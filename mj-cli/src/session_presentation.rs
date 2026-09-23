@@ -198,6 +198,7 @@ mod tests {
             inferred_idle_since_ms: None,
             goal: Default::default(),
             capacity_retry: None,
+            retry_assessment_pending: false,
             activity_turn_started_at_ms: None,
             idle_since_ms: None,
             tools_in_flight: Vec::new(),

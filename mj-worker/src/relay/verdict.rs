@@ -5,6 +5,8 @@ use mj_core::activity::verdict::{Decision, TurnEvidence, TurnPhase};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+type PendingRepliedVerdict = (u64, TurnEvidence, Option<(String, u64)>);
+
 pub(super) struct RepliedVerdictState {
     last_generation: Option<u64>,
     retry_at: Option<Instant>,
@@ -73,11 +75,11 @@ impl RepliedVerdictState {
 }
 
 impl DurableRelay {
-    pub fn pending_replied_verdict(&mut self) -> Option<(u64, TurnEvidence)> {
+    pub fn pending_replied_verdict(&mut self) -> Option<PendingRepliedVerdict> {
         self.pending_replied_verdict_at(Instant::now())
     }
 
-    fn pending_replied_verdict_at(&mut self, now: Instant) -> Option<(u64, TurnEvidence)> {
+    fn pending_replied_verdict_at(&mut self, now: Instant) -> Option<PendingRepliedVerdict> {
         if !self.replied_verdict_pending {
             return None;
         }
@@ -106,15 +108,62 @@ impl DurableRelay {
         }
         self.replied_verdict.last_generation = Some(generation);
         self.replied_verdict.retry_at = None;
-        Some((
-            generation,
-            self.turn_context.evidence(
-                self.verdict_harness.expect("checked harness"),
-                TurnPhase::Replied,
-                &facts,
-                epoch_millis(),
-            ),
-        ))
+        let assessment = self
+            .snapshot
+            .retry_assessment
+            .as_ref()
+            .map(|pending| (pending.command_id.clone(), pending.ordinal));
+        let evidence = self.snapshot.retry_assessment.as_ref().map_or_else(
+            || {
+                self.turn_context.evidence(
+                    self.verdict_harness.expect("checked harness"),
+                    TurnPhase::Replied,
+                    &facts,
+                    epoch_millis(),
+                )
+            },
+            |pending| pending.evidence.clone(),
+        );
+        Some((generation, evidence, assessment))
+    }
+
+    pub(crate) fn resolve_retry_assessment(
+        &mut self,
+        identity: Option<(String, u64)>,
+        retryable: bool,
+    ) -> Result<bool> {
+        let Some((command_id, assessment_ordinal)) = identity else {
+            return Ok(false);
+        };
+        if !self
+            .snapshot
+            .retry_assessment
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.command_id == command_id && pending.ordinal == assessment_ordinal
+            })
+        {
+            return Ok(false);
+        }
+        self.append_relay_event(
+            Some(&command_id),
+            RelayObservation::RetryAssessmentResolved {
+                command_id: command_id.clone(),
+                assessment_ordinal,
+                retryable,
+            },
+        )?;
+        if retryable {
+            self.replied_verdict_pending = false;
+        }
+        Ok(retryable)
+    }
+
+    pub(crate) fn retry_assessment_identity(&self) -> Option<(String, u64)> {
+        self.snapshot
+            .retry_assessment
+            .as_ref()
+            .map(|pending| (pending.command_id.clone(), pending.ordinal))
     }
 
     #[cfg(any(unix, test))]
@@ -228,7 +277,7 @@ mod tests {
                 .iter()
                 .any(|task| task.id == "claude:0" && task.can_stop)
         );
-        let (generation, evidence) = relay.pending_replied_verdict().unwrap();
+        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(evidence.background_commands, 4);
         assert_eq!(evidence.assistant_text_tail, "One ticket so far: #3486.");
         assert_eq!(
@@ -264,7 +313,7 @@ mod tests {
     fn identical_inventory_preserves_verdict_but_same_count_replacement_invalidates_it() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
-        let (generation, _) = relay.pending_replied_verdict().unwrap();
+        let (generation, _, _) = relay.pending_replied_verdict().unwrap();
         relay
             .apply_replied_decision(generation, Decision::InferIdle, 200)
             .unwrap();
@@ -291,7 +340,7 @@ mod tests {
             relay.operational_state().activity_state(),
             ActivityState::Background { .. }
         ));
-        let (new_generation, _) = relay.pending_replied_verdict().unwrap();
+        let (new_generation, _, _) = relay.pending_replied_verdict().unwrap();
         assert_ne!(generation, new_generation);
         assert_eq!(
             relay
@@ -313,7 +362,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
         let mut now = Instant::now();
-        let (generation, _) = relay.pending_replied_verdict_at(now).unwrap();
+        let (generation, _, _) = relay.pending_replied_verdict_at(now).unwrap();
         for seconds in [60, 120, 240, 300, 300] {
             relay.retry_replied_verdict_at(generation, now);
             now += Duration::from_secs(seconds);
@@ -337,7 +386,7 @@ mod tests {
     fn harness_restart_invalidates_the_completed_turn_inference_and_request() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
-        let (generation, _) = relay.pending_replied_verdict().unwrap();
+        let (generation, _, _) = relay.pending_replied_verdict().unwrap();
         relay
             .apply_replied_decision(generation, Decision::InferIdle, 200)
             .unwrap();

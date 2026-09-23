@@ -2149,7 +2149,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
         Some(RelayObservation::HarnessTurnSettled { origin, .. })
             if origin.as_deref() == Some("task-notification")
     ));
-    let (_, evidence) = relay
+    let (_, evidence, _) = relay
         .pending_replied_verdict()
         .expect("settled harness turn is classified");
     assert_eq!(
@@ -4151,7 +4151,7 @@ fn finished_turn_queues_only_one_replied_classification() {
             },
         )
         .unwrap();
-    let (_, evidence) = relay.pending_replied_verdict().unwrap();
+    let (_, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert_eq!(
         evidence.phase,
         mj_core::activity::verdict::TurnPhase::Replied

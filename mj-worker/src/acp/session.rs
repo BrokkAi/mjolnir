@@ -817,9 +817,7 @@ pub(super) async fn serve_session(
                                         },
                                     )
                                     .await?;
-                                    if spec.harness == HarnessKind::Codex && mj_core::relay::capacity_error(&error) {
-                                        mj_core::relay::CAPACITY_STOP_REASON.to_owned()
-                                    } else if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
+                                    if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
                                         mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
                                     } else {
                                         PROMPT_ERROR_STOP_REASON.to_owned()

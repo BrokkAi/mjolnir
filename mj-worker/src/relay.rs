@@ -126,7 +126,6 @@ pub struct DurableRelay {
     harness_turns: HarnessTurnPolicy,
     /// Where commands the agent left running are read from.
     background_work: BackgroundWorkPolicy,
-    capacity_response: CapacityResponse,
     /// Tool calls that still report pending or in-progress, with the start of
     /// their current status. This is stronger foreground evidence than a
     /// harness-neutral step clock, whose prose steps have no portable ending.
@@ -373,7 +372,6 @@ impl DurableRelay {
             step_clock: crate::acp::StepClock::default(),
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
-            capacity_response: CapacityResponse::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
@@ -463,6 +461,7 @@ impl DurableRelay {
         relay.adopt_unqueued_queue_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.promote_next_queued_command()?;
+        relay.replied_verdict_pending = relay.snapshot.retry_assessment.is_some();
         Ok(relay)
     }
 
@@ -848,11 +847,6 @@ impl DurableRelay {
                 }
             }
             _ => {}
-        }
-        if self.background_work == BackgroundWorkPolicy::CodexExecCards
-            && self.snapshot.active_prompt.is_some()
-        {
-            self.capacity_response.observe(&update);
         }
         let native_before = self.snapshot.goal.running();
         let mut native_after = self.snapshot.goal.clone();

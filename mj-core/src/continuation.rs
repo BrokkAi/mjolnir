@@ -185,10 +185,12 @@ pub fn is_generated_prompt_text(text: &str) -> bool {
 }
 
 pub fn is_generated_prompt(command_id: &str) -> bool {
+    if crate::relay::is_capacity_retry_command(command_id) {
+        return true;
+    }
     [
         "auto-continue-",
         "quota-retry-",
-        "capacity-retry-",
         "review-forward-",
         "archive-",
         "subagent-",

@@ -4,7 +4,7 @@ use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
 const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v3/turn-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v4/turn-verdict";
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -87,6 +87,9 @@ impl VerdictAttempt {
                 ),
                 ("applied", _) => (
                     "applied",
+                    if reason == "server_retry_armed" {
+                        "Mj scheduled a retry for a transient provider failure."
+                    } else {
                     match self.decision {
                         Some(mj_core::activity::verdict::Decision::InferIdle) => {
                             "Mj marked the session ready."
@@ -95,6 +98,7 @@ impl VerdictAttempt {
                             "Mj is expecting the agent to follow up."
                         }
                         _ => "Mj marked the session as awaiting input.",
+                    }
                     }
                     .to_owned(),
                 ),
@@ -201,7 +205,7 @@ impl VerdictClient {
             "Does the session need user input, expect more agent work, or appear finished?",
             "Current delivered user request and assistant conversation, plus live runtime facts. Transcript tool history is excluded; bounded summaries may omit older text."));
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v3", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v4", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -236,7 +240,7 @@ impl VerdictClient {
                             > mj_core::activity::verdict::NO_INPUT_CONFIDENCE
                             || answer.work_state_confidence
                                 < mj_core::activity::verdict::ACT_CONFIDENCE);
-                    diagnostic.update(Some("Jev assessed user input need and remaining work independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
+                    diagnostic.update(Some("Jev assessed user input need, remaining work, and transient server failures independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input, "retryable_server_error":answer.retryable_server_error}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
                 }
                 Err(error) => diagnostic.update(
                     Some("No usable Jev answer."),
@@ -297,7 +301,14 @@ impl VerdictClient {
             );
             body.extend_from_slice(&chunk);
         }
-        TurnVerdict::parse(&serde_json::from_slice(&body).context("decode turn verdict JSON")?)
+        let verdict = TurnVerdict::parse(
+            &serde_json::from_slice(&body).context("decode turn verdict JSON")?,
+        )?;
+        ensure!(
+            verdict.retryable_server_error.is_some(),
+            "missing server retry verdict"
+        );
+        Ok(verdict)
     }
 }
 
@@ -483,7 +494,7 @@ mod tests {
         let record = &page.decisions[0];
         assert_eq!(record.status, "applied");
         let technical = record.technical.as_ref().unwrap();
-        assert_eq!(technical["contract"], "turn-verdict-v3");
+        assert_eq!(technical["contract"], "turn-verdict-v4");
         assert_eq!(
             technical["confidence_threshold"],
             serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)
@@ -493,7 +504,7 @@ mod tests {
             serde_json::json!(mj_core::activity::verdict::NO_INPUT_CONFIDENCE)
         );
         let scores = technical["result"].as_object().unwrap();
-        assert_eq!(scores.len(), 3);
+        assert_eq!(scores.len(), 4);
         assert_eq!(scores["work_state"], "BackgroundWork");
         assert_eq!(
             scores["work_state_confidence"].as_f64().unwrap() as f32,
@@ -583,7 +594,7 @@ mod tests {
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v3/turn-verdict", listener.local_addr().unwrap());
+            let endpoint = format!("http://{}/v4/turn-verdict", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);
@@ -621,7 +632,8 @@ mod tests {
         let (client, server) = server(
             serde_json::json!({"answers": {
                 "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
-                "needs_user_input":{"type":"noul","noul":0.96}
+                "needs_user_input":{"type":"noul","noul":0.96},
+                "retryable_server_error":{"type":"noul","noul":0.01}
             }})
             .to_string(),
         )
@@ -658,7 +670,8 @@ mod tests {
     fn response(choice: &str) -> String {
         serde_json::json!({"answers": {
             "work_state":{"type":"choice","choice":if choice == "user" { "background_work" } else { choice },"confidence":0.95},
-            "needs_user_input":{"type":"noul","noul":if choice == "user" { 0.96 } else { 0.01 }}
+            "needs_user_input":{"type":"noul","noul":if choice == "user" { 0.96 } else { 0.01 }},
+            "retryable_server_error":{"type":"noul","noul":0.01}
         }})
         .to_string()
     }

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::HarnessKind;
 use crate::elicitation::ElicitationRequest;
 
-use super::capacity::{CAPACITY_STOP_REASON, CapacityRetry};
+use super::capacity::{CapacityRetry, RetryAssessment};
 
 use super::{
     RELAY_EVENT_DIGEST_DOMAIN, RELAY_EVENT_DIGEST_DOMAIN_V2, RELAY_EVENT_GENESIS_DIGEST,
@@ -522,6 +522,8 @@ pub struct RelayOperationalState {
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<CapacityRetry>,
+    #[serde(default)]
+    pub retry_assessment_pending: bool,
     pub session_id: String,
     /// Start of the latest turn, retained until its background work settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -875,6 +877,15 @@ pub enum RelayObservation {
         command_id: String,
         outcome: RelayCommandOutcome,
     },
+    RetryAssessmentStarted {
+        command_id: String,
+        evidence: Box<crate::activity::verdict::TurnEvidence>,
+    },
+    RetryAssessmentResolved {
+        command_id: String,
+        assessment_ordinal: u64,
+        retryable: bool,
+    },
     CommandRejected {
         command_id: String,
         command: RelayCommandKind,
@@ -1068,6 +1079,8 @@ pub struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<CapacityRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_assessment: Option<RetryAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_turn_started_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_id: Option<String>,
@@ -1145,6 +1158,7 @@ impl RelaySnapshot {
             native_agent_replay: None,
             goal: Default::default(),
             capacity_retry: None,
+            retry_assessment: None,
             activity_turn_started_at_ms: None,
             store_id: None,
             format_version: RELAY_STATE_VERSION,
@@ -1206,6 +1220,7 @@ impl RelaySnapshot {
             inferred_idle_since_ms: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
+            retry_assessment_pending: self.retry_assessment.is_some(),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

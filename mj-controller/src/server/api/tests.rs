@@ -1779,7 +1779,7 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
     assert_eq!(map_stop_reason("cancelled"), (WaitOutcome::Cancelled, None));
     assert_eq!(
         map_stop_reason("ModelCapacity"),
-        (WaitOutcome::QuotaLimit, None)
+        (WaitOutcome::Error, Some("ModelCapacity".to_owned()))
     );
     assert_eq!(
         map_stop_reason("refusal"),
@@ -1928,7 +1928,7 @@ fn an_earlier_prompt_s_outcome_never_answers_a_later_prompt_s_wait() {
 }
 
 #[test]
-fn a_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
+fn a_legacy_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
     let request = WaitRequest {
         return_on_input: false,
         turn_id: Some(10),
@@ -1950,8 +1950,31 @@ fn a_capacity_outcome_only_ends_the_wait_once_no_retry_is_armed() {
     let settled = idle(Some(completed(10, "ModelCapacity")));
     assert_eq!(
         resolve_wait(&settled, &request).unwrap().outcome,
-        WaitOutcome::QuotaLimit
+        WaitOutcome::Error
     );
+}
+
+#[test]
+fn server_retry_assessment_and_generic_retry_keep_the_wait_open() {
+    let request = WaitRequest {
+        turn_id: Some(10),
+        ..WaitRequest::default()
+    };
+    for stop_reason in ["end_turn", "error"] {
+        let mut pending = idle(Some(completed(10, stop_reason)));
+        pending.retry_assessment_pending = true;
+        assert_eq!(resolve_wait(&pending, &request), None);
+        pending.retry_assessment_pending = false;
+        pending.capacity_retry = Some(CapacityRetry {
+            attempt: 1,
+            retry_at_ms: 60_000,
+            command_id: "server-retry-10".into(),
+            submitted: false,
+        });
+        assert_eq!(resolve_wait(&pending, &request), None);
+        pending.capacity_retry = None;
+        assert!(resolve_wait(&pending, &request).is_some());
+    }
 }
 
 #[test]

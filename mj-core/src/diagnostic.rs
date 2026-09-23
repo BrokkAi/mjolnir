@@ -47,6 +47,12 @@ impl TurnDiagnostic {
         }
         if let Some(code) = data.get("code").and_then(serde_json::Value::as_str) {
             self.code = Some(code.to_owned());
+        } else if let Some(code) = data
+            .get("codex_error_info")
+            .and_then(serde_json::Value::as_str)
+        {
+            // Preserve provider metadata as evidence; retryability is Jev's decision.
+            self.code = Some(code.to_owned());
         }
         let details = data.get("details").unwrap_or(data);
         self.http_status = details

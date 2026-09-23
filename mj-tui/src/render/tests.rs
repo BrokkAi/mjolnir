@@ -2058,6 +2058,7 @@ fn background_work_reaches_both_session_row_forms() {
     let started_at_ms = i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
     let activity = mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,

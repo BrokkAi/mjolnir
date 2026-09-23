@@ -478,7 +478,7 @@ pub fn user_label(entry: &ChatEntry) -> &'static str {
         .and_then(|item| item.stable_id.strip_prefix("user:"))
         .is_some_and(mj_core::relay::is_capacity_retry_command)
     {
-        "Automatic · capacity retry"
+        "Automatic · server retry"
     } else {
         "You"
     }
