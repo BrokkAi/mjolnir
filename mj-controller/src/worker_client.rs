@@ -14,8 +14,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
-    BoundedProcessExecutor, CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS,
-    SshAdmission, SshPermit, SshSessionLease, is_transport_rejection,
+    BoundedProcessExecutor, CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS, SshAdmission,
+    SshPermit, SshSessionLease, is_transport_rejection,
 };
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{

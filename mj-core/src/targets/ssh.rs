@@ -831,6 +831,7 @@ impl SshAdmission {
 /// (`MaxSessions 10`). Two are left free for `ssh` commands from other
 /// Mjolnir processes on this machine, such as `mj doctor` and Tab completion,
 /// which join a master without being counted here.
+#[cfg(unix)]
 const DEFAULT_SESSIONS_PER_CONNECTION: usize = 8;
 
 /// Environment override for [`DEFAULT_SESSIONS_PER_CONNECTION`].
