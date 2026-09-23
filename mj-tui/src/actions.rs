@@ -1450,10 +1450,15 @@ impl DashboardState {
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
         let saved = self.command_session_override.clone();
-        if spec(id).scope == Scope::Session && saved.is_none() && self.focus == Focus::Prompt {
-            let Some(session) = self.current_session_id().map(str::to_owned) else {
-                return DashboardAction::None;
-            };
+        // From the composer a session command acts on the conversation it
+        // writes to. With the pane still empty (a launch whose attach has not
+        // finished) there is no such conversation, so the command acts on the
+        // session selected in Sessions, as it would from there.
+        if spec(id).scope == Scope::Session
+            && saved.is_none()
+            && self.focus == Focus::Prompt
+            && let Some(session) = self.current_session_id().map(str::to_owned)
+        {
             self.command_session_override = Some(session);
         }
         let action = self.dispatch_command_inner(id);

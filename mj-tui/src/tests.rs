@@ -870,6 +870,40 @@ fn cancel_with_nothing_in_flight_shows_a_notice() {
     assert_eq!(dashboard.notice().as_deref(), Some("Nothing to cancel"));
 }
 
+/// Launch campaign finding B-10: the title is a record field, not worker
+/// state, so a session that is still starting can be renamed from the
+/// Sessions pane and from its type-ahead composer.
+#[test]
+fn a_starting_session_can_be_renamed() {
+    for from_prompt in [false, true] {
+        let mut session = stopped_session();
+        session.state = SessionState::Provisioning;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        if from_prompt {
+            // The launch leaves the conversation pane empty until the attach
+            // finishes, with the keyboard in the composer.
+            dashboard.pane_sessions.clear();
+            dashboard.focus_prompt();
+        } else {
+            dashboard.focus_sessions();
+        }
+        chord(&mut dashboard, CommandId::RenameSession);
+        let Mode::Rename(editor) = &dashboard.mode else {
+            panic!(
+                "from_prompt={from_prompt}: {:?} notice={:?}",
+                dashboard.mode,
+                dashboard.notice()
+            );
+        };
+        assert_eq!(editor.session_id, "session-1");
+    }
+}
+
 /// A launching session parks its conversation behind a composer the user
 /// can type into; the draft survives to be taken by the chat that opens.
 #[test]
