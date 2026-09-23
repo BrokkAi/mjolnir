@@ -1065,9 +1065,20 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Status => {
-            let mut daemon = daemon::connect_management()
-                .await
-                .context("Mjolnir daemon is not running")?;
+            let mut daemon = match daemon::connect_management().await {
+                Ok(daemon) => daemon,
+                // No endpoint file is the ordinary stopped state.
+                Err(error) => {
+                    if let Some(stopped) = daemon::daemon_not_running(&error) {
+                        println!(
+                            "Mjolnir daemon is stopped (no {}).",
+                            stopped.metadata_path.display()
+                        );
+                        return Ok(());
+                    }
+                    return Err(error.context("Mjolnir daemon is not answering"));
+                }
+            };
             let status = daemon.status().await?;
             println!(
                 "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
@@ -1108,9 +1119,14 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             }
         }
         DaemonCommand::Stop => {
-            let daemon = daemon::connect_management()
-                .await
-                .context("Mjolnir daemon is not running")?;
+            let daemon = match daemon::connect_management().await {
+                Ok(daemon) => daemon,
+                Err(error) if daemon::daemon_not_running(&error).is_some() => {
+                    println!("Mjolnir daemon is already stopped.");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
+            };
             daemon.stop_and_wait().await?;
             println!("Mjolnir daemon stopped; detached workers remain active.");
         }

@@ -910,9 +910,47 @@ pub fn read_metadata() -> Result<DaemonMetadata> {
     Ok(metadata)
 }
 
+/// No daemon has published its endpoint: `daemon.json` does not exist.
+///
+/// This is the ordinary stopped state, not a failure. A daemon removes the
+/// file when it stops, so callers show "not running" rather than the raw
+/// file error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonNotRunning {
+    /// Where the endpoint would be, which also names the instance.
+    pub metadata_path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for DaemonNotRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the Mjolnir daemon is not running")
+    }
+}
+
+impl std::error::Error for DaemonNotRunning {}
+
+/// The stopped state, if `error` reports it anywhere in its chain.
+pub fn daemon_not_running(error: &anyhow::Error) -> Option<&DaemonNotRunning> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<DaemonNotRunning>())
+}
+
 pub fn read_metadata_any() -> Result<DaemonMetadata> {
-    let path = metadata_path();
-    let body = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    read_metadata_at(&metadata_path())
+}
+
+fn read_metadata_at(path: &std::path::Path) -> Result<DaemonMetadata> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(DaemonNotRunning {
+                metadata_path: path.to_owned(),
+            }
+            .into());
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
     let metadata: DaemonMetadata =
         serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))?;
     Ok(metadata)
@@ -1918,6 +1956,20 @@ mod tests {
     use super::*;
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
+
+    #[test]
+    fn a_missing_endpoint_file_reads_as_a_stopped_daemon() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let error = read_metadata_at(&path).unwrap_err();
+        let stopped = daemon_not_running(&error).expect("stopped, not an I/O failure");
+        assert_eq!(stopped.metadata_path, path);
+        assert_eq!(format!("{error:#}"), "the Mjolnir daemon is not running");
+
+        std::fs::write(&path, b"not json").unwrap();
+        let error = read_metadata_at(&path).unwrap_err();
+        assert!(daemon_not_running(&error).is_none());
+    }
 
     #[tokio::test]
     async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {

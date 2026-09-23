@@ -173,6 +173,15 @@ where
     RuntimeFeed { updates, task }
 }
 
+/// A stopped daemon is a state the person can act on, not an I/O error.
+fn refresh_failure_notice(error: &anyhow::Error) -> String {
+    if daemon::daemon_not_running(error).is_some() {
+        "Mjolnir daemon is stopped; sessions refresh when it starts again.".to_owned()
+    } else {
+        format!("Could not refresh sessions: {error:#}")
+    }
+}
+
 pub(super) async fn run_runtime_feed<P, PF, L, LF>(
     workspace_id: String,
     poll: P,
@@ -193,9 +202,7 @@ where
             Ok(snapshot) => snapshot,
             Err(error) => {
                 if tx
-                    .send(RuntimeFeedUpdate::Error(format!(
-                        "Could not refresh sessions: {error:#}"
-                    )))
+                    .send(RuntimeFeedUpdate::Error(refresh_failure_notice(&error)))
                     .await
                     .is_err()
                 {
@@ -342,4 +349,24 @@ pub(super) fn runtime_projection_view(
         connected: false,
         error: Some(ViewError::ProjectionIntegrity(detail)),
     })
+}
+
+#[cfg(test)]
+mod refresh_notice_tests {
+    use super::*;
+
+    #[test]
+    fn a_stopped_daemon_is_reported_as_stopped_not_as_a_file_error() {
+        let stopped = anyhow::Error::new(daemon::DaemonNotRunning {
+            metadata_path: "/data/daemon.json".into(),
+        });
+        assert_eq!(
+            refresh_failure_notice(&stopped),
+            "Mjolnir daemon is stopped; sessions refresh when it starts again."
+        );
+        assert_eq!(
+            refresh_failure_notice(&anyhow::anyhow!("unexpected end of file")),
+            "Could not refresh sessions: unexpected end of file"
+        );
+    }
 }

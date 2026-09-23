@@ -62,13 +62,15 @@ fn instance_flag_isolates_state_under_instances_subdirectory() {
         .output()
         .unwrap();
 
-    // No daemon runs for this instance, but the lookup itself must point there.
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // No daemon runs for this instance: that is the ordinary stopped state,
+    // and the lookup itself must point there.
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("Mjolnir daemon is stopped"), "{stdout}");
     for needle in ["instances", "dev", "daemon.json"] {
         assert!(
-            stderr.contains(needle),
-            "daemon lookup does not mention the instance path; stderr: {stderr}"
+            stdout.contains(needle),
+            "daemon lookup does not mention the instance path; stdout: {stdout}"
         );
     }
 
@@ -96,11 +98,11 @@ fn instance_environment_variable_isolates_without_the_flag() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("instances") && stderr.contains("envdev") && stderr.contains("daemon.json"),
-        "daemon lookup does not mention the instance path; stderr: {stderr}"
+        stdout.contains("instances") && stdout.contains("envdev") && stdout.contains("daemon.json"),
+        "daemon lookup does not mention the instance path; stdout: {stdout}"
     );
     let paths = all_paths(root.path());
     assert!(
