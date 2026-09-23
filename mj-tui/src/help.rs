@@ -492,23 +492,40 @@ fn entry_lines(entry: &HelpEntry, width: usize, related: bool) -> Vec<Line<'stat
         lines
     };
     let reason = match entry.availability {
-        Availability::Ready => "",
-        Availability::Hidden => "Not available here.",
-        Availability::Blocked(reason) => reason,
+        Availability::Ready => None,
+        Availability::Hidden => Some("Not available here.".to_owned()),
+        Availability::Blocked(reason) => Some(sentence(reason)),
     };
-    let description = [&*entry.text.description, reason]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let description = &entry.text.description;
+    let mut spans = Vec::new();
     if !description.is_empty() {
-        lines.extend(wrap_styled_line(
-            Line::styled(format!("    {description}"), theme::muted()),
-            width,
-            4,
+        spans.push(Span::styled(format!("    {description}"), theme::muted()));
+    }
+    if let Some(reason) = reason {
+        let separator = if spans.is_empty() { "    " } else { " — " };
+        spans.push(Span::styled(
+            format!("{separator}{reason}"),
+            theme::muted().add_modifier(Modifier::DIM),
         ));
     }
+    if !spans.is_empty() {
+        lines.extend(wrap_styled_line(Line::from(spans), width, 4));
+    }
     lines
+}
+
+/// Availability reasons are written as fragments for other surfaces; in
+/// help each one stands as its own capitalised sentence.
+fn sentence(reason: &str) -> String {
+    let mut chars = reason.chars();
+    let mut text: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
 }
 
 fn help_lines(
@@ -1083,6 +1100,34 @@ mod tests {
             assert!(!rendered.contains("No matching shortcuts"), "{rendered}");
             assert!(!rendered.contains("Command palette"), "{rendered}");
         }
+    }
+
+    /// Launch campaign finding A-3: an unavailability reason is its own
+    /// clause, set off from the description and capitalised, the same way
+    /// "Not available here." reads.
+    #[test]
+    fn help_rows_set_unavailability_reasons_apart_from_the_description() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        filter(&mut dashboard, "unpin session");
+        let rendered = drawn(&mut dashboard, 200, 40).join("\n");
+        assert!(
+            rendered.contains(
+                "Leave this pane empty without stopping its session. — This session is not pinned."
+            ),
+            "{rendered}"
+        );
+        let catalog = entries(&dashboard);
+        let unpin = catalog
+            .iter()
+            .find(|entry| entry.text.label == "Unpin session")
+            .unwrap();
+        let reason = entry_lines(unpin, 200, false)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .find(|span| span.content.contains("This session is not pinned"))
+            .expect("the reason span");
+        assert!(reason.style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
