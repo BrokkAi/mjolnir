@@ -1389,6 +1389,13 @@ impl DashboardState {
         action
     }
 
+    /// Puts a command at the head of the palette's Recent group.
+    pub(crate) fn remember_command(&mut self, id: CommandId) {
+        self.recent_commands.retain(|recent| *recent != id);
+        self.recent_commands.push_front(id);
+        self.recent_commands.truncate(RECENT_COMMANDS);
+    }
+
     fn dispatch_command_inner(&mut self, id: CommandId) -> DashboardAction {
         if !matches!(
             id,
@@ -1417,11 +1424,10 @@ impl DashboardState {
             return DashboardAction::None;
         }
         // Commands a person reaches for by name are worth remembering; the
-        // pane keys and the palette itself are not.
+        // pane keys and the palette itself are not. The palette records
+        // whatever it runs itself, pane keys included.
         if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
-            self.recent_commands.retain(|recent| *recent != id);
-            self.recent_commands.push_front(id);
-            self.recent_commands.truncate(RECENT_COMMANDS);
+            self.remember_command(id);
         }
         if matches!(id, CommandId::SuspendSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {

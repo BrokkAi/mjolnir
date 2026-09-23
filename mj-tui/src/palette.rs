@@ -529,6 +529,9 @@ impl DashboardState {
                     self.command_session_override = Some(id);
                 }
                 self.mode = Mode::Dashboard;
+                // Everything run from here is listed under Recent, including
+                // commands that also have a pane key.
+                self.remember_command(entry.id);
                 let action = self.run_available_command(entry.id);
                 self.command_session_override = None;
                 return action;
@@ -1179,6 +1182,41 @@ mod tests {
             described.iter().map(|entry| entry.id).collect::<Vec<_>>(),
             vec![CommandId::MarkAllRead]
         );
+    }
+
+    /// Launch campaign finding A-6: a command run from the palette appears
+    /// under Recent even when it also has a pane key, as Create session does,
+    /// and even when it opens a wizard.
+    #[test]
+    fn a_command_run_from_the_palette_is_listed_under_recent() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(!spec(CommandId::NewSessionWizard).pane_keys.is_empty());
+
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "create session");
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::NewSessionWizard)
+        );
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(dashboard.mode, Mode::New(_)),
+            "{:?}",
+            dashboard.mode
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+
+        open_palette(&mut dashboard);
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the palette stays open");
+        };
+        assert_eq!(
+            palette.entries[0].id,
+            CommandId::NewSessionWizard,
+            "{palette:?}"
+        );
+        assert!(palette.entries[0].recent);
     }
 
     /// Enter runs the row the cursor is on, so the cursor has to follow the
