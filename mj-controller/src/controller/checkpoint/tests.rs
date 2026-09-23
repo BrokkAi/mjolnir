@@ -1967,7 +1967,8 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
 
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
-    session.target_template_id = "local".into();
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
     session.target = Some(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
     });
@@ -1986,9 +1987,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
             guardian_review_model: None,
         },
     );
-    config
-        .targets
-        .insert("local".into(), TargetTemplate::LocalBare);
+    // Checkpoint export must continue after its original template is removed.
     config.bundles.insert(
         "project".into(),
         ProjectBundle {

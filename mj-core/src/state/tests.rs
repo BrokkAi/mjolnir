@@ -186,6 +186,7 @@ fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         mjolnir_subagents: None,

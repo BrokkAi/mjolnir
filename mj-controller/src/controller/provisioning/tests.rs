@@ -467,6 +467,7 @@ fn mounts_without_an_overlay_are_not_probed() {
 fn failed_new_session_provisioning_retains_error_record() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         container_workspace: None,
@@ -774,6 +775,9 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
+            r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
+        ).unwrap()).into()),
         launch_base: None,
         build_cache: None,
         container_workspace: None,
@@ -810,6 +814,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         last_checkpoint_error: None,
         checkpoint: None,
     };
+    let runtime = session.target_runtime.clone();
     let mut cleaned = State::default();
     cleaned.sessions.insert(session_id.into(), session.clone());
 
@@ -833,6 +838,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let retained = cleanup_failed.sessions.get(session_id).unwrap();
     assert_eq!(retained.state, SessionState::Error);
     assert!(retained.target.is_some());
+    assert_eq!(retained.target_runtime, runtime);
     assert!(failure.to_string().contains("cleanup"));
 }
 #[test]

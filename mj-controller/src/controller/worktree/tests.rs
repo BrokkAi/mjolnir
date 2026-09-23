@@ -1987,3 +1987,32 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
         "only another session branch contains these commits, so archiving must keep it"
     );
 }
+
+#[test]
+fn raw_checkout_inspection_uses_recorded_access_after_template_removal() {
+    struct RecordedHost;
+    impl CommandExecutor for RecordedHost {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh");
+            assert!(command.args.contains(&"builder@original.test".to_owned()));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"recorded-value\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let template: TargetTemplate = serde_json::from_str(
+        r#"{"kind":"ssh-bare","host":"original.test","user":"builder","permissions":"yolo","workspace_prefix":"workspaces"}"#
+    ).unwrap();
+    let mut session = checkpoint_test_session("raw-access");
+    session.target_runtime = Some((&template).into());
+    let position = raw_checkout_position(
+        &session,
+        &Config::default(),
+        Path::new("/project"),
+        &RecordedHost,
+    )
+    .unwrap();
+    assert_eq!(position.head_commit, "recorded-value");
+}

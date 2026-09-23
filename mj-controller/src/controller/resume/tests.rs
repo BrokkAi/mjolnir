@@ -978,6 +978,7 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
         build_cache: None,
         container_workspace: None,
@@ -1019,6 +1020,10 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     cleaned.state = SessionState::Error;
     cleaned.last_profile = "codex-new".into();
     cleaned.target = Some(partial_target.clone());
+    let destination: TargetTemplate =
+        serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap();
+    let destination_runtime = mj_core::state::TargetRuntimeSettings::from(&destination);
+    cleaned.target_runtime = Some(destination_runtime.clone());
 
     let failure =
         apply_failed_resume_rollback(&mut cleaned, &previous, "worker upload failed", None);
@@ -1026,6 +1031,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     assert_eq!(cleaned.state, SessionState::Stopped);
     assert_eq!(cleaned.last_profile, "codex-old");
     assert_eq!(cleaned.target, None);
+    assert_eq!(cleaned.target_runtime, previous.target_runtime);
     assert_eq!(failure.to_string(), "worker upload failed");
     assert_eq!(
         cleaned.last_error.as_deref(),
@@ -1036,6 +1042,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     cleanup_failed.state = SessionState::Error;
     cleanup_failed.last_profile = "codex-new".into();
     cleanup_failed.target = Some(partial_target.clone());
+    cleanup_failed.target_runtime = Some(destination_runtime.clone());
     let partial_checkout = crate::controller::test_support::managed_raw_session(
         mj_core::state::ManagedWorktreeTarget::Local,
     );
@@ -1052,6 +1059,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     assert_eq!(cleanup_failed.state, SessionState::Error);
     assert_eq!(cleanup_failed.last_profile, "codex-new");
     assert_eq!(cleanup_failed.target, Some(partial_target));
+    assert_eq!(cleanup_failed.target_runtime, Some(destination_runtime));
     assert_eq!(
         cleanup_failed.project_directory,
         partial_checkout.project_directory
@@ -1128,6 +1136,15 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             let mut observed = self.mounts_during_provisioning.lock().unwrap();
             if observed.is_none() {
                 let durable = crate::database::load_state().unwrap();
+                assert_eq!(
+                    durable.sessions["0123456789abcdef0123456789abcdef"]
+                        .target_runtime
+                        .as_ref()
+                        .unwrap()
+                        .kind,
+                    "local-podman",
+                    "resume persists destination settings before provisioning"
+                );
                 *observed = Some(
                     durable.sessions["0123456789abcdef0123456789abcdef"]
                         .additional_mounts

@@ -103,6 +103,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: BTreeMap::from([(
             "session-1".into(),
             SessionRecord {
+                target_runtime: None,
                 launch_base: None,
                 build_cache: None,
                 container_workspace: None,

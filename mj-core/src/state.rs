@@ -17,6 +17,9 @@ use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
 
+mod target_runtime;
+pub use target_runtime::{TargetConnection, TargetRuntimeSettings};
+
 mod session_move;
 pub use session_move::*;
 
@@ -1140,6 +1143,9 @@ pub struct SessionRecord {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetLocator>,
+    /// Connection and worker settings captured when this target was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_runtime: Option<TargetRuntimeSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1226,6 +1232,28 @@ pub fn target_label(config: &Config, target_id: &str, project: Option<&Path>) ->
 }
 
 impl SessionRecord {
+    pub fn target_runtime_settings<'a>(
+        &'a self,
+        config: &Config,
+    ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+        if let Some(runtime) = &self.target_runtime {
+            return Ok(std::borrow::Cow::Borrowed(runtime));
+        }
+        let template = config.targets.get(&self.target_template_id).ok_or_else(|| {
+            crate::refusal::Refusal::precondition(format!(
+                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
+                self.id, self.target_template_id))
+        })?;
+        let runtime = TargetRuntimeSettings::from(template);
+        if let Some(locator) = &self.target {
+            crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
+                locator, runtime: Some(&runtime), session_id: &self.id,
+            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
+                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", self.id, self.target_template_id)))?;
+        }
+        Ok(std::borrow::Cow::Owned(runtime))
+    }
+
     /// The recorded failure that is safe to publish whatever state this
     /// session is in, because the controller wrote it for the person rather
     /// than copying an error chain into it.
@@ -1254,7 +1282,7 @@ impl SessionRecord {
         if self.project_directory.is_none() && !config.bundles.contains_key(&self.bundle_id) {
             issues.push(format!("missing bundle {:?}", self.bundle_id));
         }
-        if !config.targets.contains_key(&self.target_template_id) {
+        if self.target_runtime.is_none() && !config.targets.contains_key(&self.target_template_id) {
             issues.push(format!(
                 "missing target template {:?}",
                 self.target_template_id
@@ -1268,7 +1296,7 @@ impl SessionRecord {
 
     pub fn validate_configuration(&self, config: &Config) -> Result<()> {
         if let Some(issue) = self.configuration_issue(config) {
-            bail!("{issue}");
+            return Err(crate::refusal::Refusal::precondition(issue).into());
         }
         Ok(())
     }

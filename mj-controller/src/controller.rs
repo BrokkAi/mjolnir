@@ -498,11 +498,38 @@ impl Controller {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }
-        Ok(Self { config, state })
+        let mut controller = Self { config, state };
+        controller.backfill_target_runtime()?;
+        Ok(controller)
     }
 
     pub fn reload(&mut self) -> Result<()> {
+        // Capture legacy settings from the previous config before a manual
+        // edit removes them. Only fill missing metadata, never overwrite it.
+        self.backfill_target_runtime()?;
         *self = Self::load()?;
+        Ok(())
+    }
+
+    fn backfill_target_runtime(&mut self) -> Result<()> {
+        for session in self.state.sessions.values_mut() {
+            if session.target_runtime.is_some() {
+                continue;
+            }
+            match session.target_runtime_settings(&self.config) {
+                Ok(runtime) => {
+                    let runtime = runtime.into_owned();
+                    session.target_runtime = crate::database::backfill_target_runtime(
+                        &session.id,
+                        &session.target_template_id,
+                        &runtime,
+                    )?;
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, %error, "target access needs configuration repair")
+                }
+            }
+        }
         Ok(())
     }
 
@@ -766,6 +793,7 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            target_runtime: Some(template.into()),
             build_cache: None,
             create_managed_worktree,
             launch_base,

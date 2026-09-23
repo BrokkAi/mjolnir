@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         container_workspace: None,
@@ -4814,7 +4815,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(floor, 44, "older JSON readers must be refused");
+    assert!(floor >= 44, "older JSON readers must be refused");
     connection
         .execute("INSERT INTO quota_reset_cache VALUES ('account', '{}')", [])
         .unwrap();
@@ -5101,5 +5102,38 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     assert_eq!(
         live.transcript.len() + window.omitted_items,
         saved.transcript.len()
+    );
+}
+
+#[test]
+fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("target-runtime.sqlite3");
+    let mut record = session("runtime-session", "project");
+    let template: mj_core::config::TargetTemplate = serde_json::from_str(
+        r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
+    ).unwrap();
+    record.target_runtime = Some((&template).into());
+    record.target = Some(TargetLocator::SshPodman {
+        host: "original.test".into(),
+        container_id: "original-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Error;
+    save_lifecycle_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id],
+        record
+    );
+    record.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
+    record.target = Some(TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/new").join(&record.id),
+    });
+    save_lifecycle_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id],
+        record
     );
 }

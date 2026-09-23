@@ -7,7 +7,7 @@ use mj_core::config::{
     ProjectRepository, TargetTemplate,
 };
 use mj_core::path_completion::{CompletionHost, CompletionKind};
-use mj_core::state::State;
+use mj_core::state::{State, TargetLocator};
 
 use super::test_support::IsolatedTest;
 use super::*;
@@ -1208,4 +1208,330 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
             .review_capture,
         "a session a review can run for takes a baseline"
     );
+}
+
+fn durable_remote_template(host: &str) -> TargetTemplate {
+    serde_json::from_value(serde_json::json!({
+        "kind": "ssh-podman", "host": host, "user": "builder",
+        "identity_file": "/keys/original key", "extra_args": ["-p", "2222"],
+        "image": "test", "environment": {"TARGET_SETTING": "original"}
+    }))
+    .unwrap()
+}
+
+#[derive(Default)]
+struct DurableTargetExecutor {
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl CommandExecutor for DurableTargetExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        self.commands.lock().unwrap().push(command.clone());
+        Ok(targets::CommandOutput {
+            status: if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                255
+            } else {
+                0
+            },
+            stdout: Vec::new(),
+            stderr: b"test connection unavailable".to_vec(),
+        })
+    }
+}
+
+#[test]
+fn saved_target_survives_config_removal_restart_and_failed_destroy() {
+    const MARKER: &str = "MJ_TEST_DURABLE_TARGET_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "saved_target_survives_config_removal_restart_and_failed_destroy",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    controller
+        .config
+        .targets
+        .insert("podman".into(), durable_remote_template("original.test"));
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "durable target",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let runtime = crate::database::load_state().unwrap().sessions[&id]
+        .target_runtime
+        .clone()
+        .unwrap();
+    assert_eq!(runtime.environment["TARGET_SETTING"], "original");
+    assert!(
+        controller.state.sessions[&id].target.is_none(),
+        "access is durable before creating a resource"
+    );
+    let record = controller.state.sessions.get_mut(&id).unwrap();
+    record.state = SessionState::Running;
+    record.mjolnir_subagents = Some(true);
+    record.target = Some(TargetLocator::SshPodman {
+        host: "original.test".into(),
+        container_id: targets::resource_name(&id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    controller.persist_session_state(&id).unwrap();
+    controller.config.targets.clear();
+    controller.config.save().unwrap();
+    let mut controller = Controller::load().unwrap();
+    let executor = DurableTargetExecutor::default();
+    let original_backend = controller
+        .session_export_layout(&id, &executor)
+        .unwrap()
+        .backend;
+    let launch = controller
+        .current_worker_launch_config(&id, &original_backend)
+        .unwrap();
+    assert_eq!(launch.environment["TARGET_SETTING"], "original");
+    controller
+        .config
+        .targets
+        .insert("podman".into(), durable_remote_template("replacement.test"));
+    controller.config.save().unwrap();
+    controller.reload().unwrap();
+    let backend = controller
+        .session_export_layout(&id, &executor)
+        .unwrap()
+        .backend;
+    assert_eq!(backend, original_backend);
+    // The branch-export worker command uses the same resolved destination as checkpoint/bundle export.
+    let command = targets::command_on_locator(
+        &backend,
+        &id,
+        vec!["hel".into(), "worker".into(), "push-branch".into()],
+        "branch export",
+    )
+    .unwrap();
+    executor.execute(&command).unwrap();
+    let child = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            parent_session_id: id.clone(),
+            task_name: "child".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: "/workspace/project".into(),
+            initial_prompt: "test child".into(),
+            request_key: "durable-child".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&child.child_session_id]
+            .target_runtime
+            .as_ref(),
+        Some(&runtime)
+    );
+    controller
+        .force_destroy_session(&child.child_session_id, &executor, BranchDisposition::Keep)
+        .unwrap();
+    assert!(controller.state.sessions.contains_key(&id));
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .all(|command| !command.args.last().unwrap().contains("'podman' 'rm'")),
+        "borrowed cleanup must retain the parent container"
+    );
+    drop(commands);
+    executor
+        .fail
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        controller
+            .force_destroy_session(&id, &executor, BranchDisposition::Keep)
+            .is_err()
+    );
+    let saved = crate::database::load_state().unwrap();
+    assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
+    assert!(saved.sessions[&id].target.is_some());
+    executor
+        .fail
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    controller
+        .force_destroy_session(&id, &executor, BranchDisposition::Keep)
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(&id)
+    );
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.args.last().unwrap().contains("rm"))
+    );
+    for command in commands.iter() {
+        assert_eq!(command.program, "ssh");
+        assert!(
+            command.args.contains(&"builder@original.test".to_owned()),
+            "{command:?}"
+        );
+        assert!(
+            command.args.contains(&"/keys/original key".to_owned()),
+            "{command:?}"
+        );
+        assert!(
+            command.args.windows(2).any(|pair| pair == ["-p", "2222"]),
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
+    const MARKER: &str = "MJ_TEST_TARGET_BACKFILL_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    controller
+        .config
+        .targets
+        .insert("podman".into(), durable_remote_template("original.test"));
+    let mut session =
+        super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
+    session.target = Some(TargetLocator::SshPodman {
+        host: "original.test".into(),
+        container_id: "original-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    crate::database::save_state(&controller.state).unwrap();
+    let mut edited = controller.config.clone();
+    edited.targets.clear();
+    edited.save().unwrap();
+    controller.reload().unwrap();
+    let saved = crate::database::load_state().unwrap().sessions[&session.id]
+        .target_runtime
+        .clone()
+        .unwrap();
+    assert_eq!(
+        saved,
+        mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("original.test"))
+    );
+    let replacement =
+        mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("different.test"));
+    assert_eq!(
+        crate::database::backfill_target_runtime(&session.id, "podman", &replacement).unwrap(),
+        Some(saved),
+        "backfill must return the winning snapshot without overwriting it"
+    );
+    controller = Controller::load().unwrap();
+    controller
+        .session_export_layout(&session.id, &UnusedExecutor)
+        .unwrap();
+    // Simulate a pre-upgrade remote record whose template was already removed.
+    session.id = "abcdef0123456789abcdef0123456789".into();
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    crate::database::save_session(&session).unwrap();
+    let error = controller
+        .session_export_layout(&session.id, &UnusedExecutor)
+        .err()
+        .unwrap();
+    let refusal = mj_core::refusal::Refusal::of(&error).unwrap();
+    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+    assert!(refusal.message().contains(&session.id));
+    assert!(refusal.message().contains("podman"));
+    assert!(
+        controller
+            .force_destroy_session(&session.id, &UnusedExecutor, BranchDisposition::Keep)
+            .is_err()
+    );
+    assert!(
+        crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(&session.id)
+    );
+    controller
+        .config
+        .targets
+        .insert("podman".into(), durable_remote_template("different.test"));
+    assert!(
+        controller
+            .session_export_layout(&session.id, &UnusedExecutor)
+            .is_err()
+    );
+    // A legacy local locator is self-contained even with no template.
+    let local = controller.state.sessions.get_mut(&session.id).unwrap();
+    local.target = Some(TargetLocator::LocalDocker {
+        container_id: "local-container".into(),
+        borrowed_from: None,
+    });
+    controller.config.targets.clear();
+    controller
+        .session_export_layout(&session.id, &UnusedExecutor)
+        .unwrap();
+}
+
+#[test]
+fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
+    const MARKER: &str = "MJ_TEST_TARGET_BACKFILL_DELETE_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "target_backfill_does_not_block_reload_after_a_concurrent_deletion",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    controller.config.save().unwrap();
+    let session = super::test_support::checkpoint_test_session("deleted-session");
+    crate::database::save_session(&session).unwrap();
+    let runtime = mj_core::state::TargetRuntimeSettings::from(&controller.config.targets["podman"]);
+    assert!(
+        crate::database::backfill_target_runtime(&session.id, "retargeted-name", &runtime)
+            .unwrap()
+            .is_none()
+    );
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    crate::database::delete_session(&session.id).unwrap();
+    controller.reload().unwrap();
+    assert!(!controller.state.sessions.contains_key(&session.id));
 }

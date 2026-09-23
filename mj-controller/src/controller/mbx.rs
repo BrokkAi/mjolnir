@@ -1013,14 +1013,21 @@ pub(super) fn attach_mounts_for_tests(
     attach_mounts(build_cache, mounts)
 }
 
-/// The host's mbx configuration file for this target, read through the cached
-/// resolution so the worker install does not repeat the host commands.
+/// Read the configuration on the host that actually owns this container.
+/// The named template may have been removed or reassigned since creation.
 pub(super) fn host_configuration(
-    target: &targets::TargetTemplate,
-    global: &BuildCacheConfig,
+    target: &targets::TargetLocator,
     executor: &impl CommandExecutor,
-) -> Option<String> {
-    resolve(target, global, executor)?.config_file
+) -> Result<Option<String>> {
+    let host = match target {
+        targets::TargetLocator::LocalPodman { .. }
+        | targets::TargetLocator::LocalDocker { .. }
+        | targets::TargetLocator::AppleContainer { .. } => CacheHost::Local,
+        targets::TargetLocator::SshPodman { ssh, .. }
+        | targets::TargetLocator::SshDocker { ssh, .. } => CacheHost::Ssh(ssh.clone()),
+        _ => return Ok(None),
+    };
+    host_config_file(&host, executor)
 }
 
 #[cfg(test)]
@@ -1133,6 +1140,33 @@ mod tests {
             ("mkdir -p", 0, ""),
             ("stat -f -c %T", 0, "xfs"),
         ]
+    }
+
+    #[test]
+    fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
+        let executor = ProbeExecutor::new(&[
+            ("$HOME", 0, "/home/builder"),
+            ("[ -f \"$1\" ]", 0, "[gc]\nmax_total_size = '50GB'\n"),
+        ]);
+        let target = targets::TargetLocator::SshPodman {
+            ssh: SshTarget {
+                destination: "builder@recorded-cache.test".into(),
+                ssh_args: vec![],
+            },
+            container_id: "saved-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let config = host_configuration(&target, &executor).unwrap().unwrap();
+        assert!(config.contains("50GB"));
+        assert!(
+            executor
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|command| command.contains("builder@recorded-cache.test"))
+        );
     }
 
     #[test]

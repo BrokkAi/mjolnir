@@ -406,6 +406,7 @@ impl ExportRuntime for ParentExports {
 
 fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,

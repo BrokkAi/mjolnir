@@ -1021,13 +1021,15 @@ pub(super) fn backend_locator(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<targets::TargetLocator> {
-    let template = config
-        .targets
-        .get(&session.target_template_id)
-        .context("session target template is missing")?;
-    Ok(targets::TargetLocator::try_from(targets::StoredTarget {
+    let runtime = if session.target_runtime.is_some() || targets::locator_needs_connection(locator)
+    {
+        Some(session.target_runtime_settings(config)?)
+    } else {
+        None
+    };
+    Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
         locator,
-        template,
+        runtime: runtime.as_deref(),
         session_id: &session.id,
     })?)
 }
