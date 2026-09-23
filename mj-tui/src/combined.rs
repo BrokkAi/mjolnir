@@ -921,7 +921,11 @@ fn render_combined_themed(
                         EmptyConversation::Failed,
                         dashboard.config.spinner,
                         Some(dashboard.session_failure_text(&session_id)),
-                        title_controls(close_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip),
+                        ),
                         false,
                     );
                     render_empty_prompt_advice(
@@ -953,7 +957,15 @@ fn render_combined_themed(
                             prompt: prompt_area,
                             footer: None,
                             overlay: pane_rect,
-                            title_controls: title_controls(close_chip),
+                            title_controls: crate::pane_controls::pane_title_reserve(
+                                dashboard,
+                                transcript_area.width,
+                                crate::pane_controls::pane_title_reserve(
+                                    dashboard,
+                                    transcript_area.width,
+                                    title_controls(close_chip),
+                                ),
+                            ),
                             title_lead: crate::pane_controls::pane_chrome_width(
                                 dashboard,
                                 pane_id,
@@ -977,7 +989,11 @@ fn render_combined_themed(
                         reason,
                         dashboard.config.spinner,
                         None,
-                        title_controls(close_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip),
+                        ),
                         false,
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
@@ -1061,8 +1077,11 @@ fn render_combined_themed(
                                 banner: banner.as_ref(),
                             }),
                             overlay: pane_rect,
-                            title_controls: title_controls(close_chip)
-                                + zoom_title_controls(zoom_chip),
+                            title_controls: crate::pane_controls::pane_title_reserve(
+                                dashboard,
+                                transcript_area.width,
+                                title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                            ),
                             title_lead: crate::pane_controls::pane_chrome_width(
                                 dashboard,
                                 pane_id,
@@ -1122,7 +1141,11 @@ fn render_combined_themed(
                         failed
                             .as_deref()
                             .map(|session_id| dashboard.session_failure_text(session_id)),
-                        title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                        ),
                         focus_borders,
                     );
                     if opening {

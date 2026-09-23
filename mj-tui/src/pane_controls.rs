@@ -267,6 +267,26 @@ pub(crate) fn pane_chrome_width(dashboard: &DashboardState, pane: PaneId, width:
     u16::try_from(drawn).unwrap_or(u16::MAX).min(width - 12)
 }
 
+/// How many columns from the right of a pane's title row the pane chips
+/// start at: the pin chip, then the menu chip, then room for the close chip.
+const PANE_CHROME_CHIPS_RESERVE: u16 = 10;
+
+/// The columns a pane's own title must leave clear at the right: the host's
+/// `reserve` for its close and zoom chips, widened to clear the pin and menu
+/// chips `render_pane_chrome` draws whenever the pane is wide enough for
+/// them. A title that ran under a chip showed through its unpainted cells.
+pub(crate) fn pane_title_reserve(dashboard: &DashboardState, width: u16, reserve: u16) -> u16 {
+    if width < 12 {
+        return reserve;
+    }
+    let zoom = if dashboard.conversation_zoomed() {
+        3
+    } else {
+        0
+    };
+    reserve.max(PANE_CHROME_CHIPS_RESERVE + zoom)
+}
+
 pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) {
     for &(pane, transcript, _) in &dashboard.conversation_pane_areas {
         if transcript.width < 12 || transcript.height == 0 {
@@ -285,10 +305,14 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
         } else {
             style
         };
-        let header = Line::from(vec![
-            ratatui::text::Span::styled(format!(" {label} "), badge_style),
-            ratatui::text::Span::styled(PANE_CHROME_SUFFIX, theme::muted()),
-        ]);
+        // A label cut short ends in an ellipsis rather than a stray letter.
+        let header = mj_chat::chat::truncate_line_to_width(
+            Line::from(vec![
+                ratatui::text::Span::styled(format!(" {label} "), badge_style),
+                ratatui::text::Span::styled(PANE_CHROME_SUFFIX, theme::muted()),
+            ]),
+            usize::from(transcript.width.saturating_sub(12)),
+        );
         frame.render_widget(
             Paragraph::new(header),
             Rect::new(
@@ -323,7 +347,8 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
                 1,
             );
             form.register(control, ControlKind::Button, area, true);
-            frame.render_widget(Paragraph::new(format!(" {glyph}")).style(style), area);
+            // Paint all three cells, so nothing underneath shows through.
+            frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), area);
         }
         if session.is_none() && pane != dashboard.browse_pane() && transcript.height > 2 {
             let area = Rect::new(

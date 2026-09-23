@@ -1782,3 +1782,57 @@ async fn the_pane_chrome_does_not_cover_the_conversation_title() {
     assert!(title.contains("| Conversation  podman-target  "), "{title}");
     assert!(title.contains("  fake  S4"), "{title}");
 }
+
+/// Launch finding D-11: in a narrow pane the title row read
+/// `Browse |t ◇r`: the chrome label was cut without an ellipsis, a letter of
+/// the conversation title showed between the label and the pin chip, and
+/// another leaked through the chip's unpainted third cell. At every width
+/// the row must show whole words or an ellipsis, never stray letters.
+#[tokio::test]
+async fn a_narrow_pane_title_ends_in_an_ellipsis_not_stray_letters() {
+    for width in (40..=140).step_by(3) {
+        let mut dashboard = populated_dashboard();
+        let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+        let chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity {
+                target: "podman-target".into(),
+                profile: "fake".into(),
+                title: "S4".into(),
+                ..SessionHeaderIdentity::default()
+            },
+            String::new(),
+            Notices::default(),
+        );
+        let mut chats = focused_chats(&mut dashboard, chat);
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let Some(row) = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .find(|cells| cells.concat().contains(" Browse "))
+        else {
+            continue;
+        };
+        let text = row.concat();
+        for pair in row.windows(2) {
+            let (left, right) = (pair[0].as_str(), pair[1].as_str());
+            let letter = right.chars().next().is_some_and(char::is_alphanumeric) || right == "…";
+            assert!(
+                !(["|", "◇", "◆", "⋯", "×"].contains(&left) && letter),
+                "width {width}: {text}"
+            );
+        }
+    }
+}
