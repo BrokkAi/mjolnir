@@ -649,6 +649,30 @@ pub struct RequestEnvelope {
     pub action: DaemonAction,
 }
 
+/// The daemon answered a request with an error. Unlike a lost connection,
+/// this is a complete round trip: the daemon read the request and said why it
+/// did not carry it out.
+#[derive(Debug)]
+pub struct DaemonRefusal(pub String);
+
+impl std::fmt::Display for DaemonRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DaemonRefusal {}
+
+impl DaemonRefusal {
+    /// Whether the daemon itself could not confirm delivery. Its message is
+    /// then led by `session::DeliveryUnconfirmed`.
+    #[must_use]
+    pub fn delivery_unconfirmed(&self) -> bool {
+        self.0
+            .starts_with(&crate::session::DeliveryUnconfirmed.to_string())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseEnvelope {
@@ -1065,7 +1089,9 @@ impl DaemonClient {
             response.request_id == request_id,
             "daemon crossed request IDs"
         );
-        response.result.map_err(anyhow::Error::msg)
+        response
+            .result
+            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {

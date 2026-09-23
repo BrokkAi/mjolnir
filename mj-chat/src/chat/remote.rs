@@ -996,6 +996,15 @@ pub(super) fn restore_unsent_prompt(chat: &mut ChatState, text: String, images: 
     chat.replace_input_range(0..0, &payload);
 }
 
+/// The command word of a one-line slash command such as `/clear`.
+fn refused_slash_command<'a>(text: &'a str, images: &[PromptImage]) -> Option<&'a str> {
+    let text = text.trim();
+    if !images.is_empty() || text.contains('\n') || !text.starts_with('/') {
+        return None;
+    }
+    text.split_whitespace().next()
+}
+
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
     if let Some(key) = result.feedback_key()
         && !matches!(result, ChatRemoteResult::Cancel { result: Ok(()), .. })
@@ -1045,6 +1054,14 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
                 return;
             }
             restore_unsent_prompt(chat, text.clone(), images.clone());
+            // A refused slash command is an event in the conversation, not
+            // lost text: the draft already holds it for a retry. It becomes a
+            // dated notice in time order instead of a row pinned below every
+            // later turn (I1-12).
+            if let Some(command) = refused_slash_command(&text, &images) {
+                chat.conversation_notice(format!("{command} was not run: {error}"));
+                return;
+            }
 
             chat.record_unsent_prompt(UnsentKind::Prompt, text, images, error);
         }
