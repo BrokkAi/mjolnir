@@ -571,6 +571,27 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             if daemon_admission_ignores_workers(metadata) {
                 match client.request(DaemonAction::PrepareUpgrade).await? {
                     DaemonReply::Done => Ok(true),
+                    DaemonReply::UpgradePending
+                        if daemon_admission_counts_open_requests(metadata) =>
+                    {
+                        // The refusal may be only open HTTP requests, which
+                        // this daemon wrongly counts as its own work. Hand off
+                        // when they are all that remain, after the same
+                        // observed lifecycle check as older daemons. This is
+                        // an observed check, not atomic admission.
+                        let Some(blockers) = upgrade_blockers(metadata).await else {
+                            return Ok(false);
+                        };
+                        if !blockers.iter().all(|label| is_open_request_label(label)) {
+                            return Ok(false);
+                        }
+                        let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
+                        if !legacy_snapshot_is_idle(&snapshot) {
+                            return Ok(false);
+                        }
+                        client.stop().await?;
+                        Ok(true)
+                    }
                     DaemonReply::UpgradePending => Ok(false),
                     reply => bail!("unexpected upgrade admission reply {reply:?}"),
                 }
@@ -604,15 +625,10 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             Ok(Ok(false)) => {}
         }
         if Instant::now() >= notice_at {
-            match upgrade_blockers(metadata).await {
-                Some(blockers) => eprintln!(
-                    "Mjolnir upgrade is waiting for: {}; existing sessions remain available.",
-                    blockers.join(", ")
-                ),
-                None => eprintln!(
-                    "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
-                ),
-            }
+            eprintln!(
+                "{}",
+                upgrade_wait_notice(metadata, upgrade_blockers(metadata).await)
+            );
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -630,6 +646,54 @@ fn daemon_admission_ignores_workers(metadata: &DaemonMetadata) -> bool {
     metadata.protocol_version >= 33
         && semver::Version::parse(&metadata.build_version)
             .is_ok_and(|version| version >= semver::Version::new(2, 18, 0))
+}
+
+/// Whether the daemon counts every open HTTP request as upgrade work.
+///
+/// Through 2.20.0 the HTTP layer held an upgrade permit for each request and
+/// response body, so a long `mj wait` or event read refused `PrepareUpgrade`
+/// until it ended. Later daemons count only the operations those requests
+/// start. The protocol did not change, so only the build version tells.
+fn daemon_admission_counts_open_requests(metadata: &DaemonMetadata) -> bool {
+    semver::Version::parse(&metadata.build_version)
+        .is_ok_and(|version| version < semver::Version::new(2, 21, 0))
+}
+
+/// The label such a daemon gives its open HTTP requests, with or without a
+/// count (`HTTP request x3`).
+fn is_open_request_label(label: &str) -> bool {
+    label == "HTTP request" || label.starts_with("HTTP request x")
+}
+
+/// The line shown while an automatic upgrade waits for the old daemon.
+fn upgrade_wait_notice(metadata: &DaemonMetadata, blockers: Option<Vec<String>>) -> String {
+    let mut blockers = blockers.unwrap_or_default();
+    let mut open_requests = false;
+    if daemon_admission_counts_open_requests(metadata) {
+        blockers.retain(|label| {
+            let request = is_open_request_label(label);
+            open_requests |= request;
+            !request
+        });
+    }
+    let waiting = if blockers.is_empty() {
+        "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+            .to_owned()
+    } else {
+        format!(
+            "Mjolnir upgrade is waiting for: {}; existing sessions remain available.",
+            blockers.join(", ")
+        )
+    };
+    if open_requests {
+        format!(
+            "{waiting} It does not wait for open HTTP requests: daemon {} counts them as work, \
+             but they end when it stops and do not need to finish first.",
+            metadata.build_version
+        )
+    } else {
+        waiting
+    }
 }
 
 /// Names the daemon-owned work holding the handoff open, for the wait notice.
@@ -892,6 +956,54 @@ mod tests {
         assert!(!daemon_admission_ignores_workers(&metadata(33, "2.17.0")));
         assert!(daemon_admission_ignores_workers(&metadata(33, "2.18.0")));
         assert!(daemon_admission_ignores_workers(&metadata(33, "2.19.0")));
+    }
+
+    #[test]
+    fn only_daemons_before_2_21_count_open_requests_as_upgrade_work() {
+        let metadata = |build_version: &str| DaemonMetadata {
+            protocol_version: 33,
+            pid: 1,
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: build_version.into(),
+        };
+        assert!(daemon_admission_counts_open_requests(&metadata("2.19.0")));
+        assert!(daemon_admission_counts_open_requests(&metadata("2.20.0")));
+        assert!(!daemon_admission_counts_open_requests(&metadata("2.21.0")));
+        assert!(is_open_request_label("HTTP request"));
+        assert!(is_open_request_label("HTTP request x4"));
+        assert!(!is_open_request_label("session lifecycle"));
+    }
+
+    #[test]
+    fn the_wait_notice_names_lifecycle_work_and_says_why_requests_do_not_count() {
+        let metadata = |build_version: &str| DaemonMetadata {
+            protocol_version: 33,
+            pid: 1,
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: build_version.into(),
+        };
+        let labels = |labels: &[&str]| Some(labels.iter().map(|l| (*l).to_owned()).collect());
+        assert_eq!(
+            upgrade_wait_notice(
+                &metadata("2.19.0"),
+                labels(&["HTTP request x2", "session lifecycle"])
+            ),
+            "Mjolnir upgrade is waiting for: session lifecycle; existing sessions remain available. \
+             It does not wait for open HTTP requests: daemon 2.19.0 counts them as work, \
+             but they end when it stops and do not need to finish first."
+        );
+        assert_eq!(
+            upgrade_wait_notice(&metadata("2.21.0"), labels(&["session lifecycle"])),
+            "Mjolnir upgrade is waiting for: session lifecycle; existing sessions remain available."
+        );
+        assert_eq!(
+            upgrade_wait_notice(&metadata("2.21.0"), None),
+            "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+        );
     }
 
     /// A pre-33 daemon is replaceable while workers are busy: only its own
