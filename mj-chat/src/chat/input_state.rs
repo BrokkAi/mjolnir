@@ -13,6 +13,8 @@ fn slash_command_name(text: &str) -> Option<&str> {
     .then_some(name)
 }
 
+pub(super) const ATTACH_UNSUPPORTED_NOTICE: &str =
+    "/attach adds image files only, and this agent does not accept images";
 pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
     "This agent does not accept images; only text can be pasted";
 pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
@@ -755,6 +757,10 @@ impl ChatState {
                     };
                 }
                 LocalCommand::Attach => {
+                    if !self.prompt_images_supported {
+                        self.set_notice(ATTACH_UNSUPPORTED_NOTICE);
+                        return ChatAction::None;
+                    }
                     if !self.allow_image_attachment() {
                         return ChatAction::None;
                     }

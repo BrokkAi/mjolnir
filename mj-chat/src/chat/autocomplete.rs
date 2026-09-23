@@ -370,7 +370,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
         ),
         (
             "attach",
-            "add an image file to the current prompt",
+            "add an image file (PNG, JPEG or WebP) to the prompt",
             Some("path"),
         ),
     ]

@@ -2610,11 +2610,25 @@ fn saved_image_drafts_require_current_capability_without_losing_content() {
 }
 
 #[test]
+fn attaching_a_text_file_says_attach_takes_images_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "plain text").unwrap();
+    let error = super::attachments::install_path("attach-text", &path).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("/attach adds image files only"), "{message}");
+    assert!(!message.contains("marker"), "{message}");
+}
+
+#[test]
 fn attach_requires_capability_and_clears_the_command_on_refusal() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("/attach picture.png".into());
     assert_eq!(chat.submit_input(), ChatAction::None);
     assert!(chat.input.is_empty());
+    let notice = chat.notice().unwrap();
+    assert_eq!(notice, super::input_state::ATTACH_UNSUPPORTED_NOTICE);
+    assert!(!notice.contains("marker"));
     assert!(!chat.reserve_attachment(1));
     assert!(chat.input_images.is_empty());
 }
