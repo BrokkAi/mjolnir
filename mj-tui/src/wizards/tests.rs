@@ -2098,7 +2098,40 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
 
     assert!(rendered.contains("(lossy: text-only transcript)"));
     assert!(rendered.contains("Resume · 1/3"));
+    // I1-6: the session's own profile is selected, and a same-harness resume
+    // continues the native conversation, so it carries no loss warning.
+    assert!(rendered.contains("Same agent: the conversation continues natively."));
+    assert!(!rendered.contains("Lossy: text only"));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("resume wizard is open");
+    };
+    let initial = wizard.profile;
+    let session_harness = dashboard.state.sessions[&wizard.session_id].harness_kind;
+    let lossy = dashboard
+        .resume_wizard_profiles(wizard)
+        .iter()
+        .position(|(_, harness)| *harness != session_harness)
+        .expect("the fixture offers a cross-harness profile");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    wizard.profile = lossy;
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw cross-harness selection");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
     assert!(rendered.contains("Lossy: text only; tool calls + reasoning dropped."));
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    wizard.profile = initial;
 
     ready_key(&mut dashboard, key(KeyCode::Enter));
     terminal

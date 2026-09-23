@@ -1521,10 +1521,24 @@ pub(crate) fn render_resume_wizard(
                     }
                 })
                 .collect();
-            let mut help = vec![
-                picker_help("↑/↓ select · Tab moves focus · Enter activates"),
-                picker_help("Lossy: text only; tool calls + reasoning dropped."),
-            ];
+            // Only a change of harness hands over a text transcript. The
+            // footnote describes the selected profile, so a same-harness
+            // resume is not warned about a loss it does not have.
+            let selected_is_lossy = profiles.get(wizard.profile).is_some_and(|(_, harness)| {
+                session_harness.is_some_and(|current| current != *harness)
+            });
+            let mut help = vec![picker_help(
+                "↑/↓ select · Tab moves focus · Enter activates",
+            )];
+            if selected_is_lossy {
+                help.push(picker_help(
+                    "Lossy: text only; tool calls + reasoning dropped.",
+                ));
+            } else if session_harness.is_some() {
+                help.push(picker_help(
+                    "Same agent: the conversation continues natively.",
+                ));
+            }
             if profiles
                 .iter()
                 .any(|(_, harness)| needs_guardian_warning(*harness))
