@@ -778,7 +778,24 @@ impl std::fmt::Display for WebViewerStatus {
 /// Treating a zombie as gone is also safe in the direction that matters: a
 /// zombie's PID cannot be reused until it is reaped, so nothing else can be
 /// occupying that number while this returns true.
-#[cfg(unix)]
+///
+/// On Linux this reads the one `/proc/<pid>/stat` file. `sysinfo` scans every
+/// process on the machine for a single-PID refresh, so it is not used here:
+/// this probe runs every 250 ms while an upgrade waits on an older daemon.
+#[cfg(target_os = "linux")]
+pub fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The command name in parentheses may itself contain ") ", so the state
+    // is the first field after the last closing parenthesis.
+    stat.iter()
+        .rposition(|byte| *byte == b')')
+        .and_then(|end| stat.get(end + 2))
+        .is_some_and(|state| *state == b'Z')
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn process_is_zombie(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
