@@ -3004,9 +3004,22 @@ async fn resuming_a_running_session_is_refused_with_the_reason() {
     let body = json_body(response).await;
     let error = body["error"].as_str().unwrap().to_owned();
     assert!(
-        error.contains("close it before resuming it"),
+        error.contains("already running") && !error.contains("close"),
         "unexpected refusal: {error}"
     );
+}
+
+/// `close` is gone (2e3077d9). A resume refused because the session is
+/// suspending says what to wait for, in the words the CLI uses now.
+#[test]
+fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.lifecycle = ViewerLifecycleCategory::Suspending;
+    let refusal = resume_refusal(&session);
+    assert!(refusal.contains("wait until it is suspended"), "{refusal}");
+    assert!(!refusal.contains("close"), "{refusal}");
 }
 
 #[tokio::test]

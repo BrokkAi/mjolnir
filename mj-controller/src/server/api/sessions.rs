@@ -330,14 +330,21 @@ async fn await_resume_started(state: &ServerState, session_id: &str) {
 }
 
 /// Why a session cannot be resumed, in words the caller can act on.
-fn resume_refusal(session: &ViewerSession) -> String {
-    if session.lifecycle.is_dashboard_visible() {
-        return format!(
-            "this session is {}; close it before resuming it",
-            session.state
-        );
+pub(super) fn resume_refusal(session: &ViewerSession) -> String {
+    match session.lifecycle {
+        ViewerLifecycleCategory::Suspending => {
+            "this session is suspending; wait until it is suspended, then resume it".to_owned()
+        }
+        ViewerLifecycleCategory::Starting => {
+            "this session is still starting; it does not need to be resumed".to_owned()
+        }
+        ViewerLifecycleCategory::Live => {
+            "this session is already running; to restart it, suspend it first (`mj suspend`), then resume it".to_owned()
+        }
+        ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed => {
+            "this session has an operation running; wait for it to finish, then resume".to_owned()
+        }
     }
-    "this session has an operation running; wait for it to finish, then resume".to_owned()
 }
 
 // ---------------------------------------------------------------------------
