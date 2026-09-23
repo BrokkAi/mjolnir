@@ -123,8 +123,7 @@ async fn serve_on(
                         let prompt = match prompt_text(&request.prompt) {
                             Ok(prompt) => prompt,
                             Err(error) => {
-                                return responder
-                                    .respond_with_internal_error(format!("{error:#}"));
+                                return responder.respond_with_internal_error(format!("{error:#}"));
                             }
                         };
                         let mut notify = |session_id: &str, message: &str| -> Result<()> {
@@ -562,12 +561,12 @@ mod tests {
 
     /// Two workspaces, which is when the daemon refuses to pick one itself.
     async fn list_workspaces() -> ([(&'static str, &'static str); 1], Json<Value>) {
-        let workspace = |id: &str, name: &str| {
-            json!({"id": id, "name": name, "created_at": "now", "last_opened_at": "now", "session_count": 0})
-        };
+        let workspace = |id: &str, name: &str| json!({"id": id, "name": name, "created_at": "now", "last_opened_at": "now", "session_count": 0});
         (
             version(),
-            Json(json!({"workspaces": [workspace("ws-1", "default"), workspace("ws-2", "Release")]})),
+            Json(
+                json!({"workspaces": [workspace("ws-1", "default"), workspace("ws-2", "Release")]}),
+            ),
         )
     }
 
@@ -689,9 +688,17 @@ mod tests {
 
         /// Start a session, the way every consumer does before its first prompt.
         async fn open_session(&mut self) {
-            self.request(1, "initialize", json!({"protocolVersion": 1, "clientCapabilities": {}}));
+            self.request(
+                1,
+                "initialize",
+                json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            );
             self.response(1).await;
-            self.request(2, "session/new", json!({"cwd": "/work/project", "mcpServers": []}));
+            self.request(
+                2,
+                "session/new",
+                json!({"cwd": "/work/project", "mcpServers": []}),
+            );
             let created = self.response(2).await;
             assert_eq!(created["result"]["sessionId"], "session-1", "{created}");
         }
@@ -806,10 +813,17 @@ mod tests {
             Some("nowhere".to_owned()),
             Some(client),
         )));
-        consumer.request(2, "session/new", json!({"cwd": "/work/project", "mcpServers": []}));
+        consumer.request(
+            2,
+            "session/new",
+            json!({"cwd": "/work/project", "mcpServers": []}),
+        );
         let refused = consumer.response(2).await;
 
-        assert!(refused["error"]["data"].to_string().contains("nowhere"), "{refused}");
+        assert!(
+            refused["error"]["data"].to_string().contains("nowhere"),
+            "{refused}"
+        );
         assert!(daemon.start.lock().unwrap().is_empty());
     }
 
