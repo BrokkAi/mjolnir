@@ -6516,5 +6516,8 @@ fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     let garbage =
         protocol_failure(agent_client_protocol::Error::parse_error().data(serde_json::json!("x")))
             .to_string();
-    assert!(garbage.contains("login-shell startup must be silent"), "{garbage}");
+    assert!(
+        garbage.contains("login-shell startup must be silent"),
+        "{garbage}"
+    );
 }

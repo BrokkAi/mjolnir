@@ -54,7 +54,11 @@ async fn analyze_diff_with(
         // it, or Bifrost would read a half-written index as the repository.
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    if let Some(cache) = keep_bifrost_state_out_of_worktree(&request.repository).await {
+        command.env(BIFROST_CACHE_DIR_ENV, cache);
+    }
+    command
         .arg("--root")
         .arg(&request.repository)
         .args(["--tool", "analyze_diff", "--args"])
@@ -96,6 +100,80 @@ async fn analyze_diff_with(
     let envelope: AnalyzeDiffEnvelope = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("invalid analyze_diff JSON: {error}"))?;
     Ok(envelope.structured_content)
+}
+
+/// Bifrost's override for where it keeps its analyzer database. Without it,
+/// Bifrost writes `.bifrost/` into the reviewed worktree.
+const BIFROST_CACHE_DIR_ENV: &str = "BIFROST_CACHE_DIR";
+
+/// Keeps Bifrost's analyzer database out of the session's changes (I2-12).
+///
+/// Returns a per-worktree cache directory inside Git's own directory for this
+/// worktree, which no diff, export, or branch includes. A Bifrost too old to
+/// honor [`BIFROST_CACHE_DIR_ENV`], and the Bifrost MCP servers a reviewer
+/// role starts, still write `.bifrost/` into the worktree, so this also adds
+/// `/.bifrost/` to the repository's `info/exclude`: `git status`, the review
+/// capture, `mj diff`, and the changed-files view then all leave it out.
+pub(crate) async fn keep_bifrost_state_out_of_worktree(
+    root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(exclude) = git_path(root, "info/exclude").await {
+        let existing = tokio::fs::read_to_string(&exclude)
+            .await
+            .unwrap_or_default();
+        let listed = existing.lines().any(|line| {
+            matches!(
+                line.trim(),
+                ".bifrost" | ".bifrost/" | "/.bifrost" | "/.bifrost/"
+            )
+        });
+        if !listed {
+            let separator = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            let updated = format!("{existing}{separator}/.bifrost/\n");
+            let written = match exclude.parent() {
+                Some(parent) => tokio::fs::create_dir_all(parent).await,
+                None => Ok(()),
+            };
+            if let Err(error) = match written {
+                Ok(()) => tokio::fs::write(&exclude, updated).await,
+                Err(error) => Err(error),
+            } {
+                tracing::warn!(path = %exclude.display(), %error, "could not exclude .bifrost/ from the review worktree");
+            }
+        }
+    }
+    let cache = git_path(root, "mj-bifrost-cache").await?;
+    tokio::fs::create_dir_all(&cache).await.ok()?;
+    Some(cache)
+}
+
+/// `git rev-parse --git-path`, resolved against `root`.
+async fn git_path(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--git-path", path])
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_DIR")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let resolved = String::from_utf8(output.stdout).ok()?;
+    let resolved = std::path::Path::new(resolved.trim());
+    Some(if resolved.is_absolute() {
+        resolved.to_path_buf()
+    } else {
+        root.join(resolved)
+    })
 }
 
 /// Explains a Bifrost that does not offer `analyze_diff`: an older release
@@ -173,5 +251,68 @@ mod tests {
         assert!(error.contains("bifrost 0.7.5"), "{error}");
         assert!(error.contains("has no analyze_diff tool"), "{error}");
         assert!(error.contains(REQUIRED_BIFROST_VERSION), "{error}");
+    }
+
+    /// I2-12: a review left `.bifrost/analyzer.db` in the session worktree,
+    /// and it showed up in `mj diff` and in the next review's capture.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bifrost_state_stays_out_of_the_session_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_DIR")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        // A Bifrost that honors the cache override writes there; an old one
+        // writes into the worktree. This fake does both, and records the
+        // override it was given.
+        let fake = temp.path().join("bifrost");
+        let seen = temp.path().join("cache-dir");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nprintf '%s' \"$BIFROST_CACHE_DIR\" > '{}'\nmkdir -p .bifrost && : > .bifrost/analyzer.db\necho 'Unknown tool: analyze_diff' >&2\nexit 1\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = analyze_diff_with(
+            &fake,
+            &AnalyzeRequest {
+                repository: repo.clone(),
+                base_tree: "base".to_string(),
+                target_tree: "target".to_string(),
+            },
+        )
+        .await;
+        let cache = std::path::PathBuf::from(std::fs::read_to_string(&seen).unwrap());
+        assert!(cache.is_dir(), "{}", cache.display());
+        assert!(cache.starts_with(repo.join(".git")), "{}", cache.display());
+        assert!(repo.join(".bifrost/analyzer.db").exists());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_DIR")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+        // Running again does not list the exclusion twice.
+        let _ = keep_bifrost_state_out_of_worktree(&repo).await;
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.matches("/.bifrost/").count(), 1, "{exclude}");
     }
 }
