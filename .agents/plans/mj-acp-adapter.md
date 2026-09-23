@@ -51,7 +51,13 @@ omitted profile, target, or bundle falls back to the same saved default that
       over the request and prompt shapes — by the full binary suite (157
       passed), by `cargo fmt --all -- --check`, and by
       `cargo clippy --workspace --all-targets -- -D warnings`.
-- [ ] Milestone C: cancellation, structured input, and failure paths.
+- [x] (2026-09-23T09:40Z) Milestone C: `session/cancel` interrupts the turn and
+      is answered `Cancelled` even when the interrupt fails, a structured input
+      request ends the turn naming what it waits for, and closing the pipe stops
+      the turns the consumer can no longer see without destroying the sessions.
+      Verified by eight adapter tests, the full binary suite (160 passed),
+      `cargo fmt --all -- --check`, and
+      `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Milestone D: document the command for consumers.
 
 ## Surprises & Discoveries
@@ -170,6 +176,27 @@ omitted profile, target, or bundle falls back to the same saved default that
   not a notion of which account or host to use. Keeping placement in the agent
   command is what lets one consumer launch the same adapter for a local run and
   a remote one, and it reuses the resolution session creation already performs.
+  Date/Author: 2026-09-23, root agent.
+
+- Decision, revising the entry above on structured input: a turn waiting for
+  input ends with a JSON-RPC error naming the question, not with a bare
+  `Refusal`.
+  Rationale: the earlier decision assumed a refusal could carry a sentence.
+  `PromptResponse` has nowhere to put one, so a refusal would tell a consumer
+  only that something stopped, leaving it to search the session for why — and a
+  consumer that cannot see the reason has gained nothing over hanging. An error
+  response both fails the turn and carries the explanation. The interrupt is
+  issued first so the session is not left waiting for a person after the
+  consumer has been told to give up.
+  Date/Author: 2026-09-23, root agent.
+
+- Decision: keep a cancellation marker on the adapter instead of relying on the
+  daemon's interrupt alone.
+  Rationale: the specification requires `Cancelled` when the client sends
+  `session/cancel`, even if cancellation raises underneath. If the interrupt
+  fails — a dead daemon, a lost race — the turn could otherwise finish normally
+  and the consumer would read a successful end of turn for work it asked to
+  stop. The marker is consumed once, so it cannot cancel a later turn.
   Date/Author: 2026-09-23, root agent.
 
 - Decision: closing the adapter's standard input interrupts every active turn
@@ -381,3 +408,33 @@ rejected before a body is ever parsed.
 
 What remains is Milestone C: cancellation, structured input, and the failure
 paths that make the adapter safe to run unattended, then Milestone D's docs.
+
+### Milestone C
+
+Reached 2026-09-23. The adapter is now safe to run unattended. A `session/cancel`
+interrupts the turn and is answered `Cancelled` even when the interrupt fails or
+the daemon is unreachable, because the adapter records the cancellation itself
+rather than trusting the daemon's interrupt to be enough. A turn that stops to
+ask a question is ended and the question named in the error the consumer sees,
+so a program fails loudly with a reason instead of hanging on a person who is
+not there. And when the consumer closes the pipe, the adapter stops the turns it
+can no longer see while leaving the sessions themselves alone, since they are
+durable and a person may still want to resume one.
+
+The one course correction: the plan originally said a structured input request
+would end the turn with `Refusal` and a message naming it. `PromptResponse` has
+no field for that message, so a refusal would have told a consumer only that
+something stopped. The turn now ends with an error carrying the question, and
+the decision log records why that beats the narrower reading of the earlier
+decision.
+
+Testing this milestone required a second seam. The cancellation rules are about
+what happens when the daemon misbehaves, so `cancel_with`, `turn_with`, and
+`stop_active_turns_with` take a client the tests can point at a fake daemon that
+fails interrupt requests; the production methods differ only in connecting
+first. Clippy caught that `cancel_with` was reachable only from tests, which is
+the kind of seam that quietly rots, so `cancel` now calls it whenever it can
+reach the daemon, and records the cancellation itself when it cannot.
+
+What remains is Milestone D, the documentation a consumer needs to find this
+command at all.

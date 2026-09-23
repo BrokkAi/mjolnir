@@ -20,15 +20,15 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason, TextContent,
+    AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, InitializeRequest,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use mj_controller::server::api::{StartSessionRequest, WaitOutcome, WaitRequest};
+use mj_controller::server::api::{StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse};
 
 use crate::api_client::ApiClient;
 
@@ -57,6 +57,11 @@ struct Adapter {
     /// so an adapter instance cannot be used to drive unrelated sessions that
     /// happen to live in the same daemon.
     sessions: Mutex<HashSet<String>>,
+    /// Sessions with a turn in flight, so closing the pipe can stop them.
+    active: Mutex<HashSet<String>>,
+    /// Sessions the consumer asked to cancel, kept until the turn that is
+    /// answering them has read the request.
+    cancelling: Mutex<HashSet<String>>,
 }
 
 /// Serve the Agent Client Protocol on standard input and output.
@@ -67,8 +72,10 @@ pub(crate) async fn serve(args: AcpArgs) -> Result<()> {
     let adapter = Arc::new(Adapter {
         args,
         sessions: Mutex::new(HashSet::new()),
+        active: Mutex::new(HashSet::new()),
+        cancelling: Mutex::new(HashSet::new()),
     });
-    Agent
+    let served = Agent
         .builder()
         .name("mjolnir")
         .on_receive_request(
@@ -118,9 +125,23 @@ pub(crate) async fn serve(args: AcpArgs) -> Result<()> {
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_notification(
+            {
+                let adapter = Arc::clone(&adapter);
+                async move |notification: CancelNotification, _cx| {
+                    adapter.cancel(&notification.session_id.0).await;
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
         .connect_to(Stdio::new())
-        .await
-        .context("serving the Agent Client Protocol on standard input and output")
+        .await;
+    // The consumer is gone, so nothing it started can be watched or steered any
+    // more: stop the turns it can no longer see. The sessions themselves stay,
+    // because they are durable and a person may still want to resume one.
+    adapter.stop_active_turns().await;
+    served.context("serving the Agent Client Protocol on standard input and output")
 }
 
 /// Answer `initialize`.
@@ -168,13 +189,111 @@ impl Adapter {
         prompt: &str,
         notify: &mut impl FnMut(&str, &str) -> Result<()>,
     ) -> Result<StopReason> {
-        if !self.owns(session_id) {
-            bail!("this adapter did not create session {session_id}");
-        }
         let client = ApiClient::connect()
             .await
             .context("connect to the Mjolnir daemon")?;
-        run_turn(&client, session_id, prompt, notify).await
+        self.turn_with(&client, session_id, prompt, notify).await
+    }
+
+    /// Run one turn through a client the caller supplies.
+    ///
+    /// Split from [`Self::turn`] so the ownership and cancellation rules can be
+    /// exercised without a daemon.
+    async fn turn_with(
+        &self,
+        client: &ApiClient,
+        session_id: &str,
+        prompt: &str,
+        notify: &mut impl FnMut(&str, &str) -> Result<()>,
+    ) -> Result<StopReason> {
+        if !self.owns(session_id) {
+            bail!("this adapter did not create session {session_id}");
+        }
+        self.active
+            .lock()
+            .expect("adapter active set")
+            .insert(session_id.to_owned());
+        let result = run_turn(client, session_id, prompt, notify).await;
+        self.active
+            .lock()
+            .expect("adapter active set")
+            .remove(session_id);
+        // A cancellation is the consumer's decision, and the specification
+        // requires `Cancelled` even when the work underneath fails while the
+        // cancellation is being applied. The failure is still worth recording.
+        if self
+            .cancelling
+            .lock()
+            .expect("adapter cancel set")
+            .remove(session_id)
+        {
+            if let Err(error) = &result {
+                tracing::debug!(%error, %session_id, "a cancelled turn also failed");
+            }
+            return Ok(StopReason::Cancelled);
+        }
+        result
+    }
+
+    /// Remember that the consumer asked to cancel, then ask the daemon to stop.
+    async fn cancel(&self, session_id: &str) {
+        match ApiClient::connect().await {
+            Ok(client) => self.cancel_with(&client, session_id).await,
+            Err(error) => {
+                // A daemon this process cannot reach must not turn a cancel
+                // into an end of turn: the consumer asked for this.
+                self.mark_cancelled(session_id);
+                tracing::warn!(%error, %session_id, "could not reach the daemon to cancel a turn");
+            }
+        }
+    }
+
+    /// The cancel path through a client the caller supplies.
+    async fn cancel_with(&self, client: &ApiClient, session_id: &str) {
+        self.mark_cancelled(session_id);
+        interrupt(client, session_id).await;
+    }
+
+    /// Stop the turns the consumer can no longer see.
+    async fn stop_active_turns(&self) {
+        match ApiClient::connect().await {
+            Ok(client) => self.stop_active_turns_with(&client).await,
+            Err(error) => {
+                tracing::debug!(%error, "could not reach the daemon to stop active turns");
+            }
+        }
+    }
+
+    /// The shutdown path with an injected client, for tests.
+    async fn stop_active_turns_with(&self, client: &ApiClient) {
+        let active: Vec<String> = self
+            .active
+            .lock()
+            .expect("adapter active set")
+            .iter()
+            .cloned()
+            .collect();
+        for session_id in active {
+            interrupt(client, &session_id).await;
+        }
+    }
+
+    fn mark_cancelled(&self, session_id: &str) {
+        self.cancelling
+            .lock()
+            .expect("adapter cancel set")
+            .insert(session_id.to_owned());
+    }
+}
+
+/// Ask the daemon to stop one session's turn.
+///
+/// An interruption that fails is logged rather than raised: the consumer has
+/// already been told its turn was cancelled, and a failure here changes what
+/// the daemon is doing, not what the consumer was promised.
+async fn interrupt(client: &ApiClient, session_id: &str) {
+    if let Err(error) = client.interrupt_turn(session_id).await {
+        tracing::warn!(%error, %session_id, "could not interrupt a turn");
     }
 }
 
@@ -197,13 +316,24 @@ async fn run_turn(
         .wait(
             session_id,
             &WaitRequest {
-                return_on_input: false,
+                // Ask to be told about a structured input request rather than
+                // waiting for an answer that will never come: the consumer is a
+                // program, and this adapter has no one to ask.
+                return_on_input: true,
                 turn_id: Some(accepted.turn_id),
                 timeout_secs: None,
             },
         )
         .await
         .context("wait for the turn")?;
+    if let Some(pending) = pending_input(&waited) {
+        // End the turn instead of leaving the session waiting for a person. The
+        // reason travels as an error rather than a stop reason because the
+        // protocol gives a refusal nowhere to carry its explanation, and a
+        // consumer that cannot see why its turn stopped has gained nothing.
+        interrupt(client, session_id).await;
+        bail!("this session is waiting for input a program cannot provide: {pending}");
+    }
     if let Some(message) = waited
         .final_message
         .as_deref()
@@ -217,11 +347,24 @@ async fn run_turn(
     Ok(match waited.outcome {
         WaitOutcome::Finished => StopReason::EndTurn,
         WaitOutcome::Cancelled => StopReason::Cancelled,
+        // Normally answered above, with the request named. Kept so the mapping
+        // stays total if a wait ever reports input without a pending request.
         WaitOutcome::InputRequired
         | WaitOutcome::Error
         | WaitOutcome::QuotaLimit
         | WaitOutcome::Timeout
         | WaitOutcome::Stopped => StopReason::Refusal,
+    })
+}
+
+/// What a turn is waiting to be asked, when it is waiting for input.
+fn pending_input(waited: &WaitResponse) -> Option<String> {
+    if !matches!(waited.outcome, WaitOutcome::InputRequired) {
+        return None;
+    }
+    Some(match waited.pending_elicitations.first() {
+        Some(request) => request.message.clone(),
+        None => "the session is waiting for input".to_owned(),
     })
 }
 
@@ -281,30 +424,43 @@ mod tests {
     /// Hand-written rather than mocked, the same way the controller's own route
     /// tests are: the adapter's job is to say the right things over HTTP, so the
     /// test asserts the bytes that arrived, not that a method was called.
-    struct FakeDaemon {
+    /// How the fake daemon should answer one turn.
+    #[derive(Default)]
+    struct FakeTurn {
         outcome: &'static str,
         final_message: Option<&'static str>,
+        /// The question a turn is waiting for, when it is waiting for one.
+        pending_message: Option<&'static str>,
+        /// Whether interrupting fails, which is what a cancel racing a dead
+        /// daemon looks like.
+        interrupt_fails: bool,
+    }
+
+    struct FakeDaemon {
+        turn: FakeTurn,
         start: Mutex<Vec<Value>>,
         prompt: Mutex<Vec<(String, Value)>>,
         wait: Mutex<Vec<(String, Value)>>,
+        interrupts: Mutex<Vec<String>>,
     }
 
     impl FakeDaemon {
-        async fn start(
-            outcome: &'static str,
-            final_message: Option<&'static str>,
-        ) -> (ApiClient, Arc<Self>) {
+        async fn start(turn: FakeTurn) -> (ApiClient, Arc<Self>) {
             let daemon = Arc::new(Self {
-                outcome,
-                final_message,
+                turn,
                 start: Mutex::new(Vec::new()),
                 prompt: Mutex::new(Vec::new()),
                 wait: Mutex::new(Vec::new()),
+                interrupts: Mutex::new(Vec::new()),
             });
             let app = Router::new()
                 .route("/api/v1/sessions", post(record_start))
                 .route("/api/v1/sessions/{session_id}/prompt", post(record_prompt))
                 .route("/api/v1/sessions/{session_id}/wait", post(record_wait))
+                .route(
+                    "/api/v1/sessions/{session_id}/interrupt-turn",
+                    post(record_interrupt),
+                )
                 .with_state(Arc::clone(&daemon));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -363,20 +519,44 @@ mod tests {
             "created_at": "now",
             "updated_at": "now"
         });
+        let pending: Vec<Value> = daemon
+            .turn
+            .pending_message
+            .map(|message| vec![json!({"id": "q1", "message": message, "fields": []})])
+            .unwrap_or_default();
         daemon.wait.lock().unwrap().push((session_id, body));
         (
             version(),
             Json(json!({
-                "outcome": daemon.outcome,
-                "final_message": daemon.final_message,
+                "outcome": daemon.turn.outcome,
+                "final_message": daemon.turn.final_message,
+                "pending_elicitations": pending,
                 "session": session
             })),
         )
     }
 
+    async fn record_interrupt(
+        State(daemon): State<Arc<FakeDaemon>>,
+        Path(session_id): Path<String>,
+    ) -> ([(&'static str, &'static str); 1], axum::http::StatusCode) {
+        daemon.interrupts.lock().unwrap().push(session_id);
+        let status = if daemon.turn.interrupt_fails {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            axum::http::StatusCode::OK
+        };
+        (version(), status)
+    }
+
     #[tokio::test]
     async fn a_finished_turn_emits_the_answer_and_reports_end_turn() {
-        let (client, daemon) = FakeDaemon::start("finished", Some("the answer")).await;
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "finished",
+            final_message: Some("the answer"),
+            ..FakeTurn::default()
+        })
+        .await;
         let mut sent: Vec<(String, String)> = Vec::new();
         let mut notify = |session_id: &str, message: &str| -> Result<()> {
             sent.push((session_id.to_owned(), message.to_owned()));
@@ -404,15 +584,15 @@ mod tests {
     async fn every_turn_that_did_not_finish_is_refused() {
         // A consumer treats `EndTurn` as success, so nothing short of a finished
         // turn may report it. Each of these is a different reason a turn stops
-        // without succeeding.
-        for outcome in [
-            "error",
-            "quota_limit",
-            "timeout",
-            "stopped",
-            "input_required",
-        ] {
-            let (client, _daemon) = FakeDaemon::start(outcome, Some("something went wrong")).await;
+        // without succeeding. `input_required` is answered differently, with the
+        // question named, which its own test covers.
+        for outcome in ["error", "quota_limit", "timeout", "stopped"] {
+            let (client, _daemon) = FakeDaemon::start(FakeTurn {
+                outcome,
+                final_message: Some("something went wrong"),
+                ..FakeTurn::default()
+            })
+            .await;
             let mut sent: Vec<(String, String)> = Vec::new();
             let mut notify = |session_id: &str, message: &str| -> Result<()> {
                 sent.push((session_id.to_owned(), message.to_owned()));
@@ -430,7 +610,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_turn_reports_cancelled() {
-        let (client, _daemon) = FakeDaemon::start("cancelled", None).await;
+        let (client, _daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "cancelled",
+            ..FakeTurn::default()
+        })
+        .await;
         let mut notify = |_session_id: &str, _message: &str| -> Result<()> { Ok(()) };
 
         let stop = run_turn(&client, "session-1", "hello", &mut notify)
@@ -484,6 +668,94 @@ mod tests {
         assert!(
             prompt_text(&[ContentBlock::Text(TextContent::new("   "))]).is_err(),
             "whitespace is not a prompt"
+        );
+    }
+
+    /// An adapter that already knows one session, without a daemon to create it.
+    fn adapter_owning(session_id: &str) -> Adapter {
+        Adapter {
+            args: AcpArgs::default(),
+            sessions: Mutex::new(HashSet::from([session_id.to_owned()])),
+            active: Mutex::new(HashSet::new()),
+            cancelling: Mutex::new(HashSet::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_is_answered_cancelled_even_when_the_interrupt_fails() {
+        // The specification requires `Cancelled` when the client sends
+        // `session/cancel`, even if cancellation raises underneath. Here the
+        // turn finishes normally and the interrupt fails, which is the worst
+        // case: a consumer would otherwise read a successful end of turn for
+        // work it asked to stop.
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "finished",
+            final_message: Some("the work finished anyway"),
+            interrupt_fails: true,
+            ..FakeTurn::default()
+        })
+        .await;
+        let adapter = adapter_owning("session-1");
+        let mut notify = |_session_id: &str, _message: &str| -> Result<()> { Ok(()) };
+
+        adapter.cancel_with(&client, "session-1").await;
+        let stop = adapter
+            .turn_with(&client, "session-1", "hello", &mut notify)
+            .await
+            .expect("the turn runs");
+
+        assert_eq!(stop, StopReason::Cancelled);
+        assert_eq!(
+            daemon.interrupts.lock().unwrap().as_slice(),
+            ["session-1"],
+            "the daemon was still asked to stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_input_request_ends_the_turn_and_names_what_it_waits_for() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "input_required",
+            pending_message: Some("Which branch should I target?"),
+            ..FakeTurn::default()
+        })
+        .await;
+        let adapter = adapter_owning("session-1");
+        let mut notify = |_session_id: &str, _message: &str| -> Result<()> { Ok(()) };
+
+        let error = adapter
+            .turn_with(&client, "session-1", "hello", &mut notify)
+            .await
+            .expect_err("a program cannot answer a question");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Which branch should I target?"),
+            "the consumer is told what the session is waiting for: {message}"
+        );
+        assert_eq!(
+            daemon.interrupts.lock().unwrap().as_slice(),
+            ["session-1"],
+            "a turn nobody can answer is ended rather than left waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_stops_the_turns_the_consumer_can_no_longer_see() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let adapter = adapter_owning("session-1");
+        adapter
+            .active
+            .lock()
+            .unwrap()
+            .insert("session-1".to_owned());
+
+        adapter.stop_active_turns_with(&client).await;
+
+        assert_eq!(daemon.interrupts.lock().unwrap().as_slice(), ["session-1"]);
+        assert!(
+            adapter.sessions.lock().unwrap().contains("session-1"),
+            "a durable session outlives the consumer that asked for it"
         );
     }
 }
