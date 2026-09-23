@@ -287,7 +287,15 @@ class Lab:
         self.scenario = scenario
         self.seed = seed
         self.repo_root = pathlib.Path(__file__).resolve().parents[2]
-        artifact_parent = self.repo_root / "target" / "reliability-artifacts"
+        # `target/` may be a managed build directory that the build cache
+        # evicts on its own schedule; a campaign that must keep its evidence
+        # points this at a directory outside it.
+        artifact_override = os.environ.get("MJ_RELIABILITY_ARTIFACTS")
+        artifact_parent = (
+            pathlib.Path(artifact_override).expanduser().resolve()
+            if artifact_override
+            else self.repo_root / "target" / "reliability-artifacts"
+        )
         artifact_parent.mkdir(parents=True, exist_ok=True)
         stamp = f"{scenario}-seed-{seed}-{os.getpid()}"
         self.root = artifact_parent / stamp
