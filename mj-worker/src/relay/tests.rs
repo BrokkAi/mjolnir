@@ -2219,6 +2219,66 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
     assert_eq!(relay.operational_state().latest_ordinal, before);
 }
 
+/// Stop while Claude Code works on its own after a background task sends
+/// `session/cancel`; the interrupted cycle's result then ends the turn. With
+/// nothing running, or during a Codex goal turn, Stop is still refused.
+#[test]
+fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_ends_it() {
+    let refused = |relay: &mut DurableRelay, command_id: &str| {
+        let response = relay.handle(relay_request(
+            &format!("request-{command_id}"),
+            RelayRequest::Submit {
+                command_id: command_id.to_owned(),
+                command: RelayCommand::Cancel,
+            },
+        ));
+        match response.body {
+            RelayResponseBody::Error { error } => error.message,
+            body => panic!("Stop must be refused: {body:?}"),
+        }
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    assert_eq!(
+        refused(&mut relay, "cancel-idle"),
+        "there is no active prompt to cancel"
+    );
+
+    relay
+        .record_session_update(agent_text_chunk("Summarizing the agent's findings"))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+    submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "cancel-harness-turn");
+    relay
+        .record_command_completed("cancel-harness-turn", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(
+        relay.operational_state().harness_turn.is_some(),
+        "the turn runs until Claude Code reports the interrupted cycle"
+    );
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    let codex = tempfile::tempdir().unwrap();
+    let mut codex = DurableRelay::open(codex.path(), SESSION, "1.0.0").unwrap();
+    codex.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    codex
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+        .unwrap();
+    assert!(codex.operational_state().harness_turn.is_some());
+    assert_eq!(
+        refused(&mut codex, "cancel-codex"),
+        "the agent is working on its own after a background task; there is no prompt to cancel"
+    );
+}
+
 #[test]
 fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let temp = tempfile::tempdir().unwrap();

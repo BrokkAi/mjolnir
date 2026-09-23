@@ -567,6 +567,21 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
 
     assert!(session.capabilities.prompt);
     assert!(session.capabilities.set_plan_mode);
+    assert!(
+        !session.capabilities.interrupt_turn,
+        "nothing is running to interrupt"
+    );
+    // A turn Claude Code started on its own after a background task can be
+    // stopped from the phone as well.
+    operational.get_mut("session-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
+        started_at_ms: 1_000,
+    });
+    assert!(
+        project(&operational).sessions[0]
+            .capabilities
+            .interrupt_turn
+    );
+    operational.get_mut("session-1").unwrap().harness_turn = None;
     assert_eq!(
         session
             .available_commands

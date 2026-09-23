@@ -194,10 +194,11 @@ impl ChatState {
                 }
                 return ChatAction::None;
             }
-            // Only a prompt of ours can be cancelled. A turn the harness
-            // started on its own also reads as Running, and the relay refuses
-            // to cancel it, so Esc must not claim to.
+            // A prompt of ours, or a turn Claude Code started on its own after
+            // a background task, can be cancelled. A Codex goal turn also
+            // reads as Running but has its own controls.
             return if self.prompt_in_flight
+                || self.harness_turn_stoppable()
                 || matches!(
                     self.session_activity.state().last_known(),
                     mj_core::activity::ActivityState::CheckingContinuation

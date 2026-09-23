@@ -497,3 +497,45 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
         .await;
     probe.close().await;
 }
+
+/// Stop while Claude Code works on its own reaches the adapter as
+/// `session/cancel`. The relay ends that turn at the interrupted cycle's
+/// result, which the runtime forwards like any other.
+#[tokio::test]
+async fn stop_while_claude_works_on_its_own_sends_session_cancel() {
+    let mut probe = ClaudeProbe::new().await;
+    probe
+        .chunk("Summarizing what the background agent found")
+        .await;
+    probe
+        .commands
+        .send(CommandRequest::Cancel {
+            request_id: "stop-1".into(),
+            steering_prompt: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(probe.message().await["method"], "session/cancel");
+    loop {
+        match probe.event().await {
+            RuntimeEvent::CancelApplied { request_id } => {
+                assert_eq!(request_id, "stop-1");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("Stop was refused: {message}"),
+            _ => {}
+        }
+    }
+    let mut interrupted = success("task-notification");
+    interrupted["subtype"] = json!("error_during_execution");
+    interrupted["is_error"] = json!(true);
+    probe.sdk_result(interrupted).await;
+    loop {
+        if let RuntimeEvent::ClaudeTurnResult(result) = probe.event().await {
+            assert_eq!(result.origin_kind.as_deref(), Some("task-notification"));
+            assert_eq!(result.prompt_stop_reason(), None);
+            break;
+        }
+    }
+    probe.close().await;
+}

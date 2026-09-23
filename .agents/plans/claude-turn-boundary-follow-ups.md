@@ -12,7 +12,7 @@ First, the decision is made in the one place that sees the adapter's notificatio
 
 - [x] Milestone A (2026-09-23): results travel as `RuntimeEvent::ClaudeTurnResult` on the ordered runtime-event stream; the relay coordinator finds the result that answers the running prompt and sends `CommandRequest::ReleasePrompt` to the prompt loop; the loop ends the prompt unless a cancel, a plan hand-off, or a newer `session/prompt` says otherwise, reports `PromptFinished` itself, and keeps the adapter's reply alive in a detached task. This differs from the shape written below in who records the completion (see Decision Log). Tests: `mj_core::acp::claude_result::tests` (7), `acp::claude_result_tests` (7), `acp::plan_tests::a_planning_result_never_ends_the_prompt_an_approved_plan_continues`, `worker_runtime::relay_tests::a_claude_result_hands_the_running_prompt_to_the_prompt_loop`. (Revises part one, Milestone 2 and 3.)
 - [x] Milestone B (2026-09-23): a result the prompt loop is not asked to take settles an open Claude harness turn (`DurableRelay::claude_turn_result`); the origin marker settles nothing for Claude, and `claude_turn_origin` is deleted. Codex still settles on its goal state. Tests: `relay::tests::a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker`, the relay tests that used the marker now settle with a result, and `worker_runtime::relay_tests::a_claude_result_hands_the_running_prompt_to_the_prompt_loop` also checks that a background follow-up opens a turn and its result settles it.
-- [ ] Milestone C: Stop interrupts a Claude harness turn.
+- [x] Milestone C (2026-09-23): Stop interrupts a Claude harness turn. The relay admits the older `Cancel` during a Claude harness turn (Codex goal turns are still refused); the chat's Esc and the phone's interrupt capability now also cover a Claude harness turn; the ACP loop already sent `session/cancel` for a cancel outside a prompt; the interrupted cycle's result settles the turn (Milestone B). `.agents/docs/claude-autonomous-turns.md` describes the result contract, where a prompt ends, and Stop, and its stale paths are fixed. Tests: `relay::tests::stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_ends_it`, `acp::claude_result_tests::stop_while_claude_works_on_its_own_sends_session_cancel`, `chat::tests::escape_only_cancels_an_active_turn` (extended), `server_runtime::tests::phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance` (extended).
 - [ ] Milestone D: tests, documentation, isolated live check, full `cargo test`, push to `origin/master` (the user authorized the push for this work on 2026-09-23).
 
 ## Surprises & Discoveries
@@ -25,6 +25,8 @@ First, the decision is made in the one place that sees the adapter's notificatio
   Evidence: `dist/acp-agent.js` near lines 3696-3706 and 3781-3790.
 - Observation: the adapter fails a prompt at once for an error result (`failActive`), and it never holds the reply of a cycle that produced no model output, because such a cycle cannot have started background work.
   Evidence: `failActive` near line 2343; `turnAwaitingSubagents` near line 2245 holds only for subagents the turn spawned.
+- Observation: Stop was not blocked by the worker for current clients. The chat and the phone send `CancelTurn`, which the relay already admitted and dispatched during a harness turn, and the ACP loop already answered a cancel outside a prompt with `session/cancel`. What blocked Stop was the clients' own gating: the chat's Esc acted only with a prompt in flight, and the phone offered interrupt only with an active prompt. The relay refused only the older `Cancel` command.
+  Evidence: `mj-chat/src/chat/keys.rs` (Esc handler), `mj-chat/src/chat/active/dispatch.rs` (`cancel_agent`), `mj-controller/src/server_runtime/snapshot.rs` (`interrupt_turn`), `mj-worker/src/relay/commands.rs` (`queued_controls_before` admits `CancelTurn` while `running_turn`).
 
 ## Decision Log
 
@@ -55,6 +57,12 @@ First, the decision is made in the one place that sees the adapter's notificatio
 - Decision: a human result with `queued_turn_count` above zero does not end the prompt.
   Rationale: Claude Code says another user cycle follows, which is how a steer's interrupted cycle ends when the steered message is still queued. This, the interruption-report rule, and the failure rule together cover steering without injection state.
   Date/Author: 2026-09-23, Opus (implementation), after reading the adapter source.
+- Decision: (revises the Stop decision above) a Stop during a Claude harness turn completes when `session/cancel` is sent, as a prompt's cancel does, and the harness turn ends separately when the interrupted cycle's result arrives. No snapshot field for a cancelling harness turn is added.
+  Rationale: this is how a prompt's cancel already works (`CancelApplied` completes the command; the prompt ends at its reply), so clients and the snapshot need nothing new, and there is no stored state to make compatible. The checkpoint barrier keeps waiting for the turn until the cycle has actually stopped, which settling the turn at the cancel would not guarantee. A harness turn opened by output that belongs to no cycle is not ended by Stop; the next result ends it (Known limitations in the design note).
+  Date/Author: 2026-09-23, Opus (implementation).
+- Decision: the chat and the phone treat a harness turn as stoppable when no goal is active (`SessionActivity::harness_turn_started_at_ms` with `!pursuing_goal` in the chat, `harness_turn` with `!goal.active()` on the phone).
+  Rationale: clients do not know the relay's harness-turn policy. A Codex harness turn is always a running native goal, which has its own controls; a Claude harness turn is not.
+  Date/Author: 2026-09-23, Opus (implementation).
 
 ## Outcomes & Retrospective
 
