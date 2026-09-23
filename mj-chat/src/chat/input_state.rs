@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
+    "This agent does not accept images; only text can be pasted";
 pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

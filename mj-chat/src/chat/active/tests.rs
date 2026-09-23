@@ -3103,3 +3103,17 @@ fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
     let ascii = with_symbols(SymbolSet::Ascii, || drawn_transcript(&mut chat, 60, 12));
     assert!(ascii.iter().all(|row| !row.contains('❯')), "{ascii:#?}");
 }
+
+#[tokio::test]
+async fn empty_paste_without_image_support_reports_it_without_reading_the_clipboard() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(false);
+    chat.state.input = "draft".into();
+    chat.handle_event_result(crossterm::event::Event::Paste(String::new()));
+    assert!(!chat.paste_in_flight, "the clipboard must not be read");
+    assert_eq!(
+        chat.state.notice().as_deref(),
+        Some(super::super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE)
+    );
+    assert_eq!(chat.state.input, "draft");
+}

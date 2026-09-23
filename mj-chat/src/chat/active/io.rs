@@ -268,7 +268,7 @@ impl ActiveChat {
                         let policy = if self.state.prompt_images_supported {
                             ""
                         } else {
-                            "; this agent has not advertised image support, so only clipboard text can be pasted"
+                            "; this agent accepts only clipboard text"
                         };
                         self.state
                             .set_notice(format!("Paste failed: {error}{policy}"));
