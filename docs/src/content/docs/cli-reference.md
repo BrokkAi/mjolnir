@@ -24,6 +24,7 @@ program starts instead of a coding harness. It is documented in
 | `mj workspaces` | Open the workspace manager in the dashboard. |
 | `mj workspaces list [--json]` | List workspaces without a terminal. |
 | `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
+| `mj go [--setup] [--global-default] [<folder>]` | Open the dashboard on a folder (default: the current directory) with its remembered account and target. `--setup` changes that folder's setup; `--global-default` also makes it the default for new projects. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
 Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
@@ -164,13 +165,14 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 ```text
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
-mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
+mj new [--profile <id>] [--target <id>] [--bundle <id>] [--project-directory <path>]
        [--base <revision>] [--workspace-id <id>] [--title <text>]
        [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
-mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
-mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--json]
-mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--json]
+mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
+          [--return-on-input] [--json]
+mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
+mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--role <role>] [--json]
 mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
@@ -180,9 +182,32 @@ mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>]
           [--queue start|discard] [--json]
-mj interrupt-turn --session <id>
+mj interrupt-turn --session <id> [--json]
 mj api-info [--json]
+mj events [--session <id>] [--workspace-id <id>] [--after-seq <seq>]
+mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
+mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
+mj elicitations --session <id> [--json]
+mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
+mj models --profile <id> [--model <name>] [--json]
+mj set-config --session <id> --key <key> --value <value> [--json]
 ```
+
+- `mj new` without `--profile` or `--target` uses the saved default for the
+  missing one (the pair `GET /api/v1/options` reports as `default`).
+- `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
+  the agent asks for structured input, with the outcome `input_required`.
+  Answer with `mj elicitations` and `mj respond`, then wait again.
+- `--role` limits `mj transcript` to one kind of entry: `user`, `agent`,
+  `thought`, `tool`, `terminal`, `plan`, `plan_proposal`, or `system`.
+- `mj events` prints durable session events as line-delimited JSON, following
+  new events until you stop it. `--after-seq` replays from that sequence first.
+- `mj usage` reads recorded token usage for a session.
+- `mj put-file` uploads a file, or standard input with `-`, into an idle
+  session's workspace. It refuses to replace a file unless you pass
+  `--overwrite`.
+- `mj models` lists the models and efforts a profile offers.
+- `mj set-config` applies one session setting, such as the model or effort.
 
 `mj new --base <revision>` starts the session at that Git revision instead of
 HEAD (managed worktree) or the remote default branch (bundle session), and
@@ -265,8 +290,10 @@ keeps the session available for another prompt.
 `mj destroy` permanently removes the session, environment, and recovery archive.
 It keeps the managed branch in the source repository unless `--delete-branch` is
 specified. Keeping that branch does not preserve work held only in the destroyed
-environment. These commands replace `mj close` and its destructive `--force`
-flag; the old command is no longer accepted.
+environment. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
+remove it (this replaces `mj close --force`). `mj cancel-turn` was removed too;
+use `mj interrupt-turn`. Both old names now fail with clap's `unrecognized
+subcommand` error.
 
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;
@@ -274,8 +301,11 @@ flag; the old command is no longer accepted.
 instead. `mj transcript` pages by `--after-seq`, so a caller that
 remembers the last `seq` it read sees only what is new.
 
-Every command takes `--json` and then prints the API response unchanged. They
-are clients for the [HTTP API](/api-reference/), which documents the routes,
+Each command in this section except `mj events` and `mj respond` takes
+`--json` and then prints the API response unchanged. `mj events` always prints
+JSON lines. `mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
+`mj daemon` commands do not take `--json`. The commands in this section are
+clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these
 commands read. `mj api-info` prints the base URL and the token file.
 
