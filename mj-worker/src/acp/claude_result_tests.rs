@@ -539,3 +539,52 @@ async fn stop_while_claude_works_on_its_own_sends_session_cancel() {
     }
     probe.close().await;
 }
+
+/// A local command such as `/context` makes no model call. The adapter sends
+/// its text after the result and then answers the prompt, so the reply ends
+/// the prompt and the text is recorded inside it.
+#[tokio::test]
+async fn a_local_command_ends_at_the_reply_after_its_text() {
+    let mut probe = ClaudeProbe::new().await;
+    let prompt = probe.prompt("prompt-1", "/context").await;
+    let mut local = success("human");
+    local["num_turns"] = json!(0);
+    local["usage"]["output_tokens"] = json!(0);
+    local["local_command"] = json!("/context");
+    local["result"] = json!("Context: 12k of 200k tokens");
+    probe.sdk_result(local).await;
+    probe.chunk("Context: 12k of 200k tokens").await;
+    probe
+        .result(&prompt, json!({"stopReason": "end_turn"}))
+        .await;
+    let mut text_seen = false;
+    loop {
+        let event = probe.event().await;
+        match &event {
+            RuntimeEvent::SessionUpdate { update }
+                if update["sessionUpdate"] == "agent_message_chunk" =>
+            {
+                text_seen = true;
+            }
+            RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason,
+                ..
+            } => {
+                assert_eq!(request_id, "prompt-1");
+                assert_eq!(stop_reason, "EndTurn");
+                assert!(text_seen, "the command's text belongs to its prompt");
+                break;
+            }
+            RuntimeEvent::ClaudeTurnResult(result) => {
+                assert_eq!(
+                    result.prompt_stop_reason(),
+                    None,
+                    "a cycle with no model call is left to the reply"
+                );
+            }
+            _ => {}
+        }
+    }
+    probe.close().await;
+}

@@ -14,7 +14,7 @@ After this change, mj ends a Claude prompt turn when Claude Code reports the res
 
 - [x] Milestone 1 (2026-09-23): the session asks for SDK `result` messages, and the worker parses them into `mj_core::acp::ClaudeTurnResult` and forwards them as `RuntimeEvent::ClaudeTurnResult` on the ordered runtime-event stream. The type and the event live in `mj-core`, not `mj-worker`, because `RuntimeEvent` is defined there (see Decision Log).
 - [x] Milestone 2 and Milestone 3 (2026-09-23): replaced by Milestone A of `.agents/plans/claude-turn-boundary-follow-ups.md`, which does the same job in a different shape: the relay coordinator finds the result that answers the running prompt and asks the prompt loop to end it; the loop checks its own state, reports the completion, and keeps the adapter's reply alive in a detached task. Steering and plan hand-off need no injection bookkeeping (see Decision Log).
-- [ ] Milestone 4: tests, documentation, and the isolated live check. Tracked as Milestone D of the part-two plan; the tests for Milestone 1 and for the prompt completion are already in place (listed in the part-two plan).
+- [x] Milestone 4 (2026-09-23): tests, documentation, and the isolated live check, done as Milestone D of the part-two plan (test names and live results are listed there).
 - [x] Commit each validated milestone on the current branch (Milestone 1 is committed together with part two's Milestone A).
 
 ## Surprises & Discoveries
@@ -57,7 +57,9 @@ After this change, mj ends a Claude prompt turn when Claude Code reports the res
 
 ## Outcomes & Retrospective
 
-To be written at completion. Candidate follow-ups, not in scope here: settle harness turns on `result` messages as well (the origin marker is omitted when a cycle has no assistant usage; see `.agents/docs/claude-autonomous-turns.md` "Known limitations"); allow the user's Stop to cancel a Claude self-started turn (today `Cancel` is rejected while a harness turn is open, `mj-worker/src/relay/commands.rs:349-374`), which becomes more visible once background follow-ups run as harness turns.
+Completed 2026-09-23, together with `.agents/plans/claude-turn-boundary-follow-ups.md`, which also carried out both candidate follow-ups this plan named (harness turns settle on results; Stop interrupts a self-started turn). In the isolated live check a Claude prompt that started a background subagent went idle about thirteen seconds after it was sent, while the subagent was still running; the adapter answered `session/prompt` about nine seconds later, and the worker discarded that reply. The subagent's follow-up ran as "Agent continued on its own" and settled at its result. Details and remaining gaps are in the part-two plan's Outcomes.
+
+What changed from this plan: the parser and the runtime event live in `mj-core`; the completion is decided in two steps (the relay coordinator finds the answering result on the ordered event stream, and the prompt loop, which alone knows about cancels, plan hand-offs, and newer prompts, reports it); steering needs no injection state because results carry `queued_turn_count` and an interruption diagnostic; and results whose text follows them, and failures, are left to the adapter's reply because the adapter never holds those replies. The echo this plan relied on for Milestone 3 turned out never to reach mj.
 
 ## Context and Orientation
 

@@ -3133,6 +3133,92 @@ async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
     coordinator.await.unwrap().unwrap();
 }
 
+/// Stop while Claude Code works on its own after a background task reaches
+/// the prompt loop as a cancel, and the interrupted cycle's result then ends
+/// the turn.
+#[tokio::test]
+async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    event_tx
+        .send(agent_output(
+            "Reviewing what the agent found",
+            "follow-up-1",
+        ))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output at idle did not open a turn",
+    )
+    .await;
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "stop-harness-turn",
+        RelayCommand::Cancel,
+    );
+    wake_tx.try_send(()).unwrap();
+    let CommandRequest::Cancel {
+        request_id,
+        steering_prompt: None,
+    } = next_command(&mut command_rx).await
+    else {
+        panic!("Stop must reach the prompt loop as a plain cancel");
+    };
+    assert_eq!(request_id, "stop-harness-turn");
+    event_tx
+        .send(RuntimeEvent::CancelApplied {
+            request_id: request_id.clone(),
+        })
+        .unwrap();
+    let mut interrupted = claude_result("task-notification", 1);
+    interrupted.subtype = "error_during_execution".into();
+    interrupted.is_error = true;
+    event_tx
+        .send(RuntimeEvent::ClaudeTurnResult(interrupted))
+        .unwrap();
+    wait_until(
+        || !harness_turn_open(&relay),
+        "the interrupted cycle's result did not end the turn",
+    )
+    .await;
+    let state = relay.lock().unwrap().operational_state();
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                &event.observation,
+                RelayObservation::CommandCompleted { command_id, .. } if command_id == "stop-harness-turn"
+            )),
+        "the Stop command completed"
+    );
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let temp = tempfile::tempdir().unwrap();
