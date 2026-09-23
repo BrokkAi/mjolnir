@@ -13,10 +13,11 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, PodmanProbe, ProcessExecutor,
-    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, failed_podman_probe,
-    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
-    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
+    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanProbe,
+    ProcessExecutor, SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
+    failed_podman_probe, podman_probe_observation, run_setup_smoke_test, ssh_command,
+    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
+    verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, TargetTemplate,
@@ -755,15 +756,12 @@ pub fn local_podman_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
             "Rootless Podman",
             format!("Podman {} has a valid rootless UID map.", preflight.version),
         ),
-        Err(error) => {
-            let detail = format!("{error:#}");
-            DoctorCheck::fixable(
-                "runtime.podman",
-                "Rootless Podman",
-                detail,
-                podman_remediation(&error),
-            )
-        }
+        Err(error) => DoctorCheck::fixable(
+            "runtime.podman",
+            "Rootless Podman",
+            podman_failure_detail(&error),
+            podman_remediation(&error),
+        ),
     }
 }
 
@@ -1248,11 +1246,13 @@ fn ssh_podman_runtime_check(
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
         Err(error) => {
-            let detail = format!("{error:#}");
+            let detail = podman_failure_detail(&error);
             let remediation = match podman_remediation_match(&error) {
-                Some(remediation) => format!("On {destination}: {remediation}"),
+                Some(remediation) => {
+                    format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
+                }
                 None => format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4 or newer there (see docs/PODMAN.md)."
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.3 or newer there. See {PODMAN_DOCUMENTATION_URL}."
                 ),
             };
             return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -1670,10 +1670,16 @@ fn doctor_smoke_id() -> String {
     )
 }
 
-fn podman_remediation(error: &anyhow::Error) -> &'static str {
-    podman_remediation_match(error).unwrap_or(
+fn podman_remediation(error: &anyhow::Error) -> String {
+    let fix = podman_remediation_match(error).unwrap_or(
         "Install Podman with `sudo apt update && sudo apt install -y podman uidmap` (Debian/Ubuntu) or `sudo dnf install -y podman shadow-utils` (Fedora).",
-    )
+    );
+    format!("{fix} See {PODMAN_DOCUMENTATION_URL}.")
+}
+
+/// A Podman failure without its fix, which the check reports separately.
+fn podman_failure_detail(error: &anyhow::Error) -> String {
+    podman_probe_observation(error).map_or_else(|| format!("{error:#}"), str::to_owned)
 }
 
 /// Map a Podman preflight failure to its specific remediation, if one applies.

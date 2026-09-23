@@ -217,7 +217,7 @@ fn docker_preflight_requires_a_reachable_linux_daemon() {
     let desktop = PodmanPreflightExecutor::with_outputs([podman_output(b"29.0.1 windows\n")]);
     let error = verify_local_docker(&desktop).unwrap_err().to_string();
     assert!(error.contains("expected a Linux Docker daemon"), "{error}");
-    assert!(error.contains(DOCKER_DOCUMENTATION_PATH), "{error}");
+    assert!(error.contains(DOCKER_DOCUMENTATION_URL), "{error}");
 
     let unavailable = PodmanPreflightExecutor::with_outputs([CommandOutput {
         status: 1,
@@ -237,7 +237,7 @@ fn podman_preflight_rejects_unsupported_version_with_upgrade_remediation() {
     let error = verify_local_podman(&executor).unwrap_err().to_string();
     assert!(error.contains("Podman 4.3.0 or newer"));
     assert!(error.contains("apt install -y podman uidmap"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
+    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
 }
 
 /// The floor is 4.3.0, not 4: `--userns=keep-id:uid=,gid=` is what every
@@ -281,7 +281,7 @@ fn podman_preflight_reports_uidmap_helper_remediation() {
     let error = verify_local_podman(&executor).unwrap_err().to_string();
     assert!(error.contains("podman unshare cat /proc/self/uid_map"));
     assert!(error.contains("apt install -y uidmap"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
+    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn podman_preflight_rejects_a_uid_map_without_subordinate_ids() {
     let error = verify_local_podman(&executor).unwrap_err().to_string();
     assert!(error.contains("maps container UIDs 0 and 1"));
     assert!(error.contains("usermod --add-subuids"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
+    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
 }
 
 /// Stand in for the remote host: one batched command, framed exactly as the
@@ -396,8 +396,8 @@ fn ssh_podman_preflight_failures_name_the_destination_and_remote_scope() {
         .to_string();
 
     assert!(error.contains("Remote Podman preflight failed on dev@example.test"));
-    assert!(error.contains("On dev@example.test: Upgrade Podman"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
+    assert!(error.contains("On dev@example.test: Install or upgrade Podman"));
+    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
 }
 
 #[test]
@@ -472,7 +472,7 @@ fn ssh_podman_preflight_reports_each_failing_batched_probe() {
         error.contains("maps container UIDs 0 and 1 was not met"),
         "{error}"
     );
-    assert!(error.contains("On dev@example.test: Add subordinate ranges"));
+    assert!(error.contains("On dev@example.test: Install UID-map helpers"));
 
     let uid_map_failed = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),

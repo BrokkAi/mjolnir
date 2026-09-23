@@ -144,7 +144,7 @@ pub(super) fn verify_docker(
         .context("Docker preflight failed: run `docker info` as the user running Mjolnir")?;
     ensure!(
         output.status == 0,
-        "Docker preflight failed: `docker version` exited with status {}: {}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_PATH}.",
+        "Docker preflight failed: `docker version` exited with status {}: {}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -154,7 +154,7 @@ pub(super) fn verify_docker(
     let os = fields.next().unwrap_or_default();
     ensure!(
         !version.is_empty() && os == "linux",
-        "Docker preflight failed: expected a Linux Docker daemon, got {:?}. See {DOCKER_DOCUMENTATION_PATH}.",
+        "Docker preflight failed: expected a Linux Docker daemon, got {:?}. See {DOCKER_DOCUMENTATION_URL}.",
         reported.trim()
     );
     Ok(DockerPreflight {
@@ -173,7 +173,7 @@ pub fn verify_ssh_podman(
     let host = PodmanHost::Ssh(ssh);
     validate_ssh(ssh).map_err(|error| {
         anyhow::anyhow!(
-            "{}: the configured SSH destination is unusable ({error}). Set a valid `host` (and optional `user`) for this ssh-podman target. See {PODMAN_DOCUMENTATION_PATH}.",
+            "{}: the configured SSH destination is unusable ({error}). Set a valid `host` (and optional `user`) for this ssh-podman target. See {PODMAN_DOCUMENTATION_URL}.",
             host.failure()
         )
     })?;
@@ -218,6 +218,9 @@ pub(crate) enum PodmanProbe {
 #[derive(Debug)]
 pub(crate) struct PodmanProbeFailure {
     probe: PodmanProbe,
+    /// What was observed, without the fix.
+    observation: String,
+    /// The observation followed by the fix and the guide link.
     message: String,
 }
 
@@ -236,9 +239,27 @@ pub(crate) fn failed_podman_probe(error: &anyhow::Error) -> Option<PodmanProbe> 
         .map(|failure| failure.probe)
 }
 
-/// Fail a probe with its own wording, keeping the probe machine-readable.
-fn probe_failure(probe: PodmanProbe, message: String) -> anyhow::Error {
-    anyhow::Error::new(PodmanProbeFailure { probe, message })
+/// What a failed probe observed, without the fix, so a report that prints
+/// the fix separately does not repeat it.
+pub(crate) fn podman_probe_observation(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<PodmanProbeFailure>()
+        .map(|failure| failure.observation.as_str())
+}
+
+/// Fail a probe with what it observed, followed by that probe's fix and the
+/// published guide, keeping the probe machine-readable.
+fn probe_failure(host: PodmanHost<'_>, probe: PodmanProbe, observation: String) -> anyhow::Error {
+    let message = format!(
+        "{observation} {}{} See {PODMAN_DOCUMENTATION_URL}.",
+        host.remediation_scope(),
+        probe.remediation()
+    );
+    anyhow::Error::new(PodmanProbeFailure {
+        probe,
+        observation,
+        message,
+    })
 }
 
 impl PodmanProbe {
@@ -314,12 +335,13 @@ pub(super) fn verify_podman_probes(
     let rootless_output = String::from_utf8_lossy(&rootless.stdout);
     if rootless_output.trim() != "true" {
         return Err(probe_failure(
+            host,
             PodmanProbe::Rootless,
             format!(
-                "{}: Postcondition `podman info --format '{{{{.Host.Security.Rootless}}}}'` prints `true` returned {:?}. {}Run Mjolnir as the ordinary user without `sudo`; if a remote Podman connection is configured, unset `CONTAINER_HOST` or select the rootless local connection. See {PODMAN_DOCUMENTATION_PATH}.",
+                "{}: {} returned {:?}.",
                 host.failure(),
+                PodmanProbe::Rootless.postcondition(),
                 rootless_output.trim(),
-                host.remediation_scope(),
             ),
         ));
     }
@@ -327,11 +349,12 @@ pub(super) fn verify_podman_probes(
     let uid_map = probe_output(PodmanProbe::UidMap)?;
     if !valid_rootless_uid_map(&uid_map.stdout) {
         return Err(probe_failure(
+            host,
             PodmanProbe::UidMap,
             format!(
-                "{}: Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1 was not met. {}Add subordinate ranges with `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\"`, verify `/etc/subuid` and `/etc/subgid`, then log out and back in. See {PODMAN_DOCUMENTATION_PATH}.",
+                "{}: {} was not met.",
                 host.failure(),
-                host.remediation_scope(),
+                PodmanProbe::UidMap.postcondition(),
             ),
         ));
     }
@@ -407,29 +430,28 @@ pub(super) fn execute_podman_probe(
     let output = match executor.execute(&command) {
         Ok(output) => output,
         Err(error) => {
-            return Err(probe_failure(
-                probe,
-                podman_probe_run_failure(host, probe, &error.to_string()),
-            ));
+            return Err(podman_probe_run_failure(host, probe, &error.to_string()));
         }
     };
     check_podman_probe_status(host, probe, output)
 }
 
-/// Message for a probe that could not be run at all.
+/// Failure for a probe that could not be run at all.
 pub(super) fn podman_probe_run_failure(
     host: PodmanHost<'_>,
     probe: PodmanProbe,
     reported: &str,
-) -> String {
+) -> anyhow::Error {
     match ssh_transport_failure(host, reported) {
-        Some(message) => message,
-        None => format!(
-            "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Underlying error: {reported}",
-            host.failure(),
-            probe.postcondition(),
-            host.remediation_scope(),
-            probe.remediation(),
+        Some(message) => anyhow::anyhow!(message),
+        None => probe_failure(
+            host,
+            probe,
+            format!(
+                "{}: {} could not be checked: {reported}.",
+                host.failure(),
+                probe.postcondition(),
+            ),
         ),
     }
 }
@@ -450,13 +472,12 @@ pub(super) fn check_podman_probe_status(
     }
     if output.status != 0 {
         return Err(probe_failure(
+            host,
             probe,
             format!(
-                "{}: {}. {}{} See {PODMAN_DOCUMENTATION_PATH}. Podman reported: {}",
+                "{}: {} failed. Podman reported: {}",
                 host.failure(),
                 probe.postcondition(),
-                host.remediation_scope(),
-                probe.remediation(),
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         ));
@@ -506,10 +527,13 @@ pub(super) fn run_ssh_podman_probes(
     );
     let output = match executor.execute(&command) {
         Ok(output) => output,
-        Err(error) => bail!(
-            "{}",
-            podman_probe_run_failure(host, PodmanProbe::Version, &error.to_string())
-        ),
+        Err(error) => {
+            return Err(podman_probe_run_failure(
+                host,
+                PodmanProbe::Version,
+                &error.to_string(),
+            ));
+        }
     };
     if output.status == SSH_TRANSPORT_EXIT_STATUS
         && let Some(message) =
@@ -519,18 +543,15 @@ pub(super) fn run_ssh_podman_probes(
     }
     let probes = parse_podman_probe_output(&output.stdout);
     if !probes.contains_key(PodmanProbe::Version.key()) {
-        bail!(
-            "{}",
-            podman_probe_run_failure(
-                host,
-                PodmanProbe::Version,
-                &format!(
-                    "the preflight probes returned unparsable output (status {}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            )
-        );
+        return Err(podman_probe_run_failure(
+            host,
+            PodmanProbe::Version,
+            &format!(
+                "the preflight probes returned unparsable output (status {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
     }
     Ok(probes)
 }
@@ -615,32 +636,35 @@ pub(super) fn ssh_transport_failure(host: PodmanHost<'_>, reported: &str) -> Opt
     };
     let destination = &ssh.destination;
     Some(format!(
-        "{}: SSH could not run the probes on {destination}. Verify that `ssh {destination}` succeeds noninteractively from this host. See {PODMAN_DOCUMENTATION_PATH}. ssh reported: {reported}",
+        "{}: SSH could not run the probes on {destination}. Verify that `ssh {destination}` succeeds noninteractively from this host. See {PODMAN_DOCUMENTATION_URL}. ssh reported: {reported}",
         host.failure()
     ))
 }
 
 pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Result<String> {
     let failure = host.failure();
-    let scope = host.remediation_scope();
     let version = String::from_utf8_lossy(stdout).trim().to_owned();
     let Some(candidate) = version
         .split_whitespace()
         .find(|part| part.as_bytes().first().is_some_and(u8::is_ascii_digit))
     else {
         return Err(probe_failure(
+            host,
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: {} returned {version:?}.",
+                PodmanProbe::Version.postcondition()
             ),
         ));
     };
     let mut numbers = candidate.split('.').map(|part| part.parse::<u32>().ok());
     let Some(Some(major)) = numbers.next() else {
         return Err(probe_failure(
+            host,
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: {} returned {version:?}.",
+                PodmanProbe::Version.postcondition()
             ),
         ));
     };
@@ -649,9 +673,11 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     let minor = numbers.next().flatten().unwrap_or(0);
     if (major, minor) < PODMAN_MINIMUM_VERSION {
         return Err(probe_failure(
+            host,
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.3.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: {} was not met (found {candidate}).",
+                PodmanProbe::Version.postcondition()
             ),
         ));
     }

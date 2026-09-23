@@ -1399,6 +1399,30 @@ fn settings_fixes_name_the_bound_settings_key() {
     );
 }
 
+/// An installed user has no repository checkout, so the Podman fix links the
+/// published guide, and the human report prints the fix once, not also inside
+/// the detail.
+#[test]
+fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
+    for response in [
+        Err(anyhow!("No such file or directory (os error 2)")),
+        Ok(failed(b"podman: command not found")),
+    ] {
+        let check = local_podman_runtime_check(&FakeExecutor::new([response]));
+        assert_eq!(check.status, CheckStatus::Fixable);
+        let remediation = check.remediation.as_deref().unwrap();
+        let mut human = Vec::new();
+        render_human(std::slice::from_ref(&check), &mut human).unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains("docs/PODMAN.md"), "{human}");
+        assert!(
+            remediation.contains("https://mjolnir.brokk.ai/podman/"),
+            "{remediation}"
+        );
+        assert_eq!(human.matches("sudo apt install").count(), 1, "{human}");
+    }
+}
+
 #[test]
 fn missing_harness_homes_are_fixable_without_a_configured_profile() {
     let check = harness_discovery_check_from(&[], false, "ctrl+b s");
