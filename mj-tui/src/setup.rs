@@ -573,15 +573,14 @@ fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
+        // The eligible profiles are a page of checkboxes, one per profile, so
+        // the row counts the checked ones instead of counting settings.
+        Value::Object(entries) if child_path == ["subagents", "eligible_profiles"] => {
+            let selected = entries.values().filter(|value| **value == true).count();
+            format!("{selected} of {} selected  ›", entries.len())
+        }
         Value::Object(entries) => format!("{} settings  ›", entries.len()),
         Value::Array(entries) => format!("{} entries  ›", entries.len()),
-        Value::Bool(value)
-            if path.first().is_some_and(|section| section == "profiles")
-                && path.len() == 2
-                && key == "enabled" =>
-        {
-            Checkbox::marker(*value).to_owned()
-        }
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.
@@ -592,7 +591,8 @@ fn value_summary(
                 Checkbox::marker(false).to_owned()
             }
         }
-        Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
+        // Every on/off setting is the same checkbox, whichever section holds it.
+        Value::Bool(value) => Checkbox::marker(*value).to_owned(),
         // The cache size is measured in whole GB, whatever unit the file
         // spells it in. Only a hand-edited invalid value keeps its own text.
         Value::String(size) if is_build_cache_field(&child_path, "max_size") => {

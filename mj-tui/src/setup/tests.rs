@@ -6,6 +6,56 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+/// Every on/off setting uses the same checkbox, whichever section holds it.
+/// Launch campaign finding C-3.
+#[test]
+fn every_boolean_setting_is_drawn_as_a_checkbox() {
+    for (section, label) in [
+        ("continuation", "Enabled"),
+        ("subagents", "Enabled"),
+        ("build_cache", "Enabled"),
+        ("phone", "Enabled"),
+        ("phone", "Detect Tailscale"),
+        ("notify", "Ring the terminal bell"),
+        ("notify", "Show counts in the terminal title"),
+        ("advanced", "Detailed activity clocks"),
+        ("advanced", "Show suspended sessions"),
+        ("review", "Enabled"),
+    ] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section(section, None);
+        let lines = drawn(&mut dashboard, 140, 40);
+        let row = lines
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{section}: missing {label:?}: {lines:#?}"));
+        assert!(
+            row.contains('☑') || row.contains('☐'),
+            "{section} › {label} is a checkbox: {row:?}"
+        );
+        assert!(
+            !row.contains(" On ") && !row.contains(" Off "),
+            "{section} › {label} has no On/Off text: {row:?}"
+        );
+    }
+}
+
+/// The additional eligible profiles are a set of checkboxes, so their row
+/// says how many are chosen rather than reading like an off switch.
+/// Launch campaign finding C-3.
+#[test]
+fn the_eligible_profiles_row_reads_as_a_multi_select() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("subagents", None);
+    let lines = drawn(&mut dashboard, 140, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Additional eligible profiles"))
+        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
+    assert!(!row.contains("Off"), "{row:?}");
+    assert!(row.contains("selected"), "{row:?}");
+}
+
 #[test]
 fn settings_can_add_a_profile_without_file_edits() {
     let mut dashboard = dashboard_with_session(stopped_session());
