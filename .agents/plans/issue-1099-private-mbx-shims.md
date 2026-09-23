@@ -17,7 +17,7 @@ Two containers sharing an MBX build cache currently overwrite compiler symlinks 
 - [x] (2026-09-23) Pin the released MBX and add a doctor warning for older native versions. Published-binary two-container acceptance passes; baseline stock 1.15.0 reproduces exit 127.
 - [x] (2026-09-23) Pass the full dev-profile Cargo test suite, clippy with warnings denied, formatting, and diff checks.
 - [x] (2026-09-23) Verify the named-instance doctor CLI output against a temporary 1.15.0 host binary.
-- [ ] (2026-09-23) Commit on hel4, integrate the advanced origin/master, and push the validated result.
+- [x] (2026-09-23) Commit on hel4 as `4b134226`, integrate the advanced origin/master, and push the validated result as `cabe833f` to origin/master.
 
 ## Surprises & Discoveries
 
@@ -33,7 +33,7 @@ MBX 1.15.0 still installs persistent C/C++ shims under the shared cache. Mjolnir
 
 ## Outcomes & Retrospective
 
-The 2026-09-20 implementation and validation completed with the release dependency outstanding. Both dev-profile suites and clippy passed. Live Podman acceptance passed. Upstream full CI had three existing shell-test failures reproduced with the official 1.15.0 binary. MBX 1.16.0 now publishes the setting. Its release archives are verified, the local installation is 1.16.0, the published binary passes the two-container acceptance, and the required Mjolnir checks pass. The named-instance doctor check also passes; commit and push remain.
+The 2026-09-20 implementation and validation completed with the release dependency outstanding. Both dev-profile suites and clippy passed. Live Podman acceptance passed. Upstream full CI had three existing shell-test failures reproduced with the official 1.15.0 binary. MBX 1.16.0 now publishes the setting. Its release archives are verified, the local installation is 1.16.0, the published binary passes the two-container acceptance, and the required Mjolnir checks pass. The named-instance doctor check also passes. Mjolnir is committed and pushed to origin/master.
 
 ## Context and Orientation
 
@@ -106,5 +106,9 @@ For a repeatable container experiment, the task artifacts contain `container-che
 2026-09-23 validation evidence: stock 1.15.0 again reproduced container A's missing shared compiler with exit 127 after container B installed its shim. The published 1.16.0 binary produced three hits in the second checkout, passed concurrent C/C++ and Rust builds, and retained working private shims through restart, in-place replacement, and peer removal. The old CMake tree needed `cmake --fresh`; the reconfigured tree passed. All disposable containers were removed. The full Mjolnir dev-profile Cargo suite, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `git diff --check` passed.
 
 2026-09-23 CLI evidence: a dev-profile `mj --instance issue-1099-release doctor --json` against an isolated config and a temporary stock 1.15.0 binary reported `build-cache.local` as a warning: host 1.15.0 is older than pinned 1.16.0, affected target `podman` runs without the cache, and remediation says to upgrade mbx to 1.16.0 or newer. The deliberately minimal config caused unrelated fixable doctor checks and an exit status of 1; the build-cache warning itself does not change doctor's exit status. The JSON output is stored at `/mnt/optane/issue-1099-v1.16.0/doctor-old.json`.
+
+2026-09-23 delivery: Mjolnir change `4b134226` was committed on hel4. Origin/master advanced twice during validation; both updates were merged without conflicts. The first changed controller code, so 1,582 controller tests, dev clippy, and formatting were rerun and passed. The second changed only AGENTS.md. Push `df50feb8..cabe833f HEAD -> master` succeeded. The new coordination rule was applied by self-assigning #1099 and adding `agent-in-progress`.
+
+2026-09-23 change note: The final update records the validated merge and successful push, closing the release dependency and this ExecPlan.
 
 2026-09-23 change note: This continuation replaces the old release dependency and delivery instructions because upstream published the feature and the user authorized a direct push to origin/master without a local mbx backup.
