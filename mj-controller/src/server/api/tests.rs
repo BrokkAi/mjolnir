@@ -1112,6 +1112,75 @@ async fn a_prompt_is_validated_before_it_reaches_the_backend() {
     );
 }
 
+/// A session that has been provisioned and whose worker has not attached
+/// yet, which is what every session is for the seconds after it is created.
+fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
+    let session = &mut snapshot.sessions[0];
+    session.state = "disconnected".into();
+    session.lifecycle = ViewerLifecycleCategory::Live;
+    session.has_error = false;
+    session.capabilities.prompt = false;
+}
+
+#[tokio::test]
+async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches() {
+    // F-4: a new session refused prompts with 409 for the twenty seconds its
+    // worker took to attach, so every caller needed its own retry loop.
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) =
+        api_app(backend.clone(), waiting_for_its_worker);
+    let request = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"first words"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The handshake marks the record running a moment before the worker's
+    // first report makes the session promptable.
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].state = "running".into());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !request.is_finished() && backend.prompts.lock().unwrap().is_empty(),
+        "nothing is submitted or refused before the worker attaches"
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+    let response = request.await.unwrap().unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(response).await["turn_id"], 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wait() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) =
+        api_app(backend.clone(), waiting_for_its_worker);
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"first words"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("still starting"),
+        "the refusal says why: {body}"
+    );
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
