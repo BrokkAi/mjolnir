@@ -987,7 +987,7 @@ pub(super) async fn serve_session(
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() }).await?;
                                 } else {
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
@@ -1014,7 +1014,7 @@ pub(super) async fn serve_session(
                                 approved_plan = None;
                                 implementation_deadline = None;
                                 if !prompt_running {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                         request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
@@ -1029,7 +1029,7 @@ pub(super) async fn serve_session(
                                         pending_steer = Some(start_steer(connection, &session_id, cancel_id, steering_prompt));
                                     }
                                 } else {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     if cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }
@@ -1361,7 +1361,15 @@ pub(super) async fn serve_session(
                 .await?;
             }
             CommandRequest::Cancel { request_id, .. } => {
-                apply_cancel(connection, &session_id, request_id, events, terminals).await?;
+                apply_cancel(
+                    connection,
+                    &session_id,
+                    request_id,
+                    events,
+                    terminals,
+                    pending_elicitations,
+                )
+                .await?;
             }
             CommandRequest::ReleasePrompt { request_id, .. } => {
                 // The adapter's reply ended this prompt before the coordinator

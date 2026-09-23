@@ -6502,6 +6502,33 @@ async fn live_adapter_compacts_and_replaces_context() {
 }
 
 #[test]
+fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
+    // I2-15: after Escape, Kimi left its permission request pending and the
+    // form stayed open on an idle session.
+    let pending = PendingElicitations::default();
+    let (permission, mut permission_rx) = oneshot::channel();
+    let (question, mut question_rx) = oneshot::channel();
+    {
+        let mut map = pending.lock().unwrap();
+        map.insert(format!("{TOOL_PERMISSION_ID_PREFIX}1"), permission);
+        map.insert("elicitation-1".to_owned(), question);
+    }
+    withdraw_tool_permissions(&pending);
+    assert!(
+        matches!(
+            permission_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ),
+        "the permission's task answers the agent with cancelled"
+    );
+    assert!(matches!(
+        question_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(pending.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     // Launch finding I2-7: a missing Codex thread came back with a hint about
     // login-shell output that had nothing to do with it.

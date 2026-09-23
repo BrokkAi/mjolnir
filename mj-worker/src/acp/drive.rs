@@ -501,7 +501,7 @@ where
                         .await
                         .map_err(|_| relay_event_channel_error())?;
                 }
-                let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                 let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
                     "const": option.option_id.to_string(), "title": option.name,
                 })).collect();
@@ -988,6 +988,19 @@ where
         .take())
 }
 
+/// Drops the answer channel of every pending tool permission request. Each
+/// request's task then answers the agent with `cancelled` and reports the
+/// elicitation resolved, which closes its form.
+pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
+    pending
+        .lock()
+        .expect("pending elicitation lock poisoned")
+        .retain(|id, _| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+}
+
+/// The id prefix of a permission request shown as a form.
+pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+
 /// Describe a failed ACP connection. The hint about stray bridge output only
 /// helps when the connection itself broke or could not parse what the bridge
 /// wrote; an error the agent answered (such as a missing thread, I2-7) says
@@ -1339,9 +1352,16 @@ pub(super) async fn apply_cancel(
     cancel_id: String,
     events: &mpsc::Sender<RuntimeEvent>,
     terminals: &TerminalRegistry,
+    pending: &PendingElicitations,
 ) -> Result<()> {
     terminals.kill_live();
-    match connection.send_notification(CancelNotification::new(session_id.clone())) {
+    let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
+    // ACP: once the client cancels a turn it answers every pending
+    // `session/request_permission` of that turn with `cancelled`. Some agents
+    // (Kimi, I2-15) never withdraw the request themselves, which left the
+    // form open on an idle session.
+    withdraw_tool_permissions(pending);
+    match sent {
         Ok(()) => {
             emit_runtime_event(
                 events,
