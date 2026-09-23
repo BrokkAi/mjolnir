@@ -169,6 +169,7 @@ pub(crate) async fn apply_dashboard_action(
                 }
             });
         }
+        DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
         DashboardAction::ExitSubagentWorkspace => {
             let parent_id = context.dashboard.subagent_parent_id().map(str::to_owned);
             context.dashboard.close_subagent_workspace();

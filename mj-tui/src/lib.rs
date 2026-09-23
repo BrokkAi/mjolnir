@@ -493,6 +493,11 @@ pub enum DashboardAction {
         workspace_id: String,
     },
     ExitSubagentWorkspace,
+    /// Show a session's sub-agents in their own workspace. The controller
+    /// saves the composer draft first, as the prompt border's click does.
+    OpenSubagents {
+        parent_id: String,
+    },
     LoadNativeAgentHistory {
         owner: String,
         child: String,

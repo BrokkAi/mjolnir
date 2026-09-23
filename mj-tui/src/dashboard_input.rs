@@ -425,6 +425,14 @@ impl DashboardState {
             // clears the notice bar: the combined surface is quit with the
             // detach key, and a stray Escape must never take the whole screen
             // away.
+            // Inside a session's sub-agents, Escape on their list goes back
+            // to the parent, the same as the X on the workspace strip.
+            (KeyCode::Esc, _)
+                if self.focus == Focus::Sessions && self.subagent_parent_id.is_some() =>
+            {
+                self.record_event_handled();
+                return DashboardAction::ExitSubagentWorkspace;
+            }
             (KeyCode::Esc, _) => {
                 self.notices.clear();
                 self.record_event_handled();

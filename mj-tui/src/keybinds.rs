@@ -156,6 +156,7 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::ResizePaneDown => CommandId::ResizePaneDown,
         KeyAction::ResizePaneUp => CommandId::ResizePaneUp,
         KeyAction::ResizePaneRight => CommandId::ResizePaneRight,
+        KeyAction::OpenSubagents => CommandId::OpenSubagents,
         KeyAction::RestartSession => CommandId::RestartSession,
         KeyAction::MoveSession => CommandId::MoveSession,
         KeyAction::DestroySession => CommandId::DestroySession,

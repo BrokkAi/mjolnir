@@ -85,6 +85,7 @@ pub enum CommandId {
     CycleSpinner,
     ToggleTranscriptRendering,
     ToggleDictation,
+    OpenSubagents,
     Help,
 }
 
@@ -421,6 +422,25 @@ fn attention_footer(dashboard: &DashboardState) -> Option<String> {
         "next ({}{count})",
         crate::render::sessions::attention_glyph(level)
     ))
+}
+
+/// The selected session (or, from the composer, the conversation's) must
+/// have sub-agents to show. With none, the command stays listed and says why,
+/// so a search for "sub-agent" always finds it.
+fn subagents_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    if dashboard.subagent_count_for(session) > 0 {
+        Availability::Ready
+    } else {
+        Availability::Blocked("this session has no sub-agents")
+    }
+}
+
+/// Named in the footer only while there are sub-agents to open.
+fn subagents_footer(dashboard: &DashboardState) -> Option<String> {
+    (subagents_available(dashboard) == Availability::Ready).then(|| "sub-agents".to_owned())
 }
 
 fn operation_in_flight(dashboard: &DashboardState) -> Availability {
@@ -877,6 +897,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
         available: live_session,
+    },
+    CommandSpec {
+        id: CommandId::OpenSubagents,
+        label: "Sub-agents",
+        description: "Open the sub-agents of this session in their own list. Esc or the X on the workspace strip returns to the parent.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::OpenSubagents),
+        footer: subagents_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 2,
+        available: subagents_available,
     },
     CommandSpec {
         id: CommandId::ContainerSettings,
@@ -1557,6 +1589,19 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
+            CommandId::OpenSubagents => match subagents_available(self) {
+                Availability::Ready => self
+                    .command_session_id()
+                    .map(str::to_owned)
+                    .map_or(DashboardAction::None, |parent_id| {
+                        DashboardAction::OpenSubagents { parent_id }
+                    }),
+                Availability::Blocked(reason) => {
+                    self.set_notice(crate::help::sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
             CommandId::MoveSession => self.begin_move(),
             CommandId::DestroySession => {
                 let Some((session_id, name)) = self
@@ -1761,6 +1806,74 @@ mod tests {
             (spec(CommandId::SuspendSession).available)(&dashboard),
             Availability::Blocked(_)
         ));
+    }
+
+    /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
+    /// lower border. It is a registry command now, so the help overlay, the
+    /// palette, a default chord, and the footer all reach it.
+    #[test]
+    fn sub_agents_open_from_a_chord_and_are_listed_for_help_and_the_palette() {
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        dashboard.focus_sessions();
+        assert_eq!(
+            dashboard.key_labels(CommandId::OpenSubagents),
+            vec!["ctrl+b shift+a".to_owned()]
+        );
+        assert_eq!(
+            (spec(CommandId::OpenSubagents).available)(&dashboard),
+            Availability::Ready
+        );
+        assert!(!hidden_from_palette(CommandId::OpenSubagents));
+        assert!(spec(CommandId::OpenSubagents).label.contains("Sub-agents"));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(footer.contains("shift+a sub-agents"), "{footer}");
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::OpenSubagents),
+            DashboardAction::OpenSubagents {
+                parent_id: parent.clone()
+            }
+        );
+
+        // Esc in the sub-agents' Sessions list goes back to the parent, as
+        // the X on the workspace strip does.
+        dashboard.open_subagent_workspace(parent);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::ExitSubagentWorkspace
+        );
+
+        // A session without sub-agents keeps the command listed, greyed with
+        // the reason, so a search for it still finds it.
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(matches!(
+            (spec(CommandId::OpenSubagents).available)(&dashboard),
+            Availability::Blocked(_)
+        ));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(!footer.contains("sub-agents"), "{footer}");
+    }
+
+    /// A-16 and A-18: the help text reads as sentences, and Close pane says
+    /// the one pane it refuses to close.
+    #[test]
+    fn pane_help_text_reads_as_sentences_and_names_the_browse_exception() {
+        assert!(
+            spec(CommandId::FocusPaneLeft)
+                .description
+                .contains("pane left of this one")
+        );
+        assert!(
+            spec(CommandId::FocusPaneRight)
+                .description
+                .contains("pane right of this one")
+        );
+        let close = spec(CommandId::ClosePane).description;
+        assert!(
+            close.contains("The Browse pane cannot be closed"),
+            "{close}"
+        );
+        assert!(close.contains("Swap pane"), "{close}");
     }
 
     #[test]

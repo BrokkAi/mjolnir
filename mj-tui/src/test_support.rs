@@ -384,6 +384,33 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     dashboard
 }
 
+/// A dashboard showing one running parent session with one running
+/// sub-agent. Returns the parent's id.
+pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
+    let parent = running_session();
+    let mut child = running_session();
+    child.id = "child-session".into();
+    let relation = mj_core::subagent::SubagentRecord {
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        initial_prompt: "Inspect the parser".into(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+    };
+    let mut dashboard = dashboard_with_session(parent.clone());
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+    (dashboard, parent.id)
+}
+
 pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
     DeploymentCapacityTarget {
         id: "local".into(),

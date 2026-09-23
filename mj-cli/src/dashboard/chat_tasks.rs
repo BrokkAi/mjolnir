@@ -84,6 +84,17 @@ impl DashboardContext {
         );
     }
 
+    /// Shows `parent_id`'s sub-agents, keeping the composer draft, and opens
+    /// the first one's conversation. The prompt border's click and the
+    /// Sub-agents command both come here.
+    pub(crate) fn open_subagents(&mut self, parent_id: String) {
+        self.capture_composer_draft(&parent_id);
+        self.dashboard.open_subagent_workspace(parent_id);
+        if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
+            self.open_chat_session(&child_id);
+        }
+    }
+
     /// Applies what the chat view asked for after handling its own input.
     pub(crate) async fn apply_chat_outcome(&mut self, outcome: mj_chat::chat::ChatEventOutcome) {
         match outcome {
@@ -96,11 +107,7 @@ impl DashboardContext {
                 else {
                     return;
                 };
-                self.capture_composer_draft(&parent_id);
-                self.dashboard.open_subagent_workspace(parent_id);
-                if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
-                    self.open_chat_session(&child_id);
-                }
+                self.open_subagents(parent_id);
             }
             mj_chat::chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();
