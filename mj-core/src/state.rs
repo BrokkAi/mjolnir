@@ -765,6 +765,73 @@ pub enum TargetLocator {
     },
 }
 
+impl ManagedWorktreeTarget {
+    /// Whether `other` reaches the same checkout: the same kind and, over
+    /// SSH, the same destination, port, and login user.
+    ///
+    /// The other `ssh` options (keys, `ControlPath`, keepalives, host-key
+    /// policy) say how to connect, not where the worktree lives, so they
+    /// follow the machine's current configuration and never make a
+    /// suspended session unable to resume.
+    pub fn same_location(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local, Self::Local) => true,
+            (
+                Self::Ssh {
+                    destination,
+                    ssh_args,
+                },
+                Self::Ssh {
+                    destination: other_destination,
+                    ssh_args: other_args,
+                },
+            ) => {
+                destination == other_destination
+                    && ssh_location_option(ssh_args, 'p', "port")
+                        == ssh_location_option(other_args, 'p', "port")
+                    && ssh_location_option(ssh_args, 'l', "user")
+                        == ssh_location_option(other_args, 'l', "user")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The value `ssh` would use for an option that has both a short flag
+/// (`-p 22`, `-p22`) and an `-o` spelling (`-o Port=22`, `-oPort 22`). OpenSSH
+/// keeps the first value it sees.
+fn ssh_location_option(args: &[String], flag: char, option: &str) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(argument) = args.next() {
+        let Some(rest) = argument.strip_prefix('-') else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let Some(name) = chars.next() else { continue };
+        if name != flag && name != 'o' {
+            continue;
+        }
+        let inline = chars.as_str();
+        let value = if inline.is_empty() {
+            args.next().cloned()
+        } else {
+            Some(inline.to_owned())
+        };
+        if name == flag {
+            return value;
+        }
+        if let Some(setting) = value {
+            let (key, found) = setting
+                .split_once(['=', ' ', '\t'])
+                .unwrap_or((setting.as_str(), ""));
+            if key.trim().eq_ignore_ascii_case(option) {
+                return Some(found.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ManagedWorktreeTarget {
