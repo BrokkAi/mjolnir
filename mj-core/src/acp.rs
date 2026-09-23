@@ -435,6 +435,11 @@ pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool {
 /// the substring is what can be matched.
 pub const CODEX_MISSING_THREAD_MESSAGE: &str = "no rollout found for thread id";
 
+/// Newer codex-acp builds report the same never-written thread as
+/// `thread not found: <thread id>`. It names the thread, so it only counts
+/// for the thread being resumed.
+pub const CODEX_THREAD_NOT_FOUND_MESSAGE: &str = "thread not found: ";
+
 /// The stable part of Claude Code's refusal to resume a session it never wrote
 /// a transcript for. Claude Code writes a session's transcript file at the
 /// first prompt, so a session that was opened and never prompted does not
@@ -458,7 +463,12 @@ pub fn error_reports_missing_native_session(
     error: &str,
 ) -> bool {
     match harness {
-        HarnessKind::Codex => error.contains(CODEX_MISSING_THREAD_MESSAGE),
+        HarnessKind::Codex => {
+            error.contains(CODEX_MISSING_THREAD_MESSAGE)
+                || error.contains(&format!(
+                    "{CODEX_THREAD_NOT_FOUND_MESSAGE}{native_session_id}"
+                ))
+        }
         HarnessKind::Claude => error.contains(&format!(
             "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
         )),
@@ -856,6 +866,24 @@ mod missing_thread_tests {
             HarnessKind::Codex,
             "0199f0ba",
             "resume ACP session 0199f0ba: Internal error: session store is locked"
+        ));
+    }
+
+    #[test]
+    fn codex_reports_a_thread_it_never_wrote_as_thread_not_found() {
+        // What codex-acp sent when a same-build worker reloaded a thread that
+        // was created and never prompted (launch finding I2-7).
+        let error = r#"load ACP session 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f: Internal error: {"details": "thread not found: 01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f"}"#;
+        assert!(error_reports_missing_native_session(
+            HarnessKind::Codex,
+            "01a0cfd5-7c1e-4f00-9d7e-1a2b3c4d5e6f",
+            error
+        ));
+        // A missing thread other than the one being resumed is not ours.
+        assert!(!error_reports_missing_native_session(
+            HarnessKind::Codex,
+            "0f0f0f0f-0000-4000-8000-000000000000",
+            error
         ));
     }
 

@@ -6500,3 +6500,21 @@ async fn live_adapter_compacts_and_replaces_context() {
     while events.recv().await.is_some() {}
     runtime.await.unwrap().unwrap();
 }
+
+#[test]
+fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
+    // Launch finding I2-7: a missing Codex thread came back with a hint about
+    // login-shell output that had nothing to do with it.
+    let agent = protocol_failure(
+        agent_client_protocol::Error::internal_error()
+            .data(serde_json::json!("thread not found: t1")),
+    )
+    .to_string();
+    assert!(agent.contains("thread not found"), "{agent}");
+    assert!(!agent.contains("login-shell"), "{agent}");
+    // Output the transport could not parse is what the hint is for.
+    let garbage =
+        protocol_failure(agent_client_protocol::Error::parse_error().data(serde_json::json!("x")))
+            .to_string();
+    assert!(garbage.contains("login-shell startup must be silent"), "{garbage}");
+}

@@ -974,16 +974,26 @@ where
             }
         })
         .await
-        .map_err(|error| {
-            anyhow!(
-                "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
-                 and login-shell startup must be silent"
-            )
-        })?;
+        .map_err(protocol_failure)?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// Describe a failed ACP connection. The hint about stray bridge output only
+/// helps when the transport could not parse what the bridge wrote; an error
+/// the agent itself returned (such as a missing thread) says nothing about
+/// bridge stdout, and the hint would send the person the wrong way.
+pub(super) fn protocol_failure(error: agent_client_protocol::Error) -> anyhow::Error {
+    if error.code == agent_client_protocol::Error::parse_error().code {
+        anyhow!(
+            "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
+             and login-shell startup must be silent"
+        )
+    } else {
+        anyhow!("ACP protocol failed: {error}")
+    }
 }
 
 /// muse-acp 0.5.0 asks, before each Muse question that offers choices, whether
