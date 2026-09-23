@@ -1713,6 +1713,21 @@ impl ModalSurface for SetupDialog {
             self.form
                 .get_mut()
                 .set_dismiss_actions(&[SetupControl::Back]);
+            // Leaving discards only this field's edit, so the prompt says so.
+            let field = if editor.adding {
+                "the new entry's name".to_owned()
+            } else {
+                format!(
+                    "“{}”",
+                    breadcrumb(&editor.path, &self.draft)
+                        .rsplit(" › ")
+                        .next()
+                        .unwrap_or_default()
+                )
+            };
+            self.form.get_mut().set_confirmation_message(Some(format!(
+                "Your edit to {field} will be lost. The rest of the Settings draft is kept."
+            )));
             self.form.get_mut().set_default_action(SetupControl::Apply);
         } else {
             // The outer setup draft uses its normalized saved-config comparison.
@@ -2614,6 +2629,12 @@ pub(crate) fn render_setup(
                         .or_else(|| dialog.archive_space_automatic_label(key)),
                 ),
                 None => String::new(),
+            };
+            // An open dropdown draws the value itself over this row.
+            let summary = if choice_editor && index == dialog.selected {
+                String::new()
+            } else {
+                summary
             };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));

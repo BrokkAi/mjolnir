@@ -2653,6 +2653,39 @@ fn a_long_save_error_is_shown_whole() {
     );
 }
 
+/// Leaving an edited field asks about that field's change, by its name, and
+/// says the rest of the draft is kept. Launch campaign finding C-15.
+#[test]
+fn discarding_a_field_edit_names_the_field() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("phone", None);
+    choose(&mut dashboard, "bind");
+    dashboard.handle_key(key(KeyCode::Char('9')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.dialog_confirmation_open());
+    let text = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(
+        text.contains("Listen address and port"),
+        "the prompt names the field:\n{text}"
+    );
+    assert!(text.contains("rest of the Settings draft"), "{text}");
+}
+
+/// An open dropdown shows its value once on the row, in the dropdown.
+/// Launch campaign finding C-16.
+#[test]
+fn an_open_dropdown_draws_its_value_once() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("notify", None);
+    choose(&mut dashboard, "mode");
+    let lines = drawn(&mut dashboard, 140, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Notify through"))
+        .unwrap_or_else(|| panic!("no Notify through row:\n{}", lines.join("\n")));
+    assert_eq!(row.matches("terminal").count(), 1, "{row}");
+}
+
 /// Every description fits the two rows above a page at the narrowest width
 /// Settings takes, so none stops mid-sentence. Launch campaign finding C-18.
 #[test]
