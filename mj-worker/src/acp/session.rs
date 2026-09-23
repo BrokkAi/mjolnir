@@ -1243,7 +1243,7 @@ pub(super) async fn serve_session(
                 )
                 .await;
                 match applied {
-                    Ok(()) => {
+                    Ok(value) => {
                         spec.accepted_config
                             .lock()
                             .map_err(|_| {
