@@ -265,6 +265,13 @@ impl ChatState {
         self.subagent_working_count = count;
     }
 
+    /// Records whether this session was created with Mjolnir sub-agents, so
+    /// the composer can show where they will appear before the first one
+    /// exists.
+    pub fn set_subagents_enabled(&mut self, enabled: bool) {
+        self.subagents_enabled = enabled;
+    }
+
     pub fn set_subagent_count(&mut self, count: usize) {
         if self.subagent_count != count {
             self.subagent_count = count;

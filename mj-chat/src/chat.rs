@@ -653,6 +653,8 @@ pub struct ChatState {
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     subagent_count: usize,
+    /// The session runs with Mjolnir sub-agents, whether or not any exist.
+    subagents_enabled: bool,
     subagent_working_count: usize,
     subagent_control_focused: bool,
     subagent_control_area: Option<Rect>,
@@ -822,6 +824,7 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             subagent_count: 0,
+            subagents_enabled: false,
             subagent_working_count: 0,
             subagent_control_focused: false,
             subagent_control_area: None,

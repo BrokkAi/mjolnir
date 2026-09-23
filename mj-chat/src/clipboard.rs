@@ -458,9 +458,7 @@ fn read_wsl_clipboard_with_script(script: &str) -> Result<ClipboardContent> {
             );
         }
         if detail.contains("ExternalException") {
-            bail!(
-                "Windows clipboard is busy or locked; try again"
-            );
+            bail!("Windows clipboard is busy or locked; try again");
         }
         bail!("Windows clipboard helper failed: {detail}");
     }

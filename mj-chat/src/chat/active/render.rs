@@ -529,8 +529,19 @@ pub(crate) fn render_composer_band(
     let queue_control = prompt_bottom_queue_control(chat);
     let task_label = (chat.background_task_count() > 0)
         .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
-    let subagent_label = (chat.subagent_count() > 0)
-        .then(|| format!(" Subagents · {} working ", chat.subagent_working_count));
+    // A session created with sub-agents shows the entry, dimmed and not
+    // clickable, before its first child exists, so the user can find where
+    // they will appear. The Sub-agents chord is greyed on the same condition.
+    let subagents_ready = chat.subagent_count() > 0;
+    let subagent_label = if subagents_ready {
+        Some(format!(
+            " Subagents · {} working ",
+            chat.subagent_working_count
+        ))
+    } else {
+        chat.subagents_enabled
+            .then(|| " Subagents · none yet ".to_owned())
+    };
     let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
         // A standby composer cannot send, so the hint says what Enter does
         // there instead of advertising a send that would be refused.
@@ -615,18 +626,22 @@ pub(crate) fn render_composer_band(
         }
         let label = subagent_label.expect("show_subagents implies a label");
         let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
-        chat.subagent_control_area = Some(Rect::new(
-            prompt_area
-                .x
-                .saturating_add(1)
-                .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
-            prompt_area.bottom().saturating_sub(1),
-            width,
-            1,
-        ));
+        chat.subagent_control_area = subagents_ready.then(|| {
+            Rect::new(
+                prompt_area
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
+                prompt_area.bottom().saturating_sub(1),
+                width,
+                1,
+            )
+        });
         bottom_spans.push(Span::styled(
             label,
-            if chat.subagent_control_focused() {
+            if !subagents_ready {
+                theme::hint_description()
+            } else if chat.subagent_control_focused() {
                 theme::selection(true)
             } else {
                 // The chip is always clickable, so keep its blue highlight;

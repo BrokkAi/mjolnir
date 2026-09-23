@@ -705,6 +705,26 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
 }
 
 #[test]
+fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(!screen.contains("Subagents"), "{screen}");
+
+    chat.set_subagents_enabled(true);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · none yet"), "{screen}");
+    assert!(
+        chat.subagent_control_area.is_none(),
+        "the dimmed entry is not clickable"
+    );
+
+    chat.set_subagent_count(1);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · 0 working"), "{screen}");
+    assert!(chat.subagent_control_area.is_some());
+}
+
+#[test]
 fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("keep this draft".into());
@@ -2616,7 +2636,10 @@ fn attaching_a_text_file_says_attach_takes_images_only() {
     std::fs::write(&path, "plain text").unwrap();
     let error = super::attachments::install_path("attach-text", &path).unwrap_err();
     let message = format!("{error:#}");
-    assert!(message.contains("/attach adds image files only"), "{message}");
+    assert!(
+        message.contains("/attach adds image files only"),
+        "{message}"
+    );
     assert!(!message.contains("marker"), "{message}");
 }
 

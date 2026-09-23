@@ -413,6 +413,13 @@ impl DashboardContext {
             }
             let count = dashboard.subagent_count_for(chat.session_id());
             chat.set_subagent_count(count);
+            chat.set_subagents_enabled(record.is_some_and(|session| {
+                session_uses_mjolnir_subagents(
+                    session,
+                    controller.config.subagents.enabled,
+                    controller.state.is_subagent_session(&session.id),
+                )
+            }));
             let working = dashboard.working_subagent_count_for(chat.session_id());
             chat.set_subagent_working_count(working);
         }
@@ -666,4 +673,20 @@ impl DashboardContext {
             self.apply_dashboard_io_update(update);
         }
     }
+}
+
+/// Whether a session was created with Mjolnir sub-agents, matching the
+/// worker launch rule: the session's own choice, else the global setting;
+/// never for a child, and only for harnesses that can receive the tools.
+fn session_uses_mjolnir_subagents(
+    session: &mj_core::state::SessionRecord,
+    global_enabled: bool,
+    is_child: bool,
+) -> bool {
+    session.mjolnir_subagents.unwrap_or(global_enabled)
+        && !is_child
+        && matches!(
+            session.harness_kind,
+            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
+        )
 }

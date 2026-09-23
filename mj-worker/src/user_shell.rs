@@ -499,10 +499,8 @@ mod tests {
         std::os::unix::fs::symlink("/bin/sh", bin.path().join("sh")).unwrap();
         std::os::unix::fs::symlink("/bin/ls", bin.path().join("ls")).unwrap();
         std::fs::write(cwd.path().join("marker-file"), "").unwrap();
-        let environment = BTreeMap::from([(
-            "PATH".into(),
-            bin.path().to_string_lossy().into_owned(),
-        )]);
+        let environment =
+            BTreeMap::from([("PATH".into(), bin.path().to_string_lossy().into_owned())]);
         let (events, mut received) = mpsc::channel(16);
         let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), environment, events);
         shells.start("shell-ls".into(), "ls -a".into()).unwrap();

@@ -846,17 +846,14 @@ impl ChatState {
             };
         }
         if let Some(name) = slash_command_name(&command_input)
-            && !self
-                .command_choices
-                .iter()
-                .any(|choice| {
-                    choice.name.eq_ignore_ascii_case(name)
-                        || choice
-                            .name
-                            .split_whitespace()
-                            .next()
-                            .is_some_and(|first| first.eq_ignore_ascii_case(name))
-                })
+            && !self.command_choices.iter().any(|choice| {
+                choice.name.eq_ignore_ascii_case(name)
+                    || choice
+                        .name
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|first| first.eq_ignore_ascii_case(name))
+            })
         {
             self.set_notice(format!(
                 "/{name} is not a Mjolnir or agent command; it was not sent"
