@@ -1269,6 +1269,7 @@ async fn login(args: LoginArgs) -> Result<()> {
         .envs(&environment)
         .status()
         .await
+        .map_err(|error| login_spawn_error(error, &program, profile.kind, &profile_id))
         .with_context(|| {
             format!(
                 "run `{program} {}` for profile {profile_id}",
@@ -1288,6 +1289,32 @@ async fn login(args: LoginArgs) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Say which program is missing and how to get it, rather than the bare
+/// "No such file or directory" the operating system reports.
+fn login_spawn_error(
+    error: io::Error,
+    program: &str,
+    kind: mj_core::config::HarnessKind,
+    profile_id: &str,
+) -> anyhow::Error {
+    if error.kind() != io::ErrorKind::NotFound {
+        return error.into();
+    }
+    let install = match kind {
+        mj_core::config::HarnessKind::Codex => {
+            " Install it with `npm install -g @openai/codex` (Node.js 22 or newer),".to_owned()
+        }
+        mj_core::config::HarnessKind::Claude => {
+            " Install it with `npm install -g @anthropic-ai/claude-code`,".to_owned()
+        }
+        other => format!(" Install the {} CLI,", other.display_name()),
+    };
+    anyhow::anyhow!(
+        "`{program}` is not installed or is not on PATH, so the {} login cannot run.{install} then run `mj login --profile {profile_id}` again.",
+        kind.display_name()
+    )
 }
 
 /// Mint a long-lived Claude subscription token and store it for the profile.
@@ -1797,6 +1824,33 @@ mod tests {
             !help.contains("cancel-turn"),
             "the old names stay out of --help"
         );
+}
+
+    /// `mj login` for a harness whose CLI is not installed names the missing
+    /// program and how to install it, instead of a bare ENOENT.
+    #[test]
+    fn a_missing_login_program_is_named_with_how_to_install_it() {
+        let error = login_spawn_error(
+            io::Error::from(io::ErrorKind::NotFound),
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "codex",
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("`codex` is not installed"), "{message}");
+        assert!(
+            message.contains("npm install -g @openai/codex"),
+            "{message}"
+        );
+        assert!(message.contains("mj login --profile codex"), "{message}");
+
+        let other = login_spawn_error(
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "codex",
+        );
+        assert!(!format!("{other:#}").contains("not installed"));
     }
 
     #[test]
