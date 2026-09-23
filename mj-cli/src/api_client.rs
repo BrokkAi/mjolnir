@@ -6,6 +6,7 @@
 //! means the CLI and the server cannot disagree about them.
 
 pub(crate) mod events;
+mod pinned_tls;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,7 +48,16 @@ impl ApiClient {
     pub(crate) async fn connect() -> Result<Self> {
         let mut client = daemon::connect_or_start().await?;
         let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
-        probe_api(&viewer_url).await?;
+        // The viewer may serve a self-signed certificate; the daemon publishes
+        // its SHA-256 beside the URL so this client trusts exactly that one.
+        let certificate_sha256 = match client.web_access().await? {
+            mj_client::web::WebViewerAccess::Ready {
+                certificate_sha256, ..
+            } => certificate_sha256,
+            _ => None,
+        };
+        let http = http_client(certificate_sha256.as_deref())?;
+        probe_api(&http, &viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)
             .with_context(|| {
@@ -64,18 +74,20 @@ impl ApiClient {
                 token_path.display()
             );
         }
-        Self::new(viewer_url, token)
+        Ok(Self::with_http(viewer_url, token, http))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(base_url: String, token: String) -> Result<Self> {
-        Ok(Self {
+        Ok(Self::with_http(base_url, token, http_client(None)?))
+    }
+
+    fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
+        Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
-            http: reqwest::Client::builder()
-                .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .context("build the API HTTP client")?,
-        })
+            http,
+        }
     }
 
     pub(crate) fn base_url(&self) -> &str {
@@ -518,9 +530,21 @@ impl ApiClient {
     }
 }
 
+/// The HTTP client for the daemon API. With a pin it trusts only the
+/// certificate the daemon published; without one (plain HTTP, or a publicly
+/// trusted Tailscale certificate) it verifies as any HTTPS client does.
+fn http_client(certificate_sha256: Option<&str>) -> Result<reqwest::Client> {
+    let mut builder =
+        reqwest::Client::builder().user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")));
+    if let Some(pin) = certificate_sha256 {
+        builder = builder.tls_backend_preconfigured(pinned_tls::pinned_client_config(pin)?);
+    }
+    builder.build().context("build the API HTTP client")
+}
+
 /// An unauthenticated versioned 401 proves the route exists before a token is read.
-async fn probe_api(base_url: &str) -> Result<()> {
-    let response = reqwest::Client::new()
+async fn probe_api(http: &reqwest::Client, base_url: &str) -> Result<()> {
+    let response = http
         .get(format!(
             "{}/api/v1/sessions",
             base_url.trim_end_matches('/')
@@ -782,14 +806,14 @@ mod tests {
     #[tokio::test]
     async fn api_probe_succeeds_without_reading_a_token() {
         let (url, seen) = serve(Some("1")).await;
-        probe_api(&url).await.unwrap();
+        probe_api(&http_client(None).unwrap(), &url).await.unwrap();
         assert!(
             seen.lock().unwrap().is_empty(),
             "the support probe must not need authentication"
         );
         let (url, _) = serve(Some("2")).await;
         assert!(
-            probe_api(&url)
+            probe_api(&http_client(None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -801,7 +825,7 @@ mod tests {
             axum::serve(listener, Router::new()).await.unwrap();
         });
         assert!(
-            probe_api(&url)
+            probe_api(&http_client(None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -832,6 +856,80 @@ mod tests {
         assert!(
             format!("{error:#}").contains("version 2"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    /// Serve the API's unauthenticated probe over HTTPS with a generated
+    /// self-signed certificate; returns the URL and the certificate's pin.
+    async fn serve_https(certificate_authority: bool) -> (String, String) {
+        mj_controller::server::install_rustls_crypto_provider();
+        let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+        if certificate_authority {
+            // What `openssl req -x509` makes by default, as the lab does.
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        }
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
+        let pin =
+            mj_controller::server::api::served_certificate_sha256(certificate.pem().as_bytes())
+                .unwrap();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            certificate.pem().into_bytes(),
+            key.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let app = Router::new().route(
+            "/api/v1/sessions",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(API_VERSION_HEADER, API_VERSION)],
+                )
+            }),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, tls)
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (url, pin)
+    }
+
+    #[tokio::test]
+    async fn the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin() {
+        let (url, pin) = serve_https(true).await;
+        let error = probe_api(&http_client(None).unwrap(), &url)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("CaUsedAsEndEntity"),
+            "unexpected error: {error:#}"
+        );
+        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_cli_reaches_a_viewer_serving_a_self_signed_leaf_certificate_by_its_pin() {
+        let (url, pin) = serve_https(false).await;
+        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_cli_refuses_a_certificate_other_than_the_pinned_one() {
+        let (url, _pin) = serve_https(true).await;
+        let other = "0".repeat(64);
+        assert!(
+            probe_api(&http_client(Some(&other)).unwrap(), &url)
+                .await
+                .is_err()
         );
     }
 }

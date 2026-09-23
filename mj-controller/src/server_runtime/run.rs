@@ -145,7 +145,17 @@ pub async fn run_server(
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
+    // Publish a pin only for a certificate the operator configured. A
+    // Tailscale certificate chains to a public CA and renews in place, so a
+    // pin taken now would go stale while ordinary verification keeps working.
+    let mut certificate_sha256 = None;
     if let Some((cert, key)) = resolved.tls_files {
+        if resolved.tailscale.is_none() {
+            let pem = tokio::fs::read(&cert)
+                .await
+                .with_context(|| format!("read web viewer TLS certificate {}", cert.display()))?;
+            certificate_sha256 = Some(crate::server::api::served_certificate_sha256(&pem)?);
+        }
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
             .context("load web viewer TLS certificate")?;
@@ -178,6 +188,7 @@ pub async fn run_server(
         viewer_code: options.viewer_code().to_owned(),
         qr_login_url,
         fallback_reason,
+        certificate_sha256,
     };
 
     let mut serve = ViewerServer::spawn({

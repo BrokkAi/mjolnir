@@ -35,6 +35,28 @@ pub fn load_or_create_api_token(path: &std::path::Path) -> AnyResult<String> {
     Ok(token)
 }
 
+/// The pin a local API client checks the viewer's certificate against:
+/// lowercase hex SHA-256 of the certificate's DER bytes.
+pub fn certificate_der_sha256(der: &[u8]) -> String {
+    use sha2::Digest;
+    mj_core::hex::lower_hex(sha2::Sha256::digest(der))
+}
+
+/// Pin the first (leaf) certificate of a PEM chain the viewer serves.
+///
+/// The daemon publishes this with the viewer URL so the CLI can trust exactly
+/// the certificate the operator configured, including a self-signed one that
+/// no CA chain, and no `CA:FALSE` rule, would accept.
+pub fn served_certificate_sha256(pem: &[u8]) -> AnyResult<String> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    let leaf = CertificateDer::pem_slice_iter(pem)
+        .next()
+        .context("the certificate file holds no PEM certificate")?
+        .context("parse the PEM certificate")?;
+    Ok(certificate_der_sha256(&leaf))
+}
+
 // ---------------------------------------------------------------------------
 // Failures
 // ---------------------------------------------------------------------------

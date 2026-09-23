@@ -527,6 +527,7 @@ impl DashboardState {
                 viewer_code,
                 qr_login_url,
                 fallback_reason,
+                ..
             } => {
                 dialog.viewer_url = Some(viewer_url);
                 dialog.viewer_code = Some(viewer_code);

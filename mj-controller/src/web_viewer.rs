@@ -198,6 +198,7 @@ fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
         viewer_code,
         qr_login_url,
         fallback_reason,
+        certificate_sha256,
     } = ready
     else {
         bail!("viewer startup is missing its access details");
@@ -216,6 +217,7 @@ fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
             .map(|url| with_port(url, port))
             .transpose()?,
         fallback_reason: fallback_reason.clone(),
+        certificate_sha256: certificate_sha256.clone(),
     })
 }
 
@@ -542,6 +544,7 @@ mod tests {
             viewer_code: "123456".into(),
             qr_login_url: None,
             fallback_reason: None,
+            certificate_sha256: None,
         }
     }
 
@@ -790,11 +793,12 @@ mod tests {
             viewer_code: "123456".into(),
             qr_login_url: Some("https://host.tailnet.ts.net:37650/auth/login?token=secret".into()),
             fallback_reason: None,
+            certificate_sha256: Some("pinned".into()),
         };
         let changed = ready_at(&ready, 49152).unwrap();
         assert!(
-            matches!(changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), .. }
-            if viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret")
+            matches!(changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), certificate_sha256: Some(pin), .. }
+            if pin == "pinned" && viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret")
         );
         let ipv6 = ready_at(&self::ready("[::1]:0".parse().unwrap()), 49152).unwrap();
         assert!(

@@ -68,6 +68,13 @@ pub enum WebViewerAccess {
         viewer_code: String,
         qr_login_url: Option<String>,
         fallback_reason: Option<String>,
+        /// Lowercase hex SHA-256 of the DER certificate the viewer serves when
+        /// that certificate is one the operator configured (often self-signed).
+        /// Local clients trust exactly this certificate instead of a CA chain.
+        /// `None` over plain HTTP and for publicly trusted Tailscale
+        /// certificates, which renew in place.
+        #[serde(default)]
+        certificate_sha256: Option<String>,
     },
     Failed {
         address: SocketAddr,
