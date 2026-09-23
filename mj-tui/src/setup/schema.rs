@@ -387,10 +387,16 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] != Value::Bool(true) {
                 "Off".to_owned()
             } else {
-                let tier = choice_label(&["tier".to_owned()], &section["tier"], draft);
+                // An unset depth is the default one, and an unset profile is
+                // Auto, which picks a reviewer when each review starts.
+                let tier = match &section["tier"] {
+                    Value::Null => Value::String("quick".to_owned()),
+                    tier => tier.clone(),
+                };
+                let tier = choice_label(&["tier".to_owned()], &tier, draft);
                 match section["profile"].as_str() {
                     Some(profile) => format!("{tier} · {profile}"),
-                    None => format!("{tier} · no reviewer"),
+                    None => format!("{tier} · Auto · picks by quota"),
                 }
             }
         }

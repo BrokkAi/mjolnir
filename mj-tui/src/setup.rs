@@ -1612,7 +1612,11 @@ impl SetupDialog {
     }
 
     fn sync_review(&mut self, review: &mj_core::config::ReviewConfig) {
-        self.draft["review"] = serde_json::to_value(review).expect("review serializes");
+        // The saved form leaves defaults out; the draft keeps every field,
+        // so the page reads the same before and after a visit.
+        let mut value = serde_json::to_value(review).expect("review serializes");
+        schema::expand(&mut value, &mut vec!["review".to_owned()]);
+        self.draft["review"] = value;
     }
 
     fn sync_review_validation(&mut self, review: &ReviewSettingsDialog) {

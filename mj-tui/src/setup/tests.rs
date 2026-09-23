@@ -2585,6 +2585,29 @@ fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
     );
 }
 
+/// With the reviewer on Auto, the first page says so, and visiting Code
+/// Review does not change what the row says. Launch campaign finding C-5.
+#[test]
+fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
+    let mut configured = config();
+    configured.review.enabled = true;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config = configured.clone();
+    dashboard.mode = Mode::Setup(SetupDialog::new(&configured));
+    let row = |dashboard: &mut DashboardState| {
+        drawn(dashboard, 140, 40)
+            .into_iter()
+            .find(|line| line.contains("Code Review"))
+            .expect("a Code Review row")
+    };
+    let before = row(&mut dashboard);
+    assert!(before.contains("Quick · Auto · picks by quota"), "{before}");
+    assert!(!before.contains("no reviewer"), "{before}");
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(row(&mut dashboard), before);
+}
+
 /// Opens the field `key` on the page `section` and types `text` into it.
 fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
     dialog.path = vec![section.to_owned()];
