@@ -646,11 +646,17 @@ fn closing_workspace_confirms_counts_and_supports_cancellation_while_busy() {
         dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         DashboardAction::None
     );
-    assert!(
-        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
-    );
+    // Cancel leaves the dialog for the dashboard the shortcut came from.
+    assert!(matches!(&dashboard.mode, Mode::Dashboard));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("load");
+    };
+    let mut workspace = entry("a", "Example");
+    workspace.workspace.session_count = 2;
+    dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
     if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
-        manager.open_selected_command(true);
         manager.sync_form();
         manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
     }
@@ -733,5 +739,57 @@ fn a_workspace_close_can_run_in_background_and_reopen_for_cancellation() {
     dashboard.finish_workspace_management(reopened, Ok(vec![]));
     assert!(
         matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.entries.is_empty() && manager.busy.is_none())
+    );
+}
+
+/// Launch finding A-5: the Rename and Close shortcuts open their dialog
+/// straight from the dashboard, so Esc there goes back to the dashboard
+/// rather than to a Workspaces manager the user never opened.
+#[test]
+fn esc_in_a_workspace_dialog_opened_by_shortcut_returns_to_the_dashboard() {
+    for command in [
+        crate::CommandId::RenameWorkspace,
+        crate::CommandId::CloseWorkspace,
+    ] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_active_workspace(Some("a".into()));
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            chord(&mut dashboard, command)
+        else {
+            panic!("load");
+        };
+        dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+        assert!(
+            matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view != WorkspaceManagerView::List),
+            "{command:?}"
+        );
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(dashboard.mode, Mode::Dashboard), "{command:?}");
+    }
+}
+
+/// Opened from the manager's list, the same dialog still goes back to the
+/// list, which is where the user was.
+#[test]
+fn esc_in_a_workspace_dialog_opened_from_the_list_returns_to_the_list() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.open_selected_command(false);
+        manager.sync_form();
+    }
+
+    dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
     );
 }
