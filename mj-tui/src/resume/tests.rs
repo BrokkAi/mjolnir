@@ -35,6 +35,28 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
     }
 }
 
+/// C-25: a long title gives way to the "[unavailable]" marker, so the marker
+/// is always shown in full.
+#[test]
+fn a_long_unavailable_title_keeps_its_marker() {
+    for width in [120, 80, 60] {
+        let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+        let mut session = native(
+            "native-long",
+            &"A very long imported conversation title ".repeat(6),
+            NEWER_THAN_THE_CHECKPOINT,
+        );
+        session.unavailable_reason = Some("missing Git repo".into());
+        dashboard.show_resume_dialog(1, vec![codex_profile(vec![session])]);
+        switch_to_import(&mut dashboard);
+        let rendered = drawn(&mut dashboard, width, 34).join("\n");
+        assert!(
+            rendered.contains("[unavailable]"),
+            "width {width}:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
     use crossterm::event::{MouseButton, MouseEventKind};

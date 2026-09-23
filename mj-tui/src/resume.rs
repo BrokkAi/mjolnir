@@ -1769,22 +1769,34 @@ struct RowLayout {
     activity: usize,
 }
 
+/// Room for a short title and the longest status mark, `  [unavailable]`.
+const MIN_TITLE_CELLS: usize = 20;
+
 fn row_layout(width: u16, tab: ResumeTab) -> RowLayout {
     let width = usize::from(width);
     // The Live tab has no profile column, so the title also gets back the
     // two-space gap that would have separated it from the origin cell.
-    let profile = if tab == ResumeTab::Live {
+    let mut profile = if tab == ResumeTab::Live {
         0
     } else {
         14.min(width / 5).max(6)
     };
-    let origin = 24.min(width / 3).max(8);
-    let activity = 14.min(width / 4).max(8);
-    let reserved = if profile == 0 {
-        origin + activity + 6
-    } else {
-        profile + origin + activity + 8
-    };
+    let mut origin = 24.min(width / 3).max(8);
+    let mut activity = 14.min(width / 4).max(8);
+    let gaps = if profile == 0 { 6 } else { 8 };
+    // The title keeps room for a status mark such as "[unavailable]". On a
+    // narrow list the other columns give up cells for it, down to their
+    // minimums, instead of pushing the mark past the list's edge.
+    let mut short = (profile + origin + activity + gaps + MIN_TITLE_CELLS).saturating_sub(width);
+    for (column, minimum) in [(&mut origin, 8), (&mut profile, 6), (&mut activity, 8)] {
+        if *column == 0 {
+            continue;
+        }
+        let give = short.min(column.saturating_sub(minimum));
+        *column -= give;
+        short -= give;
+    }
+    let reserved = profile + origin + activity + gaps;
     RowLayout {
         title: width.saturating_sub(reserved).max(10),
         profile,
@@ -2467,7 +2479,13 @@ where
     ));
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+        // The marks are ASCII. The title gives up their cells so they always
+        // show in full.
+        truncate_to_cells(
+            &row.title,
+            layout.title.saturating_sub(marks.len()),
+            Truncate::SUMMARY,
+        ),
         title_style,
     ));
     spans.push(Span::styled(
