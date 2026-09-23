@@ -28,6 +28,11 @@ pub const ANALYZE_DIFF_TIMEOUT: Duration = Duration::from_secs(600);
 pub const BIFROST_BIN_ENV: &str = "MJ_BIFROST_BIN";
 const DEFAULT_BIFROST_BIN: &str = "bifrost";
 
+/// The Bifrost release the container image installs
+/// (`containers/Containerfile.agent-dev`). A Bifrost that lacks
+/// `analyze_diff` is reported as needing this release.
+pub const REQUIRED_BIFROST_VERSION: &str = "0.10.7";
+
 /// What a review runs Bifrost as.
 #[must_use]
 pub fn bifrost_binary() -> PathBuf {

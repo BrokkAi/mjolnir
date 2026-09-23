@@ -321,6 +321,38 @@ fn a_failed_analysis_fails_the_review_and_leaves_the_baseline_alone() {
     assert!(driver.finished());
 }
 
+/// I1-15: a clean reviewer report after the analysis failed is not a clean
+/// review. The reviewer read the change without the analysis it was promised,
+/// so the review reports the failure instead of "no material findings".
+#[test]
+fn a_clean_report_after_a_failed_analysis_fails_the_review() {
+    let (mut driver, command_id) = running();
+    assert!(
+        driver
+            .analysis_completed(Err("bifrost exited with 1: Unknown tool: analyze_diff".into()))
+            .is_empty()
+    );
+    let requests = driver.role_turn_completed(&command_id, "No findings.");
+    let ReviewVerdict::Failed { reason } = driver.verdict().expect("a verdict is on screen") else {
+        panic!("expected a failed review, got {:?}", driver.phase());
+    };
+    assert!(reason.contains("Unknown tool: analyze_diff"), "{reason}");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. })),
+        "a failed review never advances the baseline: {requests:?}"
+    );
+    assert_eq!(
+        driver
+            .roles()
+            .iter()
+            .find(|role| role.role == REVIEWER_ROLE)
+            .map(|role| role.state),
+        Some(RoleState::Clean)
+    );
+}
+
 #[test]
 fn cancelling_leaves_the_baseline_so_the_next_review_covers_both_turns() {
     let (mut driver, _) = running();
