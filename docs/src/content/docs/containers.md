@@ -264,6 +264,12 @@ blank field shows what a session there would actually use, such as
 the cache, the page says why, for example because the host has no
 reflink-capable filesystem or its own mbx is too old.
 
+`mj doctor` also checks the native mbx version on each configured Podman or
+Docker host when the build cache is enabled. If it is older than the version
+Mjolnir installs in containers, doctor warns that sessions will run without
+the shared cache and names the version to install on that host. The warning
+does not make doctor fail because the cache is optional.
+
 When the host has `~/.config/mbx/config.toml`, Mjolnir copies it into the
 container so the container's mbx uses the host's own budgets. If that file
 relocates `[target] root` outside the cache directory, that directory is
