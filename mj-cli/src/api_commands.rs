@@ -80,11 +80,12 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
 #[derive(Debug, Args)]
 pub(crate) struct NewArgs {
     /// Profile the session runs its harness from. Omit it to use the saved
-    /// default that `mj go` records.
+    /// default: the pair `mj go` saved, or else the one the first session was
+    /// created with.
     #[arg(long)]
     profile: Option<String>,
     /// Target template the session is provisioned on. Omit it to use the
-    /// saved default that `mj go` records.
+    /// saved default, as for `--profile`.
     #[arg(long)]
     target: Option<String>,
     /// Existing bundle to run. Omit it to bundle `--project-directory`.
@@ -497,7 +498,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         prompt,
     };
     let client = ApiClient::connect().await?;
-    let response = client.start(&request).await?;
+    let response = client.start(&request).await.map_err(name_launch_flags)?;
     if args.json {
         return print_json(&response);
     }
@@ -506,6 +507,22 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         println!("turn {turn_id}");
     }
     Ok(())
+}
+
+/// Name the command-line flags where a refused start names the API's fields.
+///
+/// The API speaks to every client, so its refusals name the request fields
+/// `profile_id` and `target_id`; someone at a shell typed `--profile` and
+/// `--target`, and that is what they need to read (F-9).
+pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    let named = message
+        .replace("profile_id", "--profile")
+        .replace("target_id", "--target");
+    if named == message {
+        return error;
+    }
+    anyhow::anyhow!(named)
 }
 
 /// Send a prompt, and with `--wait` block on the turn it became.
@@ -1350,6 +1367,17 @@ mod tests {
         // reason recorded, and that is still a failure.
         let failed_resume = suspended(serde_json::json!("the archive was missing"));
         assert!(report_wait(&failed_resume, false).is_err());
+    }
+
+    #[test]
+    fn a_refused_start_names_the_flags_the_user_typed() {
+        let error = name_launch_flags(anyhow::anyhow!(
+            "the Mjolnir API answered 400 Bad Request: name a profile_id; this instance has no saved default to fall back on"
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the Mjolnir API answered 400 Bad Request: name a --profile; this instance has no saved default to fall back on"
+        );
     }
 
     /// F-11: a destroyed session that never took a prompt was offered

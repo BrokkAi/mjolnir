@@ -216,7 +216,11 @@ impl Adapter {
             None => None,
         };
         let start = start_request(&self.args, workspace_id, &request.cwd);
-        let started = client.start(&start).await.context("create the session")?;
+        let started = client
+            .start(&start)
+            .await
+            .map_err(crate::api_commands::name_launch_flags)
+            .context("create the session")?;
         self.sessions
             .lock()
             .expect("adapter session set")
