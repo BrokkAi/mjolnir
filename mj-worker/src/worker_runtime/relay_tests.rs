@@ -2924,7 +2924,12 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         "a checkpoint barrier was admitted while the harness was working"
     );
 
-    event_tx.send(settle_marker("task-notification")).unwrap();
+    event_tx
+        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
+            "task-notification",
+            1,
+        )))
+        .unwrap();
     wait_until(
         || {
             relay
@@ -3074,6 +3079,48 @@ async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
         answer < completed,
         "the answer belongs to the prompt's turn"
     );
+
+    // The background agent's follow-up is a turn Claude Code started on its
+    // own. Its result ends that turn and is not sent to the prompt loop.
+    event_tx
+        .send(agent_output(
+            "The background agent found three files.",
+            "follow-up-1",
+        ))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "the follow-up did not open a turn",
+    )
+    .await;
+    event_tx
+        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
+            "task-notification",
+            4,
+        )))
+        .unwrap();
+    wait_until(
+        || !harness_turn_open(&relay),
+        "the follow-up's result did not settle its turn",
+    )
+    .await;
+    assert_eq!(
+        relay.lock().unwrap().operational_state().execution,
+        RelayExecutionState::Idle
+    );
+    assert!(matches!(
+        relay
+            .lock()
+            .unwrap()
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .last()
+            .map(|event| event.observation.clone()),
+        Some(RelayObservation::HarnessTurnSettled {
+            prompt_in_flight: false,
+            ..
+        })
+    ));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
             .await

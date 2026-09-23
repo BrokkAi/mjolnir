@@ -24,7 +24,7 @@ mod replay;
 mod requests;
 mod serving;
 mod verdict;
-use background::{KimiProvisionalTask, KimiTaskEntry, claude_turn_origin, is_agent_output};
+use background::{KimiProvisionalTask, KimiTaskEntry, is_agent_output};
 use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
 pub use serving::serve_relay_json_lines;
@@ -150,7 +150,8 @@ pub struct DurableRelay {
     claude_background_tasks: BTreeMap<String, BackgroundCommand>,
     /// Claude tasks whose stop this process requested and the adapter has not
     /// yet acknowledged. The adapter answers a stop with a plain agent chunk
-    /// and no origin marker, so that chunk must not open a harness turn.
+    /// and no model cycle, so no result would settle a harness turn opened
+    /// for that chunk.
     claude_pending_stops: BTreeSet<String>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
@@ -868,8 +869,8 @@ impl DurableRelay {
         }
         let claude = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter;
         // A stop we requested is acknowledged with a plain chunk and nothing
-        // else: no model turn runs, so no origin marker would ever settle a
-        // turn opened for it. Consume the expectation and keep the line.
+        // else: no model cycle runs, so no result would ever settle a turn
+        // opened for it. Consume the expectation and keep the line.
         let ack = claude && self.is_claude_stop_acknowledgement(&update);
         if ack {
             self.claude_pending_stops.pop_first();
@@ -882,7 +883,6 @@ impl DurableRelay {
                 },
             )?;
         }
-        let settles = claude.then(|| claude_turn_origin(&update)).flatten();
         self.foreground_tools.observe_with_start(
             &update,
             self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
@@ -897,25 +897,46 @@ impl DurableRelay {
         let ordinal = self.record_observation(RelayObservation::SessionUpdate {
             update: Box::new(update),
         })?;
-        // Any origin kind settles the turn: the marker means the SDK reached a
-        // turn boundary, whatever started the work.
-        if let Some(origin) = settles.or_else(|| {
-            (codex && native_before && !native_after.running()).then_some(Some("codex".into()))
-        }) && self.snapshot.harness_turn.is_some()
+        // A Claude turn settles on its SDK result instead, in
+        // `claude_turn_result`: the adapter's origin marker is left out when a
+        // cycle produced no assistant usage.
+        if codex && native_before && !native_after.running() && self.snapshot.harness_turn.is_some()
         {
-            self.append_relay_event(
-                None,
-                RelayObservation::HarnessTurnSettled {
-                    origin,
-                    // The projection cannot see `active_prompt`, so the event
-                    // has to carry whether a prompt of ours is still running.
-                    prompt_in_flight: self.snapshot.active_prompt.is_some(),
-                },
-            )?;
-            self.finish_turn_activity()?;
-            self.replied_verdict_pending = true;
+            self.settle_harness_turn(Some("codex".into()))?;
         }
         Ok(ordinal)
+    }
+
+    /// Claude Code ended a model cycle that did not end one of Mjolnir's
+    /// prompts. If a turn Claude Code started on its own is open, this result
+    /// is its boundary, whatever started the cycle.
+    pub fn claude_turn_result(&mut self, result: &mj_core::acp::ClaudeTurnResult) -> Result<()> {
+        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter
+            || self.snapshot.harness_turn.is_none()
+        {
+            return Ok(());
+        }
+        self.settle_harness_turn(Some(
+            result
+                .origin_kind
+                .clone()
+                .unwrap_or_else(|| "human".to_owned()),
+        ))
+    }
+
+    fn settle_harness_turn(&mut self, origin: Option<String>) -> Result<()> {
+        self.append_relay_event(
+            None,
+            RelayObservation::HarnessTurnSettled {
+                origin,
+                // The projection cannot see `active_prompt`, so the event has
+                // to carry whether a prompt of ours is still running.
+                prompt_in_flight: self.snapshot.active_prompt.is_some(),
+            },
+        )?;
+        self.finish_turn_activity()?;
+        self.replied_verdict_pending = true;
+        Ok(())
     }
 
     /// Forget provisional tool statuses at a boundary the harness itself has

@@ -471,7 +471,9 @@ pub(crate) fn record_runtime_event(
             relay.claude_async_task_control_changed(task_id, can_stop)?;
         }
         RuntimeEvent::ClaudeTurnResult(result) => {
-            nominate_claude_prompt_result(in_flight, commands, &result);
+            if !nominate_claude_prompt_result(in_flight, commands, &result) {
+                relay.claude_turn_result(&result)?;
+            }
         }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
@@ -693,20 +695,21 @@ pub(crate) fn record_runtime_event(
     Ok(stopped)
 }
 
-/// Handle the end of one Claude Code model cycle.
+/// Hand a Claude Code result that answers the running prompt to the prompt
+/// loop, and say whether it was handed over.
 ///
-/// A result that answers the running prompt is passed to the prompt loop,
-/// which ends the prompt unless its own state says this cycle is not the
-/// prompt's last, and records the completion itself. The loop, not this
+/// The loop ends the prompt unless its own state says this cycle is not the
+/// prompt's last, and it reports the completion itself. The loop, not this
 /// coordinator, emits `PromptFinished`, so a prompt still completes exactly
 /// once however the result and the adapter's reply race. Everything the
 /// adapter sent before the result is already recorded, because results travel
-/// on the same ordered stream as session updates.
+/// on the same ordered stream as session updates. A result that is not handed
+/// over ends a turn Claude Code started on its own, if one is open.
 fn nominate_claude_prompt_result(
     in_flight: &BTreeMap<String, RelayCommand>,
     commands: &mpsc::Sender<CommandRequest>,
     result: &mj_core::acp::ClaudeTurnResult,
-) {
+) -> bool {
     let running_prompt = in_flight
         .iter()
         .find(|(_, command)| command.kind() == mj_core::relay::RelayCommandKind::Prompt)
@@ -720,6 +723,7 @@ fn nominate_claude_prompt_result(
                     stop_reason,
                     usage: Some(result.usage.token_usage()),
                 });
+                return true;
             }
             // The adapter's reply still ends the prompt, as it did before
             // results were read; it is only later while background work runs.
@@ -730,6 +734,7 @@ fn nominate_claude_prompt_result(
             ),
         }
     }
+    false
 }
 
 pub(crate) fn interrupt_in_flight(

@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::background::{
-    CLAUDE_ORIGIN_META_KEY, CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text,
-};
+use super::background::{CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text};
 use super::*;
 
 #[test]
@@ -761,7 +759,7 @@ fn idle_clock_starts_at_settlement_survives_reopen_and_ignores_metadata() {
     relay.record_session_update(tool_call_update()).unwrap();
     assert_eq!(relay.operational_state().idle_since_ms, None);
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     let idle_since = relay.operational_state().idle_since_ms;
     assert!(idle_since.is_some());
@@ -812,7 +810,7 @@ fn idle_clock_waits_for_background_work_and_persists_its_completion() {
         })
         .unwrap();
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     assert_eq!(relay.operational_state().idle_since_ms, None);
     assert_eq!(
@@ -2085,16 +2083,29 @@ fn tool_call_update() -> SessionUpdate {
     ))
 }
 
-/// The `usage_update` the Claude adapter sends when an SDK turn ends.
-fn settling_usage_update(origin: &str) -> SessionUpdate {
+/// The `usage_update` the Claude adapter sends when an SDK cycle ends and
+/// the cycle produced assistant usage.
+fn origin_marker(origin: &str) -> SessionUpdate {
     let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
     usage.meta = Some(
         serde_json::from_value(serde_json::json!({
-            CLAUDE_ORIGIN_META_KEY: {"kind": origin},
+            "_claude/origin": {"kind": origin},
         }))
         .unwrap(),
     );
     SessionUpdate::UsageUpdate(usage)
+}
+
+/// The SDK `result` that ends a Claude Code model cycle.
+fn cycle_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
+    mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+        "stop_reason": "end_turn", "result": "done",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "origin": {"kind": origin},
+    }))
+    .unwrap()
+    .unwrap()
 }
 
 fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
@@ -2107,7 +2118,7 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 }
 
 #[test]
-fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() {
+fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
@@ -2129,7 +2140,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
     ));
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     let settled = relay.operational_state();
@@ -2159,6 +2170,55 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
     assert!(relay.pending_replied_verdict().is_none());
 }
 
+/// The adapter's origin marker is left out when a cycle produced no
+/// assistant usage, so it cannot be what ends a Claude turn. The result can:
+/// Claude Code sends one for every cycle.
+#[test]
+fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    relay
+        .record_session_update(origin_marker("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(
+        state.harness_turn.is_some(),
+        "the marker alone settles nothing"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Running);
+
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // A cycle that streams text but sends no marker still ends.
+    relay
+        .record_session_update(agent_text_chunk("One more thing."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+    relay.claude_turn_result(&cycle_result("human")).unwrap();
+    assert!(relay.operational_state().harness_turn.is_none());
+    assert!(matches!(
+        observations(&relay).last(),
+        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false })
+            if origin.as_deref() == Some("human")
+    ));
+
+    // A result with no turn open records nothing.
+    let before = relay.operational_state().latest_ordinal;
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert_eq!(relay.operational_state().latest_ordinal, before);
+}
+
 #[test]
 fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let temp = tempfile::tempdir().unwrap();
@@ -2176,7 +2236,7 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     );
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     let claimed = relay.claim_pending_commands(true).unwrap();
@@ -2724,7 +2784,7 @@ fn a_terminal_the_agent_left_running_is_background_work_once_the_turn_ends() {
     );
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     assert_eq!(
@@ -3062,7 +3122,7 @@ fn claude_background_levels_do_not_open_turns_or_enter_the_transcript() {
         RelayExecutionState::Running
     );
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     assert_eq!(
         relay.operational_state().execution,
@@ -3417,9 +3477,8 @@ fn harness_turns_are_off_for_other_harnesses() {
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 
     relay.record_session_update(tool_call_update()).unwrap();
-    relay
-        .record_session_update(settling_usage_update("human"))
-        .unwrap();
+    relay.record_session_update(origin_marker("human")).unwrap();
+    relay.claude_turn_result(&cycle_result("human")).unwrap();
 
     let state = relay.operational_state();
     assert_eq!(state.execution, RelayExecutionState::Idle);
@@ -3587,7 +3646,7 @@ fn cancel_turn_bypasses_a_pending_checkpoint_for_an_autonomous_turn() {
     assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
