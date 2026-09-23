@@ -106,12 +106,20 @@ fn target_defaults(kind: &str) -> Value {
 }
 
 /// Insert omitted optional fields, preserving all stored values.
+///
+/// The fields a section always has come first, in the order listed above,
+/// so a page's rows keep their places whichever fields the file stores.
+/// Anything else, such as the entries of a collection, follows in its
+/// stored order.
 pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
     let missing = defaults(path, value);
     if let Some(object) = value.as_object_mut() {
+        let mut stored = std::mem::take(object);
         for (key, default) in missing.as_object().unwrap() {
-            object.entry(key.clone()).or_insert_with(|| default.clone());
+            let value = stored.shift_remove(key).unwrap_or_else(|| default.clone());
+            object.insert(key.clone(), value);
         }
+        object.append(&mut stored);
         for (key, child) in object {
             path.push(key.clone());
             expand(child, path);

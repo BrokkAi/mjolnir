@@ -2628,6 +2628,39 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
     assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
 }
 
+/// A page lists its settings in one fixed order, whichever of them the file
+/// happens to store and in whatever order. Launch campaign finding C-24.
+#[test]
+fn a_page_lists_its_settings_in_a_fixed_order() {
+    let order = |draft: serde_json::Value, path: &[&str]| {
+        let mut draft = draft;
+        schema::expand(&mut draft, &mut Vec::new());
+        let path = path.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+        visible_keys(&path, draft.pointer(&pointer(&path)).unwrap())
+    };
+    assert_eq!(
+        order(json!({"phone": {"tailscale_detect": false}}), &["phone"]),
+        order(json!({"phone": {}}), &["phone"]),
+    );
+    assert_eq!(
+        order(
+            json!({"machines": {"local": {"kind": "local", "build_cache": {"max_size": "20GB", "enabled": false}}}}),
+            &["machines", "local", "build_cache"],
+        ),
+        ["enabled", "directory", "max_size"],
+    );
+    assert_eq!(
+        order(
+            json!({"machines": {"box": {"workspace_prefix": "w", "host": "h", "kind": "ssh"}}}),
+            &["machines", "box"],
+        ),
+        order(
+            json!({"machines": {"box": {"kind": "ssh"}}}),
+            &["machines", "box"]
+        ),
+    );
+}
+
 /// Opens the field `key` on the page `section` and types `text` into it.
 fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
     dialog.path = vec![section.to_owned()];
