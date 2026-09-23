@@ -69,7 +69,7 @@ fn machine_defaults(kind: &str) -> Value {
         "ssh" => {
             object.extend(
                 json!({"host":"","user":null,"identity_file":null,"extra_args":[],
-                       "workspace_prefix":".local/share/hel/workspaces",
+                       "workspace_prefix":mj_core::config::DEFAULT_WORKSPACE_PREFIX,
                        "build_cache":build_cache_defaults()})
                 .as_object()
                 .unwrap()

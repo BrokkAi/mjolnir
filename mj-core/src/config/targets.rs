@@ -358,8 +358,18 @@ impl SshConnection {
     }
 }
 
+/// Where a new SSH machine keeps bare-runtime workspaces, relative to the
+/// login home. Setup writes it into the file for every machine it adds.
+pub const DEFAULT_WORKSPACE_PREFIX: &str = ".local/share/mjolnir/workspaces";
+
+/// The directory used before the product was renamed. A machine whose file
+/// does not name a directory keeps this one, because its existing
+/// workspaces are there.
+pub const LEGACY_WORKSPACE_PREFIX: &str = ".local/share/hel/workspaces";
+
+/// The directory of a machine the file does not give one.
 pub(super) fn default_named_machine_prefix() -> PathBuf {
-    PathBuf::from(".local/share/hel/workspaces")
+    PathBuf::from(LEGACY_WORKSPACE_PREFIX)
 }
 
 /// Rejects a remote workspace directory that would escape the login home or

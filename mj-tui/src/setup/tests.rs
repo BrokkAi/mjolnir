@@ -2628,6 +2628,20 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
     assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
 }
 
+/// A new SSH machine keeps its workspaces under Mjolnir's own directory, not
+/// the product's former name. Launch campaign finding C-17.
+#[test]
+fn a_new_ssh_machine_keeps_workspaces_under_the_mjolnir_directory() {
+    let machine = schema::defaults(
+        &["machines".to_owned(), "box".to_owned()],
+        &json!({"kind": "ssh"}),
+    );
+    assert_eq!(
+        machine["workspace_prefix"],
+        ".local/share/mjolnir/workspaces"
+    );
+}
+
 /// A page lists its settings in one fixed order, whichever of them the file
 /// happens to store and in whatever order. Launch campaign finding C-24.
 #[test]

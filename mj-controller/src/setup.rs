@@ -766,9 +766,10 @@ pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str,
     }
 }
 
-/// The same default `serde` applies to a hand-written SSH machine.
+/// A new machine's directory. The file names it, so a machine written here
+/// never falls back to the former directory a hand-written one keeps.
 fn default_ssh_workspace_prefix() -> PathBuf {
-    PathBuf::from(".local/share/hel/workspaces")
+    PathBuf::from(mj_core::config::DEFAULT_WORKSPACE_PREFIX)
 }
 
 fn config_id(value: &str) -> String {

@@ -1,5 +1,25 @@
 use super::*;
 
+/// A machine whose file never named a workspace directory keeps using the
+/// directory its workspaces are already in, under the former product name;
+/// new machines get Mjolnir's own. Launch campaign finding C-17.
+#[test]
+fn a_machine_without_a_workspace_directory_keeps_the_existing_one() {
+    let config: Config = toml::from_str(&format!(
+        "version = {CONFIG_VERSION}\n[machines.box]\nkind = \"ssh\"\nhost = \"box\"\n"
+    ))
+    .unwrap();
+    let Some(Machine::Ssh {
+        workspace_prefix, ..
+    }) = config.machines.get("box")
+    else {
+        panic!("an SSH machine");
+    };
+    assert_eq!(workspace_prefix, Path::new(LEGACY_WORKSPACE_PREFIX));
+    assert_eq!(LEGACY_WORKSPACE_PREFIX, ".local/share/hel/workspaces");
+    assert_eq!(DEFAULT_WORKSPACE_PREFIX, ".local/share/mjolnir/workspaces");
+}
+
 fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessProfile {
     fs::write(
         home.join("config.toml"),
