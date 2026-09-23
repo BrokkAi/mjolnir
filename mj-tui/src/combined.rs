@@ -1411,15 +1411,15 @@ fn render_empty_prompt_advice(
         ),
         EmptyConversation::Opening => (
             " Opening session ",
-            [
-                format!("Opening session{}", theme::glyphs().ellipsis),
+            [format!("Opening session{}", theme::glyphs().ellipsis), {
+                let separator = theme::glyphs().footer_separator;
                 match dashboard.first_key_label(crate::CommandId::QuitDetach) {
-                    Some(detach) => {
-                        format!("Esc cancels · select another session to switch · {detach} quits")
-                    }
-                    None => "Esc cancels · select another session to switch".to_owned(),
-                },
-            ],
+                    Some(detach) => format!(
+                        "Esc cancels{separator}select another session to switch{separator}{detach} quits"
+                    ),
+                    None => format!("Esc cancels{separator}select another session to switch"),
+                }
+            }],
         ),
         EmptyConversation::Failed => (
             " Session failed ",
@@ -1758,6 +1758,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Launch campaign finding A-15: the "Opening session" advice kept a
+    /// hard-coded "·" in ASCII symbol mode.
+    #[test]
+    fn the_opening_advice_uses_the_symbol_set_in_force() {
+        let dashboard = dashboard_with_session(running_session());
+        let lines = theme::with_symbols(theme::SymbolSet::Ascii, || {
+            let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_empty_prompt_advice(
+                        frame,
+                        frame.area(),
+                        false,
+                        EmptyConversation::Opening,
+                        &dashboard,
+                    );
+                })
+                .unwrap();
+            buffer_lines(terminal.backend().buffer())
+        });
+        let text = lines.join("\n");
+        assert!(text.contains("Esc cancels"), "{text}");
+        assert!(text.is_ascii(), "{text}");
     }
 
     #[test]

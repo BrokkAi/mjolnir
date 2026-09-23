@@ -114,6 +114,9 @@ impl TranscriptScrollbarState {
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     theme: theme::UiTheme,
+    /// Whether the rows were drawn with the ASCII symbol set; a change of
+    /// set redraws them, like a change of palette.
+    ascii: bool,
     width: u16,
     mode: TranscriptRenderMode,
     entries: Vec<Option<CachedEntry>>,
@@ -385,8 +388,13 @@ fn prepare_render_cache(
 ) {
     let mode_changed = cache.mode != mode;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
-    if cache.width != width || mode_changed || cache.theme != theme::current() {
+    if cache.width != width
+        || mode_changed
+        || cache.theme != theme::current()
+        || cache.ascii != theme::ascii()
+    {
         cache.theme = theme::current();
+        cache.ascii = theme::ascii();
         cache.width = width;
         cache.mode = mode;
         cache.entries.clear();
@@ -471,6 +479,7 @@ impl Default for TranscriptRenderCache {
     fn default() -> Self {
         Self {
             theme: theme::current(),
+            ascii: theme::ascii(),
             width: 0,
             mode: TranscriptRenderMode::Rich,
             entries: Vec::new(),

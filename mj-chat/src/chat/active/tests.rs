@@ -3088,3 +3088,18 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
     );
     assert_eq!(chat.state.submit_input(), ChatAction::None);
 }
+
+/// Launch campaign finding A-15: switching Setup's symbols to ASCII left an
+/// open transcript drawn with `❯` until a restart, because its row cache
+/// was kept across the change. The next draw uses the new symbols.
+#[test]
+fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
+    use crate::theme::{SymbolSet, with_symbols};
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::User, "hello there"));
+    let unicode = with_symbols(SymbolSet::Unicode, || drawn_transcript(&mut chat, 60, 12));
+    assert!(unicode.iter().any(|row| row.contains('❯')), "{unicode:#?}");
+    let ascii = with_symbols(SymbolSet::Ascii, || drawn_transcript(&mut chat, 60, 12));
+    assert!(ascii.iter().all(|row| !row.contains('❯')), "{ascii:#?}");
+}

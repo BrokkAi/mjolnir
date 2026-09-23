@@ -272,7 +272,8 @@ impl DashboardContext {
             .map(|key| format!("; {key} quits"))
             .unwrap_or_default();
         self.dashboard.set_notice(format!(
-            "Opening session… Esc cancels; select another session to switch{detach}."
+            "Opening session{} Esc cancels; select another session to switch{detach}.",
+            mj_chat::theme::glyphs().ellipsis
         ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();
