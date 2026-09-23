@@ -312,63 +312,44 @@ jobs:
             brokk-mjolnir-*.tar.gz.sha256
           if-no-files-found: error
 
-  build-macos:
-    name: Build ${{ matrix.target }}
-    needs: verify-version
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.96.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Build native binaries
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop -p brokk-mj-voice-worker --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: native-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/mj
-            target/${{ matrix.target }}/release/mj-worker
-            target/${{ matrix.target }}/release/mj-desktop
-            target/${{ matrix.target }}/release/mj-voice-worker
-          if-no-files-found: error
-
   package-macos:
     name: Package macOS universal
-    needs: [build-macos, build-worker-x64, build-worker-arm64, release-notices]
+    needs: [verify-version, build-worker-x64, build-worker-arm64, release-notices]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          pattern: native-*-apple-darwin
-          path: native
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build native binaries
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop -p brokk-mj-voice-worker --target "$target"
+          done
 
       - name: Create universal binary
         run: |
           mkdir -p target/universal-apple-darwin/release
           lipo -create \
-            native/native-x86_64-apple-darwin/mj \
-            native/native-aarch64-apple-darwin/mj \
+            target/x86_64-apple-darwin/release/mj \
+            target/aarch64-apple-darwin/release/mj \
             -output target/universal-apple-darwin/release/mj
           lipo -info target/universal-apple-darwin/release/mj
           lipo -create \
-            native/native-x86_64-apple-darwin/mj-worker \
-            native/native-aarch64-apple-darwin/mj-worker \
+            target/x86_64-apple-darwin/release/mj-worker \
+            target/aarch64-apple-darwin/release/mj-worker \
             -output target/universal-apple-darwin/release/mj-worker
           lipo -info target/universal-apple-darwin/release/mj-worker
           lipo -create \
-            native/native-x86_64-apple-darwin/mj-desktop \
-            native/native-aarch64-apple-darwin/mj-desktop \
+            target/x86_64-apple-darwin/release/mj-desktop \
+            target/aarch64-apple-darwin/release/mj-desktop \
             -output target/universal-apple-darwin/release/mj-desktop
           lipo -info target/universal-apple-darwin/release/mj-desktop
           lipo -create \
-            native/native-x86_64-apple-darwin/mj-voice-worker \
-            native/native-aarch64-apple-darwin/mj-voice-worker \
+            target/x86_64-apple-darwin/release/mj-voice-worker \
+            target/aarch64-apple-darwin/release/mj-voice-worker \
             -output target/universal-apple-darwin/release/mj-voice-worker
           lipo -info target/universal-apple-darwin/release/mj-voice-worker
 
