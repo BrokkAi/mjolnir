@@ -256,6 +256,21 @@ pub(super) fn project_observation(
                         close_streams(index, mutation, event.recorded_at_ms);
                         mutation.execution = Some(MaterializedExecutionState::Idle);
                     }
+                    // A cancelled turn's reply stops mid-sentence; mark where
+                    // it ended so it does not read as a finished reply.
+                    if mj_core::state::classify_prompt_completion(stop_reason)
+                        == mj_core::state::PromptCompletion::Cancelled
+                    {
+                        push_system_with_id(
+                            mutation,
+                            event,
+                            format!(
+                                "{}{command_id}",
+                                mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
+                            ),
+                            mj_core::transcript::TURN_INTERRUPTED_TEXT,
+                        );
+                    }
                     let active = current
                         .active_turn
                         .as_ref()

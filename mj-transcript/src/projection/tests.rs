@@ -535,6 +535,50 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
 }
 
+/// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
+/// reader can tell a cut-off reply from a finished one. A finished turn gets
+/// no such row.
+#[test]
+fn a_cancelled_turn_ends_with_an_interrupted_row() {
+    for (stop_reason, marked) in [("cancelled", true), ("end_turn", false)] {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("write a story")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt".into(),
+                started_at_ms: 20,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "prompt".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: stop_reason.into(),
+                    usage: None,
+                    diagnostic: None,
+                },
+            },
+        );
+        let last = session.transcript.last().expect("a transcript row");
+        let is_marker = matches!(
+            &last.body,
+            TranscriptBody::System { text } if text == crate::transcript::TURN_INTERRUPTED_TEXT
+        );
+        assert_eq!(is_marker, marked, "{stop_reason}: {:?}", session.transcript);
+    }
+}
+
 #[test]
 fn session_restarts_project_as_distinct_durable_system_lines() {
     let mut session = MaterializedSession::empty("session");
