@@ -25,6 +25,10 @@ pub(crate) struct PaneMenu {
     form: RefCell<Dialog<usize>>,
     destinations: bool,
     pressed_destination: Option<usize>,
+    /// Where the menu was last drawn. The empty-pane chooser lies inside a
+    /// destination pane, so a click on the menu must not count as a click
+    /// on the pane beneath it.
+    popup: std::cell::Cell<Rect>,
 }
 
 impl DashboardState {
@@ -54,6 +58,7 @@ impl DashboardState {
             form: RefCell::new(form),
             destinations,
             pressed_destination: None,
+            popup: std::cell::Cell::new(Rect::default()),
         });
     }
 
@@ -139,6 +144,7 @@ impl DashboardState {
         let mut direct = None;
         if menu.destinations
             && let Event::Mouse(mouse) = &event
+            && !rect_contains(menu.popup.get(), mouse.column, mouse.row)
         {
             let hit = menu
                 .entries
@@ -346,12 +352,32 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
         return;
     };
     let popup = if menu.destinations {
-        Rect::new(
-            area.x,
-            area.y,
-            area.width.min(44),
-            area.height.min(menu.entries.len() as u16 + 2),
-        )
+        // Open inside the first destination pane, under its "[1] Pin here"
+        // marker, so the chooser sits beside the panes it names; without a
+        // drawn pane, centre it like any other menu.
+        let width = area.width.min(44);
+        let height = area.height.min(menu.entries.len() as u16 + 2);
+        let anchor = menu.entries.iter().find_map(|(_, op)| match op {
+            PaneOperation::PinHere(_, pane) => dashboard
+                .conversation_pane_areas
+                .iter()
+                .find(|(id, _, _)| id == pane)
+                .map(|(_, transcript, _)| *transcript),
+            _ => None,
+        });
+        match anchor {
+            Some(transcript) => {
+                let x = (transcript.x + 1).min(area.right().saturating_sub(width));
+                let y = (transcript.y + 3).min(area.bottom().saturating_sub(height));
+                Rect::new(x.max(area.x), y.max(area.y), width, height)
+            }
+            None => Rect::new(
+                area.x + (area.width - width) / 2,
+                area.y + (area.height - height) / 2,
+                width,
+                height,
+            ),
+        }
     } else {
         let width = area.width.min(44);
         let height = area.height.min(menu.entries.len() as u16 + 2);
@@ -383,6 +409,7 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             }
         }
     }
+    menu.popup.set(popup);
     let mut form = menu.form.borrow_mut();
     let selected = form.selected(0).unwrap_or(0);
     form.begin_frame();
@@ -507,6 +534,64 @@ mod tests {
             }
         );
         assert!(d.pane_menu.is_none());
+    }
+
+    /// Launch campaign finding D-10: the empty-pane chooser opens in the
+    /// empty pane, under its "[1] Pin here" marker, not at the screen's
+    /// top-left corner over the Workspaces pane.
+    #[test]
+    fn the_empty_pane_chooser_opens_inside_the_empty_pane() {
+        let mut d = dashboard_with_session(running_session());
+        d.conversation_area = Some(Rect::new(0, 0, 120, 40));
+        let empty = d.browse_pane();
+        d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.set_pane_session(empty, None);
+        d.conversation_pane_areas =
+            vec![(empty, Rect::new(46, 0, 74, 30), Rect::new(46, 30, 74, 10))];
+        d.begin_pin_menu("session-1".into());
+        d.handle_key(key(KeyCode::Char('3')));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (0..40)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let marker = rows
+            .iter()
+            .position(|row| row.contains("[1] Pin here"))
+            .expect("marker");
+        let title = rows
+            .iter()
+            .position(|row| row.contains("Choose empty pane"))
+            .expect("chooser");
+        assert!(title > marker, "{rows:#?}");
+        let column = (0..120u16)
+            .find(|&x| buffer[(x, u16::try_from(title).unwrap())].symbol() != " ")
+            .map(usize::from)
+            .expect("chooser border");
+        assert!(column >= 46, "{rows:#?}");
+        // A click on the chooser's own entry picks it through the menu even
+        // though the chooser lies inside the pane.
+        let entry = (
+            u16::try_from(column).unwrap() + 3,
+            u16::try_from(title).unwrap() + 1,
+        );
+        let action = d.handle_pane_menu_event(Event::Mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Left),
+            entry,
+        )));
+        assert!(
+            d.pane_menu
+                .as_ref()
+                .is_none_or(|menu| menu.pressed_destination.is_none()),
+            "{action:?}"
+        );
     }
 
     #[test]
