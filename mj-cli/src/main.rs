@@ -143,6 +143,31 @@ enum Command {
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
+    /// Removed; kept so the old name says what replaced it.
+    #[command(hide = true)]
+    Close(RemovedCommandArgs),
+    /// Removed; kept so the old name says what replaced it.
+    #[command(hide = true)]
+    CancelTurn(RemovedCommandArgs),
+}
+
+/// Whatever was passed to a removed command. It is accepted only so the
+/// command can name its replacement instead of failing on its arguments.
+#[derive(Debug, Args)]
+struct RemovedCommandArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    rest: Vec<String>,
+}
+
+/// What a removed command was replaced by, for a command that was removed.
+fn replacement_notice(command: Option<&Command>) -> Option<&'static str> {
+    match command {
+        Some(Command::Close(_)) => Some("`mj close` was replaced by `mj suspend` and `mj destroy`"),
+        Some(Command::CancelTurn(_)) => {
+            Some("`mj cancel-turn` was replaced by `mj interrupt-turn`")
+        }
+        _ => None,
+    }
 }
 
 /// `mj workspaces` on its own opens the workspace manager in the dashboard, as
@@ -323,6 +348,11 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
+    if let Some(notice) = replacement_notice(cli.command.as_ref()) {
+        // Exit 2, the status clap uses for a usage error, which this is.
+        eprintln!("error: {notice}");
+        std::process::exit(2);
+    }
     // Apply before logging, daemon startup, or any path lookup: everything
     // derives its directories from the instance environment, and the daemon
     // child inherits it. This also covers `daemon-run`, which is this same
@@ -443,6 +473,8 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
+        Some(Command::Close(_)) => "close",
+        Some(Command::CancelTurn(_)) => "cancel-turn",
     }
 }
 
@@ -496,7 +528,9 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Acp(args)) => acp::serve(args, requested_workspace).await.map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => acp::serve(args, requested_workspace)
+            .await
+            .map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {
@@ -577,6 +611,10 @@ async fn run_command(
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)
             .await
             .map(|()| DashboardExit::Normal),
+        // Answered in `main` before anything starts.
+        Some(command @ (Command::Close(_) | Command::CancelTurn(_))) => {
+            bail!("{}", replacement_notice(Some(&command)).unwrap_or_default())
+        }
     }
 }
 
@@ -1611,6 +1649,33 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use mj_core::state::{SessionRecord, SessionState, State};
+
+    /// F-10: the removed names got clap's generic "unrecognized subcommand".
+    #[test]
+    fn a_removed_command_names_its_replacement_whatever_it_was_given() {
+        for (argv, replacement) in [
+            (
+                vec!["mj", "close", "--session", "s1"],
+                "`mj suspend` and `mj destroy`",
+            ),
+            (vec!["mj", "close"], "`mj suspend` and `mj destroy`"),
+            (
+                vec!["mj", "cancel-turn", "--session", "s1"],
+                "`mj interrupt-turn`",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("the old name still parses");
+            let notice = replacement_notice(cli.command.as_ref()).expect("a notice");
+            assert!(notice.contains(replacement), "{argv:?}: {notice}");
+        }
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        assert!(
+            !help.contains("cancel-turn"),
+            "the old names stay out of --help"
+        );
+    }
 
     #[test]
     fn the_verification_reads_which_credential_claude_code_actually_used() {
