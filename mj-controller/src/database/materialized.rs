@@ -652,6 +652,257 @@ pub(super) fn compact_materialized_transcript_in(
 /// of them would show.
 pub const PROJECTION_TAIL_ITEMS: usize = 1_024;
 
+/// Load the same safe window the live projector maintains, without first
+/// deserializing all of the conversation. Read metadata and bodies together.
+pub fn load_materialized_actor_projection(
+    session_id: &str,
+) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
+    load_materialized_actor_projection_from(&database_path(), session_id)
+}
+
+pub(super) fn load_materialized_actor_projection_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+        return Ok(None);
+    };
+    let latest_turn = last_materialized_turn_start(&connection, session_id)?;
+    let desired: Option<u64> = connection
+        .query_row(
+            "SELECT position FROM materialized_transcript_items WHERE session_id=?1
+         ORDER BY position DESC, stable_id DESC LIMIT 1 OFFSET ?2",
+            params![session_id, PROJECTION_TAIL_ITEMS - 1],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // Pending tools and streams can outlive their initiating turn. Keep their
+    // turn too; the same rule is applied by ProjectionWindow::trim.
+    let mutable: Option<u64> = connection.query_row(
+        "SELECT MIN(position) FROM materialized_transcript_items WHERE session_id=?1
+         AND (json_extract(body_json, '$.streaming')=1
+              OR (json_extract(body_json, '$.kind')='tool'
+                  AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    let boundary = desired
+        .unwrap_or(0)
+        .min(latest_turn.unwrap_or(0))
+        .min(mutable.unwrap_or(u64::MAX));
+    let start: u64 = connection.query_row(
+        "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
+         WHERE session_id=?1 AND position<=?2
+         AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')",
+        params![session_id, boundary],
+        |row| row.get(0),
+    )?;
+    let transcript = read_transcript_range(&connection, session_id, start, None, None)?;
+    let omitted_items = connection.query_row(
+        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1 AND position<?2",
+        params![session_id, start],
+        |row| row.get(0),
+    )?;
+    let window = ProjectionWindow {
+        omitted_items,
+        provisional_title: first_materialized_user_message(&connection, session_id)?
+            .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
+        latest_turn_start_position: latest_turn,
+    };
+    let materialized = MaterializedSession {
+        session_id: session_id.to_owned(),
+        applied_event_ordinal: fields.applied_event_ordinal,
+        applied_event_digest: fields.applied_event_digest,
+        last_activity_at_ms: fields.last_activity_at_ms,
+        execution: fields.execution,
+        session_title: fields.session_title,
+        configuration: fields.configuration,
+        transcript,
+        queued_prompts: read_materialized_queued_prompts(&connection, session_id)?,
+        pending_elicitations: fields.pending_elicitations,
+        active_turn: fields.active_turn,
+        last_turn_outcome: fields.last_turn_outcome,
+    };
+    materialized.validate()?;
+    Ok(Some((materialized, window)))
+}
+
+pub fn load_transcript_history(
+    session_id: &str,
+    before: Option<&mj_core::storage::TranscriptCursor>,
+    limit: usize,
+) -> Result<Option<mj_core::storage::TranscriptHistoryPage>> {
+    load_transcript_history_from(&database_path(), session_id, before, limit)
+}
+
+pub(super) fn load_transcript_history_from(
+    path: &Path,
+    session_id: &str,
+    before: Option<&mj_core::storage::TranscriptCursor>,
+    limit: usize,
+) -> Result<Option<mj_core::storage::TranscriptHistoryPage>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+        return Ok(None);
+    };
+    let limit = limit.clamp(1, 256);
+    let mut items = read_transcript_range(&connection, session_id, 0, before, Some(limit + 1))?;
+    let has_more = items.len() > limit;
+    if has_more {
+        items.remove(0);
+    }
+    let before = has_more.then(|| mj_core::storage::TranscriptCursor::of(&items[0]));
+    Ok(Some(mj_core::storage::TranscriptHistoryPage {
+        items,
+        before,
+        frontier: fields.applied_event_ordinal,
+    }))
+}
+
+fn read_transcript_range(
+    connection: &Connection,
+    session_id: &str,
+    start: u64,
+    before: Option<&mj_core::storage::TranscriptCursor>,
+    limit: Option<usize>,
+) -> Result<Vec<Arc<TranscriptItem>>> {
+    let mut statement = connection.prepare(
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json FROM materialized_transcript_items
+         WHERE session_id=?1 AND position>=?2
+           AND (position,stable_id)<(?3,?4)
+         ORDER BY position DESC, stable_id DESC LIMIT ?5",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                session_id,
+                start,
+                before.map_or(i64::MAX as u64, |c| c.position),
+                before.map_or("", |c| c.stable_id.as_str()),
+                limit.map_or(-1, |limit| limit as i64)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, Option<u64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = rows
+        .into_iter()
+        .map(
+            |(
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body,
+            )| {
+                Ok(Arc::new(TranscriptItem {
+                    stable_id,
+                    position,
+                    latest_content_event_ordinal,
+                    created_at_ms,
+                    last_changed_at_ms,
+                    body: decode_transcript_body(&body, session_id)?,
+                }))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    items.reverse();
+    Ok(items)
+}
+
+/// Rehydrate explicitly referenced historical tools before deriving a delta.
+/// A window is a cache, never evidence that a durable tool does not exist.
+pub fn load_projection_references(
+    projection: &MaterializedSession,
+    events: &[mj_core::relay::RelayEvent],
+) -> Result<Vec<Arc<TranscriptItem>>> {
+    load_projection_references_from(&database_path(), projection, events)
+}
+
+pub(super) fn load_projection_references_from(
+    path: &Path,
+    projection: &MaterializedSession,
+    events: &[mj_core::relay::RelayEvent],
+) -> Result<Vec<Arc<TranscriptItem>>> {
+    let (mut ids, terminals) = mj_transcript::projection::historical_references(events)?;
+    let retained = projection
+        .transcript
+        .iter()
+        .map(|item| item.stable_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    ids.retain(|id| !retained.contains(id.as_str()));
+    if ids.is_empty() && terminals.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    // Ordinary tool updates use the stable-ID index. Only terminal attachment
+    // events need the JSON reverse-reference scan.
+    let mut parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];
+    let mut statement = connection.prepare(if terminals.is_empty() {
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json FROM materialized_transcript_items
+         WHERE session_id=?1 AND stable_id IN (SELECT value FROM json_each(?2))
+         ORDER BY position,stable_id"
+    } else {
+        parameters.push(serde_json::to_string(&retained)?);
+        parameters.push(serde_json::to_string(&terminals)?);
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json FROM materialized_transcript_items
+         WHERE session_id=?1 AND stable_id NOT IN (SELECT value FROM json_each(?3))
+           AND (stable_id IN (SELECT value FROM json_each(?2))
+             OR EXISTS(SELECT 1 FROM json_each(body_json, '$.terminal_refs')
+                       WHERE value IN (SELECT value FROM json_each(?4))))
+         ORDER BY position,stable_id"
+    })?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(
+                stable_id,
+                position,
+                latest_content_event_ordinal,
+                created_at_ms,
+                last_changed_at_ms,
+                body,
+            )| {
+                Ok(Arc::new(TranscriptItem {
+                    stable_id,
+                    position,
+                    latest_content_event_ordinal,
+                    created_at_ms,
+                    last_changed_at_ms,
+                    body: decode_transcript_body(&body, &projection.session_id)?,
+                }))
+            },
+        )
+        .collect()
+}
+
 /// Load a projection carrying only the end of its transcript.
 ///
 /// The steady-state poll reloads a session's projection every time anything

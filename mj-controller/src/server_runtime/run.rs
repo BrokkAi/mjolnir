@@ -627,7 +627,7 @@ pub async fn run_server(
                         let pending = materialized.pending_elicitations.clone();
                         let active_shells = operational_state.active_user_shells.clone();
                         let prompt_images_supported =
-                            agent_accepts_prompt_images(&operational_state);
+                            operational_state.accepts_prompt_images();
                         active_user_shells.insert(
                             update.session_id.clone(),
                             active_shells,

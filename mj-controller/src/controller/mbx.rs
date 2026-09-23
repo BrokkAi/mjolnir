@@ -19,17 +19,17 @@ use sha2::{Digest, Sha256};
 
 use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
-use mj_core::config::{BuildCacheConfig, TargetBuildCache};
+use mj_core::config::{BuildCacheConfig, Config, TargetBuildCache, TargetTemplate};
 use mj_core::state::{
     BuildCacheLimit, BuildCacheOff, BuildCachePreview, BuildCacheStats, SessionBuildCache,
 };
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
-pub(super) const MBX_VERSION: &str = "1.15.0";
+pub(crate) const MBX_VERSION: &str = "1.16.0";
 
-const MBX_X86_64_SHA256: &str = "bf9fcc7ed39e4923588f6c25a781aa59eb466fec347102a3bb1a0c2acd12ebf8";
-const MBX_AARCH64_SHA256: &str = "d0bb6c0eb4b4ba9abed39516ab769ca62429e3e47b548848ac40becee6870c2a";
+const MBX_X86_64_SHA256: &str = "be74eb96c62e774d90e8e036ed3d5541bde682802b11dfb1bf340d57276f5ab1";
+const MBX_AARCH64_SHA256: &str = "01cce632e7bacacd78935226e778c5199f6942a55789645eb3e56c662f448792";
 
 /// Overrides the download with a local mbx binary for the current machine's
 /// architecture. Used for development against an unreleased mbx.
@@ -203,6 +203,88 @@ pub fn preview_build_cache(
     let settings = machine.build_cache().cloned().unwrap_or_default();
     inspect(&host, &settings, global, Freshness::Fresh, executor)
         .map(|inspection| Some(inspection.preview))
+}
+
+/// Native mbx compatibility for a host used by configured container targets.
+pub(crate) struct DoctorHostMbx {
+    pub host: String,
+    pub targets: Vec<String>,
+    pub status: DoctorHostMbxStatus,
+}
+
+pub(crate) enum DoctorHostMbxStatus {
+    Absent,
+    Compatible(String),
+    TooOld(String),
+    Unknown(String),
+}
+
+/// Check each relevant host once. The cache is optional, so disabled caches
+/// and hosts with no Podman or Docker target need no compatibility check.
+pub(crate) fn doctor_host_mbx(
+    config: &Config,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorHostMbx> {
+    let mut hosts: std::collections::BTreeMap<String, (CacheHost, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    let mut checks = Vec::new();
+    if !config.build_cache.enabled {
+        return checks;
+    }
+    for (id, target) in &config.targets {
+        let container = match target {
+            TargetTemplate::LocalPodman { container }
+            | TargetTemplate::LocalDocker { container }
+            | TargetTemplate::SshPodman { container, .. }
+            | TargetTemplate::SshDocker { container, .. } => container,
+            _ => continue,
+        };
+        if container
+            .build_cache
+            .as_ref()
+            .and_then(|cache| cache.enabled)
+            == Some(false)
+        {
+            continue;
+        }
+        match CacheHost::for_path_target(target) {
+            Ok(host) => {
+                let key = host.key();
+                hosts
+                    .entry(key)
+                    .or_insert_with(|| (host, Vec::new()))
+                    .1
+                    .push(id.clone());
+            }
+            Err(error) => checks.push(DoctorHostMbx {
+                host: id.clone(),
+                targets: vec![id.clone()],
+                status: DoctorHostMbxStatus::Unknown(format!("{error:#}")),
+            }),
+        }
+    }
+    checks.extend(hosts.into_iter().map(|(key, (host, targets))| {
+        let status = match probe_native_version(&host, executor) {
+            Ok(None) => DoctorHostMbxStatus::Absent,
+            Ok(Some(native)) if semver::Version::parse(&native.version).is_err() => {
+                DoctorHostMbxStatus::Unknown(format!(
+                    "the host reported an unrecognized mbx version {:?}",
+                    native.version
+                ))
+            }
+            Ok(Some(native)) if version_at_least(&native.version, MBX_VERSION) => {
+                DoctorHostMbxStatus::Compatible(native.version)
+            }
+            Ok(Some(native)) => DoctorHostMbxStatus::TooOld(native.version),
+            Err(error) => DoctorHostMbxStatus::Unknown(format!("{error:#}")),
+        };
+        DoctorHostMbx {
+            host: key,
+            targets,
+            status,
+        }
+    }));
+    checks
 }
 
 /// Everything the host says about a target's build cache, read without
@@ -424,22 +506,41 @@ exit 1"#;
 /// The host's own mbx, or `None` when neither `PATH` nor `~/.cargo/bin`
 /// has one.
 fn native_version(host: &CacheHost, executor: &impl CommandExecutor) -> Option<NativeMbx> {
+    probe_native_version(host, executor).ok().flatten()
+}
+
+fn probe_native_version(
+    host: &CacheHost,
+    executor: &impl CommandExecutor,
+) -> Result<Option<NativeMbx>> {
     let command = host.shell_command(
         NATIVE_VERSION_SCRIPT,
         LABEL,
         [],
         "read the container host mbx version",
     );
-    let output = executor.execute(&command).ok()?;
-    if output.status != 0 {
-        return None;
+    let output = executor.execute(&command)?;
+    if output.status == 1 {
+        return Ok(None);
     }
+    ensure!(
+        output.status == 0,
+        "mbx version probe exited with status {}",
+        output.status
+    );
     let text = String::from_utf8_lossy(&output.stdout);
-    let (program, version) = text.trim().split_once('\n')?;
-    Some(NativeMbx {
+    let (program, version) = text
+        .trim()
+        .split_once('\n')
+        .context("mbx version probe gave no version")?;
+    let version = version
+        .split_whitespace()
+        .next_back()
+        .context("mbx version probe gave an empty version")?;
+    Ok(Some(NativeMbx {
         program: program.to_owned(),
-        version: version.split_whitespace().next_back()?.to_owned(),
-    })
+        version: version.to_owned(),
+    }))
 }
 
 /// The host's own cache directory. `mbx cache dir` prints the store, which is
@@ -912,14 +1013,21 @@ pub(super) fn attach_mounts_for_tests(
     attach_mounts(build_cache, mounts)
 }
 
-/// The host's mbx configuration file for this target, read through the cached
-/// resolution so the worker install does not repeat the host commands.
+/// Read the configuration on the host that actually owns this container.
+/// The named template may have been removed or reassigned since creation.
 pub(super) fn host_configuration(
-    target: &targets::TargetTemplate,
-    global: &BuildCacheConfig,
+    target: &targets::TargetLocator,
     executor: &impl CommandExecutor,
-) -> Option<String> {
-    resolve(target, global, executor)?.config_file
+) -> Result<Option<String>> {
+    let host = match target {
+        targets::TargetLocator::LocalPodman { .. }
+        | targets::TargetLocator::LocalDocker { .. }
+        | targets::TargetLocator::AppleContainer { .. } => CacheHost::Local,
+        targets::TargetLocator::SshPodman { ssh, .. }
+        | targets::TargetLocator::SshDocker { ssh, .. } => CacheHost::Ssh(ssh.clone()),
+        _ => return Ok(None),
+    };
+    host_config_file(&host, executor)
 }
 
 #[cfg(test)]
@@ -1035,10 +1143,37 @@ mod tests {
     }
 
     #[test]
+    fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
+        let executor = ProbeExecutor::new(&[
+            ("$HOME", 0, "/home/builder"),
+            ("[ -f \"$1\" ]", 0, "[gc]\nmax_total_size = '50GB'\n"),
+        ]);
+        let target = targets::TargetLocator::SshPodman {
+            ssh: SshTarget {
+                destination: "builder@recorded-cache.test".into(),
+                ssh_args: vec![],
+            },
+            container_id: "saved-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let config = host_configuration(&target, &executor).unwrap().unwrap();
+        assert!(config.contains("50GB"));
+        assert!(
+            executor
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|command| command.contains("builder@recorded-cache.test"))
+        );
+    }
+
+    #[test]
     fn a_native_mbx_supplies_the_cache_directory_and_its_own_limits() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1106,7 +1241,7 @@ mod tests {
     fn a_relocated_target_root_is_reported_for_its_own_mount() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1134,7 +1269,7 @@ mod tests {
     fn a_target_root_that_cannot_be_cloned_into_still_gets_the_cache() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1184,7 +1319,7 @@ mod tests {
         let _isolated = isolated();
         let mut answers = plain_host();
         answers.retain(|(needle, _, _)| *needle != "$m\" --version");
-        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.15.0"));
+        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.16.0"));
         answers.push((
             "/home/dev/.cargo/bin/mbx cache dir --json",
             0,
@@ -1198,7 +1333,7 @@ mod tests {
     #[test]
     fn an_older_native_mbx_must_not_share_the_store() {
         let _isolated = isolated();
-        let executor = ProbeExecutor::new(&[("$m\" --version", 0, "mbx\nmbx 1.11.9")]);
+        let executor = ProbeExecutor::new(&[("$m\" --version", 0, "mbx\nmbx 1.15.0")]);
         assert_eq!(
             resolve(&podman(None), &BuildCacheConfig::default(), &executor),
             None
@@ -1315,7 +1450,7 @@ mod tests {
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
 
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1334,7 +1469,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some("1.15.0"));
+        assert_eq!(preview.native_mbx.as_deref(), Some("1.16.0"));
         assert_eq!(
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))

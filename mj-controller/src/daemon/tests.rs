@@ -836,6 +836,7 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         container_workspace: None,

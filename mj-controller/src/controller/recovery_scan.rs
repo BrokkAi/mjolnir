@@ -199,6 +199,8 @@ impl Controller {
                     workspace_id,
                     candidate.locator,
                 );
+                record.target_runtime =
+                    Some(record.target_runtime_settings(&self.config)?.into_owned());
                 record.container_workspace = container_workspace;
                 (record, true)
             }
@@ -508,6 +510,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         mjolnir_subagents: None,

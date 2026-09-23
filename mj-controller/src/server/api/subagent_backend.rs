@@ -6,6 +6,20 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn transcript_history(
+        &self,
+        session_id: String,
+        before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::TranscriptHistoryPage>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_transcript_history(&session_id, before.as_ref(), 128)?
+                    .context("session history is unavailable")
+            })
+            .await?
+        })
+    }
+
     fn native_agent_history(
         &self,
         owner: String,

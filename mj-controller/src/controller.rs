@@ -73,6 +73,7 @@ pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 pub use mbx::preview_build_cache;
+pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
 pub(crate) use worker_binary::refresh_target_worker_binary_if_stale;
 pub(crate) use worktree::path_exists_on_managed_target;
@@ -497,11 +498,38 @@ impl Controller {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }
-        Ok(Self { config, state })
+        let mut controller = Self { config, state };
+        controller.backfill_target_runtime()?;
+        Ok(controller)
     }
 
     pub fn reload(&mut self) -> Result<()> {
+        // Capture legacy settings from the previous config before a manual
+        // edit removes them. Only fill missing metadata, never overwrite it.
+        self.backfill_target_runtime()?;
         *self = Self::load()?;
+        Ok(())
+    }
+
+    fn backfill_target_runtime(&mut self) -> Result<()> {
+        for session in self.state.sessions.values_mut() {
+            if session.target_runtime.is_some() {
+                continue;
+            }
+            match session.target_runtime_settings(&self.config) {
+                Ok(runtime) => {
+                    let runtime = runtime.into_owned();
+                    session.target_runtime = crate::database::backfill_target_runtime(
+                        &session.id,
+                        &session.target_template_id,
+                        &runtime,
+                    )?;
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, %error, "target access needs configuration repair")
+                }
+            }
+        }
         Ok(())
     }
 
@@ -765,6 +793,7 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            target_runtime: Some(template.into()),
             build_cache: None,
             create_managed_worktree,
             launch_base,
@@ -1029,7 +1058,11 @@ impl Controller {
                 crate::database::rename_profile_references(&journal.old_id, &journal.new_id)?;
             }
             ConfigRenameKind::Target => {
-                Config::update(|config| {
+                // The file's own entries, not `Config::update`'s view: that one
+                // adds the standard local targets, so after a built-in id such
+                // as `localhost` was renamed away, its default would reappear
+                // beside the new id and read as a rename that cannot finish.
+                Config::update_to(&mj_core::config::config_path(), |config| {
                     finish_config_map_rename(
                         &mut config.targets,
                         &journal.old_id,

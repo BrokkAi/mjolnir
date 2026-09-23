@@ -505,6 +505,24 @@ async fn enqueue_chat_remote_operation(
                 );
                 return;
             }
+            if !normalized.is_empty()
+                && !session
+                    .view()
+                    .snapshot
+                    .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images())
+            {
+                publish_chat_remote_result(
+                    results,
+                    attached,
+                    ChatRemoteResult::Prompt {
+                        command_id,
+                        text,
+                        images: normalized,
+                        result: Err(super::input_state::IMAGE_CAPABILITY_NOTICE.into()),
+                    },
+                );
+                return;
+            }
             let response = session.enqueue_submit(command_id.clone(), command).await;
             match response {
                 Ok(response) => {
@@ -1396,6 +1414,28 @@ mod tests {
     #[tokio::test]
     async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
         let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
+        let materialized = mj_core::state::MaterializedSession::empty("image-session");
+        let mut operational =
+            mj_core::relay::RelaySnapshot::new("image-session".into()).operational_state();
+        operational.agent_capabilities = Some(Box::new(
+            serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}}))
+                .unwrap(),
+        ));
+        fixture
+            .replacement_view
+            .send_replace(mj_client::session::ManagedSessionView {
+                connected: true,
+                error: None,
+                snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+                    window: mj_core::state::ProjectionWindow::of(&materialized),
+                    materialized,
+                    operational,
+                    latest_credential_sync_signal: None,
+                    worker_build: None,
+                    subagent_requests: Vec::new(),
+                    subagent_results: Vec::new(),
+                }),
+            });
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
         let image = valid_image();
         let mut normalized_image = None;
@@ -1445,6 +1485,35 @@ mod tests {
             assert_eq!(images[0].image.reference.as_ref(), Some(&reference));
             normalized_image = Some(images[0].image.clone());
         }
+        // The supervisor must consult the latest view, even if the composer
+        // queued the image while support was still advertised.
+        fixture.replacement_view.send_modify(|view| {
+            view.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .agent_capabilities = None;
+        });
+        let revoked = PromptPayload::with_image("keep this draft", image.clone());
+        remote
+            .operations()
+            .send(ChatRemoteOperation::Prompt {
+                command_id: "capability-revoked".into(),
+                text: revoked.text.clone(),
+                images: revoked.images.clone(),
+            })
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), remote.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, ChatRemoteResult::Prompt { text, images, result: Err(error), .. }
+            if text == revoked.text && images.len() == 1 && error.contains("advertised image support"))
+        );
+        assert!(fixture.submitted.try_recv().is_err());
+
         let huge =
             PromptPayload::with_image("x".repeat(mj_core::relay::RELAY_COMMAND_BYTE_BUDGET), image);
         remote

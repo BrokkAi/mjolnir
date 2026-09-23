@@ -45,6 +45,9 @@ impl ChatState {
     }
 
     pub(super) fn handle_terminal_paste(&mut self, pasted: &str) -> ChatAction {
+        if self.earlier.is_some() {
+            return ChatAction::None;
+        }
         if pasted.is_empty() {
             // Terminals signal non-text clipboard content (such as images)
             // with an empty bracketed paste. Respect the same modal routing
@@ -340,6 +343,7 @@ mod tests {
     #[test]
     fn control_k_and_control_y_round_trip_a_line_holding_an_image_marker() {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("before\nafter".into());
         chat.handle_key(ctrl('a'));
         assert!(chat.reserve_attachment(0));

@@ -176,33 +176,6 @@ jobs:
       if: runner.os == 'macOS'
       run: cargo test --locked -p brokk-mj-desktop
 
-  cli-release:
-    name: CLI release build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - os: ubuntu-latest
-          target: x86_64-unknown-linux-gnu
-        - os: windows-latest
-          target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    env:
-      CARGO_BUILD_TARGET: ${{ matrix.target }}
-    steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@1.96.0
-      with:
-        targets: ${{ matrix.target }}
-    - uses: ./.github/actions/cache-rust
-      with:
-        lane: cli-release-${{ matrix.target }}
-        build-paths: |
-          target/release
-          target/${{ matrix.target }}/release
-    - name: Build Mjolnir
-      run: cargo build --release
-
   portable-worker:
     name: Portable worker (x86_64-unknown-linux-musl)
     runs-on: ubuntu-latest

@@ -282,7 +282,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 }
 
 #[test]
-fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies() {
+fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_all_policies() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
@@ -320,10 +320,10 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         meta.pointer("/claudeCode/options/perTaskStopAffordance"),
         Some(&serde_json::Value::Bool(true))
     );
-    let filter = serde_json::json!([{
-        "type": "system",
-        "subtype": "background_tasks_changed",
-    }]);
+    let filter = serde_json::json!([
+        {"type": "system", "subtype": "background_tasks_changed"},
+        {"type": "result"},
+    ]);
     assert_eq!(
         meta.pointer("/claudeCode/emitRawSDKMessages"),
         Some(&filter)

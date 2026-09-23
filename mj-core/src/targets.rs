@@ -1950,7 +1950,10 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
     })
 }
 mod convert;
-pub use convert::{StoredTarget, TargetConversionError, ssh_args_with_identity};
+pub use convert::{
+    RecordedTarget, StoredTarget, TargetConversionError, locator_needs_connection,
+    ssh_args_with_identity,
+};
 
 mod ssh;
 pub use ssh::*;

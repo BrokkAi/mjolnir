@@ -4,6 +4,21 @@ use super::*;
 pub(super) struct ClientSessionHandle(pub(super) ManagedSessionHandle);
 
 impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
+    fn transcript_history(
+        &self,
+        before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::TranscriptHistoryPage>> {
+        let session_id = self.0.session_id().to_owned();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_transcript_history(&session_id, before.as_ref(), 128)?
+                    .context("session history is unavailable")
+            })
+            .await
+            .context("earlier conversation history task failed")?
+        })
+    }
+
     fn search_prompts(
         &self,
         bundle_id: String,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::chat::TurnControlIntent;
+use anyhow::Context;
 use mj_core::relay::RelayCommand;
 
 impl ActiveChat {
@@ -23,11 +24,54 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
+        self.dispatch_earlier_history();
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
             consumed: consumed || action.is_some(),
             action,
         }
+    }
+
+    fn dispatch_earlier_history(&mut self) {
+        let Some(reader) = self.state.earlier.as_mut() else {
+            if let Some(task) = self.earlier_task.take() {
+                task.abort();
+            }
+            return;
+        };
+        if !reader.requested || reader.loading {
+            return;
+        }
+        reader.requested = false;
+        reader.loading = true;
+        reader.error = None;
+        let before = reader.before.clone();
+        let generation = reader.generation;
+        let session = self.session.clone();
+        let updates = self.chat_io_tx.clone();
+        self.earlier_task = Some(tokio::spawn(async move {
+            let result = async {
+                let page = session.transcript_history(before).await?;
+                tokio::task::spawn_blocking(move || {
+                    let mut lines = Vec::new();
+                    for entry in mj_client::transcript::history_entries(&page) {
+                        lines.push(Line::styled(entry.role.to_owned(), theme::title(true)));
+                        lines.extend(entry.text.lines().map(|line| {
+                            Line::raw(crate::chat::rendering::sanitize_terminal_text(line))
+                        }));
+                        lines.push(Line::raw(""));
+                    }
+                    (page.before, lines)
+                })
+                .await
+                .context("history rendering task failed")
+            }
+            .await
+            .map_err(|error: anyhow::Error| format!("{error:#}"));
+            if let Err(error) = updates.send(ChatIoUpdate::EarlierMessages { generation, result }) {
+                tracing::debug!(%error, "earlier history reader closed");
+            }
+        }));
     }
 
     /// A command ID for one remote operation. `None` means the system random
@@ -50,6 +94,12 @@ impl ActiveChat {
             ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();
+                if !images.is_empty() && !self.state.prompt_images_supported {
+                    restore_unsent_prompt(&mut self.state, text, images);
+                    self.state
+                        .set_notice(super::super::input_state::IMAGE_CAPABILITY_NOTICE);
+                    return ChatEventOutcome::Handled;
+                }
                 let Some(command_id) = self.command_id("prompt") else {
                     restore_unsent_prompt(&mut self.state, text, images);
                     return ChatEventOutcome::Handled;
@@ -202,6 +252,7 @@ impl ActiveChat {
                         intent,
                         command,
                         cancel_agent: self.state.prompt_in_flight()
+                            || self.state.harness_turn_stoppable()
                             || (self.state.session_activity.capacity_retry.is_some()
                                 || self.state.session_activity.quota_recovery.is_some()),
                         shell_command_ids: self.state.active_user_shell_ids(),
@@ -245,6 +296,7 @@ impl ActiveChat {
                 let updates = self.chat_io_tx.clone();
                 let text_only = self.state.clipboard_is_text_only();
                 let generation = self.state.input_generation();
+                let target = self.state.clipboard_target();
                 tokio::spawn(async move {
                     let result = match tokio::task::spawn_blocking(move || {
                         if text_only {
@@ -260,8 +312,11 @@ impl ActiveChat {
                         Ok(result) => result,
                         Err(error) => Err(format!("clipboard task failed: {error}")),
                     };
-                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard { generation, result })
-                    {
+                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard {
+                        generation,
+                        target,
+                        result,
+                    }) {
                         tracing::debug!(%error, "clipboard result dropped because the chat closed");
                     }
                 });

@@ -352,6 +352,12 @@ impl DurableRelay {
                 None,
             )));
         }
+        // Stop is also accepted while Claude Code works on its own after a
+        // background task: the cancel interrupts the running cycle, and that
+        // cycle's result ends the turn (`claude_turn_result`). A Codex turn of
+        // this kind is a native goal, which has its own controls.
+        let claude_harness_turn = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && self.snapshot.harness_turn.is_some();
         if let RelayCommand::Cancel = command
             && self
                 .snapshot
@@ -360,6 +366,7 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
+            && !claude_harness_turn
             && self
                 .snapshot
                 .capacity_retry

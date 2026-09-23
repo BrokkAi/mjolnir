@@ -132,6 +132,7 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            target_runtime: None,
             launch_base: None,
             build_cache: None,
             mjolnir_subagents: None,

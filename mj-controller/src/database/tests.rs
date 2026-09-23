@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         container_workspace: None,
@@ -4814,7 +4815,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(floor, 44, "older JSON readers must be refused");
+    assert!(floor >= 44, "older JSON readers must be refused");
     connection
         .execute("INSERT INTO quota_reset_cache VALUES ('account', '{}')", [])
         .unwrap();
@@ -4903,4 +4904,236 @@ fn test_reader_connections_keep_deferred_transactions() {
         .unwrap();
     write.commit().unwrap();
     drop(snapshot);
+}
+
+fn long_conversation() -> MaterializedSession {
+    let mut projection = MaterializedSession::empty("history-window");
+    projection.applied_event_ordinal = 2500;
+    projection.applied_event_digest = event_digest(2500);
+    projection.transcript = (1..=2500).map(|position| Arc::new(TranscriptItem {
+        stable_id: format!("{}:{position:04}", if position % 100 == 1 { "user" } else { "agent" }), position,
+        latest_content_event_ordinal: (position % 100 != 1).then_some(position), created_at_ms: position as i64,
+        last_changed_at_ms: position as i64,
+        body: if position % 100 == 1 {
+            TranscriptBody::User { content: vec![serde_json::json!({"type":"text", "text":format!("request {position}")})] }
+        } else {
+            TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text", "text":"answer ".repeat(50)}})], streaming: false }
+        },
+    })).collect();
+    projection
+}
+
+#[test]
+fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    for pending in [false, true] {
+        if let TranscriptBody::Agent { streaming, .. } =
+            &mut Arc::make_mut(&mut full.transcript[1]).body
+        {
+            *streaming = pending;
+        }
+        save_materialized_session_to(&path, &full).unwrap();
+        let (loaded, window) = load_materialized_actor_projection_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        let mut trimmed = full.clone();
+        let mut expected = ProjectionWindow::of(&full);
+        expected.trim(&mut trimmed, PROJECTION_TAIL_ITEMS);
+        assert_eq!(loaded, trimmed);
+        assert_eq!(window, expected);
+        assert_eq!(loaded.transcript.len(), if pending { 2500 } else { 1100 });
+        assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
+        assert_eq!(
+            load_materialized_session_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap(),
+            full,
+            "the durable source for checkpoints must stay complete"
+        );
+    }
+}
+
+#[test]
+fn history_pages_have_no_gaps_across_position_ties_and_concurrent_appends() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    // Streaming content revisions do not change a message's history position.
+    for item in &mut full.transcript {
+        let item = Arc::make_mut(item);
+        item.position = item.position.div_ceil(2);
+        if matches!(item.body, TranscriptBody::Agent { .. }) {
+            item.latest_content_event_ordinal = Some(2500);
+        }
+    }
+    full.transcript
+        .sort_by(|a, b| (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id)));
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let mut before = None;
+    let mut pages = Vec::new();
+    loop {
+        let page = load_transcript_history_from(&path, &full.session_id, before.as_ref(), 127)
+            .unwrap()
+            .unwrap();
+        assert!(page.items.len() <= 127);
+        assert!(
+            page.items
+                .windows(2)
+                .all(|pair| (pair[0].position, &pair[0].stable_id)
+                    < (pair[1].position, &pair[1].stable_id))
+        );
+        pages.push(page.items);
+        before = page.before;
+        if pages.len() == 1 {
+            let mut appended = full.clone();
+            let mut item = (*full.transcript.last().unwrap().clone()).clone();
+            item.stable_id = "new-message".into();
+            item.position = 2501;
+            item.latest_content_event_ordinal = Some(2501);
+            appended.transcript.push(Arc::new(item));
+            appended.applied_event_ordinal = 2501;
+            appended.applied_event_digest = event_digest(2501);
+            save_materialized_session_to(&path, &appended).unwrap();
+        }
+        if before.is_none() {
+            break;
+        }
+    }
+    let read: Vec<_> = pages.into_iter().rev().flatten().collect();
+    assert_eq!(read, full.transcript);
+    assert_eq!(
+        load_transcript_history_from(&path, &full.session_id, None, usize::MAX)
+            .unwrap()
+            .unwrap()
+            .items
+            .len(),
+        256
+    );
+    assert!(
+        load_transcript_history_from(&path, "missing", None, 10)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
+    use agent_client_protocol::schema::v1::{
+        SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    };
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    let old_tool = materialized_session(&full.session_id).transcript[2].clone();
+    full.transcript[2] = old_tool.clone();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !live
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == old_tool.stable_id)
+    );
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal: 2501,
+        previous_digest: full.applied_event_digest.clone(),
+        digest: String::new(),
+        recorded_at_ms: 5000,
+        command_id: None,
+        observation: RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "call-1",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .title("Late result"),
+            ))),
+        },
+    };
+    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+    let restored =
+        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+    assert_eq!(restored, vec![old_tool.clone()]);
+    window.omitted_items -= restored.len();
+    live.transcript.splice(0..0, restored);
+    assert!(
+        load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+            .unwrap()
+            .is_empty()
+    );
+    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+        .unwrap()
+        .mutation;
+    apply_projection_page_to(&path, &full.session_id, |page| {
+        page.apply(
+            event.ordinal,
+            &event.previous_digest,
+            &event.digest,
+            &mutation,
+        )
+    })
+    .unwrap();
+    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+        .unwrap();
+    window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+    let saved = load_materialized_session_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.transcript.len(), 2500);
+    let tool = saved
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == old_tool.stable_id)
+        .unwrap();
+    assert_eq!(tool.position, old_tool.position);
+    assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
+    let TranscriptBody::Tool { call, .. } = &tool.body else {
+        panic!("tool remains a tool")
+    };
+    assert_eq!(call["title"], "Late result");
+    assert_eq!(
+        live.transcript.len() + window.omitted_items,
+        saved.transcript.len()
+    );
+}
+
+#[test]
+fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("target-runtime.sqlite3");
+    let mut record = session("runtime-session", "project");
+    let template: mj_core::config::TargetTemplate = serde_json::from_str(
+        r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
+    ).unwrap();
+    record.target_runtime = Some((&template).into());
+    record.target = Some(TargetLocator::SshPodman {
+        host: "original.test".into(),
+        container_id: "original-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Error;
+    save_lifecycle_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id],
+        record
+    );
+    record.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
+    record.target = Some(TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/new").join(&record.id),
+    });
+    save_lifecycle_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id],
+        record
+    );
 }

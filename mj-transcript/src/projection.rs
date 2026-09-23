@@ -64,6 +64,67 @@ pub struct ProjectionIndex {
     terminal_referrers: HashMap<String, BTreeSet<String>>,
 }
 
+/// Explicit references that may address rows older than a live window. Keep
+/// identity interpretation beside the projector that consumes these events.
+pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut ids = BTreeSet::new();
+    let mut terminals = BTreeSet::new();
+    for event in events {
+        match &event.observation {
+            RelayObservation::SessionUpdate { update } => {
+                let value = match update.as_ref() {
+                    SessionUpdate::ToolCall(call) => {
+                        ids.insert(format!("tool:{}", call.tool_call_id));
+                        Some(serde_json::to_value(call)?)
+                    }
+                    SessionUpdate::ToolCallUpdate(update) => {
+                        ids.insert(format!("tool:{}", update.tool_call_id));
+                        Some(serde_json::to_value(&update.fields)?)
+                    }
+                    SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let Some(id) = &chunk.message_id {
+                            ids.insert(format!("agent:{id}"));
+                        }
+                        None
+                    }
+                    SessionUpdate::AgentThoughtChunk(chunk) => {
+                        if let Some(id) = &chunk.message_id {
+                            ids.insert(format!("thought:{id}"));
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    terminals.extend(tool_call_terminal_ids(&value));
+                }
+            }
+            RelayObservation::TerminalOutput { terminal_id, .. } => {
+                terminals.insert(terminal_id.clone());
+            }
+            RelayObservation::CommandStarted { command_id, .. }
+            | RelayObservation::CommandCompleted { command_id, .. }
+            | RelayObservation::CommandRejected { command_id, .. }
+            | RelayObservation::CommandInterrupted { command_id, .. }
+            | RelayObservation::UserShellOutput { command_id, .. } => {
+                ids.insert(user_shell_item_id(command_id));
+                ids.insert(format!("user:{command_id}"));
+            }
+            RelayObservation::Notice { .. } => {
+                if let Some(id) = &event.command_id {
+                    ids.insert(format!("system:notice:{id}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    for terminal in &terminals {
+        ids.insert(terminal_item_id(terminal));
+        ids.insert(fallback_terminal_tool_item_id(terminal));
+    }
+    Ok((ids.into_iter().collect(), terminals.into_iter().collect()))
+}
+
 impl ProjectionIndex {
     pub fn new(current: &MaterializedSession) -> Self {
         let mut index = Self {

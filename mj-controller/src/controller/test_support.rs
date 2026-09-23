@@ -23,6 +23,7 @@ use super::worktree::{
 
 pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         container_workspace: None,

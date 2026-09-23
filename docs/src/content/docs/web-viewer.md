@@ -49,6 +49,11 @@ The viewer can:
 - refresh target capacity and profile quota; and
 - keep a per-browser draft for the active conversation.
 
+Use **Earlier messages** above the conversation to read stored history, then
+**Load earlier page** to continue backward. Each page replaces the previous
+page. **Close** or **Escape** returns to the live conversation with your draft
+preserved, including while a history request is still loading.
+
 The terminal owns the richer launch workflow. Use it when you need per-session
 CPU or memory sizing, attached-directory setup, or quick bundle creation. The
 viewer also omits native-session import, force destruction, and configuration or

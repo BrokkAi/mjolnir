@@ -1384,6 +1384,13 @@ impl Controller {
         record.harness_kind = profile.kind;
         record.last_profile = profile_id.to_string();
         record.target_template_id = target_id.to_string();
+        record.target_runtime = Some(
+            self.config
+                .targets
+                .get(target_id)
+                .context("resume target disappeared")?
+                .into(),
+        );
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;

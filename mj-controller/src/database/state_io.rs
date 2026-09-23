@@ -18,7 +18,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents,
-                s.container_workspace, s.build_cache_json, s.launch_base
+                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
@@ -37,6 +37,14 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             return Ok(None);
         };
         Ok(Some(SessionRecord {
+            target_runtime: row
+                .get::<_, Option<String>>(28)?
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?,
             harness_kind,
             create_managed_worktree: row.get(23)?,
             launch_base: row.get(27)?,
@@ -548,8 +556,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
-             mjolnir_subagents, container_workspace, build_cache_json, launch_base
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+             mjolnir_subagents, container_workspace, build_cache_json, launch_base, target_runtime_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -576,7 +584,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              mjolnir_subagents = excluded.mjolnir_subagents,
              container_workspace = excluded.container_workspace,
              build_cache_json = excluded.build_cache_json,
-             launch_base = excluded.launch_base",
+             launch_base = excluded.launch_base,
+             target_runtime_json = excluded.target_runtime_json",
         params![
             session.id,
             session.title,
@@ -621,6 +630,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
                 .map(serde_json::to_string)
                 .transpose()?,
             session.launch_base,
+            session.target_runtime.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     tx.execute(
@@ -645,6 +655,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // whoever adds it decides then whether a lifecycle transition owns it.
     // Everything bound to `_` is owned by `upsert_session` instead.
     let SessionRecord {
+        target_runtime,
         id,
         title,
         harness_kind,
@@ -695,7 +706,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              last_checkpoint_error = ?11,
              project_directory = ?12,
              managed_worktree = ?13,
-             build_cache_json = ?14
+             build_cache_json = ?14,
+             target_runtime_json = ?15
          WHERE session_id = ?1",
         params![
             id,
@@ -720,6 +732,10 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
             // Resolved while a session is provisioned and assigned to the
             // record right before this write, so the lifecycle path owns it.
             build_cache
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            target_runtime
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
@@ -1074,4 +1090,29 @@ pub(super) fn load_checkpoints(connection: &Connection, state: &mut State) -> Re
         }
     }
     Ok(())
+}
+
+/// Fill a missing snapshot without overwriting a concurrent writer. A deleted
+/// or retargeted session returns `None`; its stale controller copy can be dropped
+/// by reload instead of preventing every subsequent reload.
+pub fn backfill_target_runtime(
+    session_id: &str,
+    target_template_id: &str,
+    runtime: &mj_core::state::TargetRuntimeSettings,
+) -> Result<Option<mj_core::state::TargetRuntimeSettings>> {
+    let session_id = session_id.to_owned();
+    let target_template_id = target_template_id.to_owned();
+    let runtime = serde_json::to_string(runtime)?;
+    submit_database_write("backfill_target_runtime", move |_| {
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("UPDATE sessions SET target_runtime_json = ?2 WHERE session_id = ?1 AND target_template_id = ?3 AND target_runtime_json IS NULL",
+            params![session_id, runtime, target_template_id])?;
+        // Concurrent backfills must all use the winning durable value.
+        let stored: Option<String> = tx.query_row("SELECT target_runtime_json FROM sessions WHERE session_id = ?1 AND target_template_id = ?2",
+            params![session_id, target_template_id], |row| row.get(0)).optional()?;
+        let runtime = stored.as_deref().map(serde_json::from_str).transpose()?;
+        tx.commit()?;
+        Ok(runtime)
+    })
 }

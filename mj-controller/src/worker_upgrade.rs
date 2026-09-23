@@ -333,6 +333,7 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            target_runtime: None,
             launch_base: None,
             build_cache: None,
             container_workspace: None,

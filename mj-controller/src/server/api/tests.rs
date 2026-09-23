@@ -420,6 +420,8 @@ struct FakeBackend {
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
     transcript_limits: Mutex<Vec<usize>>,
+    history: Option<mj_core::storage::TranscriptHistoryPage>,
+    history_cursors: Mutex<Vec<Option<mj_core::storage::TranscriptCursor>>>,
     /// Export answers. `None` stands for a refusal, which is what an
     /// export that cannot be produced looks like to a handler.
     diff: Option<String>,
@@ -430,6 +432,7 @@ struct FakeBackend {
     /// When set, the diff fails outright rather than being refused.
     diff_fails: bool,
     bundle_fails: bool,
+    target_access_missing: bool,
     /// The path the file handler asked the backend for.
     file_paths: Mutex<Vec<PathBuf>>,
     file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
@@ -454,6 +457,18 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn transcript_history(
+        &self,
+        _session_id: String,
+        before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::TranscriptHistoryPage>> {
+        Box::pin(async move {
+            self.history_cursors.lock().unwrap().push(before);
+            self.history
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("history unavailable"))
+        })
+    }
     fn events(
         &self,
         filter: crate::database::ApiEventFilter,
@@ -633,6 +648,9 @@ impl SubagentBackend for FakeBackend {
         branch: String,
     ) -> BoxFuture<'_, Result<PushedBranch, ExportError>> {
         Box::pin(async move {
+            if self.target_access_missing {
+                return Err(missing_target_access_error());
+            }
             self.pushed
                 .clone()
                 .map(|pushed| PushedBranch { branch, ..pushed })
@@ -663,6 +681,9 @@ impl SubagentBackend for FakeBackend {
     }
     fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
         Box::pin(async {
+            if self.target_access_missing {
+                return Err(missing_target_access_error());
+            }
             if self.bundle_fails {
                 return Err(ExportError::Failed(anyhow::anyhow!(
                     "checkpoint storage failed"
@@ -3316,4 +3337,125 @@ async fn start_explains_a_saved_default_that_names_a_missing_profile() {
     assert!(message.contains("saved default"), "{message}");
     assert!(message.contains("gone"), "{message}");
     assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn earlier_history_authenticates_validates_the_cursor_and_renders_stored_messages() {
+    use mj_core::storage::{TranscriptCursor, TranscriptHistoryPage};
+    let cursor = TranscriptCursor {
+        position: 10,
+        stable_id: "agent:10".into(),
+    };
+    let backend = Arc::new(FakeBackend {
+        history: Some(TranscriptHistoryPage {
+            items: vec![Arc::new(mj_core::state::TranscriptItem {
+                stable_id: "agent:10".into(),
+                position: 10,
+                latest_content_event_ordinal: Some(20),
+                created_at_ms: 10,
+                last_changed_at_ms: 20,
+                body: mj_core::state::TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content":{"type":"text", "text":"stored answer"}}),
+                    ],
+                    streaming: false,
+                },
+            })],
+            before: Some(cursor.clone()),
+            frontier: 20,
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/sessions/session-1/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    for url in [
+        "/api/v1/sessions/session-1/history?before_position=10",
+        "/api/v1/sessions/session-1/history?before_id=agent:10",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(url)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/history?before_position=10&before_id=agent:10",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["items"][0]["text"], "stored answer");
+    assert_eq!(body["items"][0]["role"], "agent");
+    assert_eq!(body["before"], serde_json::to_value(&cursor).unwrap());
+    assert_eq!(body["frontier"], 20);
+    assert_eq!(*backend.history_cursors.lock().unwrap(), vec![Some(cursor)]);
+    let missing = app
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/missing/history"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+fn missing_target_access_error() -> ExportError {
+    let record = crate::controller::test_support::checkpoint_test_session("session-1");
+    ExportError::Failed(
+        record
+            .target_runtime_settings(&mj_core::config::Config::default())
+            .unwrap_err()
+            .context("resolve export target"),
+    )
+}
+
+#[tokio::test]
+async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle_exports() {
+    for body in [
+        r#"{"kind":"bundle"}"#,
+        r#"{"kind":"branch","branch":"saved-work"}"#,
+    ] {
+        let (app, _actions, _snapshots, _bundles) = api_app(
+            Arc::new(FakeBackend {
+                target_access_missing: true,
+                ..Default::default()
+            }),
+            |_| {},
+        );
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/export"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(
+            error.contains("session-1") && error.contains("podman") && error.contains("Restore"),
+            "{error}"
+        );
+    }
 }

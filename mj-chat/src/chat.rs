@@ -11,6 +11,7 @@ mod active;
 mod attachments;
 mod autocomplete;
 mod config_picker;
+mod earlier;
 mod elicitation;
 mod feedback;
 mod history;
@@ -481,12 +482,15 @@ pub struct TranscriptPosition(TranscriptAnchor);
 
 pub struct ChatState {
     pub(crate) clear_context_supported: bool,
+    pub(crate) prompt_images_supported: bool,
     session_id: String,
     bundle_id: Option<String>,
     phase: WorkerPhase,
     latest_seq: u64,
     last_compaction_seq: u64,
     entries: Vec<ChatEntry>,
+    earlier: Option<earlier::EarlierMessages>,
+    earlier_generation: u64,
     pending_diffstats: VecDeque<ToolDiffstatRequest>,
     scheduled_diffstats: BTreeSet<(String, u64)>,
     /// Leading transcript items that are not converted to entries yet, because
@@ -659,8 +663,8 @@ pub struct ChatState {
     detailed_activity_clocks: bool,
     activity_reachable: bool,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
-    /// turn the harness started on its own, which the relay refuses to cancel,
-    /// so cancellation and the composer's cancel hint key on this instead.
+    /// turn the harness started on its own, so cancellation and the
+    /// composer's cancel hint key on this and on `harness_turn_stoppable`.
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
     targeted_turn_control_supported: bool,
@@ -707,12 +711,15 @@ impl ChatState {
     pub fn new(snapshot: &WorkerSnapshot, events: &[SequencedEvent]) -> Self {
         let mut state = Self {
             clear_context_supported: false,
+            prompt_images_supported: false,
             session_id: snapshot.session_id.clone(),
             bundle_id: None,
             phase: snapshot.phase,
             latest_seq: 0,
             last_compaction_seq: 0,
             entries: Vec::new(),
+            earlier: None,
+            earlier_generation: 0,
             pending_diffstats: VecDeque::new(),
             scheduled_diffstats: BTreeSet::new(),
             unconverted_prefix: 0,

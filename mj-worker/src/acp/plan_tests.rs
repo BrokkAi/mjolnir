@@ -337,6 +337,49 @@ impl PlanProbe {
         }
     }
 
+    async fn sdk_result(&mut self, message: Value) {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "_claude/sdkMessage",
+            "params": {"sessionId": "plan-session", "message": message},
+        }))
+        .await;
+    }
+
+    async fn claude_result(&mut self) -> mj_core::acp::ClaudeTurnResult {
+        loop {
+            if let RuntimeEvent::ClaudeTurnResult(result) = self.event().await {
+                return result;
+            }
+        }
+    }
+
+    /// What the relay coordinator does with a result that would end the
+    /// running prompt: hand it to the prompt loop.
+    async fn release(&mut self, result: &mj_core::acp::ClaudeTurnResult) {
+        self.commands
+            .send(CommandRequest::ReleasePrompt {
+                request_id: "original-prompt".into(),
+                received: result.received,
+                stop_reason: result
+                    .prompt_stop_reason()
+                    .expect("the result would end a prompt"),
+                usage: Some(result.usage.token_usage()),
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn no_finish(&mut self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.events.recv()).await {
+            assert!(
+                !matches!(event, RuntimeEvent::PromptFinished { .. }),
+                "the prompt must keep running: {event:?}"
+            );
+        }
+    }
+
     async fn close(&mut self) {
         self.commands
             .send(CommandRequest::Close {
@@ -409,6 +452,58 @@ async fn approved_plan_waits_for_turn_and_mode_ack_then_continues_once_in_same_s
     assert_eq!(probe.finished().await, "EndTurn");
     probe.no_message().await;
     probe.close().await;
+}
+
+/// Claude answers a cancelled plan review with "Tool use aborted", so the
+/// planning cycle can end with an ordinary result rather than an interruption
+/// report. Neither that result nor a late relay of it may end the prompt the
+/// approved plan continues; the implementation cycle's result ends it.
+#[tokio::test]
+async fn a_planning_result_never_ends_the_prompt_an_approved_plan_continues() {
+    let result = json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 3,
+        "stop_reason": "end_turn", "result": "done",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "origin": {"kind": "human"},
+    });
+    for relayed_late in [false, true] {
+        let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
+        let (prompt, _, _) = probe.approve("Plan", &["exit-plan-auto", "reject"]).await;
+        probe.sdk_result(result.clone()).await;
+        let planning = probe.claude_result().await;
+        if !relayed_late {
+            probe.release(&planning).await;
+            probe.no_finish().await;
+        }
+        probe
+            .result(&prompt, json!({"stopReason": "end_turn"}))
+            .await;
+        let mode = probe.message().await;
+        assert_eq!(mode["method"], "session/set_mode");
+        probe.result(&mode, json!({})).await;
+        let continuation = probe.message().await;
+        assert_eq!(continuation["method"], "session/prompt");
+        if relayed_late {
+            probe.release(&planning).await;
+            probe.no_finish().await;
+        }
+        probe
+            .send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "plan-session",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "implemented"}},
+            }}))
+            .await;
+        probe.sdk_result(result.clone()).await;
+        let implementation = probe.claude_result().await;
+        probe.release(&implementation).await;
+        assert_eq!(probe.finished().await, "EndTurn", "{relayed_late}");
+        probe.no_message().await;
+        probe
+            .result(&continuation, json!({"stopReason": "end_turn"}))
+            .await;
+        probe.no_finish().await;
+        probe.close().await;
+    }
 }
 
 #[tokio::test]

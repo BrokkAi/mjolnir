@@ -66,6 +66,8 @@ where
     let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
+    let claude_result_count = ClaudeResultCount::default();
+    let claude_sdk_result_count = claude_result_count.clone();
     let permission_events = events.clone();
     let permission_parent_context = spec.turn_context.clone();
     let permission_activity = spec.acp_activity.clone();
@@ -258,6 +260,29 @@ where
             async move |notification: ClaudeSdkMessageNotification, _cx| {
                 if claude_sdk_harness != HarnessKind::Claude {
                     return Ok(());
+                }
+                // Sent on the same stream as the session updates, so the
+                // coordinator records everything the adapter sent before the
+                // result ahead of it.
+                match ClaudeTurnResult::from_sdk_message(&notification.message) {
+                    Ok(Some(mut result)) => {
+                        result.received = claude_sdk_result_count.stamp();
+                        claude_sdk_events
+                            .send(RuntimeEvent::ClaudeTurnResult(result))
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        claude_sdk_events
+                            .send(RuntimeEvent::Warning {
+                                message: format!("ignored malformed Claude SDK result: {error}"),
+                            })
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return Ok(());
+                    }
                 }
                 let tasks = match claude_background_tasks(&notification.message) {
                     Ok(Some(tasks)) => tasks,
@@ -930,6 +955,7 @@ where
                 plan_implementation_slot,
                 opened,
                 agent_output_count,
+                claude_result_count,
                 session_updates_enabled,
                 resume_required,
                 native_session_used,
@@ -1186,6 +1212,26 @@ impl AgentOutputCount {
     }
 }
 
+/// How many Claude Code SDK results one ACP connection has received.
+///
+/// The notification handler stamps each result with its position, and the
+/// prompt loop reads the count just before it sends `session/prompt`. A result
+/// stamped at or below that count arrived before the prompt was sent, so it
+/// cannot be the prompt's answer however late the coordinator relays it.
+#[derive(Clone, Default)]
+pub(super) struct ClaudeResultCount(Arc<AtomicU64>);
+
+impl ClaudeResultCount {
+    /// Count one more result and return its position, starting at one.
+    pub(super) fn stamp(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(super) fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// What the person is told when the harness ended a turn without answering.
 ///
 /// It leads with the stable marker `mj_core::credentials` matches on, then
@@ -1230,6 +1276,7 @@ pub(super) async fn drive_connection(
     plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: AgentOutputCount,
+    claude_result_count: ClaudeResultCount,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -1249,6 +1296,7 @@ pub(super) async fn drive_connection(
         &plan_implementation_slot,
         opened,
         &agent_output_count,
+        &claude_result_count,
         &session_updates_enabled,
         resume_required,
         native_session_used,
@@ -1426,6 +1474,72 @@ pub(super) async fn settle_steer(
     }
 }
 
+/// Settle a steer still waiting for its acknowledgement when the prompt ends.
+/// The acknowledgement normally follows at once; without it within two
+/// seconds, delivery is reported as unconfirmed and the queued input is held.
+pub(super) async fn settle_steer_at_turn_end(
+    events: &mpsc::Sender<RuntimeEvent>,
+    pending_steer: &mut Option<PendingSteer>,
+) -> Result<()> {
+    let Some(mut pending) = pending_steer.take() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(Duration::from_secs(2), pending.response.as_mut()).await {
+        Ok(outcome) => settle_steer(events, pending, outcome).await,
+        Err(_) => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandInterrupted {
+                    request_id: pending.request_id,
+                    message: "Steering delivery unconfirmed after the turn ended; queued input is held for review".into(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// Keep the adapter's `session/prompt` request alive after the prompt ended at
+/// Claude Code's result, and discard the reply when it comes.
+///
+/// Dropping the reply future before the reply arrives makes the ACP crate send
+/// `$/cancel_request`, which the adapter handles as a cancel of the live turn.
+/// The adapter holds the reply while background work the turn started runs,
+/// and answers it at the next prompt or when that work ends. The task belongs
+/// to the connection, so it ends with the connection.
+pub(super) fn detach_prompt_reply(
+    connection: &ConnectionTo<Agent>,
+    reply: ActivePrompt,
+    request_id: String,
+    recorded_stop_reason: String,
+) {
+    let task_request_id = request_id.clone();
+    let spawned = connection.spawn(async move {
+        match reply.await {
+            Ok(response) => tracing::debug!(
+                request_id = %task_request_id,
+                recorded_stop_reason,
+                reply_stop_reason = ?response.stop_reason,
+                "discarded the adapter's reply to a prompt that ended at its result"
+            ),
+            Err(error) => tracing::debug!(
+                request_id = %task_request_id,
+                recorded_stop_reason,
+                %error,
+                "discarded the adapter's failed reply to a prompt that ended at its result"
+            ),
+        }
+        Ok(())
+    });
+    if let Err(error) = spawned {
+        tracing::warn!(
+            %request_id,
+            %error,
+            "could not keep the adapter's prompt reply open; the connection is closing"
+        );
+    }
+}
+
 /// Discard requests left in the channel by the bridge that just restarted. See
 /// the call site in [`serve_session`] for why nothing is reported back.
 pub(super) fn drain_requests_from_the_previous_bridge(
@@ -1445,6 +1559,7 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
+            CommandRequest::ReleasePrompt { request_id, .. } => ("ReleasePrompt", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
             CommandRequest::StopBackgroundTask { resolved, .. } => {
                 let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));

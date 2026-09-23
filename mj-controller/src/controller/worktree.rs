@@ -1167,11 +1167,20 @@ pub(super) fn raw_checkout_position(
     let target = match &session.managed_worktree {
         Some(worktree) => worktree.target.clone(),
         None => {
-            let template = config
-                .targets
-                .get(&session.target_template_id)
-                .context("the bare target this session last used is missing")?;
-            managed_worktree_target(template)?
+            let runtime = session.target_runtime_settings(config)?;
+            match (&*runtime.kind, &runtime.connection) {
+                ("local-bare", mj_core::state::TargetConnection::Local) => {
+                    ManagedWorktreeTarget::Local
+                }
+                ("ssh-bare", mj_core::state::TargetConnection::Ssh { ssh }) => {
+                    let ssh = targets::SshTarget::from(ssh);
+                    ManagedWorktreeTarget::Ssh {
+                        destination: ssh.destination,
+                        ssh_args: ssh.ssh_args,
+                    }
+                }
+                _ => bail!("the session's recorded target is not a bare checkout"),
+            }
         }
     };
     read_checkout_position(executor, &target, project_directory)

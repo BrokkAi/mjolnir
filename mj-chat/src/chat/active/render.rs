@@ -59,6 +59,10 @@ pub(crate) fn render_in(
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
+    if let Some(reader) = chat.earlier.as_mut() {
+        crate::chat::earlier::render_earlier(frame, regions.overlay, reader);
+        return;
+    }
     // Dialogs and the completion popup are centred in this conversation's own
     // overlay rectangle, not in the band the transcript happens to have been
     // given.
@@ -892,6 +896,7 @@ pub(crate) fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'stat
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
     if chat.prompt_in_flight()
+        || chat.harness_turn_stoppable()
         || (chat.session_activity.capacity_retry.is_some()
             || chat.session_activity.quota_recovery.is_some())
     {

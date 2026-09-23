@@ -35,6 +35,67 @@ fn agent_item(position: u64) -> Arc<TranscriptItem> {
     })
 }
 
+#[test]
+fn projection_window_keeps_whole_turns_and_unsettled_content() {
+    let mut session = MaterializedSession::empty("windowed");
+    session.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "original request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    let mut window = ProjectionWindow::of(&session);
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript[0].position, 1401);
+    assert_eq!(window.omitted_items, 1400);
+    assert_eq!(window.latest_turn_start_position, Some(2401));
+    assert_eq!(
+        window.provisional_title.as_deref(),
+        Some("original request")
+    );
+    let retained = session.transcript.clone();
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript, retained);
+    assert_eq!(window.omitted_items, 1400);
+
+    let mut long_turn = MaterializedSession::empty("long-turn");
+    long_turn.transcript.push(user_item(1, "large turn"));
+    long_turn.transcript.extend((2..=2500).map(agent_item));
+    let mut long_window = ProjectionWindow::of(&long_turn);
+    long_window.trim(&mut long_turn, 1024);
+    assert_eq!(
+        long_turn.transcript.len(),
+        2500,
+        "never cut an active turn in half"
+    );
+
+    let mut pending = MaterializedSession::empty("pending");
+    pending.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    if let TranscriptBody::Agent { streaming, .. } =
+        &mut Arc::make_mut(&mut pending.transcript[1]).body
+    {
+        *streaming = true;
+    }
+    let mut pending_window = ProjectionWindow::of(&pending);
+    pending_window.trim(&mut pending, 1024);
+    assert_eq!(
+        pending.transcript.len(),
+        2500,
+        "late streaming data keeps its original turn"
+    );
+}
+
 fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSessionSnapshot {
     ManagedSessionSnapshot {
         materialized: session,
@@ -125,6 +186,7 @@ fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        target_runtime: None,
         launch_base: None,
         build_cache: None,
         mjolnir_subagents: None,

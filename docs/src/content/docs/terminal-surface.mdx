@@ -377,6 +377,7 @@ changing the prompt draft.
 | `Tab` | Accept a completion, or move to the next pane when none is offered |
 | `Esc` | Cancel the running turn or shell command |
 | `Page Up` / `Page Down` | Scroll the transcript |
+| `Ctrl+Page Up` | Browse earlier conversation pages; Enter loads an earlier page and Esc returns to the live conversation |
 | `↑` / `↓` | Move within multiline input or walk prompt history |
 | `Ctrl+R` | Search prompt history; `Alt+R` changes the search scope |
 | `Ctrl+V` | Paste the system clipboard |
@@ -393,6 +394,30 @@ changing the prompt draft.
 Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
 
 Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
+
+## Clipboard images
+
+`Ctrl+V` reads the clipboard on the machine running the terminal client. `Cmd+V`
+works too if your terminal forwards that key to Mjolnir. When the active agent
+advertises image support, Mjolnir prefers an image over text and inserts an
+editable `[image N]` marker. Delete the marker to remove the attachment. `/attach <path>` adds an image from that machine's filesystem under the same capability
+rule.
+
+Agents that have not advertised image support, question answer fields, and
+history search receive only the clipboard's text representation. If none is
+available, the notice includes the clipboard error. Text pasted by your terminal
+always stays text. If image support disappears, existing image drafts are kept;
+remove their markers or wait for support to return before sending. `prefix+m`
+remains the dictation shortcut.
+
+Native macOS and Windows use their system clipboards. Linux needs access to a
+working X11 or Wayland clipboard; a headless shell alone cannot read your desktop
+clipboard. WSL uses Windows PowerShell to read the Windows clipboard. Over SSH,
+Mjolnir runs on the remote machine and cannot read your laptop's clipboard image
+through an ordinary text paste. Run the terminal client locally when you need
+local image paste into a remote session. Terminal and tmux key bindings can
+intercept clipboard shortcuts; configure them to forward the key. OSC 52 copy
+support does not provide image clipboard reads.
 
 ## Shell commands
 
