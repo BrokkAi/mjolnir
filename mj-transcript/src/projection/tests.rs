@@ -2021,6 +2021,28 @@ fn rejected_close_rolls_closing_projection_back_to_idle() {
 }
 
 #[test]
+fn a_rejected_command_notice_does_not_show_the_command_id() {
+    let mut session = MaterializedSession::empty("session-1");
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            command_id: "set-config-0123abcd".into(),
+            command: RelayCommandKind::SetConfig,
+            message: "\"gpt-9\" is not an available model value".into(),
+        },
+    );
+    let notices = session
+        .transcript
+        .iter()
+        .filter_map(|item| match &item.body {
+            TranscriptBody::System { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices, ["\"gpt-9\" is not an available model value"]);
+}
+
+#[test]
 fn control_command_outcomes_do_not_end_an_active_prompt() {
     let mut session = MaterializedSession::empty("session-1");
     session.applied_event_ordinal = 2;

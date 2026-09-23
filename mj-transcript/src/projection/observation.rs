@@ -453,7 +453,10 @@ pub(super) fn project_observation(
                     format!("Work interrupted: {message}"),
                 );
             } else {
-                push_system(mutation, event, format!("command {command_id}: {message}"));
+                // The command id is internal. The relay event keeps it for
+                // diagnosis, and the log line below ties it to the notice.
+                tracing::info!(%command_id, ?command, %message, "relay command did not complete");
+                push_system(mutation, event, message.clone());
             }
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
