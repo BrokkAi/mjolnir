@@ -55,9 +55,17 @@ target validation probes (including the `mj doctor` connectivity probe) and
 remote Tab completion. They set a short `ConnectTimeout` and a one-miss
 keepalive so they fail fast instead of hanging the interface, and a master
 holding those settings would drop every later session on it after a stall of
-a couple of seconds. They carry `ControlMaster=no` and the path of the host's
-first master, so they join it when it is up and otherwise open their own
-direct connection.
+a couple of seconds. They carry `ControlMaster=no` and the path of a master,
+so they join it when it is up and otherwise open their own direct
+connection. In the daemon, a validation probe counts as one of the 8 sessions
+on the master it joins, so probes for new sessions cannot push a master past
+`MaxSessions`. `mj doctor` and Tab completion run in other processes and use
+the two spare sessions.
+
+If the server refuses a session anyway, the command never started, so Mjolnir
+retries it. The daemon log names this case "refused another session on a
+shared connection (MaxSessions)", which is different from a connection
+closed before authentication (`MaxStartups`).
 
 If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
 `-S`, Mjolnir adds no sharing options at all for that target and leaves
