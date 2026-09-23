@@ -603,16 +603,16 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
         }
         "profiles" => {
-            "Add an agent profile for each installed agent you want to run, or use Detect profiles to find the agents installed on this machine."
+            "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."
         }
         "home" => {
-            "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
+            "The agent's account directory, such as ~/.codex. Sign in with the agent's own login command."
         }
         "machines" => {
-            "Add an SSH host or an EC2 launch template. This machine is always listed as local. Build cache settings live here because every runtime on a machine shares them."
+            "Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes share them."
         }
         "targets" => {
-            "Add a runtime and choose the machine it runs on, or use Detect runtimes to find this machine's usable container engines."
+            "Add a runtime and choose its machine, or use Detect runtimes to find container engines here."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {
@@ -623,7 +623,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "How to be told when a session you are not looking at asks a question, fails, or finishes."
         }
         "mode" if path.first().is_some_and(|key| key == "notify") => {
-            "Terminal rings the bell and works over SSH. System also posts a desktop notification through osascript or notify-send."
+            "Terminal rings the bell and works over SSH. System also posts a desktop notification."
         }
         "bell" => "Ring the terminal bell with each notification.",
         "delay_seconds" => {
@@ -638,7 +638,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Group sessions by project, or list the ones that need you first without project headings."
         }
         "symbols" => {
-            "Draw status marks, borders, and separators with Unicode or plain ASCII. Unset, the terminal decides: ASCII on the Linux console or without a UTF-8 locale."
+            "Draw marks and borders in Unicode or ASCII. Unset: ASCII on the Linux console or without UTF-8."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
@@ -647,41 +647,41 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => {
-            "Shared by turn review and plan second opinion. Auto prefers another provider with quota; a named profile allows main model and effort overrides."
+            "Used by turn review and plan second opinions. Auto picks another provider with quota."
         }
         "continuation" => {
-            "Continue an unfinished request up to three times between user messages. Resume a quota-blocked session a minute after its quota resets; that is not counted."
+            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "sessionwiki" => {
-            "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."
+            "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
         }
         "archive_after_days" => {
-            "Suspended sessions older than this many days lose their checkpoint and attachments once SessionWiki has indexed them; a fully merged branch goes too. Blank keeps all."
+            "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
         "subagents" => {
-            "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."
+            "Mjolnir-owned child agents: their limit and extra profiles. A parent's own profile is always eligible."
         }
         "eligible_profiles" => {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share one mbx build cache between the Rust container sessions on each machine. Leave a machine's settings blank to use its own defaults."
+            "Share one mbx build cache among Rust container sessions on each machine. Blank settings use its defaults."
         }
         "directory" => {
-            "Cache directory on the machine itself. Blank uses that machine's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
+            "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."
         }
         "max_size" => {
-            "Largest the whole cache may grow, as a whole number of GB: build outputs, target directories, and incremental state together. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
+            "Largest size of the whole cache, in whole GB. Blank uses the host's mbx limits, or min(100 GB, 1/4 free)."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "pull_policy" => {
-            "When Mjolnir downloads this image. The first choice is derived from the image: it never delays a launch, pulling only a missing image, while the daemon refreshes a remote :latest image in the background."
+            "When Mjolnir downloads this image. The first choice follows the image and never delays a launch."
         }
         "context_window_bytes" => {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
         }
         "guardian_review_model" => {
-            "For a Codex profile with a custom model provider: newest-flash reviews with the newest flash model, session reviews with the session's own model, or name a model from the provider's catalog. Leave blank for newest-flash."
+            "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
         }
         // The first page has no parent setting to describe, so it says what
         // the whole screen does instead.

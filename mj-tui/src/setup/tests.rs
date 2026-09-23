@@ -2653,6 +2653,63 @@ fn a_long_save_error_is_shown_whole() {
     );
 }
 
+/// Every description fits the two rows above a page at the narrowest width
+/// Settings takes, so none stops mid-sentence. Launch campaign finding C-18.
+#[test]
+fn every_setting_description_fits_its_two_rows() {
+    let paths: &[&[&str]] = &[
+        &["interface", "prefix"],
+        &["theme"],
+        &["profiles"],
+        &["profiles", "p", "home"],
+        &["machines"],
+        &["targets"],
+        &["targets", "t", "machine"],
+        &["phone"],
+        &["advanced"],
+        &["notify"],
+        &["notify", "mode"],
+        &["notify", "bell"],
+        &["notify", "delay_seconds"],
+        &["notify", "title"],
+        &["advanced", "detailed_activity_clocks"],
+        &["advanced", "show_stopped_sessions"],
+        &["advanced", "session_order"],
+        &["advanced", "symbols"],
+        &["bundles"],
+        &["bundles", "b", "repositories"],
+        &["review"],
+        &["continuation"],
+        &["sessionwiki"],
+        &["sessionwiki", "archive_after_days"],
+        &["subagents"],
+        &["subagents", "eligible_profiles"],
+        &["build_cache"],
+        &["machines", "m", "build_cache", "directory"],
+        &["machines", "m", "build_cache", "max_size"],
+        &["targets", "t", "memory"],
+        &["targets", "t", "pull_policy"],
+        &["profiles", "p", "context_window_bytes"],
+        &["profiles", "p", "guardian_review_model"],
+        &[],
+        &["other"],
+    ];
+    // The dialog is at least 64 columns wide, less its border and margin.
+    let width = 60;
+    let overflowing = paths
+        .iter()
+        .map(|path| path.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>())
+        .filter(|path| {
+            ratatui::widgets::Paragraph::new(schema::help(path))
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                > 2
+        })
+        .map(|path| path.join("."))
+        .collect::<Vec<_>>();
+    assert!(overflowing.is_empty(), "{overflowing:#?}");
+}
+
 /// A new SSH machine keeps its workspaces under Mjolnir's own directory, not
 /// the product's former name. Launch campaign finding C-17.
 #[test]
