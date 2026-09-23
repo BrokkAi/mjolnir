@@ -87,6 +87,7 @@ pub enum CommandId {
     ToggleDictation,
     OpenSubagents,
     SessionActions,
+    InterruptTurn,
     Help,
 }
 
@@ -436,6 +437,20 @@ fn subagents_available(dashboard: &DashboardState) -> Availability {
         Availability::Ready
     } else {
         Availability::Blocked("this session has no sub-agents")
+    }
+}
+
+/// A turn can be interrupted only while one is running. Otherwise the
+/// command stays listed, greyed with the reason, so a search for "interrupt"
+/// always finds it.
+fn interrupt_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    if dashboard.attention_level(session) == crate::AttentionLevel::Working {
+        Availability::Ready
+    } else {
+        Availability::Blocked("no turn is running")
     }
 }
 
@@ -898,6 +913,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
         available: live_session,
+    },
+    CommandSpec {
+        id: CommandId::InterruptTurn,
+        label: "Interrupt turn",
+        description: "Stop the agent's running turn, as Esc does in the composer. The session keeps running.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::InterruptTurn),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: interrupt_available,
     },
     CommandSpec {
         id: CommandId::SessionActions,
@@ -1602,6 +1629,19 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
+            CommandId::InterruptTurn => match interrupt_available(self) {
+                Availability::Ready => self
+                    .command_session_id()
+                    .map(str::to_owned)
+                    .map_or(DashboardAction::None, |session_id| {
+                        DashboardAction::InterruptTurn { session_id }
+                    }),
+                Availability::Blocked(reason) => {
+                    self.set_notice(crate::help::sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
             CommandId::SessionActions => {
                 if self.command_session_id().is_some() {
                     self.begin_session_palette();
@@ -1907,6 +1947,41 @@ mod tests {
         dashboard.focus_prompt();
         dashboard.dispatch_command(CommandId::SessionActions);
         assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
+    }
+
+    /// B-16: the terminal said "Interrupt turn" nowhere. The command is in
+    /// the palette at all times, greyed with the reason while no turn runs,
+    /// and it runs only while the session is working.
+    #[test]
+    fn interrupt_turn_is_listed_always_and_runs_only_during_a_turn() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(spec(CommandId::InterruptTurn).label, "Interrupt turn");
+        assert_eq!(
+            dashboard.key_labels(CommandId::InterruptTurn),
+            vec!["ctrl+b i".to_owned()]
+        );
+        assert!(!hidden_from_palette(CommandId::InterruptTurn));
+        assert_eq!(
+            (spec(CommandId::InterruptTurn).available)(&dashboard),
+            Availability::Blocked("no turn is running")
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptTurn),
+            DashboardAction::None
+        );
+
+        crate::test_support::set_working(&mut dashboard, "session-1");
+        assert_eq!(
+            (spec(CommandId::InterruptTurn).available)(&dashboard),
+            Availability::Ready
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptTurn),
+            DashboardAction::InterruptTurn {
+                session_id: "session-1".into()
+            }
+        );
     }
 
     /// A-16 and A-18: the help text reads as sentences, and Close pane says

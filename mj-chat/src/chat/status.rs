@@ -184,6 +184,30 @@ impl ChatState {
             && !self.session_activity.pursuing_goal
     }
 
+    /// Whether Esc (or the host's Interrupt turn command) has a turn to
+    /// interrupt. A prompt of ours, or a turn Claude Code started on its own
+    /// after a background task, can be interrupted. A Codex goal turn also
+    /// reads as Running but has its own controls.
+    pub(crate) fn turn_interruptible(&self) -> bool {
+        self.prompt_in_flight
+            || self.harness_turn_stoppable()
+            || matches!(
+                self.session_activity.state().last_known(),
+                mj_core::activity::ActivityState::CheckingContinuation
+            )
+            || (self.session_activity.capacity_retry.is_some()
+                || self.session_activity.quota_recovery.is_some())
+            || !self.active_user_shells.is_empty()
+    }
+
+    /// Whether a turn-control request is already on its way, when a second
+    /// interrupt would do nothing.
+    pub(crate) fn turn_control_pending(&self) -> bool {
+        self.turn_control_submitting
+            || self.turn_control_awaiting_state.is_some()
+            || self.cancelling_prompt_id.is_some()
+    }
+
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
         if self.targeted_turn_control_supported
             && self.prompt_in_flight

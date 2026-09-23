@@ -384,6 +384,15 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     dashboard
 }
 
+/// Marks a session's turn as running, so it reads as working.
+pub(crate) fn set_working(dashboard: &mut DashboardState, session_id: &str) {
+    dashboard
+        .session_details
+        .get_mut(session_id)
+        .expect("the session has details")
+        .current_turn_started_at = Some(1);
+}
+
 /// A dashboard showing one running parent session with one running
 /// sub-agent. Returns the parent's id.
 pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {

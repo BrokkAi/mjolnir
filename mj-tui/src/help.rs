@@ -76,7 +76,7 @@ fn group(id: CommandId) -> &'static str {
         OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
         | ContainerSettings | MoveSession | DestroySession | MarkAllRead | FilterSessions
         | NextAttention | PreviousAttention | CancelOperation | ToggleProject | OpenSubagents
-        | SessionActions => GROUPS[2],
+        | SessionActions | InterruptTurn => GROUPS[2],
         PinSession
         | UnpinSession
         | OpenSessionSplitRight
@@ -116,7 +116,7 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ),
     ("Shift-Enter / Alt-Enter", "start a new line"),
     ("Tab", "accept a completion, or move to the next pane"),
-    ("Esc", "cancel the running turn or shell command"),
+    ("Esc", "interrupt the running turn or shell command"),
     ("PgUp / PgDn", "scroll the transcript"),
     ("Ctrl+PgUp", "browse earlier conversation pages"),
     (

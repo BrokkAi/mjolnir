@@ -201,19 +201,7 @@ impl ChatState {
                 }
                 return ChatAction::None;
             }
-            // A prompt of ours, or a turn Claude Code started on its own after
-            // a background task, can be cancelled. A Codex goal turn also
-            // reads as Running but has its own controls.
-            return if self.prompt_in_flight
-                || self.harness_turn_stoppable()
-                || matches!(
-                    self.session_activity.state().last_known(),
-                    mj_core::activity::ActivityState::CheckingContinuation
-                )
-                || (self.session_activity.capacity_retry.is_some()
-                    || self.session_activity.quota_recovery.is_some())
-                || !self.active_user_shells.is_empty()
-            {
+            return if self.turn_interruptible() {
                 ChatAction::Cancel
             } else {
                 ChatAction::None

@@ -1743,7 +1743,7 @@ fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
         .collect::<String>();
 
     assert_eq!(rendered.matches("gpt-5.6-sol · high").count(), 1);
-    assert!(rendered.contains("Esc cancels"));
+    assert!(rendered.contains("Esc interrupts"));
     assert!(!rendered.contains("Running"));
     // No outer frame wraps the whole session: the transcript's own titled
     // border is the first thing on the frame, not a session title bar.
@@ -1775,9 +1775,9 @@ fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
     chat.set_prompt_in_flight(true);
     assert_eq!(
         prompt_bottom_queue_control(&chat).unwrap().to_string(),
-        " Esc cancels"
+        " Esc interrupts"
     );
-    assert!(!prompt_title(&chat).contains("Esc cancels"));
+    assert!(!prompt_title(&chat).contains("Esc interrupts"));
 }
 
 #[tokio::test]
@@ -1816,14 +1816,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                     key: "model".into(),
                     value: "next-model".into(),
                 }),
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
             (
                 Some(true),
                 None,
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
@@ -1841,7 +1841,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             );
             let mut materialized = MaterializedSession::empty("steering-session");
             let targeted = protocol.is_some_and(|version| version >= 17);
-            let hint = if targeted { hint } else { "Esc cancels" };
+            let hint = if targeted { hint } else { "Esc interrupts" };
             let sending = if targeted {
                 sending
             } else {
@@ -2537,10 +2537,14 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
             prompt_title.chars().count() - 3,
             "spinner occupies the upper-right title: {prompt_title}"
         );
-        assert!(
-            running[prompt_bottom].contains("Esc cancels"),
-            "{running:?}"
-        );
+        // A 16-column composer has 14 cells of border, one short of the
+        // whole hint; the border clips it there.
+        let hint = if width > 16 {
+            "Esc interrupts"
+        } else {
+            "Esc interrupt"
+        };
+        assert!(running[prompt_bottom].contains(hint), "{running:?}");
         assert_eq!(running[0], idle[0], "the transcript keeps its full height");
         assert_eq!(running[input.y as usize], idle[input.y as usize]);
         assert_eq!(

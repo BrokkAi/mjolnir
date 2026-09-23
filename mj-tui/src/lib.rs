@@ -493,6 +493,11 @@ pub enum DashboardAction {
         workspace_id: String,
     },
     ExitSubagentWorkspace,
+    /// Interrupt the running turn of this session's open conversation, as
+    /// Esc in its composer does.
+    InterruptTurn {
+        session_id: String,
+    },
     /// Show a session's sub-agents in their own workspace. The controller
     /// saves the composer draft first, as the prompt border's click does.
     OpenSubagents {

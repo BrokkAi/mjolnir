@@ -346,7 +346,7 @@ enum TurnControlIntent {
 impl TurnControlIntent {
     fn escape_hint(self) -> &'static str {
         match self {
-            Self::Cancel => "Esc cancels",
+            Self::Cancel => "Esc interrupts",
             Self::Steer => "Esc steers next",
         }
     }
