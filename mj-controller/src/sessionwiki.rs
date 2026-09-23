@@ -1603,6 +1603,13 @@ pub fn wiki_session(
             .unwrap_or_default(),
         false => tags::MjTags::default(),
     };
+    // Only an archived row is continued by restoring its transcript, and a
+    // restore needs a prompt to open the first turn.
+    let nothing_to_restore = status == WikiSessionStatus::Archived
+        && !has_prompt(
+            &sessionwiki::index::session_from_index(&connection, &row)
+                .context("read an indexed session")?,
+        );
     let harness = tags
         .harness
         .as_deref()
@@ -1623,7 +1630,17 @@ pub fn wiki_session(
         harness,
         title: row.title,
         project: row.project,
+        nothing_to_restore,
     }))
+}
+
+/// Whether an indexed transcript holds a prompt, which is what
+/// [`snapshot_of`] needs to open a turn.
+fn has_prompt(session: &sessionwiki::model::Session) -> bool {
+    session
+        .messages
+        .iter()
+        .any(|message| message.role == Role::User && !message.text.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -2312,6 +2329,12 @@ mod tests {
             error.to_string().contains("no prompt"),
             "a session with no prompt cannot be restored: {error}"
         );
+        // `mj sessions --session` offers a restore by the same rule.
+        assert!(!has_prompt(&indexed(vec![(
+            Role::Assistant,
+            "nobody asked"
+        )])));
+        assert!(has_prompt(&indexed(vec![(Role::User, "carry on")])));
     }
 
     fn record(

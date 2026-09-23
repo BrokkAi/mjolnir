@@ -817,18 +817,31 @@ async fn wiki_session(client: &ApiClient, wiki_id: &str, json: bool) -> Result<(
     if json {
         return print_json(&info);
     }
+    for line in wiki_session_lines(&info) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// What `mj sessions --session` prints for a SessionWiki row.
+fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> {
     let status = match info.status {
         WikiSessionStatus::Mine => "mine",
         WikiSessionStatus::Archived => "archived",
         WikiSessionStatus::Native => "native",
     };
-    println!("{}  {status}  {}", info.wiki_id, info.title);
-    println!("{} at {}", info.tool, info.path.display());
+    let mut lines = vec![
+        format!("{}  {status}  {}", info.wiki_id, info.title),
+        format!("{} at {}", info.tool, info.path.display()),
+    ];
     if let Some(session_id) = &info.mjolnir_session_id {
-        println!("Mjolnir session {session_id}");
+        lines.push(format!("Mjolnir session {session_id}"));
     }
-    println!("continue it with `mj resume --wiki {}`", info.wiki_id);
-    Ok(())
+    lines.push(match info.nothing_to_restore {
+        true => "it cannot be continued: it never received a prompt".to_owned(),
+        false => format!("continue it with `mj resume --wiki {}`", info.wiki_id),
+    });
+    lines
 }
 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
@@ -1326,6 +1339,40 @@ mod tests {
         // reason recorded, and that is still a failure.
         let failed_resume = suspended(serde_json::json!("the archive was missing"));
         assert!(report_wait(&failed_resume, false).is_err());
+    }
+
+    /// F-11: a destroyed session that never took a prompt was offered
+    /// `mj resume --wiki`, which then failed with "no prompt to restore from".
+    #[test]
+    fn an_archived_row_is_offered_a_resume_only_when_it_has_something_to_restore() {
+        let row = |nothing_to_restore: bool| mj_client::daemon::WikiSessionInfo {
+            wiki_id: "w1".into(),
+            tool: "mjolnir".into(),
+            path: PathBuf::from("/data/sessions/w1"),
+            status: WikiSessionStatus::Archived,
+            mjolnir_session_id: Some("w1".into()),
+            profile_id: None,
+            target_template_id: None,
+            harness: None,
+            title: "burst3".into(),
+            project: String::new(),
+            nothing_to_restore,
+        };
+        assert!(
+            wiki_session_lines(&row(false))
+                .iter()
+                .any(|line| line.contains("mj resume --wiki w1"))
+        );
+        let lines = wiki_session_lines(&row(true));
+        assert!(
+            !lines.iter().any(|line| line.contains("mj resume")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("never received a prompt"))
+        );
     }
 
     #[test]

@@ -193,6 +193,12 @@ pub struct WikiSessionInfo {
     pub harness: Option<mj_core::config::HarnessKind>,
     pub title: String,
     pub project: String,
+    /// Set for an archived Mjolnir row whose transcript holds no prompt,
+    /// which `mj resume --wiki` has nothing to restore from. Sent only when
+    /// set, so a daemon that predates it and a client that predates it both
+    /// read every other row unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nothing_to_restore: bool,
 }
 
 /// Start a new session carrying a compacted hand-off from an archived one.
