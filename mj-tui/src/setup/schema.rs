@@ -126,6 +126,58 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
     }
 }
 
+/// A setting the file stores as a whole number. The form edits every value
+/// as text, so this is the one place that text becomes a number again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WholeNumber {
+    pub(super) min: u64,
+    pub(super) max: u64,
+    /// What to say when the text is not a whole number in range.
+    pub(super) message: &'static str,
+    /// Whether clearing the field removes it, so the setting's own default
+    /// applies. Otherwise a cleared field is an optional value set to none.
+    pub(super) defaulted: bool,
+}
+
+pub(super) fn whole_number(path: &[String]) -> Option<WholeNumber> {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let (min, max, message, defaulted) = match parts.as_slice() {
+        ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
+        ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
+        ["sessionwiki", "archive_after_days"] => (
+            1,
+            u64::from(u32::MAX),
+            "Enter a whole number of days, at least 1. Clear the field to keep every session.",
+            false,
+        ),
+        ["profiles", _, "context_window_bytes"] => (
+            0,
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            "Enter a whole number of bytes.",
+            false,
+        ),
+        _ => return None,
+    };
+    Some(WholeNumber {
+        min,
+        max,
+        message,
+        defaulted,
+    })
+}
+
+/// Converts the text typed into a whole-number field. Blank means unset.
+pub(super) fn parse_whole_number(number: WholeNumber, text: &str) -> Result<Value, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    match text.parse::<u64>() {
+        Ok(value) if (number.min..=number.max).contains(&value) => Ok(Value::from(value)),
+        _ => Err(number.message.to_owned()),
+    }
+}
+
 /// Whether the runtime `target` runs on this machine, which is what decides
 /// the settings the screen can resolve without asking another host.
 pub(super) fn is_local_runtime(draft: &Value, target: &str) -> bool {
@@ -221,6 +273,15 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     match parts.as_slice() {
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // A cleared number takes the setting's own default.
+        ["notify", "delay_seconds"] => format!(
+            "{} (default)",
+            mj_core::config::NotifyConfig::default().delay_seconds
+        ),
+        ["subagents", "max_concurrent"] => format!(
+            "{} (default)",
+            mj_core::config::SubagentConfig::default().max_concurrent
+        ),
         // Unset symbols follow the terminal: ASCII on the Linux console or
         // without a UTF-8 locale, Unicode otherwise.
         ["advanced", "symbols"] => "Follows the terminal".to_owned(),

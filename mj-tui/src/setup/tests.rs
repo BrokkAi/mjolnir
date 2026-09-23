@@ -2571,3 +2571,66 @@ fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
         theme::UiTheme::Mono
     );
 }
+
+/// Opens the field `key` on the page `section` and types `text` into it.
+fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
+    dialog.path = vec![section.to_owned()];
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|candidate| candidate == key)
+        .unwrap_or_else(|| panic!("{section} has no {key}"));
+    dialog.open_selected();
+    dialog.editor.as_mut().expect("a text editor").input = EditorInput::Text(TextInput::from(text));
+}
+
+fn saved_config(dialog: &mut SetupDialog) -> Config {
+    let action = dialog.save();
+    dialog.saving = false;
+    match action {
+        DashboardAction::SaveSetup { updated, .. } => serde_json::from_str(&updated).unwrap(),
+        other => panic!("save refused: {other:?}, notice {:?}", dialog.notice),
+    }
+}
+
+/// The numeric settings are edited as text but saved as numbers, "Use
+/// default" puts the default back, and text that is not a number is refused
+/// under the field without losing the draft. Launch campaign finding C-23.
+#[test]
+fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
+    type Read = fn(&Config) -> u64;
+    let fields: [(&str, &str, Read, u64); 3] = [
+        ("notify", "delay_seconds", |c| c.notify.delay_seconds, 2),
+        (
+            "sessionwiki",
+            "archive_after_days",
+            |c| c.sessionwiki.archive_after_days.map_or(0, u64::from),
+            0,
+        ),
+        (
+            "subagents",
+            "max_concurrent",
+            |c| u64::try_from(c.subagents.max_concurrent).unwrap(),
+            6,
+        ),
+    ];
+    for (section, key, read, default) in fields {
+        let mut dialog = SetupDialog::new(&config());
+        edit_field(&mut dialog, section, key, "5");
+        dialog.apply_editor(false).unwrap();
+        assert_eq!(dialog.draft[section][key], 5, "{section}.{key}");
+        assert_eq!(read(&saved_config(&mut dialog)), 5, "{section}.{key}");
+
+        edit_field(&mut dialog, section, key, "5");
+        dialog.apply_editor(true).unwrap();
+        assert_eq!(read(&saved_config(&mut dialog)), default, "{section}.{key}");
+
+        edit_field(&mut dialog, section, key, "five");
+        let error = dialog.apply_editor(false).unwrap_err();
+        assert!(error.starts_with("Enter a whole number"), "{error}");
+        assert!(
+            dialog.editor.is_some(),
+            "{section}.{key}: the field stays open"
+        );
+    }
+}

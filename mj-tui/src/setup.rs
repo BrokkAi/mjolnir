@@ -278,6 +278,15 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     {
         machines.remove(mj_core::config::LOCAL_MACHINE_ID);
     }
+    // A cleared number that has a default of its own is left out, so the
+    // configuration's default applies instead of a null it cannot read.
+    for (section, key) in [("notify", "delay_seconds"), ("subagents", "max_concurrent")] {
+        if draft[section][key].is_null()
+            && let Some(entries) = draft[section].as_object_mut()
+        {
+            entries.remove(key);
+        }
+    }
     serde_json::from_value(draft)
 }
 
@@ -1316,8 +1325,7 @@ impl SetupDialog {
             // A half-typed or cleared number means "Never" until it parses.
             return Some(editor.input.to_string().trim().parse::<u32>().ok());
         }
-        // The draft keeps an edited number as text until it is saved, so both
-        // shapes have to read the same.
+        // Edits store a number; a hand-written string is still read the same.
         Some(match &self.draft["sessionwiki"]["archive_after_days"] {
             Value::String(text) => text.trim().parse::<u32>().ok(),
             value => value.as_u64().and_then(|days| u32::try_from(days).ok()),
@@ -1453,22 +1461,8 @@ impl SetupDialog {
             Value::Null
         } else if !editor.choices.is_empty() {
             editor.choices[editor.selected].clone()
-        } else if editor
-            .path
-            .last()
-            .is_some_and(|key| key == "context_window_bytes")
-        {
-            if editor.input.trim().is_empty() {
-                Value::Null
-            } else {
-                Value::from(
-                    editor
-                        .input
-                        .trim()
-                        .parse::<u64>()
-                        .map_err(|_| "Enter a whole number of bytes.".to_owned())?,
-                )
-            }
+        } else if let Some(number) = schema::whole_number(&editor.path) {
+            schema::parse_whole_number(number, &editor.input.to_string())?
         } else if is_build_cache_field(&editor.path, "max_size") {
             let text = editor.input.trim().to_owned();
             if text.is_empty() {
@@ -1512,6 +1506,7 @@ impl SetupDialog {
         if clear
             && !defaults.get(&key).is_some_and(Value::is_null)
             && editor.path != ["interface", "prefix"]
+            && !schema::whole_number(&editor.path).is_some_and(|number| number.defaulted)
         {
             return Err("This setting is required. Choose a value instead of clearing it.".into());
         }
