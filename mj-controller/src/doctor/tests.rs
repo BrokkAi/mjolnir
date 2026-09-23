@@ -532,6 +532,8 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
     let mut responses = passing_podman_probes();
     responses.push(Ok(output(b"")));
     responses.push(Ok(failed(b"")));
+    // The built-in `podman` target the dashboard also lists.
+    responses.push(Ok(output(b"")));
     let executor = FakeExecutor::new(responses);
     let config = config_with([
         (
@@ -558,11 +560,13 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
         vec![
             "runtime.podman",
             "runtime.podman.image.alpha",
-            "runtime.podman.image.beta"
+            "runtime.podman.image.beta",
+            "runtime.podman.image.podman"
         ]
     );
     assert_eq!(checks[1].status, CheckStatus::Ready);
     assert_eq!(checks[2].status, CheckStatus::Fixable);
+    assert_eq!(checks[3].status, CheckStatus::Ready);
 }
 
 #[test]
@@ -601,6 +605,72 @@ fn docker_checks_probe_the_daemon_then_the_configured_image() {
     assert_eq!(
         commands[1].args,
         ["image", "inspect", "ghcr.io/example/dev:1"]
+    );
+}
+
+/// The dashboard lists the built-in `docker` target (and downloads its image)
+/// without any configured Docker target. Doctor checks the same target set:
+/// it probes Docker and the image for the built-in target, and when Docker
+/// is missing it reports the built-in target as unavailable, not as a fault.
+#[test]
+fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
+    let executor = FakeExecutor::new([
+        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(b"image metadata\n")),
+    ]);
+    let checks = docker_checks(Ok(&Config::default()), &executor, false);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| (check.id.as_str(), check.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("runtime.docker", CheckStatus::Ready),
+            ("runtime.docker.image.docker", CheckStatus::Ready)
+        ]
+    );
+
+    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let checks = docker_checks(Ok(&Config::default()), &missing_image, false);
+    assert_eq!(
+        checks[1].status,
+        CheckStatus::Warning,
+        "the dashboard downloads a built-in target's image itself: {}",
+        checks[1].detail
+    );
+
+    let checks = docker_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Unsupported);
+    assert!(
+        checks[0].detail.contains("built-in `docker` target"),
+        "{}",
+        checks[0].detail
+    );
+
+    let configured = config_with([(
+        "docker",
+        TargetTemplate::LocalDocker {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]);
+    let checks = docker_checks(Ok(&configured), &AlwaysFailingExecutor, false);
+    assert_eq!(
+        checks[0].status,
+        CheckStatus::Fixable,
+        "a target the user configured is still a fault to fix"
+    );
+}
+
+#[test]
+fn podman_checks_cover_the_built_in_podman_target() {
+    let checks = podman_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Unsupported);
+    assert!(
+        checks[0].detail.contains("built-in `podman` target"),
+        "{}",
+        checks[0].detail
     );
 }
 

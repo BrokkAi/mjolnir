@@ -724,13 +724,73 @@ fn podman_checks(
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let preflight = podman_check(config, executor);
+    let effective = config.map(|config| config.clone().with_local_targets());
+    let effective = effective.as_ref().map_err(|gap| *gap);
+    let explicit = config.is_ok_and(|config| !local_podman_targets(config).is_empty());
+    let preflight = builtin_target_availability(
+        podman_check(effective, executor),
+        explicit,
+        "Podman",
+        "podman",
+    );
     let preflight_passed = preflight.status == CheckStatus::Ready;
     let mut checks = vec![preflight];
     if preflight_passed {
-        checks.extend(podman_image_checks(config, executor, smoke));
+        checks.extend(
+            podman_image_checks(effective, executor, smoke)
+                .into_iter()
+                .map(|(id, check)| builtin_image_check(config, &id, check)),
+        );
     }
     checks
+}
+
+/// An image check for a standard local target the user never configured.
+/// The dashboard downloads that image itself when it starts, so a missing
+/// image is a warning rather than a fault.
+fn builtin_image_check(
+    config: ConfigStatus<'_>,
+    target_id: &str,
+    check: DoctorCheck,
+) -> DoctorCheck {
+    let explicit = config.is_ok_and(|config| config.targets.contains_key(target_id));
+    if explicit || check.status != CheckStatus::Fixable {
+        return check;
+    }
+    DoctorCheck::warning(
+        check.id,
+        check.title,
+        format!(
+            "{} (built-in `{target_id}` target; the dashboard downloads its image when it starts)",
+            check.detail
+        ),
+        check.remediation.unwrap_or_default(),
+    )
+}
+
+/// Doctor checks the same target set the dashboard lists: the configured
+/// targets plus the standard local ones [`Config::with_local_targets`]
+/// supplies whether or not their engine is installed. A standard target whose
+/// engine is missing or not running is reported as unavailable, as the
+/// dashboard's Targets pane marks it, rather than as a fault to fix: nobody
+/// asked for it. A target the user configured keeps the fixable result.
+fn builtin_target_availability(
+    check: DoctorCheck,
+    explicit: bool,
+    engine: &str,
+    target_id: &str,
+) -> DoctorCheck {
+    if explicit || check.status != CheckStatus::Fixable {
+        return check;
+    }
+    DoctorCheck::unsupported(
+        check.id,
+        check.title,
+        format!(
+            "{engine} is not available, so the built-in `{target_id}` target is marked unavailable: {}",
+            check.detail
+        ),
+    )
 }
 
 fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> DoctorCheck {
@@ -794,13 +854,18 @@ fn podman_image_checks(
     config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
-) -> Vec<DoctorCheck> {
+) -> Vec<(String, DoctorCheck)> {
     let Ok(config) = config else {
         return Vec::new();
     };
     local_podman_targets(config)
         .into_iter()
-        .map(|(id, container)| podman_image_check(id, &container.image, executor, smoke))
+        .map(|(id, container)| {
+            (
+                id.clone(),
+                podman_image_check(id, &container.image, executor, smoke),
+            )
+        })
         .collect()
 }
 
@@ -887,7 +952,9 @@ fn docker_checks(
             )];
         }
     };
-    let targets = local_docker_targets(config);
+    let explicit = !local_docker_targets(config).is_empty();
+    let effective = config.clone().with_local_targets();
+    let targets = local_docker_targets(&effective);
     if targets.is_empty() {
         return vec![DoctorCheck::unsupported(
             "runtime.docker",
@@ -895,16 +962,23 @@ fn docker_checks(
             "No local-docker target is configured.",
         )];
     }
-    let preflight = local_docker_runtime_check(executor);
+    let preflight = builtin_target_availability(
+        local_docker_runtime_check(executor),
+        explicit,
+        "Docker",
+        "docker",
+    );
     if preflight.status != CheckStatus::Ready {
         return vec![preflight];
     }
     let mut checks = vec![preflight];
-    checks.extend(
-        targets
-            .into_iter()
-            .map(|(id, container)| docker_image_check(id, &container.image, executor, smoke)),
-    );
+    checks.extend(targets.into_iter().map(|(id, container)| {
+        builtin_image_check(
+            Ok(config),
+            id,
+            docker_image_check(id, &container.image, executor, smoke),
+        )
+    }));
     checks
 }
 
