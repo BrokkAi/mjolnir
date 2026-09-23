@@ -156,6 +156,7 @@ pub(super) fn build_observation(
             .filter(|error| mj_core::state::is_public_lifecycle_error(error))
             .filter(|_| session.operation.is_none())
             .cloned(),
+        cannot_take_prompt: !session.capabilities.prompt,
         launch_failed: snapshot
             .launch_failures
             .iter()

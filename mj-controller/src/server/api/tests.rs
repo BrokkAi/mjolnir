@@ -130,7 +130,10 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
     };
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let session = &snapshot.sessions[0];
+    // The runtime snapshot publishes this for an attached, idle session.
+    let mut session = snapshot.sessions[0].clone();
+    session.capabilities.prompt = true;
+    let session = &session;
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
     for known in [None, Some(false), Some(true)] {
         live.snapshot
@@ -2045,6 +2048,32 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
         assert!(!state.is_idle(), "{state:?}");
         assert!(state.has_work_in_flight(), "{state:?}");
     }
+}
+
+/// `mj wait` with no turn must not say "finished" while the session is still
+/// provisioning, or is live but not yet able to take a prompt (a resume that
+/// has not reattached): the next prompt would be refused.
+#[test]
+fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
+    let request = WaitRequest {
+        return_on_input: false,
+        turn_id: None,
+        timeout_secs: None,
+    };
+    let mut starting = idle(None);
+    starting.lifecycle = Some(ViewerLifecycleCategory::Starting);
+    starting.cannot_take_prompt = true;
+    assert_eq!(resolve_wait(&starting, &request), None);
+
+    let mut reattaching = idle(Some(completed(3, "end_turn")));
+    reattaching.cannot_take_prompt = true;
+    assert_eq!(resolve_wait(&reattaching, &request), None);
+
+    let ready = idle(None);
+    assert_eq!(
+        resolve_wait(&ready, &request).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished)
+    );
 }
 
 #[test]
