@@ -1034,6 +1034,7 @@ fn render_combined_themed(
                         dashboard,
                         crate::actions::FooterGroup::Chord,
                     );
+                    let chord_prefix = crate::render::chord_prefix(dashboard);
                     let commands = chords.clone();
                     let chords = chords
                         .iter()
@@ -1055,6 +1056,7 @@ fn render_combined_themed(
                             footer: prompt_focused.then_some(ChatFooter {
                                 area: footer_area,
                                 chords: &chords,
+                                chord_prefix: &chord_prefix,
                                 functions: &[],
                                 banner: banner.as_ref(),
                             }),

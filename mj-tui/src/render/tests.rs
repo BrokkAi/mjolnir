@@ -1466,7 +1466,7 @@ fn the_footer_is_one_row_that_a_notice_takes_over() {
     let hotkeys = (buffer.area.x..buffer.area.right())
         .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
         .collect::<String>();
-    assert!(hotkeys.contains("ctrl+b then: c create"), "{hotkeys:?}");
+    assert!(hotkeys.contains("ctrl+b then c create"), "{hotkeys:?}");
     assert!(hotkeys.contains("a read"), "{hotkeys:?}");
     assert!(!hotkeys.contains("[S]ort"));
 }
@@ -1535,11 +1535,7 @@ fn footer_drops_whole_hints_when_the_width_runs_out() {
         // Every hint that survived is a whole hint of the full text. The
         // prefix label moves to whichever chord survives first, so it is
         // set aside before comparing.
-        let unlabeled = |hint: &str| {
-            hint.strip_prefix("ctrl+b then: ")
-                .unwrap_or(hint)
-                .to_owned()
-        };
+        let unlabeled = |hint: &str| hint.strip_prefix("ctrl+b then ").unwrap_or(hint).to_owned();
         let whole = footer_hints(&full)
             .iter()
             .map(|hint| unlabeled(hint))
@@ -1581,7 +1577,7 @@ fn the_footer_shows_the_prefix_banner_while_a_chord_is_pending() {
             lines
                 .last()
                 .expect("the footer row")
-                .contains("ctrl+b then:"),
+                .contains("ctrl+b then "),
             "{focus:?}"
         );
     }
@@ -1597,7 +1593,7 @@ fn footer_chord_group_starts_with_the_live_prefix() {
     config.keys.prefix = "ctrl+a".to_owned();
     dashboard.set_config(config);
     let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("│ ctrl+a then: c create"), "{footer}");
+    assert!(footer.contains("│ ctrl+a then c create"), "{footer}");
     assert!(!footer.contains("ctrl+b"), "{footer}");
 }
 
@@ -1620,13 +1616,44 @@ fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     dashboard.focus_sessions();
     let footer = combined_footer_text(&dashboard, 60);
     assert_eq!(
-        footer, "Enter open │ ctrl+b then: : palette · ? keys",
+        footer, "Enter open │ ctrl+b then : palette · ? keys",
         "{footer}"
     );
     assert!(
-        !combined_footer_text(&dashboard, 200).contains("then: : palette"),
+        !combined_footer_text(&dashboard, 200).contains("then : palette"),
         "a wide row keeps the label on the first chord"
     );
+}
+
+/// A-12: at every ordinary width and for every pane focus, the chord group
+/// leads with the prefix, and the palette's `:` never follows a colon.
+#[test]
+fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
+    for focus in [
+        Focus::Workspaces,
+        Focus::Sessions,
+        Focus::Quota,
+        Focus::Targets,
+    ] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus = focus;
+        for width in [140_u16, 100, 80] {
+            let footer = combined_footer_text(&dashboard, width);
+            let chord_group = footer
+                .split(theme::footer_group_separator())
+                .nth(1)
+                .unwrap_or_else(|| panic!("{focus:?} {width}: {footer}"));
+            assert!(
+                chord_group.starts_with("ctrl+b then "),
+                "{focus:?} {width}: {footer}"
+            );
+            assert!(
+                footer.ends_with(": palette · ? keys"),
+                "{focus:?} {width}: {footer}"
+            );
+            assert!(!footer.contains("then: :"), "{focus:?} {width}: {footer}");
+        }
+    }
 }
 
 /// The row is read left to right by someone hunting one key, so the kinds of
@@ -1639,7 +1666,7 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
          · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering \
          · : palette · ? keys"
     );
@@ -1648,12 +1675,12 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     // chord list gives way from its right-hand end.
     assert_eq!(
         combined_footer_text(&dashboard, 160),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
          · a read · b panes · q detach · u web · : palette · ? keys"
     );
     assert_eq!(
         combined_footer_text(&dashboard, 140),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
          · a read · b panes · q detach · : palette · ? keys"
     );
     // The filter letters are what the search hint is there to teach, and 140
@@ -1676,7 +1703,7 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
         1_000,
     );
     let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("│ ctrl+b then: c create"), "{footer}");
+    assert!(footer.contains("│ ctrl+b then c create"), "{footer}");
     assert!(
         footer.contains("b panes · shift+c cancel launch · q detach"),
         "{footer}"
@@ -1704,14 +1731,14 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let squeezed = combined_footer_text(&dashboard, 90);
     assert_eq!(
         squeezed,
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys"
     );
 
     // Narrower still, the pane hints give way from the right as well, and the
     // prefix label stays on the first chord left standing.
     assert_eq!(
         combined_footer_text(&dashboard, 52),
-        "Enter open │ ctrl+b then: : palette · ? keys"
+        "Enter open │ ctrl+b then : palette · ? keys"
     );
 
     assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");

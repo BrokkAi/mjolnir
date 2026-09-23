@@ -1539,7 +1539,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1559,7 +1559,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1591,8 +1591,61 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             // The chords give way before the composer's own keys, so what a
             // narrow row keeps is the key that works right here plus the two
             // hints that lead to everything else.
-            assert_eq!(text.trim_end(), "Tab pane │ : palette · ? keys");
+            // The label outranks Tab pane: without it `:` reads as a plain
+            // key, and a plain `:` types a colon (A-12).
+            assert_eq!(text.trim_end(), "ctrl+b then : palette · ? keys");
         }
+    }
+}
+
+/// A-12: the composer's footer dropped the prefix label with the first chord,
+/// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
+/// as the reader could tell. The label must ride on the first chord left.
+#[test]
+fn the_composer_footer_names_the_prefix_at_every_width() {
+    let chat = ChatState::new(&snapshot(), &[]);
+    let chords = [
+        "c create",
+        "g sessions",
+        "a read",
+        "b panes",
+        "q detach",
+        "u web",
+        ": palette",
+        "? keys",
+    ];
+    for width in [140_u16, 100, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let footer = crate::chat::ChatFooter {
+                    area,
+                    chords: &chords,
+                    chord_prefix: "ctrl+b then ",
+                    functions: &[],
+                    banner: None,
+                };
+                render_chat_footer(frame, footer, &chat, true);
+            })
+            .expect("draw footer");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let chord_group = text
+            .split('│')
+            .nth(1)
+            .unwrap_or_else(|| panic!("{width}: no chord group in {text:?}"));
+        assert!(
+            chord_group.trim_start().starts_with("ctrl+b then "),
+            "{width}: {text:?}"
+        );
+        assert!(text.contains(": palette · ? keys"), "{width}: {text:?}");
+        assert!(!text.contains("then:"), "{width}: {text:?}");
     }
 }
 

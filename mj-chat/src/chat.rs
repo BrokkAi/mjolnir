@@ -193,6 +193,10 @@ pub struct ChatRegions<'a> {
 pub struct ChatFooter<'a> {
     pub area: Rect,
     pub chords: &'a [&'a str],
+    /// The words that lead the chord group — `ctrl+b then `. The renderer
+    /// puts them on the first chord that fits, so a narrow row never shows
+    /// chord keys as if they were plain keys.
+    pub chord_prefix: &'a str,
     pub functions: &'a [&'a str],
     pub banner: Option<&'a Line<'static>>,
 }

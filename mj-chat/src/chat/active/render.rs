@@ -368,36 +368,36 @@ pub(crate) fn render_chat_footer(
             "Tab pane{sep}Ctrl-V paste{sep}Enter send{sep}Ctrl-R history{sep}Shift-Enter newline"
         )
     };
-    let groups = theme::fit_footer_items(
+    let groups = theme::fit_prefixed_footer_items(
         [
             composer_keys
                 .split(theme::footer_separator())
-                .map(|text| (None, text))
+                .map(|text| (None, text.to_owned()))
                 .collect(),
             footer
                 .chords
                 .iter()
                 .enumerate()
-                .map(|(index, text)| (Some(index), *text))
+                .map(|(index, text)| (Some(index), (*text).to_owned()))
                 .collect(),
             footer
                 .functions
                 .iter()
                 .enumerate()
-                .map(|(index, text)| (Some(footer.chords.len() + index), *text))
+                .map(|(index, text)| (Some(footer.chords.len() + index), (*text).to_owned()))
                 .collect(),
         ],
         footer_area.width,
-        |(_, text)| *text,
+        footer.chord_prefix,
         // The host ranks its hints, and puts the two it wants kept longest —
         // the palette and the help key — at the end of the list.
-        |(command, _)| {
+        |command: &Option<usize>| {
             command.is_some_and(|index| {
                 index + 2 >= footer.chords.len().saturating_add(footer.functions.len())
             })
         },
     );
-    let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
+    let default_footer = theme::footer_items_text(&groups, |(_, text)| text.as_str());
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
@@ -459,7 +459,8 @@ pub(crate) fn render_chat_footer(
 pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     ChatFooter {
         area,
-        chords: &["ctrl+b then: b panes", "q detach", ": palette", "? keys"],
+        chords: &["b panes", "q detach", ": palette", "? keys"],
+        chord_prefix: "ctrl+b then ",
         functions: &[],
         banner: None,
     }
