@@ -28,6 +28,14 @@ impl Clone for Work {
 }
 
 impl Gate {
+    pub(crate) fn is_open(&self) -> bool {
+        !self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed
+    }
+
     pub(crate) fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
         let mut state = self
             .0
