@@ -50,8 +50,26 @@ pub fn raw_project_context_id(project_directory: &str) -> String {
     format!("remote-project-{suffix}")
 }
 
+/// Ports a named instance's viewer may default to. The default instance keeps
+/// 3765; each named instance hashes its name into this range so a test build
+/// beside the live one does not collide with it, and so its viewer URL (and
+/// the bookmarked QR login) stays the same across daemon restarts.
+pub const INSTANCE_VIEWER_PORTS: std::ops::RangeInclusive<u16> = 38000..=38999;
+
 fn default_phone_bind() -> String {
-    "127.0.0.1:3765".to_owned()
+    default_phone_bind_for(instance_name().as_deref())
+}
+
+/// The default `[phone] bind` for the default instance (`None`) or a named one.
+pub fn default_phone_bind_for(instance: Option<&str>) -> String {
+    let Some(name) = instance else {
+        return "127.0.0.1:3765".to_owned();
+    };
+    let digest = Sha256::digest(name.as_bytes());
+    let span = u32::from(INSTANCE_VIEWER_PORTS.end() - INSTANCE_VIEWER_PORTS.start()) + 1;
+    let offset = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % span;
+    let port = u32::from(*INSTANCE_VIEWER_PORTS.start()) + offset;
+    format!("127.0.0.1:{port}")
 }
 
 const fn default_true() -> bool {

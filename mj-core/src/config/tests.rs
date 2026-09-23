@@ -1742,6 +1742,28 @@ image = "ubuntu:24.04"
 }
 
 #[test]
+fn named_instances_default_to_their_own_stable_viewer_port() {
+    assert_eq!(default_phone_bind_for(None), "127.0.0.1:3765");
+    let port = |name: &str| -> u16 {
+        let bind: std::net::SocketAddr = default_phone_bind_for(Some(name)).parse().unwrap();
+        assert!(bind.ip().is_loopback(), "{name} binds beyond loopback");
+        bind.port()
+    };
+    let launch = port("launch-i1");
+    assert_eq!(
+        launch,
+        port("launch-i1"),
+        "the default must survive restarts"
+    );
+    assert!(
+        (INSTANCE_VIEWER_PORTS).contains(&launch),
+        "{launch} is outside the documented range"
+    );
+    assert_ne!(launch, 3765);
+    assert_ne!(port("dev"), port("dev-2"));
+}
+
+#[test]
 fn instance_names_accept_single_segment_identifiers() {
     for valid in ["dev", "dev-2", "x.y_z", "A1", "a".repeat(64).as_str()] {
         assert!(is_valid_instance_name(valid), "rejects valid {valid:?}");

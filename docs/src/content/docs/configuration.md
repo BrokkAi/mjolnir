@@ -291,10 +291,20 @@ tailscale_detect = true
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Starts the viewer with the daemon. |
-| `bind` | string | no | `"127.0.0.1:3765"` | Must parse as a numeric socket address, including a port. |
+| `bind` | string | no | `"127.0.0.1:3765"`; a named instance uses a port in 38000–38999 | Must parse as a numeric socket address, including a port. |
 | `tailscale_detect` | boolean | no | `true` | Allows automatic trusted `ts.net` certificate discovery and renewal. |
 | `tls_cert` | path string | no | unset | Certificate-chain path. Must be paired with `tls_key`. |
 | `tls_key` | path string | no | unset | Private-key path. Must be paired with `tls_cert`. |
+
+A named instance (`MJ_INSTANCE=<name>` or `mj --instance <name>`) that does not
+set `bind` listens on `127.0.0.1` at a port from 38000 to 38999 computed from
+its name. The port stays the same across daemon restarts, so a bookmarked
+login link keeps working, and it does not collide with the default instance's
+port 3765. If the port is taken anyway, for example by another named instance
+whose name maps to the same port, the viewer reports the conflict and gives the
+exact `bind` line to add under `[phone]`. The `mj` commands that use the HTTP API,
+such as `mj sessions` and `mj prompt`, need the viewer's listener and fail until
+the conflict is resolved.
 
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
 When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
