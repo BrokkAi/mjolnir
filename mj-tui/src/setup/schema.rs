@@ -411,10 +411,12 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
             } else {
-                match section["max_concurrent"].as_u64() {
-                    Some(limit) => format!("On · up to {limit}"),
-                    None => "On".to_owned(),
-                }
+                // A cleared limit is the default one, which still applies.
+                let limit = section["max_concurrent"].as_u64().unwrap_or(
+                    u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
+                        .unwrap_or(u64::MAX),
+                );
+                format!("On · up to {limit}")
             }
         }
         "sessionwiki" => match section["archive_after_days"].as_u64() {

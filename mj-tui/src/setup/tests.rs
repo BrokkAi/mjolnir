@@ -2608,6 +2608,26 @@ fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
     assert_eq!(row(&mut dashboard), before);
 }
 
+/// The first page describes the draft, not the saved file, and a limit put
+/// back to its default still shows the limit. Launch campaign finding C-22.
+#[test]
+fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
+    let mut dialog = SetupDialog::new(&config());
+    edit_field(&mut dialog, "sessionwiki", "archive_after_days", "30");
+    dialog.apply_editor(false).unwrap();
+    edit_field(&mut dialog, "subagents", "max_concurrent", "4");
+    dialog.apply_editor(false).unwrap();
+    let summary = |dialog: &SetupDialog, key: &str| {
+        row_summary(&[], key, &dialog.draft[key], &dialog.draft, None)
+    };
+    assert_eq!(summary(&dialog, "sessionwiki"), "Archives after 30 days");
+    assert_eq!(summary(&dialog, "subagents"), "On · up to 4");
+
+    edit_field(&mut dialog, "subagents", "max_concurrent", "");
+    dialog.apply_editor(true).unwrap();
+    assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
+}
+
 /// Opens the field `key` on the page `section` and types `text` into it.
 fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
     dialog.path = vec![section.to_owned()];
