@@ -898,6 +898,48 @@ fn declining_the_aws_step_writes_no_aws_target() {
     assert!(!config.targets.contains_key(AWS_TARGET_ID));
 }
 
+/// The first smoke test pulls the image, which for the default image is about
+/// 2 GB and prints nothing while it runs, so setup says so before it starts.
+#[test]
+fn smoke_test_announces_the_image_download_before_it_starts() {
+    for (runtime, engine) in [
+        (RuntimeKind::Podman, "Podman"),
+        (RuntimeKind::Docker, "Docker"),
+    ] {
+        let mut output = Vec::new();
+        run_smoke_test(
+            &mut output,
+            &smoke_target(runtime, mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            &FakeExecutor::succeeds(),
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("{engine} downloads it first")),
+            "{output}"
+        );
+        assert!(output.contains("about 2 GB"), "{output}");
+    }
+
+    let mut output = Vec::new();
+    run_smoke_test(
+        &mut output,
+        &smoke_target(RuntimeKind::Podman, "ubuntu:24.04"),
+        &FakeExecutor::succeeds(),
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("ubuntu:24.04"), "{output}");
+    assert!(
+        !output.contains("2 GB"),
+        "a custom image's size is unknown: {output}"
+    );
+}
+
 #[test]
 fn smoke_test_removes_the_container_after_a_failed_command() {
     let executor = FakeExecutor {
