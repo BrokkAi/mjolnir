@@ -452,12 +452,16 @@ pub(super) fn project_observation(
                     ),
                     format!("Work interrupted: {message}"),
                 );
-            } else {
+            } else if !controller_coordination(*command) {
                 // The command id is internal. The relay event keeps it for
                 // diagnosis, and the log line below ties it to the notice.
                 tracing::info!(%command_id, ?command, %message, "relay command did not complete");
                 push_system(mutation, event, message.clone());
             }
+            // Checkpoint barriers and recovery floors are coordination between
+            // the daemon and the worker. Their failure has nothing for the
+            // person to act on; the relay journal keeps the command id and the
+            // diagnostic.
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
             let mut configuration = current.configuration.clone();
@@ -758,4 +762,16 @@ pub(super) fn user_shell_result_text(result: &mj_core::relay::UserShellResult) -
         text.push_str(error);
     }
     text
+}
+
+/// Commands the daemon issues to the worker for its own bookkeeping, never
+/// on the person's behalf.
+fn controller_coordination(command: RelayCommandKind) -> bool {
+    matches!(
+        command,
+        RelayCommandKind::BeginCheckpoint
+            | RelayCommandKind::CompleteCheckpoint
+            | RelayCommandKind::ReleaseCheckpoint
+            | RelayCommandKind::AdvanceRecoveryFloor
+    )
 }

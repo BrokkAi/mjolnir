@@ -2593,3 +2593,34 @@ fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_hist
     };
     assert_eq!(call["status"], "completed");
 }
+
+#[test]
+fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
+    let mut session = MaterializedSession::empty("session");
+    for command in [
+        mj_core::relay::RelayCommandKind::BeginCheckpoint,
+        mj_core::relay::RelayCommandKind::ReleaseCheckpoint,
+    ] {
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandInterrupted {
+                command_id: "worker-upgrade-0123abcd".into(),
+                command,
+                message: "relay restarted without the controller that owned the checkpoint barrier"
+                    .into(),
+            },
+        );
+    }
+    assert!(session.transcript.is_empty(), "{:?}", session.transcript);
+
+    // A person's own command still reports its failure.
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            command_id: "clear".into(),
+            command: mj_core::relay::RelayCommandKind::ClearContext,
+            message: "busy".into(),
+        },
+    );
+    assert_eq!(session.transcript.len(), 1);
+}
