@@ -96,9 +96,26 @@ to opening masters, and to every command when sharing is off.
   pseudo-terminal and does not prompt for a password or passphrase, so the
   target user must already accept your key without interaction (an unlocked
   key, `ssh-agent`, or a passphrase-free key).
-- **The host key already trusted.** Add the remote host to `known_hosts` (or
-  otherwise satisfy your SSH host-key policy) before pointing a target at it;
-  Mjolnir does not manage `known_hosts` for you.
+- **A host-key policy you have chosen.** By default Mjolnir passes
+  `-o StrictHostKeyChecking=accept-new`: `ssh` trusts a host key it has never
+  seen and records it in `known_hosts`, and refuses a key that has changed.
+  Mjolnir does not otherwise manage `known_hosts`. To require that the key
+  already be in `known_hosts`, add the option to the machine's `extra_args`:
+
+  ```toml
+  [machines.builder]
+  kind = "ssh"
+  host = "builder"
+  extra_args = ["-o", "StrictHostKeyChecking=yes"]
+  ```
+
+  OpenSSH uses the first value it sees for an option, and Mjolnir puts
+  `extra_args` before its own defaults, so this setting wins. The same holds
+  for `UserKnownHostsFile` and any other option. Setting
+  `StrictHostKeyChecking yes` in `~/.ssh/config` is not enough: options on
+  the command line override the config file. Add the host key first, for
+  example with `ssh-keyscan <host> >> ~/.ssh/known_hosts` after you have
+  checked the key's fingerprint.
 - For a bare runtime: **an existing remote Git project with a valid `HEAD`.** The
   SSH user must be able to create a branch and `.mj/worktrees/` below the
   repository. If you select its primary checkout, that checkout must be fully
@@ -119,7 +136,7 @@ machine. The machine's keys are:
 | `host` | yes | SSH destination: hostname, IP, or an alias from your SSH config. |
 | `user` | no | SSH login user; omit to use your SSH config / default. |
 | `identity_file` | no | Path to the private key. |
-| `extra_args` | no | Extra arguments appended to every `ssh` invocation for this machine. |
+| `extra_args` | no | Extra arguments for every `ssh` invocation for this machine. They come before Mjolnir's own options, so they override Mjolnir's defaults. |
 | `workspace_prefix` | no | Per-session lifecycle path recorded for cleanup as `<prefix>/<session-id>`. It does not select or relocate the Git project. Defaults to `.local/share/hel/workspaces` relative to the login home. |
 
 A `bare` runtime on the machine also takes:
