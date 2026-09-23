@@ -191,6 +191,7 @@ The default bindings:
 | `toggle_dictation` | `prefix+m` | Start or stop dictation |
 | `changed_files` | `prefix+d` | List the selected session's changed files |
 | `open_subagents` | `prefix+shift+a` | Show the selected session's sub-agents |
+| `session_actions` | `prefix+.` | Open the selected session's actions menu (also `.` on the Sessions pane) |
 | `split_vertical` | `prefix+v` | Open the selected session in a pane beside this one |
 | `split_horizontal` | `prefix+-` | Open the selected session in a pane below this one |
 | `close_pane` | `prefix+x` | Close the conversation pane you are in |

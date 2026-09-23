@@ -440,6 +440,7 @@ key_actions! {
     ResizePaneUp / resize_pane_up = "",
     ResizePaneRight / resize_pane_right = "",
     OpenSubagents / open_subagents = "prefix+shift+a",
+    SessionActions / session_actions = "prefix+.",
 }
 
 /// Whether a binding fires on its own or only after the prefix key.

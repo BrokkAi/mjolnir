@@ -1666,8 +1666,8 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
-         · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering \
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
+         · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings \
          · : palette · ? keys"
     );
 
@@ -1675,13 +1675,13 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     // chord list gives way from its right-hand end.
     assert_eq!(
         combined_footer_text(&dashboard, 160),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
-         · a read · b panes · q detach · u web · : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
+         · g sessions · a read · b panes · q detach · u web · : palette · ? keys"
     );
     assert_eq!(
         combined_footer_text(&dashboard, 140),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions \
-         · a read · b panes · q detach · : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
+         · g sessions · a read · b panes · : palette · ? keys"
     );
     // The filter letters are what the search hint is there to teach, and 140
     // columns is an ordinary window, so that hint has to survive at that width.

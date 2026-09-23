@@ -86,6 +86,7 @@ pub enum CommandId {
     ToggleTranscriptRendering,
     ToggleDictation,
     OpenSubagents,
+    SessionActions,
     Help,
 }
 
@@ -899,6 +900,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: live_session,
     },
     CommandSpec {
+        id: CommandId::SessionActions,
+        label: "Session actions…",
+        description: "Open the selected session's actions menu, the same one the ⋯ on its row opens.",
+        scope: Scope::Session,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
+        action: Some(KeyAction::SessionActions),
+        footer: footer_word!("actions"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 2,
+        available: selected_session_ready,
+    },
+    CommandSpec {
         id: CommandId::OpenSubagents,
         label: "Sub-agents",
         description: "Open the sub-agents of this session in their own list. Esc or the X on the workspace strip returns to the parent.",
@@ -1589,6 +1602,12 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
+            CommandId::SessionActions => {
+                if self.command_session_id().is_some() {
+                    self.begin_session_palette();
+                }
+                DashboardAction::None
+            }
             CommandId::OpenSubagents => match subagents_available(self) {
                 Availability::Ready => self
                     .command_session_id()
@@ -1852,6 +1871,42 @@ mod tests {
         ));
         let footer = crate::render::combined_footer_text(&dashboard, 400);
         assert!(!footer.contains("sub-agents"), "{footer}");
+    }
+
+    /// A-8 / B-1: the row's ⋯ menu had no keyboard route. "Session
+    /// actions…" opens the same menu from a chord, from `.` on the Sessions
+    /// pane, and from the palette, and the Sessions footer names it.
+    #[test]
+    fn session_actions_open_the_row_menu_from_the_keyboard() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(
+            dashboard.key_labels(CommandId::SessionActions),
+            vec![".".to_owned(), "ctrl+b .".to_owned()]
+        );
+        assert!(!hidden_from_palette(CommandId::SessionActions));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(footer.contains(". actions"), "{footer}");
+
+        dashboard.handle_key(key(KeyCode::Char('.')));
+        let crate::Mode::Palette(menu) = &dashboard.mode else {
+            panic!("the row menu opens");
+        };
+        let from_key = menu.entries.clone();
+        dashboard.mode = crate::Mode::Dashboard;
+        // The mouse's ⋯ opens the same menu.
+        dashboard.begin_session_palette();
+        let crate::Mode::Palette(menu) = &dashboard.mode else {
+            panic!("the row menu opens");
+        };
+        assert_eq!(from_key, menu.entries);
+
+        // From the composer the chord opens the menu for the conversation's
+        // session.
+        dashboard.mode = crate::Mode::Dashboard;
+        dashboard.focus_prompt();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
     }
 
     /// A-16 and A-18: the help text reads as sentences, and Close pane says
