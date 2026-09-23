@@ -1619,7 +1619,18 @@ impl DashboardState {
                 self.select_resume_row(index);
                 return self.next_wiki_preview();
             }
-            Some(Interaction::Activate(Search | Tabs)) => {
+            // Enter on a query acts on its selected match, the same as Enter on
+            // the list. With nothing matched it only hands the list the focus.
+            Some(Interaction::Activate(Search)) => {
+                if let Some(row) = self.selected_resume_row() {
+                    return self.activate_selected_resume_row(Some(row));
+                }
+                let Mode::ResumeDialog(dialog) = &mut self.mode else {
+                    return DashboardAction::None;
+                };
+                dialog.form.get_mut().focus(Sessions);
+            }
+            Some(Interaction::Activate(Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
             }
             Some(Interaction::Activate(Sessions | Open)) => {

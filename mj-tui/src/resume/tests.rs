@@ -811,6 +811,27 @@ fn slash_moves_focus_to_the_search_box_and_typing_narrows_by_name() {
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 }
 
+/// C-6: Enter in the search box does what Enter on the list does. On the Live
+/// tab that jumps to the matched session and closes the dialog.
+#[test]
+fn enter_in_the_search_box_opens_the_live_match() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "mast".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "Enter on the search match left the dialog open"
+    );
+}
+
 /// No production path opens the dialog anywhere but Live (see Milestone 5),
 /// so `search_focus_pending` served no purpose and was removed. An index
 /// answer arriving while the dialog is open must still leave the focus
