@@ -1,101 +1,103 @@
-# Expand managed coding-agent support
+# Registry-backed ACP agent support
 
-This ExecPlan is a living document governed by `.agents/PLANS.md`. Keep its Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective sections current during implementation.
+This ExecPlan is a living document governed by `.agents/PLANS.md`. Keep its Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective sections current as work proceeds.
 
 ## Purpose / Big Picture
 
-Mjolnir currently manages Codex, Claude Code, Kimi Code, Grok Build, and Muse Code. A person who primarily uses OpenCode, Gemini CLI, GitHub Copilot CLI, or Cursor CLI cannot select that agent as a Mjolnir profile and use Mjolnir's session lifecycle. Add these agents in that order, one independently usable integration at a time. For each, a person should be able to configure or discover an account, start a session, exchange prompts and approval requests, detach and return, and recover work through Mjolnir's supported continuity path. A name in a picker or a process that merely starts is not completion.
+Mjolnir should let users select and run compatible agents from the [ACP registry](https://agentclientprotocol.com/get-started/agents), including OpenCode and Antigravity, without adding a new agent category in code for every agent. ACP, the Agent Client Protocol, is the message format between a worker and an agent. The registry is a catalog of ways to download and start agents, not proof that an agent supports Mjolnir's session lifecycle or authentication needs. Show only entries that can run on the worker's platform and pass the relevant capability checks. Keep Gemini out of the default catalog; allow an explicit advanced search for users with enterprise or paid API access.
 
-The first milestone delivers OpenCode as a real managed agent. The later milestones apply the same acceptance standard to Gemini, Copilot, and Cursor. The order is an implementation hypothesis based on documented Agent Client Protocol (ACP) support, not a claim about user demand. Revisit it when user requests or protocol probes justify doing so.
+The result should feel like a managed Mjolnir session: installation, launch, approvals, checkpoints, reconnection, and failure reporting work through existing worker and daemon ownership. Unsupported lifecycle actions must fail clearly before stopping accepted work.
 
 ## Progress
 
-- [x] (2026-09-23 12:24Z) Audited the five existing harness kinds, managed runtime pins, worker launch, profile documentation, and continuity code.
-- [x] (2026-09-23 12:24Z) Verified that OpenCode, Gemini CLI, Copilot CLI, and Cursor CLI publish ACP stdio launch modes in their official documentation.
-- [ ] Probe OpenCode's pinned ACP build in an isolated instance and record its actual session, authentication, permission, model, and resume behavior.
-- [ ] Complete and validate the OpenCode integration across configuration, installation, runtime, UI, and continuity.
-- [ ] Complete and validate Gemini CLI with the same user-visible acceptance criteria.
-- [ ] Complete and validate Copilot CLI with the same user-visible acceptance criteria.
-- [ ] Complete and validate Cursor CLI with the same user-visible acceptance criteria.
-- [ ] Update user documentation and comparison, perform all required checks, and commit each validated integration on the current branch.
+- [x] (2026-09-23) Reassess the earlier per-agent plan against the registry and current product availability.
+- [ ] Build a cached, filterable registry catalog and a durable selected-agent profile.
+- [ ] Run one registry agent, starting with OpenCode, through a generic ACP worker path.
+- [ ] Validate capabilities and continuity across daemon and worker lifecycles.
+- [ ] Add Antigravity through its official ACP server; evaluate other candidates afterward.
+- [ ] Complete isolated behavior tests, full Rust checks, and documentation; commit each validated milestone.
 
 ## Surprises & Discoveries
 
-- Observation: Harness support is currently a closed five-variant `HarnessKind` enum. It reaches credential detection, execution policy, runtime installation, checkpoint capture and restore, native import, SessionWiki, quota reporting, and the UI. Adding an ACP launch command alone would leave major behavior incomplete.
-  Evidence: `mj-core/src/config/harness.rs`, `mj-core/src/harness_runtime.rs`, `mj-worker/src/worker_runtime/harness.rs`, and `mj-checkpoint/src/checkpoint/native_scan.rs` all match on harness kind.
-- Observation: The four candidate agents advertise ACP over standard input and output, but their advertised capabilities and authentication flows differ. Treat ACP compatibility as the starting point for a probe, not as evidence of full Mjolnir compatibility.
-  Evidence: official launch commands are `opencode acp`, `gemini --acp`, `copilot --acp`, and `agent acp`.
+- The prior plan treated OpenCode, Gemini CLI, Copilot, and Cursor as separate harness implementations. Mjolnir previously consumed the ACP registry for Thor; the reusable catalog approach is a better starting point, though today's worker lifecycle requires additional validation.
+- The [registry entry for Antigravity](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json) supplies a separate `agy_acp_server` binary, not the `agy` CLI. It currently has platform downloads but no published SHA-256 in its manifest.
+- [Google announced](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) the end of Gemini CLI consumer free/Pro/Ultra access after June 18, 2026, while enterprise and paid API access remain. Gemini should therefore be hidden by default, not described as unavailable to everyone.
+- The registry describes launch artifacts. It does not certify authentication, approvals, session restore, checkpointing, quota visibility, or review integration.
 
 ## Decision Log
 
-- Decision: Make OpenCode the first full vertical integration, followed by Gemini CLI, Copilot CLI, and Cursor CLI. Do not add every candidate to the picker before its own behavior passes acceptance.
-  Rationale: OpenCode documents model and effort selection, prompt content, and session options over ACP, making it a useful first test of the existing abstractions. A sequence of complete increments avoids implying that an untested agent has Mjolnir's normal durability and safety behavior.
+- Decision: Replace the per-agent roadmap with a registry-backed ACP path while preserving the five built-in harnesses.
+  Rationale: One launch and protocol path can cover registry agents, but existing sessions must keep their stored identities and behavior.
   Date/Author: 2026-09-23 / Codex.
-- Decision: Preserve explicit per-agent capability reporting and fail visibly when a required lifecycle operation is unavailable. Do not silently run a different CLI, skip a checkpoint, drop an approval, or claim native restore without evidence.
-  Rationale: Session recovery and approvals are part of Mjolnir's product contract. An unsupported feature must be named to the person using it.
+- Decision: Treat registry entries as opt-in choices, not installed worker inventory. Pin selected identity, version, platform artifact, and launch arguments.
+  Rationale: Catalog updates must not silently change an existing session.
   Date/Author: 2026-09-23 / Codex.
-- Decision: Treat quota, external native-session adoption, and use as a utility or review profile as separately earned capabilities.
-  Rationale: ACP launch support does not provide provider quota endpoints, another tool's native history format, or reliable review output. Each can be added after the core session behavior, with its absence visible in the UI and docs.
+- Decision: Filter Gemini from ordinary discovery, while allowing explicit advanced search with an enterprise/paid-access qualification; treat Antigravity as a separate entry.
+  Rationale: Google's changed consumer access makes Gemini a poor default, but it remains usable through some accounts.
+  Date/Author: 2026-09-23 / Codex.
+- Decision: Gate lifecycle features on observed behavior and tested adapters.
+  Rationale: Registry presence alone does not establish managed-session continuity, approvals, or authentication.
   Date/Author: 2026-09-23 / Codex.
 
 ## Outcomes & Retrospective
 
-Planning is complete; no harness implementation has begun. The plan identifies a first working increment and the integration surfaces that must be checked. Update this section after each agent lands, including any capability that remains unsupported and the observed reason.
+Planning revised; implementation has not begun under this revision. Update this section after each milestone with observed behavior and any changes to scope.
 
 ## Context and Orientation
 
-An agent harness is the program that conducts the coding conversation. ACP is the line-oriented JSON protocol between Mjolnir's worker and that program. A profile selects one harness and one account. A target is the machine or container where the worker runs. A checkpoint is Mjolnir's verified recovery archive containing repository and, when needed, native agent session state. A native session is the agent's own conversation identity and history, distinct from Mjolnir's session record.
+A harness is the agent program used by a session. The current five harness categories are closed in `mj-core/src/config/harness.rs`; avoid adding one category per registry entry. A profile records the selected harness and account. A daemon is Mjolnir's long-running control process; a worker is the per-session process that runs the agent. Runtime selection and installation live in `mj-core/src/harness_runtime.rs`, launch construction in `mj-core/src/worker_launch.rs`, and worker-side harness behavior in `mj-worker/src/worker_runtime/harness.rs`. A checkpoint is a verified archive used to recover repository and agent state; related assumptions appear in `mj-checkpoint/src/checkpoint/native_scan.rs`. Before adding interpretation of registry commands or paths, find and reuse existing helpers.
 
-`mj-core/src/config/harness.rs` defines `HarnessKind`, profile homes, authentication markers, execution policy, and ACP launch arguments. `mj-core/src/harness_runtime.rs` holds exact managed runtime versions. `mj-worker/src/worker_runtime/harness.rs` installs and leases those versions for bare targets, while `mj-worker/src/acp/launch.rs` opens or resumes ACP sessions. `mj-controller/src/setup.rs` and `mj-controller/src/doctor.rs` discover and diagnose profiles. `mj-controller/src/quota.rs` supplies quota rows. `mj-checkpoint/src/checkpoint/native_scan.rs` and `mj-checkpoint/src/checkpoint/restore.rs` capture and restore native history; `mj-controller/src/import.rs` and `mj-controller/src/sessionwiki/harness_adapters.rs` handle external session discovery. `containers/Containerfile.agent-dev` supplies the published container image. `docs/src/content/docs/profiles.md` states the user-facing support contract.
+Historical commits `77165172` and `7ca7652d` contain the former registry catalog and setup flow; use them as reference, not as code to restore unchanged. The authoritative feed is `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Follow `.agents/PLANS.md` and update this plan as the design is tested.
 
-Current official ACP launch instructions are: OpenCode `opencode acp` (https://opencode.ai/v2/docs/cli/acp/), Gemini CLI `gemini --acp` (https://geminicli.com/docs/cli/acp-mode/), GitHub Copilot CLI `copilot --acp` (https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server), and Cursor CLI `agent acp` (https://prod.cursor.com/docs/cli/acp). Copilot's ACP support is labeled public preview by GitHub. These links are sources to recheck when implementation begins; the commands and caveat are recorded here so the plan remains usable without them.
+The daemon owns catalog selection, durable session records, and lifecycle orchestration. Workers own agent processes, turns, relay journals, and pending questions. Catalog refresh, downloads, probes, and installs must run in supervised background tasks rather than UI event loops. Independent requests should remain concurrent, cancellable where rollback is possible, and have visible errors.
 
 ## Plan of Work
 
-Start with an OpenCode protocol probe against one exact version. In an isolated `--instance` and separate agent home, verify ACP initialize, authentication, session creation, prompt streaming, permission requests, model and effort selectors, cancellation, native identity, `session/load` or `session/resume`, and operation after the worker process is replaced. Capture the actual capability response and a short scrubbed event trace in this plan. Confirm how OpenCode scopes its credentials and whether its ACP process and private server can use Mjolnir's staged home without reading an unintended global account. Do not infer this from its CLI docs. If native history cannot be copied and relocated safely, design an explicit Mjolnir-owned transcript handoff for suspend and move before declaring OpenCode supported; retain the original archive for recovery and report any loss of exact native context.
+### Milestone 1: Catalog and durable selection
 
-Then add one `HarnessKind` through the existing control path. Update the kind's identity, environment, account discovery, authorization evidence, install pin, entrypoint, ACP arguments, and execution policy in the files above. Make authentication evidence an explicit per-harness capability if a provider does not have a stable credential file; avoid a fake file marker. Update credential synchronization and target staging using an allowlist of files that the probed version actually requires. Install the pinned version atomically in the existing managed cache and include the identical version in `containers/Containerfile.agent-dev`. Keep the worker's active lease and background installation behavior. A missing prerequisite or failed login must show a concrete error without changing an active worker.
+Fetch and cache the registry with an explicit refresh status and last successful update. Serve cached results during a fetch failure with their age visible. Parse distribution commands and binary artifacts through one shared representation. Filter by the **worker** operating system and architecture, since a local controller may launch remote Linux workers. Keep unsupported distributions visible only when they can be explained accurately.
 
-Wire the session's ACP capabilities through the worker and client. Test prompts, streamed output, tools, attachments if advertised, approval questions, cancellation, model changes, and detach/reattach. Decide from observed behavior whether a raw target can preserve configured approvals and whether an isolated target can reliably use Mjolnir's unconstrained policy. If either cannot be enforced, disable that target and show why before launch. Verify Mjolnir's project-memory MCP tools; if the agent cannot accept them, show that limitation and exclude it from utility and reviewer selection rather than pretending the tools are installed.
+Apply product filters separately from platform filters. Hide `gemini` in normal discovery; expose it only through explicit advanced search with its access qualification. Do not conflate `antigravity-acp` with Gemini CLI. Selection pins the registry entry/version, artifact identity, and arguments in durable configuration. Define how users deliberately upgrade a pin. Preserve reads and writes of the five existing harness kinds and classify any database migration under repository policy.
 
-Implement the native continuity path using the actual agent history layout and session identity. Extend checkpoint scan and restore with bounded, path-safe capture, then prove suspend/resume and same-harness move in an isolated instance. Extend external import and SessionWiki only when their native-history parser is verified on fixtures from the pinned agent version; until then, those commands must say the agent is unsupported for external adoption. A new agent must never make older archives unreadable. Any database schema change needs a new migration revision with a compatible or breaking classification beside it; use isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR` for breaking migration tests.
+### Milestone 2: Generic ACP runtime, first exercised with OpenCode
 
-Once OpenCode passes, repeat this vertical sequence for Gemini, Copilot, and Cursor. Probe each before choosing its version, credential allowlist, approval policy, and continuity format. Copilot's preview ACP status deserves an explicit pin and compatibility test. Cursor documents blocking `cursor/ask_question` and `cursor/create_plan` methods; answer these through Mjolnir's existing structured-input route or refuse launch with an explanatory limitation until they are supported. Do not copy OpenCode's credential or native-history assumptions into another integration.
+Build a generic ACP installation and launch path from a selected pinned entry. Use existing subprocess helpers. Cache downloads by identity and version; verify provided checksums and reject mismatches. For archives, reject path traversal and unsafe links before extraction. For entries without a checksum, use a documented trust decision tied to the official publisher or require a user-provided local executable; never silently fall back to a different version or source. Keep installed artifacts leased while workers use them.
 
-## Milestones
+Probe ACP initialization and session creation, then map prompts, streaming output, tool calls, permissions, cancellation, and errors into existing worker events. Authentication failures must remain actionable and must not be mistaken for capability absence. Mark features such as review, external import, project memory, and quota visibility available only after an adapter or behavior test demonstrates them. Do not create a new workspace crate solely for this work.
 
-The OpenCode milestone produces a profile that can be selected and used from the terminal and web surfaces. A small isolated session demonstrates a streamed answer, a tool request, a person answering an approval, an interruption, and a restored conversation after suspend/resume. Its install and image versions match, and failure cases report why they fail. Commit that validated increment before beginning another agent.
+### Milestone 3: Continuity and lifecycle gates
 
-The Gemini milestone adds the same usable lifecycle for `gemini --acp`, including its own authentication and history evidence. Complete its isolated behavior demonstration and commit it separately.
+Prove that an active generic ACP turn survives daemon replacement because its worker and relay journal remain authoritative. Test client detach and reattach, replay, pending approval, cancellation, and worker failure. For worker replacement, suspend, and move, support tested native session restoration with captured native state or an explicitly labeled transcript handoff with a verified repository checkpoint. If neither route is safe for a selected agent, reject that lifecycle action before stopping accepted work. Make limits visible in the session UI and API.
 
-The Copilot milestone adds `copilot --acp` with the same lifecycle and a regression fixture for the pinned preview protocol. Complete its isolated behavior demonstration and commit it separately.
+### Milestone 4: Antigravity and later candidates
 
-The Cursor milestone adds `agent acp`, including its blocking question and plan requests, with the same lifecycle. Complete its isolated behavior demonstration and commit it separately. If a candidate cannot satisfy required lifecycle guarantees, record the blocker and keep it unavailable instead of shipping partial support.
+Exercise the official Antigravity ACP server on a supported platform using its own registry entry and distribution. Resolve the missing manifest checksum through the trust rule from Milestone 2. Validate login, approvals, turn streaming, and continuity before marking it managed. Then evaluate Copilot and Cursor registry entries with the same capability matrix. Add agent-specific adapters only for demonstrated gaps that cannot be expressed in the generic ACP path. Gemini has no implementation milestone unless access or user demand changes.
 
 ## Concrete Steps
 
-Run commands from the repository root. First inspect `mj-core/src/config/harness.rs`, `mj-worker/src/worker_runtime/harness.rs`, and the ACP and checkpoint modules named above. Search every exhaustive `HarnessKind` match with `rg -n 'HarnessKind::|Self::Codex|Self::Claude' mj-* containers docs/src/content/docs` before editing. Choose a single pinned upstream version after a successful protocol probe; record the exact version, install source, and checksum or lockfile evidence in this plan.
+Run commands from the repository root, `/Users/ryansvihla/code/mjolnir`. Start with `rg -n 'HarnessKind::|Self::Codex|Self::Claude' mj-*` and `rg -n 'acp|ACP' mj-worker/src mj-core/src` to find the current profile, worker, and bridge paths. Read the files named above, then use `git show 77165172:src/registry.rs` to inspect the historical registry parser. Record the shared data shape and migration classification in this plan before editing. Re-run these searches after each milestone to find new integration points.
 
-For each integration, add focused behavior tests beside changed Rust modules, then run `cargo fmt --all -- --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` on the dev profile. Run every `cargo test` invocation with elevated permissions outside the restricted sandbox, as `AGENTS.md` requires for socket tests. Run all new-build daemon, CLI, TUI, and end-to-end trials with a separate named instance such as `mj --instance harness-opencode`; never use the live default instance. Exercise launch, prompt, approval, detach, restart, suspend, and resume with a disposable repository and test credentials. Do not redirect build output to `/tmp`.
-
-Before each milestone commit, inspect `git diff --check`, the task-file diff, the container pin parity test, and the applicable documentation. Stage only files changed for that integration and commit on the current branch. Do not push unless the user explicitly requests it.
+Implement the milestones in order. For each Rust milestone, run `cargo fmt --all -- --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` on the dev profile; run `cargo test` outside the restricted sandbox with elevated permissions as required by `AGENTS.md`. Use `mj --instance registry-acp` for every new-build CLI invocation and the same named instance for daemon, TUI, and end-to-end trials. Never use the host's default session data. Before each commit, run `git diff --check`, review the changed files, stage only those files, and commit on the current branch. Do not push without an explicit request.
 
 ## Validation and Acceptance
 
-For OpenCode, `mj --instance harness-opencode doctor --json` should report the configured profile ready or a specific fixable authentication or runtime error. A new session using that profile must visibly stream a reply. An agent tool requiring approval must appear as a pending request, accept a chosen response, and continue. `mj --instance harness-opencode wait --session <id> --json` must report the completed turn; `mj --instance harness-opencode transcript --session <id> --json` must contain its content. After suspend and resume, another prompt must retain the previous conversation context and repository changes. Repeating the scenario after a daemon restart must not lose a pending question or running turn. Perform the equivalent scenario for the other three agents using their own named instances.
-
-Negative tests must prove that wrong credentials, a missing pinned executable, failed runtime installation, unsupported approval enforcement, and an unavailable native-history path produce explicit failures. No test should declare an agent ready solely because `initialize` succeeded. Verify older five-harness sessions and archives remain usable after each addition. If a capability such as quota, external import, or review is absent, the UI and docs must say so; the core acceptance above is still required.
+- A user can find an eligible registry entry, select a pinned version, see its capability and trust status, and start an OpenCode session through the generic ACP path. In an isolated disposable repository, `mj --instance registry-acp doctor --json` should report either a ready profile or an actionable installation or authentication error. A started session should stream a reply and persist it in the transcript.
+- Default discovery omits Gemini. An explicit advanced search can display it with the access qualification. Antigravity appears only on platforms with a supported artifact.
+- A registry refresh failure retains a clearly aged cache; an install or probe failure reports the actual error without substituting another agent or version.
+- A live generic ACP turn, pending approval, and relay replay survive daemon replacement. After reattaching, a user can answer the pending approval and see the same turn complete. Unsupported worker continuity actions reject before accepted work is stopped.
+- Existing harness sessions and stored profiles continue to work across any schema change. New migration revisions and isolated migration tests follow `AGENTS.md`.
+- For Rust changes, run focused behavior tests, then `cargo test` outside the restricted sandbox with elevated permissions and `cargo clippy --all-targets -- -D warnings` on the dev profile. Do not substitute release-profile checks. For this plan-only revision, review the diff and run `git diff --check`.
 
 ## Idempotence and Recovery
 
-Managed runtime installation already stages under a versioned cache and leases active versions. Reuse it; retry a failed install by rerunning the isolated launch after correcting the cause. Never overwrite an existing agent's global home during protocol probes. Keep profile staging limited to documented credentials and settings. Archive capture must validate paths and leave the source history untouched. If a continuity test fails, retain the checkpoint and active worker, surface the error, and fix the path before enabling that harness in a release.
+Catalog refresh and artifact downloads should be retryable and keyed by pinned identity. A partial installation cannot become selectable. An interrupted probe or failed launch leaves a useful status and does not corrupt a stored profile. Daemon restarts reconstruct in-flight control-plane status from durable state; workers remain the source for active turns. Re-running migration or selection steps must not duplicate records or silently upgrade a pin.
 
 ## Artifacts and Notes
 
-At each milestone, add a concise sanitized ACP capability result, a test transcript excerpt showing one turn and one approval, the pinned upstream version, and the observed restore result here. Do not include credentials, tokens, callback URLs, or private conversation content.
+Keep this ExecPlan in `.agents/plans/`. Put any internal capability matrix or agent research in `.agents/docs/`, not `docs/`. Record test commands and results here as milestones complete. Relevant sources: [ACP registry](https://github.com/agentclientprotocol/registry), [Antigravity registry entry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json), and [Google's Gemini CLI transition](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/).
 
 ## Interfaces and Dependencies
 
-Reuse the existing `HarnessKind`, `HarnessPin`, managed installer, ACP worker, checkpoint archive, and API routes. Keep small harness-specific decisions near the existing match arms, but introduce a shared capability type only when two or more new harnesses actually need the same interpretation; search for an existing helper first. Do not create a new workspace crate solely to organize integrations. Preserve existing serialized harness identifiers and archive formats. Public UI and API capability reporting must distinguish supported, unsupported, and temporarily unavailable operations so scripts cannot mistake a hidden fallback for success.
+Expect a catalog fetch/cache interface, a pinned registry-agent profile, a generic ACP worker launch specification, and a capability report consumed by both API and UI. Keep platform artifact selection at the worker boundary. Any new persisted shape or wire field must be versioned and remain compatible with existing harness profiles or have an explicitly breaking migration. The registry feed is an external advisory dependency; selected sessions must continue to start from their pinned, installed artifact when the feed is offline.
 
-Revision note (2026-09-23): Created after reassessing Herdr and Mjolnir. The plan prioritizes complete managed-agent support over generic terminal or pane features, and uses OpenCode as the first independently verifiable integration.
+Revision 2026-09-23: Replaced the per-agent roadmap after the user proposed restoring ACP registry support. Gemini is filtered from default discovery, Antigravity is treated as its own ACP server, and implementation remains stopped pending a separate request.
