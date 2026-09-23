@@ -214,6 +214,75 @@ The same object, plus `last_turn_outcome` when a prompt has finished on it:
 or `interrupted` with a `message`. The list route omits the field: it is built
 from the dashboard projection, which carries no turn identity.
 
+### List launch options
+
+```text
+GET /api/v1/options
+```
+
+```json
+{
+  "revision": 1790192456730219,
+  "profiles": [{ "id": "codex", "harness": "codex" }],
+  "targets": [
+    {
+      "id": "localhost",
+      "kind": "local-bare",
+      "requires_project_directory": true,
+      "availability": "ready",
+      "host": "local"
+    },
+    {
+      "id": "docker",
+      "kind": "local-docker",
+      "requires_project_directory": false,
+      "availability": "ready",
+      "host": "local"
+    }
+  ],
+  "bundles": [
+    {
+      "id": "fixture",
+      "primary_repository": "fixture",
+      "repositories": [{ "id": "fixture", "destination": "fixture" }]
+    }
+  ],
+  "hosts": [
+    {
+      "id": "local",
+      "label": "local",
+      "targets": ["docker", "localhost"],
+      "stale": false,
+      "refreshing": false,
+      "has_error": false
+    }
+  ],
+  "default": { "profile_id": "codex", "target_id": "localhost" }
+}
+```
+
+This route lists the profiles, targets, and bundles a new session can use,
+without reading `config.toml`. It never fails.
+
+- `revision` identifies the configuration the lists came from. Two replies
+  with the same revision describe the same configuration.
+- `profiles[].harness` is the harness kind, such as `codex` or `claude`.
+- `targets[].requires_project_directory` is `true` when the target needs an
+  existing Git directory (`project_directory` on create) instead of a bundle.
+- `targets[].availability` is `ready` (the last check passed), `stale` (the
+  reading is old), `unavailable` (the last check failed), or `unknown` (no
+  check yet, normal just after startup). An `unavailable` target may carry
+  `unavailable_reason`, a sentence for a person.
+- `bundles[].repositories[].github` appears only for a repository with a
+  GitHub source.
+- `hosts` has one entry per host that has reported capacity. It is omitted
+  when empty.
+- `default` is the profile and target a create request uses when it names
+  none. It is omitted when no default has been saved.
+
+The reply contains no credentials, harness homes, SSH hosts or keys, container
+environments, AWS details, or controller paths.
+
 ### Create a session
 
 ```text
@@ -235,7 +304,8 @@ POST /api/v1/sessions
 }
 ```
 
-`profile_id` and `target_id` are required. Supply `bundle_id`, or
+`profile_id` and `target_id` may be omitted; each then follows the saved
+default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
 viewer's own form does it. `launch_base` starts the session at that Git
 revision instead of HEAD (managed worktree) or the remote default branch
