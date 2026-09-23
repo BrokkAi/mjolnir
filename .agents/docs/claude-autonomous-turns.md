@@ -73,13 +73,17 @@ when:
   `/context`) or, on a success, produced no output tokens (a replayed answer).
   The adapter sends the text of such a cycle after the result and before its
   reply, and never holds that reply;
-- it is a failure (`is_error`, other than a refusal or `max_tokens`) or a
-  sign-in failure. The adapter fails the prompt at once, and its error carries
-  what the worker's failure handling and credential recovery read.
+- it is a failure (`is_error`, other than `max_tokens`) or a sign-in failure.
+  The adapter fails the prompt at once, and its error carries what the
+  worker's failure handling and credential recovery read;
+- it is a refusal (`stop_reason: "refusal"`, the safety classifier blocked
+  the reply). The adapter sends the classifier's explanation as agent text
+  after the result and before its reply, so the reply ends the prompt with
+  that text inside the turn.
 
-The stop reason follows the adapter's own mapping (`refusal`, `max_tokens`,
-`end_turn`, `max_turn_requests`), spelled as the reply's is recorded
-(`Refusal`, `MaxTokens`, `EndTurn`, `MaxTurnRequests`).
+The stop reason follows the adapter's own mapping (`max_tokens`, `end_turn`,
+`max_turn_requests`), spelled as the reply's is recorded (`MaxTokens`,
+`EndTurn`, `MaxTurnRequests`).
 
 ## What Hel records
 
@@ -269,9 +273,7 @@ Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
   model cycle ends with a result, so this now needs output that belongs to no
   cycle. The one such chunk Hel itself provokes, the `**Task stopped by user:**
   <name>.` acknowledgement of a stop it requested, is paired with the pending
-  stop and handled (see `ClaudeTasks` above). A refusal's explanation, which
-  the adapter sends after the refusal's result, can open a harness turn after
-  the prompt ended; the next result settles it, and Stop interrupts it.
+  stop and handled (see `ClaudeTasks` above).
 - **A steer that lands just as a cycle ends can run as a harness turn.** If
   Claude Code finishes the cycle before it reads the steered message, the
   result reports no queued user message and ends the prompt, and the steered

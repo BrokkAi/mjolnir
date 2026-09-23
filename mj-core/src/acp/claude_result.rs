@@ -171,23 +171,24 @@ impl ClaudeTurnResult {
     /// a cycle with no model output cannot start background work. Nor does a
     /// failure: the adapter fails the prompt at once through its reply, which
     /// carries the error that Mjolnir reports and that credential recovery
-    /// reads.
+    /// reads. Nor does a refusal: the adapter sends the classifier's
+    /// explanation as agent text after the result and before its reply, so
+    /// ending the prompt at the result would leave that text outside the
+    /// turn.
     ///
     /// The mapping is the adapter's own (`case "result"` in claude-agent-acp's
-    /// `acp-agent.js`): a refusal first, then a sign-in failure, then
-    /// `max_tokens`, then errors, then the subtype. The values are spelled the
-    /// way the prompt reply's stop reason is recorded.
+    /// `acp-agent.js`): a sign-in failure first, then `max_tokens`, then
+    /// errors, then the subtype. The values are spelled the way the prompt
+    /// reply's stop reason is recorded.
     #[must_use]
     pub fn prompt_stop_reason(&self) -> Option<String> {
         if !self.answers_user_prompt()
             || self.queued_turn_count > 0
             || self.is_interruption_report()
             || self.num_turns == 0
+            || self.stop_reason.as_deref() == Some("refusal")
         {
             return None;
-        }
-        if self.stop_reason.as_deref() == Some("refusal") {
-            return Some(stop_reason_text(StopReason::Refusal));
         }
         let max_tokens = self.stop_reason.as_deref() == Some("max_tokens");
         let stop = match self.subtype.as_str() {
@@ -375,7 +376,11 @@ mod tests {
         refusal["stop_reason"] = serde_json::json!("refusal");
         refusal["is_error"] = serde_json::json!(true);
         refusal["usage"]["output_tokens"] = serde_json::json!(0);
-        assert_eq!(stop_reason(&refusal).as_deref(), Some("Refusal"));
+        assert_eq!(
+            stop_reason(&refusal),
+            None,
+            "the adapter sends a refusal's explanation after the result; its reply ends the prompt"
+        );
 
         let mut max_tokens = success(Some("human"));
         max_tokens["stop_reason"] = serde_json::json!("max_tokens");
