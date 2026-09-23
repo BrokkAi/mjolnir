@@ -1563,6 +1563,17 @@ impl State {
             .unwrap_or(session)
     }
 
+    /// Whether `id` names a sub-agent rather than a session the user started:
+    /// a Mjolnir-managed child, or the record a client builds to show a
+    /// harness-owned child (see [`crate::native_agent::view_id`]).
+    ///
+    /// Every list of top-level sessions filters with this, so the lists
+    /// cannot disagree about what a sub-agent is.
+    #[must_use]
+    pub fn is_subagent_session(&self, id: &str) -> bool {
+        self.subagents.contains_key(id) || crate::native_agent::is_view_id(id)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != STATE_VERSION {
             bail!(

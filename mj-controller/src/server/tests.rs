@@ -1412,12 +1412,17 @@ if (sessionActivityLabel(session, 121000) !== 'Model at capacity · retrying in 
 
 #[test]
 fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
-    let source = viewer_source("function isResumeSession(", "const resumeDrafts =");
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function isSubagentSession(", "function liveSessions("),
+        viewer_source("function isResumeSession(", "const resumeDrafts ="),
+    );
     let setup = r#"
 const snapshot = {
   sessions: [
 { id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
 { id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
+{ id: "child-a", workspace_id: "workspace-a", subagent_parent_id: "absent-parent", capabilities: { resume: true } },
 { id: "running-a", workspace_id: "workspace-a", lifecycle: "live", has_error: true, capabilities: { resume: false, open: false } },
 { id: "move-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "failed" } },
 { id: "moving-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "starting_queue" } },
@@ -1439,6 +1444,33 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 "#;
     run_viewer_script(
         "workspace-resume-history",
+        &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+#[test]
+fn embedded_viewer_lists_no_sub_agent_among_live_sessions() {
+    let source = viewer_source("function isSubagentSession(", "/// Sessions grouped by");
+    let setup = r#"
+const route = {};
+const snapshot = {
+  sessions: [
+{ id: "parent", workspace_id: "workspace-a", subagent_session_ids: ["listed-child"] },
+{ id: "listed-child", workspace_id: "workspace-a", subagent_parent_id: "parent" },
+{ id: "orphan-child", workspace_id: "workspace-a", subagent_parent_id: "absent-parent" },
+  ],
+};
+function selectedWorkspaceId() { return "workspace-a"; }
+function isDashboardSession() { return true; }
+"#;
+    let checks = r#"
+const ids = liveSessions().map(session => session.id);
+if (JSON.stringify(ids) !== JSON.stringify(["parent"])) {
+  throw new Error(`live sessions listed a sub-agent: ${JSON.stringify(ids)}`);
+}
+"#;
+    run_viewer_script(
+        "live-sessions-without-sub-agents",
         &format!("{setup}\n{source}\n{checks}"),
     );
 }

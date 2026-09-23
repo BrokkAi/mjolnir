@@ -96,7 +96,7 @@ impl DashboardState {
             .state
             .sessions
             .keys()
-            .filter(|id| !self.state.subagents.contains_key(*id))
+            .filter(|id| !self.state.is_subagent_session(id))
             .cloned()
             .collect::<Vec<_>>();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));

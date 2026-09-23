@@ -593,7 +593,8 @@ pub(crate) fn merged_resume_rows(
         if let Some(native_session_id) = &session.native_session_id {
             adopted.insert((session.harness_kind, native_session_id.clone()));
         }
-        if session.state.is_active() {
+        // A sub-agent is resumed through its parent, never on its own.
+        if session.state.is_active() || state.is_subagent_session(&session.id) {
             continue;
         }
         let last_activity_ms = session

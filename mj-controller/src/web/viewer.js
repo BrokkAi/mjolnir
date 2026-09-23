@@ -634,6 +634,12 @@ function orderedSessions(live) {
   );
 }
 
+/// Whether a session is a sub-agent rather than one the person started. Every
+/// list of top-level sessions filters with this, so the lists cannot disagree.
+function isSubagentSession(session) {
+  return Boolean(session?.subagent_parent_id);
+}
+
 function liveSessions() {
   if (route.subagentParentId) {
     const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
@@ -641,13 +647,10 @@ function liveSessions() {
     return (snapshot.sessions || []).filter(session => children.has(session.id));
   }
   const workspaceId = selectedWorkspaceId();
-  const childIds = new Set(
-    (snapshot.sessions || []).flatMap(session => session.subagent_session_ids || []),
-  );
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
-      !childIds.has(session.id) &&
+      !isSubagentSession(session) &&
       isDashboardSession(session),
   );
 }
@@ -1910,7 +1913,10 @@ function resumeActivityMs(session) {
 
 function resumeSessions(workspaceId = selectedWorkspaceId()) {
   return (snapshot?.sessions || [])
-    .filter(session => session.workspace_id === workspaceId && isResumeSession(session))
+    .filter(session =>
+      session.workspace_id === workspaceId
+      && !isSubagentSession(session)
+      && isResumeSession(session))
     .sort((left, right) =>
       resumeActivityMs(right) - resumeActivityMs(left) || left.id.localeCompare(right.id));
 }

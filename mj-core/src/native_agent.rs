@@ -128,9 +128,18 @@ impl NativeAgent {
     }
 }
 
+/// Marks a native child's presentation id. Mjolnir session ids are hex, so no
+/// real session id starts with it.
+const VIEW_ID_PREFIX: &str = "native:";
+
 pub fn view_id(owner: &str, child: &str) -> String {
     // Length-prefixing keeps opaque provider IDs collision-free.
-    format!("native:{}:{owner}{child}", owner.len())
+    format!("{VIEW_ID_PREFIX}{}:{owner}{child}", owner.len())
+}
+
+/// Whether `id` is a native child's presentation id from [`view_id`].
+pub fn is_view_id(id: &str) -> bool {
+    id.starts_with(VIEW_ID_PREFIX)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

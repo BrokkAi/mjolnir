@@ -69,6 +69,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     turn_review: null,
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
+    subagent_parent_id: options.subagentParentId,
     capabilities,
   };
 }
@@ -822,8 +823,14 @@ test('sub-agent workspace hides children from the normal list and closes back to
       title: 'Parent session',
       subagentSessionIds: ['child-one', 'child-two'],
     }),
-    session('child-one', 'project-parent', 'Parent project', { title: 'Grok helper' }),
-    session('child-two', 'project-parent', 'Parent project', { title: 'Muse helper' }),
+    session('child-one', 'project-parent', 'Parent project', {
+      title: 'Grok helper',
+      subagentParentId: 'parent',
+    }),
+    session('child-two', 'project-parent', 'Parent project', {
+      title: 'Muse helper',
+      subagentParentId: 'parent',
+    }),
   ]);
 
   await expect(card(page, 'parent')).toBeVisible();

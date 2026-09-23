@@ -97,7 +97,10 @@ impl RuntimeState {
             self.wiki.request_sync(false);
         }
         let live = self.live_session_ids();
-        let rows = blocking(move || crate::sessionwiki::query_rows(&query, limit, &live)).await?;
+        // Every caller is a resume list, and a sub-agent is never resumed on
+        // its own.
+        let rows =
+            blocking(move || crate::sessionwiki::query_rows(&query, limit, &live, false)).await?;
         // The status is read after the rows, so a sync that finished while the
         // query ran is reported as finished.
         Ok(WikiSearchPage {

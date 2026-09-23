@@ -397,8 +397,7 @@ impl DashboardState {
         workspace_id: &str,
     ) -> bool {
         session.workspace_id == workspace_id
-            && !self.state.subagents.contains_key(&session.id)
-            && !self.native_agents.contains_key(&session.id)
+            && !self.state.is_subagent_session(&session.id)
             && (session.state.is_active()
                 || self.transition_kind(&session.id).is_some()
                 || (self.config.advanced.show_stopped_sessions

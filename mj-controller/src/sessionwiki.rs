@@ -896,9 +896,16 @@ pub fn sync_is_stale(last_success: Option<Instant>) -> bool {
 ///
 /// `live` is the set of session ids this daemon still holds, which is what
 /// decides whether a Mjolnir row names a session the user can simply resume.
+/// `include_subagents` decides, for every path below, whether sub-agent
+/// sessions are answered at all; a resume list never wants them.
 /// Runs SQLite work, so callers on the async runtime wrap it in
 /// `spawn_blocking`.
-pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<Vec<WikiRow>> {
+pub fn query_rows(
+    query: &str,
+    limit: usize,
+    live: &BTreeSet<String>,
+    include_subagents: bool,
+) -> Result<Vec<WikiRow>> {
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     if !index_is_writable() {
         // Nothing to answer from: either this process has no index of its own
@@ -909,8 +916,9 @@ pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<
     let connection = open_readonly()?;
     let query = query.trim();
     if query.is_empty() {
-        let rows = sessionwiki::index::recent(&connection, limit, None, None, None, false)
-            .context("list recent SessionWiki sessions")?;
+        let rows =
+            sessionwiki::index::recent(&connection, limit, None, None, None, include_subagents)
+                .context("list recent SessionWiki sessions")?;
         let mut rows: Vec<WikiRow> = rows
             .into_iter()
             .map(|row| wiki_row(row, None, live))
@@ -924,15 +932,17 @@ pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<
         sessionwiki::index::search(&connection, query, limit, None, None)
     }
     .context("search the SessionWiki index")?;
+    // SessionWiki's full-text search has no sub-agent filter of its own.
     let mut rows: Vec<WikiRow> = hits
         .into_iter()
+        .filter(|hit| include_subagents || is_main_session(&hit.row))
         .map(|hit| wiki_row(hit.row, Some(hit.snippet), live))
         .collect();
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
     let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    for row in named_like(&connection, query)? {
+    for row in named_like(&connection, query, include_subagents)? {
         if rows.len() >= limit {
             break;
         }
@@ -977,10 +987,18 @@ const NAME_SCAN_LIMIT: usize = 2_000;
 fn named_like(
     connection: &rusqlite::Connection,
     query: &str,
+    include_subagents: bool,
 ) -> Result<Vec<sessionwiki::index::SessionRow>> {
     let needle = query.to_lowercase();
-    let rows = sessionwiki::index::recent(connection, NAME_SCAN_LIMIT, None, None, None, false)
-        .context("list recent SessionWiki sessions")?;
+    let rows = sessionwiki::index::recent(
+        connection,
+        NAME_SCAN_LIMIT,
+        None,
+        None,
+        None,
+        include_subagents,
+    )
+    .context("list recent SessionWiki sessions")?;
     Ok(rows
         .into_iter()
         .filter(|row| {
@@ -988,6 +1006,12 @@ fn named_like(
                 || row.project.to_lowercase().contains(&needle)
         })
         .collect())
+}
+
+/// Whether an indexed session is one a person started rather than a
+/// sub-agent. SessionWiki's own `recent` filter tests the same `kind`.
+fn is_main_session(row: &sessionwiki::index::SessionRow) -> bool {
+    row.kind == "main"
 }
 
 /// The briefing for one indexed session, or `None` when the id names none.
@@ -2607,7 +2631,7 @@ mod tests {
         )
         .expect("write the session metadata");
 
-        let rows = query_rows("", 10, &BTreeSet::new()).expect("query the index");
+        let rows = query_rows("", 10, &BTreeSet::new(), false).expect("query the index");
         let mjolnir = rows
             .iter()
             .find(|row| row.id == "mj-session")
@@ -2623,5 +2647,52 @@ mod tests {
         assert_eq!(codex.target, None);
         assert_eq!(codex.profile, None);
         assert_eq!(codex.harness, None);
+    }
+
+    #[test]
+    fn one_flag_keeps_sub_agents_out_of_every_query_path() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        for (session_id, kind) in [("main-session", "main"), ("sub-session", "sub")] {
+            tags::testing::index_row(&connection, session_id, "claude");
+            connection
+                .execute(
+                    "UPDATE files SET kind = ?2 WHERE session_id = ?1",
+                    rusqlite::params![session_id, kind],
+                )
+                .expect("set the session kind");
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text)
+                     VALUES (?1, 'user', 'fix the bridge derivation zq')",
+                    [session_id],
+                )
+                .expect("insert a message");
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, 'fix the bridge derivation zq')",
+                    [connection.last_insert_rowid()],
+                )
+                .expect("index the message");
+        }
+        let ids = |query: &str, include_subagents: bool| {
+            let mut ids: Vec<String> = query_rows(query, 10, &BTreeSet::new(), include_subagents)
+                .expect("query the index")
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        // The recent list, full-text search, short-query scan, and title match.
+        for query in ["", "bridge derivation", "zq", "an indexed session"] {
+            assert_eq!(ids(query, false), ["main-session"], "query {query:?}");
+            assert_eq!(
+                ids(query, true),
+                ["main-session", "sub-session"],
+                "query {query:?}"
+            );
+        }
     }
 }

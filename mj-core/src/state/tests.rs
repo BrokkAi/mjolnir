@@ -326,6 +326,40 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
 }
 
 #[test]
+fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
+    let mut parent = sample_session();
+    parent.id = "0123456789abcdef0123456789abcdef".into();
+    let mut child = sample_session();
+    child.id = "fedcba9876543210fedcba9876543210".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Inspect parser".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the parser".into(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    let native = crate::native_agent::view_id(&parent.id, "a0c7080aee7ead7c5:generation:2");
+
+    assert!(crate::native_agent::is_view_id(&native));
+    assert!(!crate::native_agent::is_view_id(&parent.id));
+    assert!(state.is_subagent_session(&child.id), "a managed child");
+    assert!(state.is_subagent_session(&native), "a harness-owned child");
+    assert!(!state.is_subagent_session(&parent.id), "the owner");
+}
+
+#[test]
 fn container_size_history_rejects_invalid_keys_and_values() {
     let mut state = State::default();
     state.container_sizes.insert(
