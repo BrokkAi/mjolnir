@@ -74,7 +74,6 @@ pub use crate::actions::CommandId;
 pub use crate::combined::{render_combined, render_combined_with_theme};
 pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
-pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::go::GoMode;
 pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
