@@ -927,6 +927,7 @@ fn render_combined_themed(
                             title_controls(close_chip),
                         ),
                         false,
+                        false,
                     );
                     render_empty_prompt_advice(
                         frame,
@@ -995,6 +996,7 @@ fn render_combined_themed(
                             title_controls(close_chip),
                         ),
                         false,
+                        dashboard.pane_shows_pin_hint(pane_id),
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
                 }
@@ -1147,6 +1149,7 @@ fn render_combined_themed(
                             title_controls(close_chip) + zoom_title_controls(zoom_chip),
                         ),
                         focus_borders,
+                        dashboard.pane_shows_pin_hint(pane_id),
                     );
                     if opening {
                         // The real composer parks in the prompt band while the
@@ -1273,6 +1276,7 @@ enum EmptyConversation {
 /// that has live sessions just needs one opened, and an attach that is still
 /// running needs nothing but a moment. Telling the second user there is no
 /// live session would be a plain lie — the pane above is listing them.
+#[allow(clippy::too_many_arguments)]
 fn render_empty_transcript(
     frame: &mut Frame,
     transcript_area: Rect,
@@ -1281,6 +1285,7 @@ fn render_empty_transcript(
     failure: Option<String>,
     title_controls: u16,
     pane_focused: bool,
+    pin_hint: bool,
 ) {
     if matches!(reason, EmptyConversation::Failed) {
         let panel = theme::panel(pane_focused)
@@ -1328,12 +1333,17 @@ fn render_empty_transcript(
         );
     }
     frame.render_widget(panel, transcript_area);
-    if transcript_area.height >= 7 {
+    // The pane chrome puts "Pin selected here" on the first inside row of
+    // an empty pane; the splash starts below it, and is left out when the
+    // pane is too short for both.
+    let first_row = if pin_hint { 2 } else { 1 };
+    let top = (transcript_area.height.saturating_sub(5) / 2).max(first_row);
+    if transcript_area.height >= 7 && top + 3 < transcript_area.height {
         let hero = Rect::new(
             transcript_area.x.saturating_add(1),
-            transcript_area.y + (transcript_area.height.saturating_sub(5) / 2).max(1),
+            transcript_area.y + top,
             transcript_area.width.saturating_sub(2),
-            4,
+            (transcript_area.height - 1 - top).min(4),
         );
         let invitation = match reason {
             EmptyConversation::NoLiveSession => {
@@ -1713,6 +1723,42 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// Launch campaign finding A-13: in an empty pane the "Pin selected
+    /// here" hint on the first inside row was drawn over the splash at 79
+    /// and 60 columns. The splash keeps clear of that row, and is dropped
+    /// when the pane is too short for both.
+    #[test]
+    fn the_splash_keeps_clear_of_the_pin_hint_row() {
+        for height in 3..=16 {
+            let mut terminal = Terminal::new(TestBackend::new(34, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_empty_transcript(
+                        frame,
+                        frame.area(),
+                        EmptyConversation::NoConversationOpen,
+                        spinner::SpinnerStyle::default(),
+                        None,
+                        0,
+                        false,
+                        true,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            assert!(
+                !lines[1].contains("M J O") && !lines[1].contains("Your next"),
+                "height {height}: {lines:#?}"
+            );
+            if height >= 8 {
+                assert!(
+                    lines.iter().any(|line| line.contains("M J O L N I R")),
+                    "height {height}: {lines:#?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn minimized_sessions_use_two_content_lines_per_visible_item() {

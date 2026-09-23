@@ -85,6 +85,13 @@ impl DashboardState {
         self.show_pane_menu("Pin session", entries, false);
     }
 
+    /// Whether the pane chrome puts "Pin selected here" on the pane's first
+    /// inside row: an empty pane other than Browse. Anything drawn in the
+    /// pane keeps clear of that row.
+    pub(crate) fn pane_shows_pin_hint(&self, pane: PaneId) -> bool {
+        self.pane_session(pane).is_none() && pane != self.browse_pane()
+    }
+
     fn empty_pin_panes(&self) -> impl Iterator<Item = PaneId> + '_ {
         self.conversation_layout
             .pane_ids()
@@ -350,7 +357,7 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
             // Paint all three cells, so nothing underneath shows through.
             frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), area);
         }
-        if session.is_none() && pane != dashboard.browse_pane() && transcript.height > 2 {
+        if dashboard.pane_shows_pin_hint(pane) && transcript.height > 2 {
             let area = Rect::new(
                 transcript.x + 1,
                 transcript.y + 1,
