@@ -1794,6 +1794,10 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
         assert!(!instructions.contains("Hel"), "{instructions}");
         assert!(instructions.contains("## Local bare runtime"));
         assert!(instructions.contains("Node.js 22 or newer and npm"));
+        assert!(instructions.ends_with('\n'));
+        assert!(!instructions.contains("](#"), "{instructions}");
+        assert!(!instructions.contains("keep-id:uid=,"));
+        assert!(!instructions.contains("Disposable EC2"));
     }
     let macos = setup_instructions(InstructionsPlatform::Macos);
     assert!(!macos.contains("local Podman"), "{macos}");

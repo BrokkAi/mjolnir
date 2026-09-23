@@ -419,7 +419,7 @@ configured by an `apple-container` target; without one, doctor uses\n\
 ## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
-Podman prerequisites. Resolve every `fixable` status before starting a session."
+Podman prerequisites. Resolve every `fixable` status before starting a session.\n"
         ),
     }
 }

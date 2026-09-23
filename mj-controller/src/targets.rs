@@ -30,7 +30,7 @@ pub const PODMAN_DOCUMENTATION: &str = include_str!("../docs/PODMAN.md");
 /// The Docker postconditions page, verbatim.
 pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
-/// `--userns=keep-id:uid=,gid=`, which maps a session container's image user
+/// `--userns=keep-id:uid=<uid>,gid=<gid>`, which maps a session container's image user
 /// onto the host user, landed in Podman 4.3.0.
 const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 3);
 
