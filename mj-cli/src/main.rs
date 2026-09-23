@@ -496,7 +496,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Acp(args)) => acp::serve(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => acp::serve(args, requested_workspace).await.map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {
