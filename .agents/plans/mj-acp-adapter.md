@@ -58,7 +58,10 @@ omitted profile, target, or bundle falls back to the same saved default that
       Verified by eight adapter tests, the full binary suite (160 passed),
       `cargo fmt --all -- --check`, and
       `cargo clippy --workspace --all-targets -- -D warnings`.
-- [ ] Milestone D: document the command for consumers.
+- [x] (2026-09-23T11:51Z) Milestone D: `docs/src/content/docs/acp-agent.md`
+      documents the command for consumers, is listed in the sidebar, and is
+      pointed at from the CLI reference. Verified by building the site —
+      26 pages, 2059 internal links checked.
 
 ## Surprises & Discoveries
 
@@ -438,3 +441,25 @@ reach the daemon, and records the cancellation itself when it cannot.
 
 What remains is Milestone D, the documentation a consumer needs to find this
 command at all.
+
+### Milestone D
+
+Reached 2026-09-23. The adapter is now documented where a consumer will look.
+`docs/src/content/docs/acp-agent.md` explains what `mj acp` is, how to point a
+program's agent command at it, what a session becomes, which ACP methods are
+supported and which are deliberately not, how a turn ends, and what happens when
+the program exits. It sits in the Reference group beside the HTTP API reference,
+because its audience and its nature are the same: a program integrating with
+Mjolnir against a documented contract. The CLI reference, which otherwise omits
+hidden commands on purpose, now names `mj acp` as the exception and links to the
+page — without that, the feature would exist and be undiscoverable.
+
+The site build is the verification here, not the test suite: it renders every
+page and checks 2059 internal links across 26 pages, so a wrong slug or a page
+missing from the sidebar fails the build rather than shipping.
+
+That completes the plan. The adapter answers a handshake, creates and drives
+sessions, cancels them, answers the cases a program cannot, stops work when its
+consumer leaves, and is documented. What has not been exercised anywhere is a
+real harness: every test stands a fake daemon in front of the adapter, and the
+first genuine consumer will be the real test.
