@@ -174,6 +174,36 @@ fn local_targets_need_no_setup_and_preserve_explicit_overrides() {
     assert_eq!(resolved.clone().with_local_targets(), resolved);
 }
 
+/// Saving edits the user's file in place: comments, blank lines, and the
+/// order of sections and keys survive a save that changes one value.
+/// Launch campaign finding C-21.
+#[test]
+fn saving_keeps_the_files_comments_and_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let original = format!(
+        "# My Mjolnir settings\nversion = {CONFIG_VERSION}\n\n\
+         # Quiet, please.\n[notify]\ntitle = false # no counts in the title\nbell = true\n\n\
+         [advanced]\n# Clocks help me debug.\ndetailed_activity_clocks = true\n"
+    );
+    fs::write(&path, &original).unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    config.notify.bell = false;
+    config.save_to(&path).unwrap();
+
+    let saved = fs::read_to_string(&path).unwrap();
+    assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    // A version 12 file is marked as this build's, in place.
+    fs::write(&path, "# keep me\nversion = 12 # the file format\n").unwrap();
+    Config::load_from(&path).unwrap().save_to(&path).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("# keep me\nversion = {CONFIG_VERSION} # the file format\n")
+    );
+}
+
 #[test]
 fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
     let directory = tempfile::tempdir().unwrap();

@@ -15,6 +15,7 @@
 //! * `ui` -- terminal appearance settings.
 //! * `loading` -- instance names, directories, and atomic file writes.
 
+mod document;
 mod harness;
 mod keys;
 mod loading;
@@ -912,7 +913,17 @@ impl Config {
         Self::ensure_writable(path)?;
         self.validate()?;
         let body = toml::to_string_pretty(self).context("serialize Mjolnir config")?;
+        let body = Self::edited_file(path, &body).unwrap_or(body);
         atomic_write(path, body.as_bytes())
+    }
+
+    /// The file at `path` edited in place to hold `body`, keeping its
+    /// comments and layout. `None` when there is no file to keep, or it
+    /// cannot be edited in place.
+    fn edited_file(path: &Path, body: &str) -> Option<String> {
+        let existing = fs::read_to_string(path).ok()?;
+        let loaded = toml::to_string_pretty(&Self::load_from(path).ok()?).ok()?;
+        document::edit_in_place(&existing, &loaded, body)
     }
 
     /// Refuse to overwrite a file that a newer Mjolnir wrote after this
