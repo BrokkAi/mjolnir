@@ -741,16 +741,14 @@ pub(crate) async fn run_dashboard_for_workspace(
                                 context.request_shutdown();
                             }
                         }
-                        crate::daemon::DaemonPresence::Attached => context
-                            .dashboard
-                            .set_notice("Mjolnir daemon is running again."),
+                        crate::daemon::DaemonPresence::Attached => {
+                            show_daemon_reattached(&mut context.dashboard);
+                        }
                         // The reason is already in the log. The notice bar is
                         // one line, so it carries the action instead.
                         crate::daemon::DaemonPresence::Missing(reason) => {
                             tracing::warn!(%reason, "the Mjolnir daemon is not running");
-                            context.dashboard.set_failure_notice(
-                                "Mjolnir daemon is unavailable; waiting to reconnect.",
-                            );
+                            context.dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
                         }
                     }
                 }
@@ -1975,6 +1973,27 @@ fn route_selection_event(
         }
         event => SelectionRouting::Forward(event),
     }
+}
+
+const DAEMON_UNAVAILABLE_NOTICE: &str = "Mjolnir daemon is unavailable; waiting to reconnect.";
+const DAEMON_RUNNING_AGAIN_NOTICE: &str = "Mjolnir daemon is running again.";
+
+/// Report that the keep-alive reached a daemon again.
+///
+/// The unavailable notice is a failure notice, which a plain notice cannot
+/// replace until it has been readable for a while. A daemon restart is often
+/// shorter than that, so a plain `set_notice` was dropped and the stale
+/// failure stayed up while the dashboard was live. The reconnect is exactly
+/// the event that makes that failure false, so it replaces it directly, also
+/// when it is shown inside a count of stacked failures.
+fn show_daemon_reattached(dashboard: &mut DashboardState) {
+    if let Some(current) = dashboard.notice()
+        && current.ends_with(DAEMON_UNAVAILABLE_NOTICE)
+        && dashboard.replace_notice_if(&current, DAEMON_RUNNING_AGAIN_NOTICE)
+    {
+        return;
+    }
+    dashboard.set_notice(DAEMON_RUNNING_AGAIN_NOTICE);
 }
 
 #[cfg(test)]

@@ -1836,3 +1836,31 @@ async fn a_narrow_pane_title_ends_in_an_ellipsis_not_stray_letters() {
         }
     }
 }
+
+#[test]
+fn a_quick_reconnect_replaces_the_daemon_unavailable_notice() {
+    let mut dashboard =
+        DashboardState::new(Default::default(), State::default(), Default::default());
+    dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+
+    dashboard.set_failure_notice("Could not save the layout.");
+    dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+
+    // Another fresh failure is not the reconnect's to clear.
+    dashboard.set_failure_notice("Could not save the layout.");
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not save the layout.")
+    );
+}
