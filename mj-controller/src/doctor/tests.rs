@@ -211,6 +211,130 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
     }
 }
 
+#[test]
+fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
+    let config = config_with([
+        (
+            "podman",
+            TargetTemplate::LocalPodman {
+                container: container("ubuntu:24.04"),
+            },
+        ),
+        (
+            "docker",
+            TargetTemplate::LocalDocker {
+                container: container("ubuntu:24.04"),
+            },
+        ),
+    ]);
+    let executor = FakeExecutor::new([Ok(output("mbx\nmbx 1.15.0"))]);
+
+    let checks = build_cache_checks(Ok(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    let check = &checks[0];
+    assert_eq!(check.id, "build-cache.local");
+    assert_eq!(check.status, CheckStatus::Warning);
+    assert!(check.detail.contains("1.15.0"));
+    assert!(check.detail.contains("1.16.0"));
+    assert!(check.detail.contains("run without the shared build cache"));
+    assert!(check.detail.contains("docker, podman"));
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("Upgrade mbx")
+    );
+    assert_eq!(executor.commands.borrow().len(), 1);
+    assert!(
+        all_ready(&checks),
+        "an optional cache warning preserves doctor's exit status"
+    );
+
+    let json = serde_json::to_value(check).unwrap();
+    assert_eq!(json["status"], "warning");
+    assert!(json["remediation"].as_str().unwrap().contains("1.16.0"));
+    let mut human = Vec::new();
+    render_human(&checks, &mut human).unwrap();
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("warning Build cache on local"));
+    assert!(human.contains("remediation: Upgrade mbx"));
+}
+
+#[test]
+fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
+    let config = config_with([(
+        "podman",
+        TargetTemplate::LocalPodman {
+            container: container("ubuntu:24.04"),
+        },
+    )]);
+    for (response, expected_status, expected_text) in [
+        (
+            Ok(output("mbx\nmbx 1.16.0")),
+            CheckStatus::Ready,
+            "compatible",
+        ),
+        (Ok(failed("")), CheckStatus::Ready, "No native mbx"),
+        (
+            Err(anyhow!("probe timed out")),
+            CheckStatus::Warning,
+            "probe timed out",
+        ),
+    ] {
+        let executor = FakeExecutor::new([response]);
+        let checks = build_cache_checks(Ok(&config), &executor);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, expected_status);
+        assert!(checks[0].detail.contains(expected_text), "{:?}", checks[0]);
+    }
+}
+
+#[test]
+fn doctor_reports_remote_host_mbx_for_ssh_container_targets() {
+    let config = config_with([(
+        "remote",
+        TargetTemplate::SshPodman {
+            ssh: ssh_connection(),
+            container: container("ubuntu:24.04"),
+        },
+    )]);
+    let executor = FakeExecutor::new([Ok(output("/home/dev/.cargo/bin/mbx\nmbx 1.15.0"))]);
+
+    let checks = build_cache_checks(Ok(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Warning);
+    assert!(checks[0].id.contains("example.test"));
+    assert!(checks[0].detail.contains("targets remote"));
+    assert_eq!(executor.commands.borrow()[0].program, "ssh");
+}
+
+#[test]
+fn doctor_skips_disabled_or_irrelevant_build_caches_without_probing() {
+    let mut disabled = config_with([(
+        "podman",
+        TargetTemplate::LocalPodman {
+            container: container("ubuntu:24.04"),
+        },
+    )]);
+    disabled.build_cache.enabled = false;
+    let executor = FakeExecutor::new([]);
+    assert!(build_cache_checks(Ok(&disabled), &executor).is_empty());
+    disabled.build_cache.enabled = true;
+    if let TargetTemplate::LocalPodman { container } = disabled.targets.get_mut("podman").unwrap() {
+        container.build_cache = Some(mj_core::config::TargetBuildCache {
+            enabled: Some(false),
+            ..Default::default()
+        });
+    }
+    assert!(build_cache_checks(Ok(&disabled), &executor).is_empty());
+    let bare = config_with([("bare", TargetTemplate::LocalBare)]);
+    assert!(build_cache_checks(Ok(&bare), &executor).is_empty());
+    assert!(executor.commands.borrow().is_empty());
+}
+
 fn runtime_ssh() -> RuntimeSshTarget {
     RuntimeSshTarget::from(&ssh_connection())
 }

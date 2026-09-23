@@ -196,6 +196,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(build_cache_checks(config, executor));
     checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(config));
     checks.push(daemon_build_check());
@@ -208,6 +209,63 @@ pub fn run_with_config_path(
         apple_container_image(config),
     ));
     checks
+}
+
+fn build_cache_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    crate::controller::doctor_host_mbx(config, executor)
+        .into_iter()
+        .map(|host| {
+            let id = format!("build-cache.{}", host.host);
+            let title = format!("Build cache on {}", host.host);
+            let targets = host.targets.join(", ");
+            match host.status {
+                crate::controller::DoctorHostMbxStatus::Absent => DoctorCheck::ready(
+                    id,
+                    title,
+                    format!(
+                        "No native mbx is installed; targets {targets} can use Mjolnir's mbx {}.",
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::Compatible(version) => DoctorCheck::ready(
+                    id,
+                    title,
+                    format!(
+                        "Host mbx {version} is compatible with Mjolnir's mbx {} for targets {targets}.",
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::TooOld(version) => DoctorCheck::warning(
+                    id,
+                    title,
+                    format!(
+                        "Host mbx {version} is older than Mjolnir's mbx {}; sessions on targets {targets} run without the shared build cache.",
+                        crate::controller::MBX_VERSION
+                    ),
+                    format!(
+                        "Upgrade mbx on {} to {} or newer, then rerun `mj doctor`.",
+                        host.host,
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::Unknown(error) => DoctorCheck::warning(
+                    id,
+                    title,
+                    format!("Could not check host mbx for targets {targets}: {error}"),
+                    format!(
+                        "Check access to {} and run `mbx --version` there, then rerun `mj doctor`.",
+                        host.host
+                    ),
+                ),
+            }
+        })
+        .collect()
 }
 
 fn harness_discovery_check(
