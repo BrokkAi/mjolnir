@@ -94,6 +94,16 @@ const SESSION_ACTOR_RECONNECT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 enum ChatIoUpdate {
+    EarlierMessages {
+        generation: u64,
+        result: std::result::Result<
+            (
+                Option<mj_core::storage::TranscriptCursor>,
+                Vec<Line<'static>>,
+            ),
+            String,
+        >,
+    },
     ProjectHistoryPrefetched(std::result::Result<Vec<PromptHistoryEntry>, String>),
     HistorySearchResults {
         generation: u64,
@@ -260,6 +270,23 @@ enum PrefixRebuild {
 
 fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixRebuild {
     match update {
+        ChatIoUpdate::EarlierMessages { generation, result } => {
+            if let Some(reader) = chat.earlier.as_mut().filter(|r| r.generation == generation) {
+                reader.loading = false;
+                match result {
+                    Ok((before, lines)) => {
+                        reader.before = before;
+                        reader.lines = lines;
+                        reader.scroll = 0;
+                        reader.loaded = true;
+                        reader.error = None;
+                    }
+                    Err(error) => {
+                        reader.error = Some(format!("{error} | Enter: retry | Esc: live"))
+                    }
+                }
+            }
+        }
         ChatIoUpdate::TranscriptPrefix { attempt, result } => match result {
             Ok((entries, diffstats)) => {
                 if chat.splice_transcript_prefix(entries) {
@@ -467,6 +494,7 @@ pub struct ActiveChat {
     attachment_queue: VecDeque<(u64, AttachmentSource, Option<String>)>,
     attachment_tasks_in_flight: usize,
     next_attachment_sequence: u64,
+    earlier_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Sendable chat initialization data. Build this off the UI thread, then
@@ -796,6 +824,7 @@ impl ActiveChat {
             attachment_queue: VecDeque::new(),
             attachment_tasks_in_flight: 0,
             next_attachment_sequence: 0,
+            earlier_task: None,
         };
         chat.refresh_voice_availability();
         if chat.state.second_opinion_split() {
@@ -990,6 +1019,9 @@ impl std::ops::DerefMut for ActiveChat {
 
 impl Drop for ActiveChat {
     fn drop(&mut self) {
+        if let Some(task) = self.earlier_task.take() {
+            task.abort();
+        }
         if let Some(flag) = self.reviewer_preparation.take() {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }

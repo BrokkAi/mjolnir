@@ -25,10 +25,11 @@ def parse_args() -> argparse.Namespace:
 
 def start_dashboard(lab: Lab):
     client = lab.start_tui("tui-1")
-    # Startup opens the last workspace directly, including its empty state.
-    # The footer's chord group is what proves the dashboard finished drawing;
-    # its heading names the prefix key rather than any one command's letter.
-    client.wait_for("ctrl+b then:")
+    # Startup opens the last workspace directly, including its empty state,
+    # and that empty state is what proves the dashboard finished drawing. The
+    # footer cannot: any notice, such as the first-launch key hint, replaces
+    # its hints for as long as the notice shows.
+    client.wait_for("No live session in this workspace.")
     return client
 
 
@@ -89,17 +90,19 @@ def focus_sessions(client) -> None:
 
 def stop_from_dashboard(client) -> None:
     focus_sessions(client)
-    client.send(b"\x1bOQ")
-    client.wait_for("Click/Enter runs \u00b7 Tab moves \u00b7 Esc closes")
-    client.send(b"stop\r")
+    # The palette is a prefix chord (ctrl+b then :); it has no function key.
+    client.send(b"\x02:")
+    client.wait_for("Search commands")
+    # An idle session with no sub-agents suspends without a confirmation.
+    client.send(b"suspend session\r")
     # A stop needs the daemon's session manager to have adopted the session,
     # and adoption is asynchronous: a session the browser created moments ago
     # can still be unmanaged when the first stop reaches it. The surface offers
-    # Retry stop for exactly that, so take it rather than failing on a
+    # Retry suspension for exactly that, so take it rather than failing on a
     # condition that resolves itself.
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        if "Stop could not complete" not in client.text():
+        if "Suspension could not complete" not in client.text():
             return
         # Cancel, discard since checkpoint, retry suspension: two steps right.
         client.send(b"\x1b[C\x1b[C\r")
@@ -200,7 +203,7 @@ def run(lab: Lab) -> None:
         stop_from_dashboard(dashboard)
         snapshot = lab.wait_snapshot(
             lambda value: any(
-                item.get("title") == title and item.get("state") == "stopped"
+                item.get("title") == title and item.get("state") == "suspended"
                 for item in value.get("sessions", [])
             ),
             "TUI-stopped browser session",

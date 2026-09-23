@@ -73,6 +73,7 @@ pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 pub use mbx::preview_build_cache;
+pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
 pub(crate) use worker_binary::refresh_target_worker_binary_if_stale;
 pub(crate) use worktree::path_exists_on_managed_target;
@@ -1029,7 +1030,11 @@ impl Controller {
                 crate::database::rename_profile_references(&journal.old_id, &journal.new_id)?;
             }
             ConfigRenameKind::Target => {
-                Config::update(|config| {
+                // The file's own entries, not `Config::update`'s view: that one
+                // adds the standard local targets, so after a built-in id such
+                // as `localhost` was renamed away, its default would reappear
+                // beside the new id and read as a rename that cannot finish.
+                Config::update_to(&mj_core::config::config_path(), |config| {
                     finish_config_map_rename(
                         &mut config.targets,
                         &journal.old_id,

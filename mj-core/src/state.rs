@@ -471,6 +471,43 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
+    /// Keep complete turns around the tail target. Unsettled content can still
+    /// change after a newer turn starts, so retain its turn as well.
+    pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
+        let observed = Self::of(session);
+        if self.provisional_title.is_none() {
+            self.provisional_title = observed.provisional_title;
+        }
+        self.latest_turn_start_position = observed
+            .latest_turn_start_position
+            .or(self.latest_turn_start_position);
+        let mut boundary = session.transcript.len().saturating_sub(target.max(1));
+        for (index, item) in session.transcript.iter().enumerate() {
+            let mutable = match &item.body {
+                TranscriptBody::Agent { streaming, .. }
+                | TranscriptBody::Thought { streaming, .. } => *streaming,
+                TranscriptBody::Tool { call, .. } => matches!(
+                    call.get("status").and_then(serde_json::Value::as_str),
+                    Some("pending" | "in_progress")
+                ),
+                _ => false,
+            };
+            if mutable || Some(item.position) == self.latest_turn_start_position {
+                boundary = boundary.min(index);
+            }
+        }
+        let cut = session
+            .transcript
+            .iter()
+            .take(boundary + 1)
+            .rposition(|item| item.is_turn_start())
+            .unwrap_or(0);
+        if cut > 0 {
+            session.transcript.drain(..cut);
+            self.omitted_items += cut;
+        }
+    }
+
     /// The window of a projection that omits nothing.
     #[must_use]
     pub fn of(session: &MaterializedSession) -> Self {
@@ -1561,6 +1598,17 @@ impl State {
             .get(&session.id)
             .and_then(|record| self.sessions.get(&record.parent_session_id))
             .unwrap_or(session)
+    }
+
+    /// Whether `id` names a sub-agent rather than a session the user started:
+    /// a Mjolnir-managed child, or the record a client builds to show a
+    /// harness-owned child (see [`crate::native_agent::view_id`]).
+    ///
+    /// Every list of top-level sessions filters with this, so the lists
+    /// cannot disagree about what a sub-agent is.
+    #[must_use]
+    pub fn is_subagent_session(&self, id: &str) -> bool {
+        self.subagents.contains_key(id) || crate::native_agent::is_view_id(id)
     }
 
     pub fn validate(&self) -> Result<()> {

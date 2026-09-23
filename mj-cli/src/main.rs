@@ -5,6 +5,7 @@
 //! [`server`] implements the daemon-owned phone control, [`pollers`] the background
 //! feeds both of them read, and [`import`] session adoption.
 
+mod acp;
 mod api_client;
 mod api_commands;
 mod daemon;
@@ -86,6 +87,10 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    /// Serve the Agent Client Protocol on standard input and output, running
+    /// each session it creates through this daemon.
+    #[command(hide = true)]
+    Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
     /// Discover local agent homes and create an initial Mjolnir configuration.
@@ -411,6 +416,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
@@ -490,6 +496,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => acp::serve(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {

@@ -59,6 +59,10 @@ pub(crate) fn render_in(
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
+    if let Some(reader) = chat.earlier.as_mut() {
+        crate::chat::earlier::render_earlier(frame, regions.overlay, reader);
+        return;
+    }
     // Dialogs and the completion popup are centred in this conversation's own
     // overlay rectangle, not in the band the transcript happens to have been
     // given.

@@ -35,6 +35,67 @@ fn agent_item(position: u64) -> Arc<TranscriptItem> {
     })
 }
 
+#[test]
+fn projection_window_keeps_whole_turns_and_unsettled_content() {
+    let mut session = MaterializedSession::empty("windowed");
+    session.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "original request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    let mut window = ProjectionWindow::of(&session);
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript[0].position, 1401);
+    assert_eq!(window.omitted_items, 1400);
+    assert_eq!(window.latest_turn_start_position, Some(2401));
+    assert_eq!(
+        window.provisional_title.as_deref(),
+        Some("original request")
+    );
+    let retained = session.transcript.clone();
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript, retained);
+    assert_eq!(window.omitted_items, 1400);
+
+    let mut long_turn = MaterializedSession::empty("long-turn");
+    long_turn.transcript.push(user_item(1, "large turn"));
+    long_turn.transcript.extend((2..=2500).map(agent_item));
+    let mut long_window = ProjectionWindow::of(&long_turn);
+    long_window.trim(&mut long_turn, 1024);
+    assert_eq!(
+        long_turn.transcript.len(),
+        2500,
+        "never cut an active turn in half"
+    );
+
+    let mut pending = MaterializedSession::empty("pending");
+    pending.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    if let TranscriptBody::Agent { streaming, .. } =
+        &mut Arc::make_mut(&mut pending.transcript[1]).body
+    {
+        *streaming = true;
+    }
+    let mut pending_window = ProjectionWindow::of(&pending);
+    pending_window.trim(&mut pending, 1024);
+    assert_eq!(
+        pending.transcript.len(),
+        2500,
+        "late streaming data keeps its original turn"
+    );
+}
+
 fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSessionSnapshot {
     ManagedSessionSnapshot {
         materialized: session,
@@ -323,6 +384,40 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
         parent.id,
         "a session that is not a sub-agent keeps its own project identity"
     );
+}
+
+#[test]
+fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
+    let mut parent = sample_session();
+    parent.id = "0123456789abcdef0123456789abcdef".into();
+    let mut child = sample_session();
+    child.id = "fedcba9876543210fedcba9876543210".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Inspect parser".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the parser".into(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    let native = crate::native_agent::view_id(&parent.id, "a0c7080aee7ead7c5:generation:2");
+
+    assert!(crate::native_agent::is_view_id(&native));
+    assert!(!crate::native_agent::is_view_id(&parent.id));
+    assert!(state.is_subagent_session(&child.id), "a managed child");
+    assert!(state.is_subagent_session(&native), "a harness-owned child");
+    assert!(!state.is_subagent_session(&parent.id), "the owner");
 }
 
 #[test]

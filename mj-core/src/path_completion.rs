@@ -142,7 +142,7 @@ pub fn ssh_completions(
         "-o".into(),
         "ServerAliveCountMax=1".into(),
     ]);
-    push_connection_reuse_args(&mut args);
+    push_connection_reuse_args(&mut args, ssh);
     args.extend([ssh.destination.clone(), remote_command]);
     let output = executor.execute(
         &CommandSpec::new("ssh", args)

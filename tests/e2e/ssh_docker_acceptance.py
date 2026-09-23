@@ -405,7 +405,6 @@ class AcceptanceLab:
                     "read_only": False,
                 },
             ],
-            "allow_dirty_local": False,
             "resource_allocation": None,
             "title": f"ssh-docker acceptance {ordinal}",
             "session_title_override": f"ssh-docker acceptance {ordinal}",
@@ -502,7 +501,7 @@ class AcceptanceLab:
         result = self.ipc({"action": "checkpoint_session", "arguments": {"session_id": session_id}}, 300)
         record_json(self.artifact / "checkpoint.json", result)
         self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 301)
-        self.wait_state(session_id, "stopped", timeout=DEFAULT_TIMEOUT)
+        self.wait_state(session_id, "suspended", timeout=DEFAULT_TIMEOUT)
         resume = {
             "session_id": session_id,
             "workspace_id": self.workspace_id,
@@ -630,12 +629,12 @@ class AcceptanceLab:
         self.lab.record_action("docker-daemon-interruption-recovered")
 
         self.ipc({"action": "suspend_session", "arguments": {"session_id": first}}, 501)
-        self.wait_state(first, "stopped")
+        self.wait_state(first, "suspended")
         self.verify_removed(first)
         if identities[second] != self.container_id(second):
             raise AcceptanceFailure("closing one session disturbed the other")
         self.ipc({"action": "suspend_session", "arguments": {"session_id": second}}, 503)
-        self.wait_state(second, "stopped")
+        self.wait_state(second, "suspended")
         self.verify_removed(second)
         self.run_orphan()
 
@@ -689,7 +688,7 @@ class AcceptanceLab:
         self.wait_state(session_id, "running")
         self.prompt_and_verify(session_id, 2)
         self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 502)
-        self.wait_state(session_id, "stopped")
+        self.wait_state(session_id, "suspended")
         self.verify_removed(session_id)
         self.lab.record_action("fresh-controller-adoption-and-close", session_id=session_id)
         self.lab.trace["outcome"] = "passed"
@@ -781,8 +780,8 @@ class AcceptanceLab:
         self.restart_and_recover()
         self.ipc({"action": "suspend_session", "arguments": {"session_id": first}}, 400)
         self.ipc({"action": "suspend_session", "arguments": {"session_id": second}}, 401)
-        self.wait_state(first, "stopped", timeout=DEFAULT_TIMEOUT)
-        self.wait_state(second, "stopped", timeout=DEFAULT_TIMEOUT)
+        self.wait_state(first, "suspended", timeout=DEFAULT_TIMEOUT)
+        self.wait_state(second, "suspended", timeout=DEFAULT_TIMEOUT)
         self.verify_removed(first)
         self.verify_removed(second)
         self.lab.trace["outcome"] = "passed"

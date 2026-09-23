@@ -568,15 +568,16 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         }
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
             let mut client = DaemonClient::connect(metadata.clone()).await?;
-            if metadata.protocol_version >= 33 {
+            if daemon_admission_ignores_workers(metadata) {
                 match client.request(DaemonAction::PrepareUpgrade).await? {
                     DaemonReply::Done => Ok(true),
                     DaemonReply::UpgradePending => Ok(false),
                     reply => bail!("unexpected upgrade admission reply {reply:?}"),
                 }
             } else {
-                // Historical daemons cannot provide atomic admission. Inspect
-                // their own activity without opening or migrating their store.
+                // These daemons cannot give a trustworthy atomic admission.
+                // Inspect their own activity without opening or migrating
+                // their store; this is an observed idle check only.
                 let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
                 if !legacy_snapshot_is_idle(&snapshot) {
                     return Ok(false);
@@ -618,13 +619,19 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
     }
 }
 
-/// Whether a pre-33 daemon can be replaced now.
+/// Whether the daemon's `PrepareUpgrade` answer can be trusted.
 ///
-/// The daemon is the control plane, so only its own lifecycle work blocks a
-/// handoff: a lifecycle operation in flight, or a record that is provisioning,
-/// checkpointing, closing, or being destroyed. Running and Disconnected
-/// sessions live in workers that outlive the daemon, and reviews are agent
-/// sessions in those same workers, so neither blocks.
+/// Protocol 33 added atomic admission, but 2.17.0 shipped it with a gate that
+/// also counted worker turns, reviews, and every session without a snapshot,
+/// so one unreachable worker refuses the handoff forever. 2.18.0 narrowed the
+/// gate to daemon-owned work without changing the protocol, so the build
+/// version is the only way to tell them apart.
+fn daemon_admission_ignores_workers(metadata: &DaemonMetadata) -> bool {
+    metadata.protocol_version >= 33
+        && semver::Version::parse(&metadata.build_version)
+            .is_ok_and(|version| version >= semver::Version::new(2, 18, 0))
+}
+
 /// Names the daemon-owned work holding the handoff open, for the wait notice.
 /// A daemon that predates `UpgradeBlockers` fails the frame and closes the
 /// connection; that, any other failure, and an empty answer all yield `None`,
@@ -642,6 +649,13 @@ async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
     (!labels.is_empty()).then_some(labels)
 }
 
+/// Whether a daemon without trustworthy admission can be replaced now.
+///
+/// The daemon is the control plane, so only its own lifecycle work blocks a
+/// handoff: a lifecycle operation in flight, or a record that is provisioning,
+/// checkpointing, closing, or being destroyed. Running and Disconnected
+/// sessions live in workers that outlive the daemon, and reviews are agent
+/// sessions in those same workers, so neither blocks.
 fn legacy_snapshot_is_idle(snapshot: &RuntimeSnapshot) -> bool {
     use mj_core::state::SessionState;
     snapshot.lifecycles.is_empty()
@@ -860,6 +874,24 @@ mod tests {
             "lifecycles": [],
         }))
         .expect("legacy snapshot fixture")
+    }
+
+    /// 2.17.0 answers `PrepareUpgrade` but its gate never releases while a
+    /// worker is unreachable, so only later builds get the atomic handshake.
+    #[test]
+    fn only_daemons_with_the_narrowed_gate_use_atomic_admission() {
+        let metadata = |protocol_version, build_version: &str| DaemonMetadata {
+            protocol_version,
+            pid: 1,
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: build_version.into(),
+        };
+        assert!(!daemon_admission_ignores_workers(&metadata(32, "2.16.0")));
+        assert!(!daemon_admission_ignores_workers(&metadata(33, "2.17.0")));
+        assert!(daemon_admission_ignores_workers(&metadata(33, "2.18.0")));
+        assert!(daemon_admission_ignores_workers(&metadata(33, "2.19.0")));
     }
 
     /// A pre-33 daemon is replaceable while workers are busy: only its own

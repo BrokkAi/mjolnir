@@ -57,13 +57,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/BrokkAi/mjolnir/releases/tags/$RELEASE_TAG" --jq .id)"
+          assets="$(gh api "repos/BrokkAi/mjolnir/releases/$release_id/assets?per_page=100")"
+          # The release lookup can report no embedded assets even when the
+          # dedicated asset endpoint lists all uploaded files.
+          jq -e 'length == 6' <<< "$assets" > /dev/null
           mkdir release-assets
-          gh release download "$RELEASE_TAG" --repo BrokkAi/mjolnir \
-            --dir release-assets \
-            --pattern 'brokk-mjolnir-*.tar.gz' \
-            --pattern 'brokk-mjolnir-*.tar.gz.sha256' \
-            --pattern 'brokk-mjolnir-*.zip' \
-            --pattern 'brokk-mjolnir-*.zip.sha256'
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu universal-apple-darwin; do
+            for suffix in tar.gz tar.gz.sha256; do
+              name="brokk-mjolnir-$RELEASE_TAG-$target.$suffix"
+              record="$(jq -er --arg name "$name" \
+                '[.[] | select(.name == $name)] | if length == 1 then .[0] | [.id, .size] | @tsv else error("missing or duplicate asset: " + $name) end' \
+                <<< "$assets")"
+              read -r asset_id expected_size <<< "$record"
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/BrokkAi/mjolnir/releases/assets/$asset_id" > "release-assets/$name"
+              actual_size="$(wc -c < "release-assets/$name")"
+              test "$actual_size" -eq "$expected_size"
+            done
+          done
 
       - name: Run npm packaging tests
         working-directory: npm

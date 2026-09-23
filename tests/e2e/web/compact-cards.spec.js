@@ -69,6 +69,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     turn_review: null,
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
+    subagent_parent_id: options.subagentParentId,
     capabilities,
   };
 }
@@ -822,8 +823,14 @@ test('sub-agent workspace hides children from the normal list and closes back to
       title: 'Parent session',
       subagentSessionIds: ['child-one', 'child-two'],
     }),
-    session('child-one', 'project-parent', 'Parent project', { title: 'Grok helper' }),
-    session('child-two', 'project-parent', 'Parent project', { title: 'Muse helper' }),
+    session('child-one', 'project-parent', 'Parent project', {
+      title: 'Grok helper',
+      subagentParentId: 'parent',
+    }),
+    session('child-two', 'project-parent', 'Parent project', {
+      title: 'Muse helper',
+      subagentParentId: 'parent',
+    }),
   ]);
 
   await expect(card(page, 'parent')).toBeVisible();
@@ -979,3 +986,52 @@ for (const queued of [0, 1]) {
     expect(state.actions[0]).toEqual({ action: 'interrupt-turn', session_id: 'old-worker' });
   });
 }
+
+test('earlier messages page backwards, retry errors, and preserve the live draft', async ({ page }) => {
+  await mount(page, [session('history', 'alpha', 'Alpha', { capabilities: { prompt: true } })]);
+  const queries = [];
+  await page.route('**/api/v1/sessions/history/history*', async route => {
+    const query = new URL(route.request().url()).search;
+    queries.push(query);
+    if (queries.length === 2) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'History temporarily unavailable' }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(queries.length === 1 ? {
+      items: [{ role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
+    } : { items: [{ role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
+  });
+  await card(page, 'history').click();
+  await page.locator('#prompt-text').fill('Keep my draft');
+  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
+  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
+  await expect(reader).toContainText('Recent stored request');
+  await reader.getByRole('button', { name: 'Load earlier page' }).click();
+  await expect(reader.getByRole('status')).toContainText('History temporarily unavailable');
+  await reader.getByRole('button', { name: 'Retry' }).click();
+  await expect(reader).toContainText('First stored answer');
+  await expect(reader).not.toContainText('Recent stored request');
+  await expect(reader).toContainText('Beginning of conversation');
+  expect(queries).toEqual(['', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
+  await reader.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(reader).toHaveCount(0);
+  await expect(page.locator('#prompt-text')).toHaveText('Keep my draft');
+});
+
+test('earlier messages can be dismissed while loading', async ({ page }) => {
+  await mount(page, [session('history', 'alpha', 'Alpha')]);
+  let release;
+  let entered = false;
+  await page.route('**/api/v1/sessions/history/history*', async route => {
+    entered = true;
+    await new Promise(resolve => { release = resolve; });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [{role: 'agent', text: 'Late answer'}], before: null, frontier: 1 }) });
+  });
+  await card(page, 'history').click();
+  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
+  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
+  await expect(reader.getByRole('status')).toContainText('Loading');
+  await expect.poll(() => entered).toBe(true);
+  await reader.press('Escape');
+  await expect(reader).toHaveCount(0);
+  release();
+  await renderAfterFrame(page);
+  await expect(page.getByText('Late answer', { exact: true })).toHaveCount(0);
+});

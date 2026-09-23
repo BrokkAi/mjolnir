@@ -123,6 +123,7 @@ jobs:
         - os: windows-latest
           target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
 
@@ -140,7 +141,9 @@ jobs:
         lane: cli-tests-${{ matrix.target }}
         build-paths: |
           target/debug
+          target/release
           target/${{ matrix.target }}/debug
+          target/${{ matrix.target }}/release
 
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
@@ -156,34 +159,22 @@ jobs:
       if: runner.os == 'Windows'
       run: cargo test --no-run
 
-  cli-release:
-    name: CLI release build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - os: ubuntu-latest
-          target: x86_64-unknown-linux-gnu
-        - os: macos-latest
-          target: aarch64-apple-darwin
-        - os: windows-latest
-          target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    env:
-      CARGO_BUILD_TARGET: ${{ matrix.target }}
-    steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@1.96.0
-      with:
-        targets: ${{ matrix.target }}
-    - uses: ./.github/actions/cache-rust
-      with:
-        lane: cli-release-${{ matrix.target }}
-        build-paths: |
-          target/release
-          target/${{ matrix.target }}/release
-    - name: Build Mjolnir
+    # Keep all macOS validation on one runner per CI run.
+    - name: Build Mjolnir release on macOS
+      if: runner.os == 'macOS'
       run: cargo build --release
+
+    - name: Run desktop Clippy lints on macOS
+      if: runner.os == 'macOS'
+      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
+
+    - name: Build desktop application on macOS
+      if: runner.os == 'macOS'
+      run: cargo build --release --locked -p brokk-mj-desktop
+
+    - name: Run desktop tests on macOS
+      if: runner.os == 'macOS'
+      run: cargo test --locked -p brokk-mj-desktop
 
   portable-worker:
     name: Portable worker (x86_64-unknown-linux-musl)
@@ -213,8 +204,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - os: macos-latest
-          target: aarch64-apple-darwin
         - os: windows-latest
           target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}

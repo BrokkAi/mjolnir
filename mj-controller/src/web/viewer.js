@@ -634,6 +634,12 @@ function orderedSessions(live) {
   );
 }
 
+/// Whether a session is a sub-agent rather than one the person started. Every
+/// list of top-level sessions filters with this, so the lists cannot disagree.
+function isSubagentSession(session) {
+  return Boolean(session?.subagent_parent_id);
+}
+
 function liveSessions() {
   if (route.subagentParentId) {
     const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
@@ -641,13 +647,10 @@ function liveSessions() {
     return (snapshot.sessions || []).filter(session => children.has(session.id));
   }
   const workspaceId = selectedWorkspaceId();
-  const childIds = new Set(
-    (snapshot.sessions || []).flatMap(session => session.subagent_session_ids || []),
-  );
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
-      !childIds.has(session.id) &&
+      !isSubagentSession(session) &&
       isDashboardSession(session),
   );
 }
@@ -791,6 +794,70 @@ async function openNativeHistory(owner, agent) {
   }
   earlier.onclick = load;
   await load();
+}
+
+document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
+
+function openConversationHistory(sessionId) {
+  if (!sessionId) return;
+  const generation = conversationGeneration;
+  const modal = el('dialog', 'native-agent-history');
+  modal.setAttribute('aria-label', 'Earlier messages');
+  const close = button('Close');
+  const earlier = button('Load earlier page');
+  const status = el('p'); status.setAttribute('role', 'status');
+  const content = el('div');
+  modal.append(el('h2', '', 'Earlier messages'), close, earlier, status, content);
+  document.body.append(modal);
+  const controller = new AbortController();
+  let before = null;
+  let loading = false;
+  const navigationChanged = () => modal.close();
+  close.onclick = () => modal.close();
+  modal.addEventListener('close', () => {
+    controller.abort();
+    window.removeEventListener('hashchange', navigationChanged);
+    modal.remove();
+  }, { once: true });
+  window.addEventListener('hashchange', navigationChanged);
+  modal.showModal();
+  async function load() {
+    if (loading) return;
+    loading = true; earlier.disabled = true; status.textContent = 'Loading earlier messages…';
+    try {
+      const query = new URLSearchParams();
+      if (before) {
+        query.set('before_position', String(before.position));
+        query.set('before_id', before.stable_id);
+      }
+      const suffix = query.size ? `?${query}` : '';
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/history${suffix}`, {
+        signal: controller.signal,
+      });
+      if (!modal.open || currentSession !== sessionId || conversationGeneration !== generation) {
+        if (modal.open) modal.close();
+        return;
+      }
+      content.replaceChildren(...page.items.map(item => {
+        const row = el('section'); row.append(el('h3', '', item.role), renderMarkdown(item.text)); return row;
+      }));
+      before = page.before;
+      earlier.textContent = 'Load earlier page';
+      earlier.hidden = !before;
+      status.textContent = before ? 'Showing an earlier page.' : 'Beginning of conversation.';
+      if (!page.items.length) status.textContent = 'No recorded messages.';
+      modal.scrollTop = 0;
+    } catch (error) {
+      if (modal.open && !controller.signal.aborted) {
+        status.textContent = `Could not load earlier messages: ${error.message}`;
+        earlier.textContent = 'Retry';
+      }
+    } finally {
+      loading = false; earlier.disabled = false;
+    }
+  }
+  earlier.onclick = load;
+  void load();
 }
 
 /// One session row.
@@ -1910,7 +1977,10 @@ function resumeActivityMs(session) {
 
 function resumeSessions(workspaceId = selectedWorkspaceId()) {
   return (snapshot?.sessions || [])
-    .filter(session => session.workspace_id === workspaceId && isResumeSession(session))
+    .filter(session =>
+      session.workspace_id === workspaceId
+      && !isSubagentSession(session)
+      && isResumeSession(session))
     .sort((left, right) =>
       resumeActivityMs(right) - resumeActivityMs(left) || left.id.localeCompare(right.id));
 }

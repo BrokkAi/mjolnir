@@ -87,6 +87,9 @@ impl ChatState {
     /// text selection or the host surface. Captured presses remain owned even
     /// after the pointer leaves the control's hitbox.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        if self.earlier.is_some() {
+            return true;
+        }
         // An elicitation is the visible modal. Check its captured controls
         // before retained task/config/review geometry so those hidden states
         // cannot steal transcript selection or pointer events above it.
@@ -144,7 +147,8 @@ impl ChatState {
     /// Whether a dialog of this conversation's own currently stands in for the
     /// ordinary composer.
     pub(super) fn composer_replaced(&self) -> bool {
-        self.elicitation.is_some()
+        self.earlier.is_some()
+            || self.elicitation.is_some()
             || self.config_picker.is_some()
             || self.task_dialog_open
             || matches!(self.second_opinion, Some(SecondOpinion::Setup { .. }))
@@ -200,6 +204,14 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
+        if let Some(reader) = self.earlier.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => reader.scroll = reader.scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => reader.scroll = reader.scroll.saturating_add(3),
+                _ => {}
+            }
+            return ChatAction::None;
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.notices.dismiss(std::time::Instant::now());
         }

@@ -2429,6 +2429,76 @@ fn the_dialog_footer_names_its_own_keys() {
 /// A query's hits are counted on every tab, not only the one on screen, and
 /// an empty tab says where the other hits are rather than switching by itself.
 #[test]
+fn sub_agents_are_never_offered_for_resume() {
+    let owner = stopped_session();
+    let managed_child = SessionRecord {
+        id: "child-1".into(),
+        acp_session_title: Some("Managed lane".into()),
+        native_session_id: Some("native-child".into()),
+        ..stopped_session()
+    };
+    let mut state = state_with(vec![owner.clone(), managed_child.clone()]);
+    state.subagents.insert(
+        managed_child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: managed_child.id.clone(),
+            parent_session_id: owner.id.clone(),
+            task_name: "lane".into(),
+            profile_id: managed_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: std::path::PathBuf::new(),
+            initial_prompt: "work in the lane".into(),
+            request_key: "request-1".into(),
+            created_at: managed_child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    // A harness-owned child the owner spawned, shown the way the TUI shows it:
+    // as a stopped copy of the owner's record.
+    let agent = mj_core::native_agent::NativeAgent {
+        owner_session_id: owner.id.clone(),
+        session_id: "a0c7080aee7ead7c5".into(),
+        parent_session_id: None,
+        name: "Regression: bridge derivation conflict".into(),
+        task: "Fix the regression".into(),
+        capabilities: Default::default(),
+        state: mj_core::native_agent::NativeAgentState::Completed,
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
+    };
+    dashboard.set_native_agents(vec![mj_core::native_agent::NativeAgentView {
+        generation_ordinal: 1,
+        projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
+        agent,
+    }]);
+    dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
+
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+
+    // A search hit on a child counts on no tab.
+    replace_search(&mut dashboard, "the phrase");
+    apply_ready_rows(
+        &mut dashboard,
+        vec![
+            WikiRow {
+                hel_session_id: Some(managed_child.id.clone()),
+                ..wiki_row("child-hit", false)
+            },
+            WikiRow {
+                hel_session_id: Some(owner.id.clone()),
+                ..wiki_row("owner-hit", false)
+            },
+        ],
+    );
+    assert_eq!(dashboard.resume_hit_counts, [0, 1, 0, 0]);
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+}
+
+#[test]
 fn search_counts_hits_on_every_tab() {
     let mut dashboard = DashboardState::new(
         config(),

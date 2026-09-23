@@ -6,6 +6,36 @@ pub(super) struct NativeHistoryQuery {
     before_id: Option<String>,
 }
 
+pub(super) async fn transcript_history(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<NativeHistoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let before = match (query.before_position, query.before_id) {
+        (Some(position), Some(stable_id)) => Some(mj_core::storage::TranscriptCursor {
+            position,
+            stable_id,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(ApiFailure::bad_request(
+                "both before_position and before_id are required",
+            ));
+        }
+    };
+    let page = backend(&state)?
+        .transcript_history(session_id, before)
+        .await?;
+    let response = tokio::task::spawn_blocking(move || {
+        let entries = mj_client::transcript::history_entries(&page);
+        serde_json::json!({"items": entries, "before": page.before, "frontier": page.frontier})
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("history rendering task failed: {error}"))?;
+    Ok(Json(response))
+}
+
 pub(super) async fn native_agent_history(
     State(state): State<ServerState>,
     Path((owner, child)): Path<(String, String)>,

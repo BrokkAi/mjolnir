@@ -171,7 +171,7 @@ def stop_and_resume(lab, tmux, evidence, session_id, dialogs_only=False):
     tmux.wait_for("Suspend session")
     click(tmux, "  Run  ")
     absent(tmux, " Commands ")
-    lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "stopped" for row in value["sessions"]), "session stopped with recovery copy")
+    lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "suspended" for row in value["sessions"]), "session stopped with recovery copy")
     record(tmux, evidence, "stop-command-dismissed", "Close palette then reopen and Run Stop", "Close retains the session; Run stops it and closes the palette")
     from tui_review_discovery import exercise_offline_save
     if not dialogs_only:

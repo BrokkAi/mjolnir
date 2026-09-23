@@ -808,6 +808,47 @@ fn configuration_id_rename_rewrites_durable_session_references() {
     assert!(!config_rename_journal_path().exists());
 }
 
+const BUILT_IN_TARGET_RENAME_RECOVERY_CHILD: &str = "MJ_TEST_BUILT_IN_TARGET_RENAME_RECOVERY_CHILD";
+
+#[test]
+fn rename_recovery_finishes_after_a_built_in_target_was_renamed_away() {
+    if std::env::var_os(BUILT_IN_TARGET_RENAME_RECOVERY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            BUILT_IN_TARGET_RENAME_RECOVERY_CHILD,
+            "rename_recovery_finishes_after_a_built_in_target_was_renamed_away",
+            directory.path(),
+        );
+        return;
+    }
+    // Alone in this child process, so it installs the one writer.
+    let _writer = crate::database::install_isolated_test_writer();
+
+    // The crash landed after the config replacement: the file already holds
+    // the new id and no longer holds `localhost`, which the standard local
+    // targets would otherwise supply again.
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("local-renamed".into(), TargetTemplate::LocalBare);
+    config.save().unwrap();
+    write_config_rename_journal(&ConfigRenameJournal {
+        kind: ConfigRenameKind::Target,
+        old_id: "localhost".into(),
+        new_id: "local-renamed".into(),
+    })
+    .unwrap();
+
+    assert!(Controller::recover_config_id_rename().unwrap());
+
+    let loaded = Config::load().unwrap();
+    assert_eq!(
+        loaded.targets.get("local-renamed"),
+        Some(&TargetTemplate::LocalBare)
+    );
+    assert!(!config_rename_journal_path().exists());
+}
+
 #[test]
 fn a_session_the_database_rejects_is_never_left_in_memory() {
     if std::env::var_os(UNPERSISTABLE_SESSION_CHILD).is_none() {

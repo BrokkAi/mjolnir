@@ -71,6 +71,46 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
 }
 
 const npmWorkflow = readFileSync(join(root, '.github/workflows/publish-npm.yml'), 'utf8');
+test('npm downloads assets when the release lookup omits its embedded asset list', t => {
+  const dir = fixture(t);
+  const work = join(dir, 'work');
+  mkdirSync(work);
+  mkdirSync(join(dir, 'bin'));
+  const assets = [];
+  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin']) {
+    for (const suffix of ['tar.gz', 'tar.gz.sha256']) {
+      const name = `brokk-mjolnir-v1.2.3-${target}.${suffix}`;
+      const id = assets.length + 1;
+      const data = suffix === 'tar.gz' ? Buffer.alloc(70 * 1024, id) : Buffer.from(`${id}  ${name}\n`);
+      writeFileSync(join(dir, String(id)), data);
+      assets.push({ id, name, size: data.length });
+    }
+  }
+  writeFileSync(join(dir, 'assets.json'), JSON.stringify(assets));
+  writeFileSync(join(dir, 'bin/gh'), `#!/bin/bash
+set -euo pipefail
+case "$*" in
+  *'/tags/'*) echo 123 ;;
+  *'assets?per_page=100'*) cat "$FIXTURE/assets.json" ;;
+  *'/releases/assets/'*) asset="\${@: -1}"; cat "$FIXTURE/\${asset##*/}" ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o755 });
+  const run = () => spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(npmWorkflow, 'Download GitHub release assets and checksums')], {
+    cwd: work, encoding: 'utf8',
+    env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FIXTURE: dir, RELEASE_TAG: 'v1.2.3' },
+  });
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(join(work, 'release-assets')).sort(), assets.map(asset => asset.name).sort());
+  for (const asset of assets) {
+    assert.deepEqual(readFileSync(join(work, 'release-assets', asset.name)), readFileSync(join(dir, String(asset.id))));
+  }
+  rmSync(join(work, 'release-assets'), { recursive: true });
+  writeFileSync(join(dir, 'assets.json'), JSON.stringify(assets.slice(1)));
+  const missing = run();
+  assert.notEqual(missing.status, 0);
+});
 for (const fail of ['', 'linux-x64-gnu']) {
   test(`npm uploads run concurrently and ${fail ? 'a failure blocks the wrapper' : 'all platforms precede the wrapper'}`, t => {
     const dir = fixture(t);
