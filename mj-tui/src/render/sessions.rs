@@ -1377,11 +1377,22 @@ pub(crate) fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'sta
     })
 }
 
-pub(crate) fn capacity_target_labels(target_ids: &[String], config: &Config) -> Line<'static> {
+pub(crate) fn capacity_target_labels(
+    target_ids: &[String],
+    dashboard: &DashboardState,
+) -> Line<'static> {
+    let config = &dashboard.config;
     let mut spans = Vec::new();
     for (index, target_id) in target_ids.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
+        }
+        if dashboard.target_known_unavailable(target_id) {
+            spans.push(Span::styled(
+                format!("{target_id} (unavailable)"),
+                Style::default().fg(theme::palette().muted),
+            ));
+            continue;
         }
         spans.push(Span::raw(target_id.clone()));
         if let Some(badge) = config

@@ -3006,6 +3006,51 @@ fn session_name_prefers_override_then_acp_title_then_hel_uuid() {
     assert_ne!(session_name(&session), session.title);
 }
 
+/// The standard local container targets exist whether or not an engine is
+/// installed. The Targets pane checks each one in the background, the same
+/// check the new-session wizard uses, and marks one whose engine is missing
+/// rather than listing it as if it could run.
+#[test]
+fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    let Some(crate::DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_target_availability_check()
+    else {
+        panic!("the Targets pane must check its local container targets");
+    };
+    assert_eq!(target_ids, vec!["podman".to_owned()]);
+    assert!(
+        dashboard.take_target_availability_check().is_none(),
+        "a check in flight is not repeated"
+    );
+    let render_text = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw dashboard");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    assert!(!render_text(&mut dashboard).contains("podman (unavailable)"));
+
+    dashboard.apply_target_readiness(
+        generation,
+        "podman".into(),
+        Err("Podman preflight failed: podman: not found".into()),
+    );
+
+    let rendered = render_text(&mut dashboard);
+    assert!(rendered.contains("podman (unavailable)"), "{rendered}");
+}
+
 /// A capacity sample the poller keeps refreshing carries no clock column
 /// and no staleness marker: the number on screen is the current one.
 #[test]

@@ -180,37 +180,15 @@ impl DashboardState {
         if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
         {
-            let now = Instant::now();
-            let target_ids: Vec<_> =
-                self.config
-                    .targets
-                    .iter()
-                    .filter(|(id, template)| {
-                        !matches!(template, TargetTemplate::LocalBare)
-                            && self.target_readiness.get(*id).is_none_or(|check| {
-                                &check.template != *template || check.is_stale(now)
-                            })
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-            if !target_ids.is_empty() {
-                self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
-                let generation = self.target_readiness_generation;
-                for id in &target_ids {
-                    self.target_readiness.insert(
-                        id.clone(),
-                        TargetReadiness {
-                            template: self.config.targets[id].clone(),
-                            generation,
-                            result: None,
-                            recorded_at: now,
-                        },
-                    );
-                }
-                return Some(DashboardAction::CheckTargetReadiness {
-                    generation,
-                    target_ids,
-                });
+            let target_ids: Vec<_> = self
+                .config
+                .targets
+                .iter()
+                .filter(|(_, template)| !matches!(template, TargetTemplate::LocalBare))
+                .map(|(id, _)| id.clone())
+                .collect();
+            if let Some(check) = self.begin_target_readiness_checks(target_ids) {
+                return Some(check);
             }
         }
         let Mode::New(wizard) = &self.mode else {

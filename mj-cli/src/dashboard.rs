@@ -807,6 +807,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(refresh) = context.dashboard.take_mount_history_refresh() {
                 actions::apply_dashboard_action(&mut context, refresh).await?;
             }
+            if let Some(check) = context.dashboard.take_target_availability_check() {
+                actions::apply_dashboard_action(&mut context, check).await?;
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
