@@ -6201,6 +6201,84 @@ async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Claude).await;
 }
 
+/// I1-13: a resumed Claude session reports its model as a raw id that its own
+/// catalogue does not list. Replaying that id after `/clear` must not fail the
+/// clear or stop the runtime; the new conversation keeps the bridge's model.
+#[tokio::test]
+async fn clear_skips_a_reported_model_the_bridge_does_not_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("clear.py");
+    std::fs::write(&script, r#"
+import json, os, sys
+root = sys.argv[1]
+count_path = os.path.join(root, 'generation')
+generation = int(open(count_path).read()) + 1 if os.path.exists(count_path) else 1
+with open(count_path, 'w') as f: f.write(str(generation))
+current = 'claude-fable-5-1[1m]' if generation == 1 else 'default'
+options = [{'id':'model','name':'Model','category':'model','type':'select','currentValue':current,'options':[{'value':'default','name':'Default'},{'value':'opus[1m]','name':'Opus'}]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    ident = request.get('id')
+    with open(os.path.join(root, 'requests.jsonl'), 'a') as f:
+        f.write(json.dumps(request) + '\n')
+    if ident is None: continue
+    if method == 'initialize':
+        result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}}
+    elif method in ('session/new', 'session/load', 'session/resume'):
+        result = {'sessionId': 'original' if generation == 1 or method != 'session/new' else 'replacement',
+                  'configOptions':options,
+                  'modes': {'currentModeId':'auto','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'},{'id':'auto','name':'Auto'}]}}
+    elif method == 'session/set_config_option':
+        value = request['params']['value']
+        if value not in ('default', 'opus[1m]'):
+            print(json.dumps({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'unknown model'}}), flush=True)
+            continue
+        options[0]['currentValue'] = value
+        result = {'configOptions':options}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#).unwrap();
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.command = "python3".into();
+    spec.args = vec![
+        script.to_string_lossy().into_owned(),
+        temp.path().to_string_lossy().into_owned(),
+    ];
+    spec.cwd = temp.path().to_path_buf();
+    spec.harness = HarnessKind::Claude;
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    request_tx
+        .send(CommandRequest::ClearContext {
+            request_id: "clear-request".into(),
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    drop(request_tx);
+    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    tokio::time::timeout(Duration::from_secs(20), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drain.await.unwrap();
+}
+
 #[tokio::test]
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;

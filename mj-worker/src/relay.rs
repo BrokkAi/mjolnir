@@ -581,10 +581,7 @@ impl DurableRelay {
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
     fn clear_context_started_at_ms(&self) -> Option<i64> {
-        self.snapshot
-            .dispatches
-            .values()
-            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
+        self.clear_context_in_progress()
             .then_some(self.snapshot.activity_turn_started_at_ms)
             .flatten()
     }

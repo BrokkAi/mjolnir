@@ -376,7 +376,7 @@ pub(super) async fn serve_session(
         .or(spec.context_restore.as_ref())
     {
         for (key, value) in &reset.selectors {
-            apply_session_selector(
+            let applied = apply_session_selector(
                 connection,
                 &session_id,
                 &mut config_options,
@@ -385,8 +385,26 @@ pub(super) async fn serve_session(
                 key,
                 value,
             )
-            .await
-            .with_context(|| format!("restore {key} after clear"))?;
+            .await;
+            let Err(error) = applied else { continue };
+            // These values are what the previous bridge reported, not what
+            // the user chose (the accepted configuration above carries that).
+            // A resumed Claude bridge reports its model as a raw id it does
+            // not list, and it refuses that id when it is sent back. Such a
+            // value cannot be restored, so the new conversation keeps the
+            // bridge's own value. The rollback after a failed clear never
+            // fails on a selector: it must leave a usable session.
+            if spec.clear_context_request.is_some()
+                && selector_value_is_offered(&config_options, key, value)
+            {
+                return Err(error.context(format!("restore {key} after clear")));
+            }
+            tracing::warn!(
+                selector = key.as_str(),
+                value = value.as_str(),
+                error = format!("{error:#}"),
+                "kept the bridge's value after clear because the reported value could not be restored"
+            );
         }
         if let Some(mode) = &reset.mode {
             enforce_execution_mode(

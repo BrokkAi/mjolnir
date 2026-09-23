@@ -178,12 +178,7 @@ impl DurableRelay {
                 ordinal: accepted_ordinal,
             }));
         }
-        if self
-            .snapshot
-            .dispatches
-            .values()
-            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
-        {
+        if self.clear_context_in_progress() {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
                 "Context is being cleared; wait for the new conversation",
@@ -1490,6 +1485,21 @@ impl DurableRelay {
                     | RelayDispatchState::Pending
                     | RelayDispatchState::InFlight
             )
+        })
+    }
+
+    /// Whether a `/clear` is still waiting or running. A rejected or
+    /// interrupted clear leaves the previous conversation in place, so it
+    /// must not hold later work back.
+    pub(crate) fn clear_context_in_progress(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            matches!(dispatch.command, RelayCommand::ClearContext)
+                && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued
+                        | RelayDispatchState::Pending
+                        | RelayDispatchState::InFlight
+                )
         })
     }
 

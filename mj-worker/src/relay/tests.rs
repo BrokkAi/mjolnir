@@ -4638,6 +4638,31 @@ fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
     assert!(accepted.is_ok(), "{accepted:?}");
 }
 
+/// I1-13: a rejected `/clear` stays in the ledger until its events are
+/// acknowledged. The session must accept prompts again at once instead of
+/// saying the context is still being cleared.
+#[test]
+fn a_rejected_clear_does_not_block_later_prompts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    assert!(
+        relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok()
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected("clear-request", "restore model after clear failed")
+        .unwrap();
+    assert!(relay.snapshot.dispatches.contains_key("clear-request"));
+    assert_eq!(relay.clear_context_started_at_ms(), None);
+    let accepted = relay
+        .submit_command("after-clear", prompt("still usable"))
+        .unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
 /// I1-11: the refusal still holds while a turn is running.
 #[test]
 fn clear_is_refused_while_a_turn_is_running() {
