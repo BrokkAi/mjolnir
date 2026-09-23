@@ -16,6 +16,7 @@ use mj_controller::server::api::{
 };
 
 use mj_client::daemon::WikiSessionStatus;
+use mj_controller::server::ViewerLifecycleCategory;
 use mj_controller::sessionwiki::WikiContinuation;
 
 use crate::api_client::{ApiClient, ExportResult};
@@ -565,8 +566,18 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     }
     match response.outcome {
         WaitOutcome::Finished | WaitOutcome::InputRequired => Ok(()),
+        _ if suspended_cleanly(response) => Ok(()),
         outcome => bail!("the turn ended as {}", outcome_name(outcome)),
     }
+}
+
+/// Whether a wait ended because the session was suspended as asked, rather
+/// than because a resume or a close failed. `mj suspend` tells the user to
+/// watch with `mj wait`, so this ending is the success it was waiting for.
+fn suspended_cleanly(response: &WaitResponse) -> bool {
+    response.outcome == WaitOutcome::Stopped
+        && response.session.lifecycle == ViewerLifecycleCategory::Suspended
+        && response.session.error.is_none()
 }
 
 /// What `mj wait` prints, one line per entry.
@@ -575,6 +586,9 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
 /// used to print the bare word "error" and leave the reason in the transcript,
 /// where automation never saw it (#1020).
 fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
+    if suspended_cleanly(response) {
+        return vec!["session suspended".to_owned()];
+    }
     let mut lines = Vec::new();
     let mut summary = outcome_name(response.outcome).to_owned();
     if let Some(stop_reason) = &response.stop_reason {
@@ -827,7 +841,7 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
         )
     } else {
         println!("suspension accepted for {session}");
-        println!("watch it with `mj wait --session {session}`");
+        println!("`mj wait --session {session}` returns once the session is suspended");
         Ok(())
     }
 }
@@ -1288,6 +1302,30 @@ mod tests {
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
         );
+    }
+
+    /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with
+    /// "the turn ended as stopped" once the suspension had succeeded.
+    #[test]
+    fn a_wait_that_sees_a_finished_suspension_reports_success() {
+        let suspended = |error: serde_json::Value| {
+            let mut response = wait_response(
+                "stopped",
+                serde_json::json!({"message": "the session is stopped or stopping"}),
+            );
+            response.session.lifecycle = ViewerLifecycleCategory::Suspended;
+            response.session.error = serde_json::from_value(error).unwrap();
+            response
+        };
+
+        let clean = suspended(serde_json::Value::Null);
+        assert_eq!(wait_report_lines(&clean), ["session suspended"]);
+        assert!(report_wait(&clean, false).is_ok());
+
+        // A resume that failed also leaves the session stopped, with its
+        // reason recorded, and that is still a failure.
+        let failed_resume = suspended(serde_json::json!("the archive was missing"));
+        assert!(report_wait(&failed_resume, false).is_err());
     }
 
     #[test]
