@@ -16,10 +16,11 @@ Issue #1063 reports that restarting the controller daemon left the session worke
 - [x] (2026-09-23) Read #1063 and its history; it was open and unassigned. Self-assigned it and added `agent-in-progress` before investigation.
 - [x] (2026-09-23) Located existing instance stamping, clean worker re-execution, TUI Restart, CLI suspend/resume, and empty-native-session recovery tests.
 - [x] (2026-09-23) Prepared this narrowed plan without changing application code for #1063.
-- [ ] Receive user approval before implementation or the isolated proof of concept.
-- [ ] Prove the supported restart workflow reaches native reload and verify process attribution in an isolated instance.
-- [ ] Add the missing behavior coverage and document the verified procedure.
-- [ ] Run applicable checks, commit on the current branch, push to origin/master, and close #1063.
+- [x] (2026-09-23) Received user approval for the isolated proof and implementation.
+- [x] (2026-09-23) Proved native reload, empty-session replacement, queued prompt delivery, and process attribution in disposable real-worker fixtures. The existing selected-session suspend/resume route is covered at its controller boundary; no full TUI automation was added.
+- [x] (2026-09-23) Added Codex and Claude process-boundary regressions, including used-history refusal, strengthened the instance environment test, and documented the selected-session procedure and QA fixture.
+- [x] (2026-09-23) Validated the full dev-profile `cargo test` suite, final three-case worker recovery test, controller same-harness resume test, `cargo clippy --all-targets -- -D warnings`, formatting, `npm run check`, `npm run build`, and diff whitespace.
+- [ ] Commit on the current branch, push to origin/master, and close #1063.
 - [ ] Only then prepare #1073's plan for separate review.
 
 ## Surprises & Discoveries
@@ -33,6 +34,8 @@ Commit `6f9f65da` (2026-09-17, part of #1065) explicitly implemented the observa
 
 `mj-worker/tests/worker_environment.rs::checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec` already launches a real isolated worker through `BoundedProcessExecutor`, checks liveness, and stops/joins it before deleting files. Reuse that ownership and cleanup pattern. `tests/e2e/session_restart_chaos.sh` is an existing disposable-container harness; it is not permission to signal arbitrary host workers.
 
+The proof in `mj-worker/tests/empty_session_recovery.rs` uses a genuine `mj-worker` child and a scripted adapter. Both harness cases log `initialize`, `session/load`, `session/new`, then `session/prompt`; each test passes with one new session and one prompt, and the durable journal records the warning and completed queued command. The first prototype used `unconstrained` execution policy while its fake adapter advertised only guardian modes, so the worker correctly rejected `session/new` for lacking `agent-full-access`. Changing the fixture to `configured_approvals` made the adapter policy coherent. The real process environment test passed with a conflicting launcher `MJ_INSTANCE`, proving clean re-execution uses the configured value. The process fixture starts from a persisted relay rather than driving the full TUI; controller suspend/resume coverage and the public CLI route are checked separately.
+
 ## Decision Log
 
 
@@ -43,6 +46,8 @@ Decision (2026-09-23, proposed): retain the existing instance identity scheme an
 Decision (2026-09-23, proposed): use scripted ACP adapters, temporary repositories, and isolated config/data directories for deterministic empty-session recovery. A scripted adapter is a small test process speaking the same JSON protocol as the real harness, with controlled new/resume responses. No paid model request or live session is needed.
 
 Decision (2026-09-23, proposed): expect documentation and regression tests to be the main deliverables. If the proof finds a missing link in the existing implementation, fix that source within the selected-session recovery path. If a new public lifecycle command is actually needed, present that finding before expanding the public interface.
+
+Decision (2026-09-23): keep the process-level regression independent of a live provider and of the full controller/TUI lifecycle. The persistent relay records exactly the state handed to a resumed worker, and the existing controller test proves that same-harness resume carries native identity. This isolates the missing process boundary without duplicating the entire provisioning system. The user-facing procedure uses the already supported Restart action or CLI suspend/resume.
 
 ## Context and Orientation
 
@@ -94,6 +99,8 @@ Each proof and test gets fresh temporary storage. Teardown stops the owned proce
 ## Outcomes & Retrospective
 
 
-Planning is complete. The main finding is that instance stamping and supported session restart already exist, so the proposed scope is verification, targeted regression coverage, and documentation. Application changes and the local proof await approval. #1073 and #1083 remain untouched.
+The isolated real-worker proof passes for both supported harnesses, including refusal to replace used history, and the process attribution check passes after clean re-execution. The full Rust suite, final focused worker cases, controller resume case, clippy, and docs checks pass. Existing application paths need no production code change; the deliverables are regression coverage and the reproducible selected-session procedure. Publication remains. #1073 and #1083 remain untouched.
 
 Revision (2026-09-23): initial review plan, narrowed after finding the attribution fix in `6f9f65da` and the existing Restart/suspend-resume workflow.
+
+Revision (2026-09-23): recorded the approved proof, its adapter-policy correction, process-boundary results, and the intentionally separate controller lifecycle coverage.

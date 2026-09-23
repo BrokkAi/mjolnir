@@ -201,6 +201,18 @@ blocks while the resume runs and reports the reason if it fails. Afterwards
 operation is `POST /api/v1/sessions/{id}/resume` in the
 [HTTP API](/api-reference/#resume-a-suspended-session).
 
+To test native recovery for one selected session, use **Restart session** in
+the terminal command palette, or suspend and resume that session with the
+commands above. This stops its worker and starts a new one, which attempts to
+reload the recorded native session. Restarting only the Mjolnir daemon leaves
+detached workers running and does not exercise native reload. If Codex or
+Claude reports that a never-prompted native session is missing, Mjolnir warns
+and opens a new empty native session under the same Mjolnir session ID. A
+native session with recorded use is not replaced this way. For worker
+attribution during diagnosis, workers launched by current Mjolnir versions
+carry their owning `MJ_INSTANCE` in the process environment; workers launched
+before that marker was added acquire it after a supported session restart.
+
 ### Resume a local session into a container
 
 A session that runs the agent in a directory on this machine can resume on an
