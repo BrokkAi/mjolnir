@@ -2480,3 +2480,94 @@ fn classifier_notice_is_shown_without_warning_prefix() {
         matches!(&session.transcript[0].body, TranscriptBody::System { text } if text == message)
     );
 }
+
+#[test]
+fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_history() {
+    use agent_client_protocol::schema::v1::ToolCallStatus;
+    let mut full = MaterializedSession::empty("window-stream");
+    // Multiple settled turns, with enough text to exceed a pipe buffer too.
+    for turn in 0..12 {
+        let command_id = format!("prompt-{turn}");
+        apply_observation(
+            &mut full,
+            RelayObservation::CommandQueued {
+                command_id: command_id.clone(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("continue")],
+                },
+                created_at_ms: 0,
+            },
+        );
+        apply_observation(
+            &mut full,
+            RelayObservation::CommandStarted {
+                command_id,
+                started_at_ms: 0,
+            },
+        );
+        for _ in 0..100 {
+            apply_observation(
+                &mut full,
+                RelayObservation::Notice {
+                    message: "recorded context ".repeat(20),
+                },
+            );
+        }
+    }
+    apply_observation(
+        &mut full,
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCall(
+                ToolCall::new("current-tool", "read file").status(ToolCallStatus::InProgress),
+            )),
+        },
+    );
+    apply_observation(&mut full, untagged_agent_chunk("first "));
+    let mut live = full.clone();
+    let mut window = mj_core::state::ProjectionWindow::of(&live);
+    window.trim(&mut live, 1024);
+    assert!(window.omitted_items > 0);
+    assert!(live.transcript.len() < full.transcript.len());
+    for observation in [
+        untagged_agent_chunk("second"),
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "current-tool",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            ))),
+        },
+    ] {
+        let next = event(&full, observation);
+        apply(&mut full, next.clone());
+        apply(&mut live, next);
+        window.trim(&mut live, 1024);
+        for item in &live.transcript {
+            let durable = full
+                .transcript
+                .iter()
+                .find(|candidate| candidate.stable_id == item.stable_id)
+                .unwrap();
+            assert_eq!(item, durable);
+        }
+        assert_eq!(
+            live.transcript.len() + window.omitted_items,
+            full.transcript.len()
+        );
+    }
+    let TranscriptBody::Agent { chunks, .. } = &live.transcript.last().unwrap().body else {
+        panic!("agent stream")
+    };
+    assert_eq!(
+        crate::transcript::materialized_chunks_text(chunks),
+        "first second"
+    );
+    let tool = live
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == "tool:current-tool")
+        .unwrap();
+    let TranscriptBody::Tool { call, .. } = &tool.body else {
+        panic!("tool")
+    };
+    assert_eq!(call["status"], "completed");
+}

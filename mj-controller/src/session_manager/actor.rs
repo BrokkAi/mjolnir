@@ -1282,11 +1282,17 @@ pub(super) fn publish_view(
 /// and the transcript deserialization behind it are synchronous and grow with
 /// the conversation, so a long session must not stall a worker thread that
 /// other actors share.
-pub(super) async fn load_projection(session_id: &str) -> Result<MaterializedSession> {
+pub(super) async fn load_projection(
+    session_id: &str,
+) -> Result<(MaterializedSession, mj_core::state::ProjectionWindow)> {
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<MaterializedSession> {
-        let loaded = crate::database::load_materialized_session(&session_id)?;
-        Ok(loaded.unwrap_or_else(|| MaterializedSession::empty(session_id)))
+    tokio::task::spawn_blocking(move || {
+        let loaded = crate::database::load_materialized_actor_projection(&session_id)?;
+        Ok(loaded.unwrap_or_else(|| {
+            let materialized = MaterializedSession::empty(session_id);
+            let window = mj_core::state::ProjectionWindow::of(&materialized);
+            (materialized, window)
+        }))
     })
     .await
     .context("controller projection load task failed")?

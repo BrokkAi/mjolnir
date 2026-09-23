@@ -403,6 +403,20 @@ shape to change between Mjolnir versions.
 The transcript is read from the durable projection, so it answers the same way
 while the session runs and long after it was suspended.
 
+### Read earlier messages
+
+`GET /api/v1/sessions/{session_id}/history` returns up to 128 stored items in
+chronological order as `{ "items": [{ "role": "agent", "text": "..." }],
+"before": { "position": 123, "stable_id": "agent:123" }, "frontier": 456 }`.
+The first request returns the newest page. For the preceding page, pass both
+`before_position` and `before_id` from `before`. A null `before` means the
+beginning of the conversation. The cursor is exclusive and uses the original
+message position, so new messages and streaming revisions do not shift pages.
+
+The browser's **Earlier messages** reader and the terminal's **Ctrl+PgUp**
+reader use this durable history. Live views retain recent complete turns;
+checkpoints still contain the complete conversation.
+
 ### Suspend, destroy, or interrupt a turn
 
 ```text

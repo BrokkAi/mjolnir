@@ -313,7 +313,19 @@ impl Controller {
             .checkpoint_ready
             .clone()
             .context("relay reported a checkpoint barrier without its ready cursor")?;
-        let materialized = barrier.materialized;
+        // The live view is windowed. An archive must contain the complete
+        // durable conversation at the verified checkpoint cut.
+        let materialized = if barrier.window.omitted_items > 0 {
+            let session_id = barrier.materialized.session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::database::load_materialized_session(&session_id)?
+                    .context("checkpoint durable projection disappeared")
+            })
+            .await
+            .context("checkpoint history load task failed")??
+        } else {
+            barrier.materialized
+        };
         let expected_ordinal = materialized.applied_event_ordinal;
         let expected_digest = materialized.applied_event_digest.clone();
         ensure!(

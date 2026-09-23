@@ -3,6 +3,7 @@ use super::*;
 pub struct StandaloneSession {
     pub(super) client: RelayClient,
     pub(super) materialized: MaterializedSession,
+    pub(super) window: mj_core::state::ProjectionWindow,
     pub(super) operational: RelayOperationalState,
     pub(super) latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub(super) project_memory: Option<ProjectMemorySyncTarget>,
@@ -23,10 +24,11 @@ impl StandaloneSession {
         // whole synchronous read on every attempt against a worker that is down.
         let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
         let operational = client.status().await?;
-        let materialized = load_projection(&target.session_id).await?;
+        let (materialized, window) = load_projection(&target.session_id).await?;
         let mut connection = Self {
             client,
             materialized,
+            window,
             operational,
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
@@ -81,11 +83,12 @@ impl StandaloneSession {
             match self.catch_up_fixed_frontier().await {
                 Ok(()) => break,
                 Err(error) if error.downcast_ref::<ProjectionAdvancedError>().is_some() => {
-                    let durable = load_projection(&self.materialized.session_id).await?;
+                    let (durable, window) = load_projection(&self.materialized.session_id).await?;
                     if durable.applied_event_ordinal <= after_ordinal {
                         return Err(error);
                     }
                     self.materialized = durable;
+                    self.window = window;
                     continue;
                 }
                 Err(error) if relay_desynchronized(&error) => {
@@ -233,6 +236,7 @@ impl StandaloneSession {
                 .await
                 .context("relay cannot rebuild the projection from its genesis")?;
             save_materialized_session(&replacement)?;
+            self.window = mj_core::state::ProjectionWindow::of(&replacement);
             self.materialized = replacement;
             return Ok(());
         };
@@ -275,13 +279,18 @@ impl StandaloneSession {
         let replacement =
             materialized_session_from_canonical(&self.materialized.session_id, &canonical)?;
         save_materialized_session(&replacement)?;
+        self.window = mj_core::state::ProjectionWindow::of(&replacement);
         self.materialized = replacement;
+        self.window.trim(
+            &mut self.materialized,
+            crate::database::PROJECTION_TAIL_ITEMS,
+        );
         Ok(())
     }
 
     pub fn snapshot(&self) -> ManagedSessionSnapshot {
         ManagedSessionSnapshot {
-            window: mj_core::state::ProjectionWindow::of(&self.materialized),
+            window: self.window.clone(),
             materialized: self.materialized.clone(),
             operational: self.operational.clone(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
@@ -385,14 +394,23 @@ impl StandaloneSession {
             let session_id = self.materialized.session_id.clone();
             let events = events.to_vec();
             let projection = self.materialized.clone();
+            let mut window = self.window.clone();
             // Projection is CPU work and its durable page uses synchronous
             // SQLite. Keep both off the async actor runtime so independent
             // sessions stay responsive during each bounded catch-up chunk.
-            let (projection, credential_sync_signal) = tokio::task::spawn_blocking(
-                move || -> Result<(MaterializedSession, Option<CredentialSyncSignal>)> {
+            let (projection, window, credential_sync_signal) = tokio::task::spawn_blocking(
+                move || -> Result<(MaterializedSession, mj_core::state::ProjectionWindow, Option<CredentialSyncSignal>)> {
                     // The in-memory projection advances on a working copy and
                     // is published only once its page is durable.
                     let mut projection = projection;
+                    if window.omitted_items > 0 {
+                        let mut historical = crate::database::load_projection_references(&projection, &events)?;
+                        window.omitted_items = window.omitted_items.checked_sub(historical.len())
+                            .context("projection reference count exceeds omitted history")?;
+                        historical.append(&mut projection.transcript);
+                        historical.sort_by(|a,b| (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id)));
+                        projection.transcript = historical;
+                    }
                     let mut projection_index = ProjectionIndex::new(&projection);
                     let mut credential_sync_signal = None;
                     let mut prepared = Vec::with_capacity(events.len());
@@ -432,13 +450,15 @@ impl StandaloneSession {
                                 }
                             }
                         }
-                        Ok((projection, credential_sync_signal))
+                        window.trim(&mut projection, crate::database::PROJECTION_TAIL_ITEMS);
+                        Ok((projection, window, credential_sync_signal))
                     })
                 },
             )
             .await
             .context("relay projection page task failed")??;
             self.materialized = projection;
+            self.window = window;
             if let Some(signal) = credential_sync_signal {
                 self.latest_credential_sync_signal = Some(signal);
             }

@@ -206,6 +206,12 @@ pub struct ReviewState {
 }
 
 pub trait SessionHandleBackend: Send + Sync {
+    fn transcript_history(
+        &self,
+        _before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> BoxFuture<'_, Result<mj_core::storage::TranscriptHistoryPage>> {
+        Box::pin(async { anyhow::bail!("earlier conversation history is unavailable") })
+    }
     fn search_prompts(
         &self,
         bundle_id: String,
@@ -253,6 +259,13 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    pub async fn transcript_history(
+        &self,
+        before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> Result<mj_core::storage::TranscriptHistoryPage> {
+        self.backend.transcript_history(before).await
+    }
+
     pub async fn search_prompts(
         &self,
         bundle_id: String,

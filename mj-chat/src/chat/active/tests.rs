@@ -2704,3 +2704,68 @@ fn a_failed_history_conversion_is_reported_instead_of_dropped() {
         Some("Earlier messages failed to load: worker panicked")
     );
 }
+
+#[test]
+fn earlier_history_ignores_closed_readers_and_allows_retry_without_losing_the_draft() {
+    let mut chat = ChatState::new(
+        &mj_core::relay::WorkerSnapshot::summary("history".into(), WorkerPhase::Idle, 0),
+        &[],
+    );
+    chat.input = "unfinished draft".into();
+    chat.open_earlier_messages();
+    let retired = chat.earlier.as_ref().unwrap().generation;
+    chat.earlier_key(KeyCode::Esc);
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: retired,
+            result: Ok((None, vec![Line::raw("obsolete")])),
+        },
+    );
+    assert!(chat.earlier.is_none());
+    chat.open_earlier_messages();
+    let current = chat.earlier.as_ref().unwrap().generation;
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: retired,
+            result: Ok((None, vec![Line::raw("obsolete")])),
+        },
+    );
+    assert!(chat.earlier.as_ref().unwrap().lines.is_empty());
+    chat.earlier.as_mut().unwrap().loading = true;
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: current,
+            result: Err("database unavailable".into()),
+        },
+    );
+    assert!(!chat.earlier.as_ref().unwrap().loading);
+    assert!(
+        chat.earlier
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("database unavailable")
+    );
+    chat.earlier_key(KeyCode::Enter);
+    assert!(chat.earlier.as_ref().unwrap().requested);
+    chat.handle_terminal_paste("accidental paste");
+    assert_eq!(chat.input, "unfinished draft");
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: current,
+            result: Ok((None, vec![Line::raw("old message")])),
+        },
+    );
+    assert!(chat.earlier.as_ref().unwrap().loaded);
+    assert!(chat.earlier.as_ref().unwrap().error.is_none());
+    assert_eq!(
+        chat.earlier.as_ref().unwrap().lines,
+        vec![Line::raw("old message")]
+    );
+}

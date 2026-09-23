@@ -11,6 +11,7 @@ mod active;
 mod attachments;
 mod autocomplete;
 mod config_picker;
+mod earlier;
 mod elicitation;
 mod feedback;
 mod history;
@@ -487,6 +488,8 @@ pub struct ChatState {
     latest_seq: u64,
     last_compaction_seq: u64,
     entries: Vec<ChatEntry>,
+    earlier: Option<earlier::EarlierMessages>,
+    earlier_generation: u64,
     pending_diffstats: VecDeque<ToolDiffstatRequest>,
     scheduled_diffstats: BTreeSet<(String, u64)>,
     /// Leading transcript items that are not converted to entries yet, because
@@ -713,6 +716,8 @@ impl ChatState {
             latest_seq: 0,
             last_compaction_seq: 0,
             entries: Vec::new(),
+            earlier: None,
+            earlier_generation: 0,
             pending_diffstats: VecDeque::new(),
             scheduled_diffstats: BTreeSet::new(),
             unconverted_prefix: 0,

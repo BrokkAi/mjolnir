@@ -117,6 +117,7 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Tab", "accept a completion, or move to the next pane"),
     ("Esc", "cancel the running turn or shell command"),
     ("PgUp / PgDn", "scroll the transcript"),
+    ("Ctrl+PgUp", "browse earlier conversation pages"),
     (
         "Up / Down",
         "walk prompt history, or move within the prompt",

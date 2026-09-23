@@ -1,5 +1,6 @@
 use super::*;
 use crate::chat::TurnControlIntent;
+use anyhow::Context;
 use mj_core::relay::RelayCommand;
 
 impl ActiveChat {
@@ -23,11 +24,54 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
+        self.dispatch_earlier_history();
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
             consumed: consumed || action.is_some(),
             action,
         }
+    }
+
+    fn dispatch_earlier_history(&mut self) {
+        let Some(reader) = self.state.earlier.as_mut() else {
+            if let Some(task) = self.earlier_task.take() {
+                task.abort();
+            }
+            return;
+        };
+        if !reader.requested || reader.loading {
+            return;
+        }
+        reader.requested = false;
+        reader.loading = true;
+        reader.error = None;
+        let before = reader.before.clone();
+        let generation = reader.generation;
+        let session = self.session.clone();
+        let updates = self.chat_io_tx.clone();
+        self.earlier_task = Some(tokio::spawn(async move {
+            let result = async {
+                let page = session.transcript_history(before).await?;
+                tokio::task::spawn_blocking(move || {
+                    let mut lines = Vec::new();
+                    for entry in mj_client::transcript::history_entries(&page) {
+                        lines.push(Line::styled(entry.role.to_owned(), theme::title(true)));
+                        lines.extend(entry.text.lines().map(|line| {
+                            Line::raw(crate::chat::rendering::sanitize_terminal_text(line))
+                        }));
+                        lines.push(Line::raw(""));
+                    }
+                    (page.before, lines)
+                })
+                .await
+                .context("history rendering task failed")
+            }
+            .await
+            .map_err(|error: anyhow::Error| format!("{error:#}"));
+            if let Err(error) = updates.send(ChatIoUpdate::EarlierMessages { generation, result }) {
+                tracing::debug!(%error, "earlier history reader closed");
+            }
+        }));
     }
 
     /// A command ID for one remote operation. `None` means the system random
