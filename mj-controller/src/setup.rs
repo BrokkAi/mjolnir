@@ -909,7 +909,10 @@ fn run_setup_dialog_inner(
         output,
         "Advanced users can edit TOML for extra profiles, virtual monorepos, SSH, and AWS."
     )?;
-    writeln!(output, "Press n to start your first session.")?;
+    writeln!(
+        output,
+        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
+    )?;
     Ok(SetupOutcome::Written)
 }
 

@@ -1202,7 +1202,9 @@ fn dialog_configures_every_usable_runtime_as_a_normal_target() {
     assert!(output.contains("Docker target using"), "{output}");
     assert!(!output.contains("Recommended runtime"), "{output}");
     assert!(!output.contains("Runtime ("), "{output}");
-    assert!(output.ends_with("Press n to start your first session.\n"));
+    assert!(output.ends_with(
+        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session.\n"
+    ));
 }
 
 #[test]
@@ -1255,7 +1257,7 @@ fn a_failed_smoke_test_becomes_a_fixable_line_in_the_closing_report() {
         "{output}"
     );
     assert!(
-        output.ends_with("Press n to start your first session.\n"),
+        output.ends_with("Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session.\n"),
         "{output}"
     );
 }
