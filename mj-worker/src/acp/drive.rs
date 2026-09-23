@@ -120,6 +120,10 @@ where
     let session_environment = spec.environment.clone();
     let restart = Arc::new(Mutex::new(None));
     let restart_slot = restart.clone();
+    // Set when the session itself failed (an agent error answer, for example),
+    // as opposed to the connection: only the latter may be stray bridge output.
+    let session_failed = Arc::new(AtomicBool::new(false));
+    let session_failed_flag = session_failed.clone();
     let native_agents = Arc::new(Mutex::new(native_agents::NativeAgentRouter::default()));
     let permission_native_agents = native_agents.clone();
     let elicitation_native_agents = native_agents.clone();
@@ -969,12 +973,15 @@ where
                         native_session_id;
                     Ok(())
                 }
-                Err(error) => Err(agent_client_protocol::Error::internal_error()
-                    .data(serde_json::Value::String(format!("{error:#}")))),
+                Err(error) => {
+                    session_failed_flag.store(true, Ordering::Release);
+                    Err(agent_client_protocol::Error::internal_error()
+                        .data(serde_json::Value::String(format!("{error:#}"))))
+                }
             }
         })
         .await
-        .map_err(protocol_failure)?;
+        .map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
@@ -982,11 +989,15 @@ where
 }
 
 /// Describe a failed ACP connection. The hint about stray bridge output only
-/// helps when the transport could not parse what the bridge wrote; an error
-/// the agent itself returned (such as a missing thread) says nothing about
-/// bridge stdout, and the hint would send the person the wrong way.
-pub(super) fn protocol_failure(error: agent_client_protocol::Error) -> anyhow::Error {
-    if error.code == agent_client_protocol::Error::parse_error().code {
+/// helps when the connection itself broke or could not parse what the bridge
+/// wrote; an error the agent answered (such as a missing thread, I2-7) says
+/// nothing about bridge stdout, and the hint would send the person the wrong
+/// way.
+pub(super) fn protocol_failure(
+    error: agent_client_protocol::Error,
+    connection_failed: bool,
+) -> anyhow::Error {
+    if connection_failed || error.code == agent_client_protocol::Error::parse_error().code {
         anyhow!(
             "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
              and login-shell startup must be silent"

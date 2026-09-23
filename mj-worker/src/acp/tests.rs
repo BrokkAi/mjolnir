@@ -6508,16 +6508,25 @@ fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     let agent = protocol_failure(
         agent_client_protocol::Error::internal_error()
             .data(serde_json::json!("thread not found: t1")),
+        false,
     )
     .to_string();
     assert!(agent.contains("thread not found"), "{agent}");
     assert!(!agent.contains("login-shell"), "{agent}");
-    // Output the transport could not parse is what the hint is for.
-    let garbage =
-        protocol_failure(agent_client_protocol::Error::parse_error().data(serde_json::json!("x")))
-            .to_string();
+    // Output the transport could not parse, or a connection that broke, is
+    // what the hint is for.
+    let garbage = protocol_failure(
+        agent_client_protocol::Error::parse_error().data(serde_json::json!("x")),
+        false,
+    )
+    .to_string();
     assert!(
         garbage.contains("login-shell startup must be silent"),
         "{garbage}"
+    );
+    let closed = protocol_failure(agent_client_protocol::Error::internal_error(), true).to_string();
+    assert!(
+        closed.contains("login-shell startup must be silent"),
+        "{closed}"
     );
 }
