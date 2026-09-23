@@ -44,8 +44,13 @@ omitted profile, target, or bundle falls back to the same saved default that
       integration test that drives the real binary as an ACP client, by
       `cargo fmt --all -- --check`, and by
       `cargo clippy --workspace --all-targets -- -D warnings`.
-- [ ] Milestone B: `session/new` creates a Mjolnir session; `session/prompt`
-      runs a turn and maps its outcome to a stop reason.
+- [x] (2026-09-23T09:19Z) Milestone B: `session/new` creates a Mjolnir session
+      from the adapter's flags or the saved default, and `session/prompt` runs
+      a turn, emits its final message, and maps its outcome to a stop reason.
+      Verified by five tests — three against a hand-written fake daemon and two
+      over the request and prompt shapes — by the full binary suite (157
+      passed), by `cargo fmt --all -- --check`, and by
+      `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Milestone C: cancellation, structured input, and failure paths.
 - [ ] Milestone D: document the command for consumers.
 
@@ -140,6 +145,32 @@ omitted profile, target, or bundle falls back to the same saved default that
   `Refusal` and a message naming the pending request makes the consumer fail
   visibly, which is recoverable; blocking makes it hang, which is not.
   Date/Author: 2026-09-22, root agent.
+
+- Decision: the ACP session id is the Mjolnir session id.
+  Rationale: a consumer's logs, `mj sessions`, and the daemon's own records then
+  all name one thing, so diagnosing a consumer's failed run starts from a
+  session id a person can look up directly instead of from a mapping table only
+  this process knows. The adapter still refuses a prompt naming a session it did
+  not create, so the identity is shared without widening what the instance can
+  be asked to do.
+  Date/Author: 2026-09-23, root agent.
+
+- Decision: a prompt contributes only its text blocks; attachments and resource
+  links are dropped rather than refused.
+  Rationale: the prompt route takes text, and ACP requires agents to accept
+  resource links, which name something in the workspace the session already
+  runs in — the agent can read it directly. Refusing a turn because a consumer
+  attached context would break the consumers this adapter exists for, and
+  silently dropping an image is recorded here rather than left to be discovered.
+  Date/Author: 2026-09-23, root agent.
+
+- Decision: session creation resolves its identifiers from the adapter's flags,
+  which are themselves optional, rather than from the ACP request.
+  Rationale: ACP's `session/new` carries a working directory and MCP servers,
+  not a notion of which account or host to use. Keeping placement in the agent
+  command is what lets one consumer launch the same adapter for a local run and
+  a remote one, and it reuses the resolution session creation already performs.
+  Date/Author: 2026-09-23, root agent.
 
 - Decision: closing the adapter's standard input interrupts every active turn
   and exits, but never destroys or suspends a session.
@@ -322,3 +353,31 @@ answering a prompt means making several HTTP calls and emitting notifications
 while the request is in flight. Second, the format check earned its place
 immediately: rustfmt orders module declarations, so `mod acp;` had to move above
 `mod api_client;`, which clippy would never have caught.
+
+### Milestone B
+
+Reached 2026-09-23. A consumer can now create a session, send a prompt, and
+receive the turn's answer with an honest stop reason. `session/new` resolves the
+profile, target, and bundle from the adapter's flags — each optional, falling
+back to the saved default — and returns the Mjolnir session id as the ACP
+session id. `session/prompt` submits the text of the prompt, waits for the turn,
+emits the final message as one update, and answers with `EndTurn` only for a
+finished turn; every other outcome is a `Refusal`, with `Cancelled` reserved for
+a turn that was actually cancelled.
+
+The handler shape anticipated at the end of Milestone A turned out to be
+unnecessary: chained `on_receive_request` handlers each accept their own
+`AsyncFnMut` closure, so the adapter shares its state through an `Arc` instead of
+implementing a state-owning dispatch loop by hand.
+
+Three discoveries are worth keeping. The SDK marks its protocol types
+non-exhaustive, so `SessionNotification` must be built with its constructor
+rather than a struct literal — this first appeared as a confusing error against
+a different struct in the same function. `WaitResponse` carries a required
+`ApiSession`, so any test that stands in for the daemon must supply a complete
+public session view, not just an outcome. And the client validates the
+`mj-api-version` header on every response, so a fake daemon that omits it is
+rejected before a body is ever parsed.
+
+What remains is Milestone C: cancellation, structured input, and the failure
+paths that make the adapter safe to run unattended, then Milestone D's docs.
