@@ -65,6 +65,17 @@ fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
     assert!(!view.is_working());
 }
 
+/// I1-14: a review that could not start because a lifecycle operation held
+/// the session said only "session is reserved for a lifecycle operation".
+#[test]
+fn a_review_that_cannot_start_says_so_in_plain_words() {
+    assert_eq!(
+        start_refusal_notice("session is reserved for a lifecycle operation"),
+        "Turn review did not start: another operation was using the session. \
+         The next review covers these changes."
+    );
+}
+
 #[test]
 fn resolution_notices_keep_the_verdict_context_after_close() {
     let resolved_dismissed = TurnReviewPhase::Resolved(Resolution::Dismissed);

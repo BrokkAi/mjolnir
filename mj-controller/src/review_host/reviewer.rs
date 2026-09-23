@@ -216,6 +216,19 @@ pub(super) async fn prepare_recovery(
     }))
 }
 
+/// The transcript line a review that could not start leaves behind. The
+/// refusal alone ("session is reserved for a lifecycle operation") did not say
+/// that it was about the review, or what happens to the change (I1-14).
+#[must_use]
+pub fn start_refusal_notice(reason: &str) -> String {
+    let reason = if reason == "session is reserved for a lifecycle operation" {
+        "another operation was using the session"
+    } else {
+        reason
+    };
+    format!("Turn review did not start: {reason}. The next review covers these changes.")
+}
+
 /// The transcript line a resolution leaves behind, on every surface.
 #[must_use]
 pub fn resolution_notice(

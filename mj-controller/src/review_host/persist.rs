@@ -23,7 +23,7 @@ impl HostState {
                 self.preparation_cancellation.remove(&session_id);
                 self.preparing.remove(&session_id);
                 release_prompts(&session_id);
-                self.record_notice(&session_id, refusal.0.clone());
+                self.record_notice(&session_id, start_refusal_notice(&refusal.0));
                 self.publish(&session_id);
                 answer(reply, Err(refusal));
                 return;
