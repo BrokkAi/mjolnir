@@ -368,8 +368,8 @@ pub fn render_human(checks: &[DoctorCheck], output: &mut impl Write) -> Result<(
 pub fn setup_instructions(platform: InstructionsPlatform) -> String {
     match platform {
         InstructionsPlatform::Linux => format!(
-            "# Hel setup instructions for Linux\n\n\
-This page is self-contained. Follow this exact loop as the user who will run Hel:\n\n\
+            "# Mjolnir setup instructions for Linux\n\n\
+This page is self-contained. Follow this exact loop as the user who will run `mj`:\n\n\
 1. Run `mj doctor --json`.\n\
 2. Follow every `fixable` remediation from its JSON output.\n\
 3. Run `mj doctor --json` again. Repeat until no check is `fixable`.\n\
@@ -377,32 +377,46 @@ This page is self-contained. Follow this exact loop as the user who will run Hel
    image end to end, and resolve anything it reports as `fixable`.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
+## Local bare runtime\n\n\
+A local bare runtime runs the agent directly on this machine. It needs the\n\
+native `mj-worker` installed beside `mj`; the release installer and the npm\n\
+package include it. The worker installs the pinned harness version itself.\n\
+Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
+need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
+prerequisites.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
         ),
         InstructionsPlatform::Macos => format!(
-            "# Hel setup instructions for macOS\n\n\
-This page is self-contained. Follow this exact loop as the user who will run Hel:\n\n\
+            "# Mjolnir setup instructions for macOS\n\n\
+This page is self-contained. Follow this exact loop as the user who will run `mj`:\n\n\
 1. Run `mj doctor --json`.\n\
 2. Follow every `fixable` remediation from its JSON output.\n\
 3. Run `mj doctor --json` again. Repeat until no check is `fixable`.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
+## Local bare runtime\n\n\
+A local bare runtime runs the agent directly on this machine. It needs the\n\
+native `mj-worker` installed beside `mj`; the release installer and the npm\n\
+package include it. The worker installs the pinned harness version itself.\n\
+Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
+need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
+prerequisites.\n\n\
 ## Apple container runtime\n\n\
-Hel's Apple container target requires Apple silicon and macOS 26 or newer.\n\
-On an Intel Mac or an older macOS release, the target is unsupported; use a\n\
-local Podman, SSH, or AWS target instead.\n\n\
+Mjolnir's Apple container target requires Apple silicon and macOS 26 or newer.\n\
+On an Intel Mac or an older macOS release, the target is unsupported; use the\n\
+local bare runtime, an SSH target, or an AWS target instead.\n\n\
 If the `container` command is absent, install only the official signed package:\n\n\
 <https://github.com/apple/container#initial-install>\n\n\
-Hel never downloads or installs that package. If doctor reports a stopped\n\
+Mjolnir never downloads or installs that package. If doctor reports a stopped\n\
 daemon, run exactly:\n\n```console\ncontainer system start\n```\n\n\
 Finish with the opt-in disposable runtime test in JSON mode:\n\n```console\nmj doctor --json --smoke\n```\n\n\
 Apple container is ready only when that smoke test creates a disposable\n\
 container, executes `true` in it, and removes it successfully. Use the image\n\
 configured by an `apple-container` target; without one, doctor uses\n\
 `{DEFAULT_CONTAINER_IMAGE}` for the smoke test.\n\n\
-## Shared Hel prerequisites\n\n\
+## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
 Podman prerequisites. Resolve every `fixable` status before starting a session."

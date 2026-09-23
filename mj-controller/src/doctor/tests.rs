@@ -1787,6 +1787,18 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     assert!(instructions.contains("--opt type=overlay"));
 }
 
+#[test]
+fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
+    for platform in [InstructionsPlatform::Linux, InstructionsPlatform::Macos] {
+        let instructions = setup_instructions(platform);
+        assert!(!instructions.contains("Hel"), "{instructions}");
+        assert!(instructions.contains("## Local bare runtime"));
+        assert!(instructions.contains("Node.js 22 or newer and npm"));
+    }
+    let macos = setup_instructions(InstructionsPlatform::Macos);
+    assert!(!macos.contains("local Podman"), "{macos}");
+}
+
 /// Releases before this one wrote Mjolnir's own refs into user repositories
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
