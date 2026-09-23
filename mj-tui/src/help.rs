@@ -591,7 +591,7 @@ pub(crate) fn render_help(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let prefix = format!(
-        "prefix: {}   (edit [keys] in config.toml)",
+        "prefix: {}   (change it in Setup → Interface)",
         dashboard.keybinds().prefix_label()
     );
     let header = wrap_styled_line(
@@ -665,7 +665,7 @@ pub(crate) fn render_help(
         format!("{count} text matches · Searching related shortcuts…")
     } else if needle.is_empty() {
         format!(
-            "{} shortcuts · / search by key, name, or intent",
+            "{} shortcuts · Type to search by key, name, or intent",
             catalog.len()
         )
     } else {
@@ -737,8 +737,16 @@ mod tests {
         // The overlay leads with the prefix, because every chord below it is
         // meaningless to a reader who does not know which key starts one.
         assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
+        // Launch campaign finding A-2: the prefix is set in Setup now, and
+        // the filter is focused on open, so neither line may send the
+        // reader to config.toml or to a `/` key.
         assert!(
-            rendered.contains("(edit [keys] in config.toml)"),
+            rendered.contains("(change it in Setup → Interface)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("config.toml"), "{rendered}");
+        assert!(
+            rendered.contains("shortcuts · Type to search by key, name, or intent"),
             "{rendered}"
         );
         // The palette is a command like any other, so the reference names it
