@@ -2628,6 +2628,31 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
     assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
 }
 
+/// A long save error is shown whole: the notice grows to fit it instead of
+/// stopping after three lines. Launch campaign finding C-20.
+#[test]
+fn a_long_save_error_is_shown_whole() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let error = format!(
+        "Could not save: {} closing words",
+        "Setup would change the project that a running session uses. ".repeat(5)
+    );
+    setup_dialog_mut(&mut dashboard.mode).unwrap().notice = Some(error);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("closing words")),
+        "{}",
+        lines.join("\n")
+    );
+    // The footer's controls are still drawn below it.
+    assert!(
+        lines.iter().any(|line| line.contains("Save")),
+        "{}",
+        lines.join("\n")
+    );
+}
+
 /// A new SSH machine keeps its workspaces under Mjolnir's own directory, not
 /// the product's former name. Launch campaign finding C-17.
 #[test]

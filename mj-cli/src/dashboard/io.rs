@@ -1628,7 +1628,7 @@ mod tests {
             &state,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("active session"), "{error}");
+        assert!(error.to_string().contains("running session"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // An unrelated preference remains editable even while a session needs repair.
         updated = original.clone();

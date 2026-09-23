@@ -2456,11 +2456,23 @@ pub(crate) fn render_setup(
     // Back and the commit share the dialog's bottom row; the page's own
     // actions stack in a column beside the body.
     let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    // A notice takes three rows, or as many as its wrapped text needs, as
+    // long as the page keeps a few rows of its own above it.
+    let notice_rows = dialog.notice.as_ref().map_or(3, |notice| {
+        let needed = Paragraph::new(notice.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        let room = footer_row.y.saturating_sub(body_y).saturating_sub(3);
+        u16::try_from(needed).unwrap_or(u16::MAX).min(room).max(3)
+    });
     let band = Rect::new(
         inner.x,
         body_y,
         inner.width,
-        inner.height.saturating_sub(7 + u16::from(nested)).max(1),
+        inner
+            .height
+            .saturating_sub(4 + notice_rows + u16::from(nested))
+            .max(1),
     );
     // The three rows a notice would occupy belong to the page while no notice
     // is showing in them, never to the footer's row.
@@ -2724,7 +2736,14 @@ pub(crate) fn render_setup(
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            editor_notice.unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
+            editor_notice.unwrap_or_else(|| {
+                Rect::new(
+                    inner.x,
+                    footer_row.y.saturating_sub(notice_rows),
+                    inner.width,
+                    notice_rows,
+                )
+            }),
         );
     }
     form.end_frame(initial);

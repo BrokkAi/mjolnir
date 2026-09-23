@@ -1796,12 +1796,35 @@ impl State {
                             != Some(target.without_launch_only_settings())
                     });
             if protected || bundle_changed || target_changed {
+                // Named as the screen names them: the session by its title,
+                // the project by its name rather than the internal bundle
+                // id, and only the parts this change touches.
+                let mut used = Vec::new();
+                if protected {
+                    used.push(format!("agent profile {:?}", session.last_profile));
+                }
+                if bundle_changed {
+                    used.push(format!("project {:?}", session.project_name(before)));
+                }
+                if target_changed {
+                    used.push(format!("runtime {:?}", session.target_template_id));
+                }
+                let used = match used.as_slice() {
+                    [only] => only.clone(),
+                    [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                    [] => unreachable!("something changed"),
+                };
+                let title = session.display_title();
+                let named = if title == session.id {
+                    format!(
+                        "a running session in project {:?}",
+                        session.project_name(before)
+                    )
+                } else {
+                    format!("the running session {title:?}")
+                };
                 bail!(
-                    "Setup would change configuration used by active session {:?}. Keep its profile {:?}, bundle {:?}, and target {:?}; add a separate entry for new settings, or stop the session before editing its configuration.",
-                    session.id,
-                    session.last_profile,
-                    session.bundle_id,
-                    session.target_template_id
+                    "Setup would change the {used} that {named} uses. Save the new settings under a new name, or stop the session first."
                 );
             }
         }
