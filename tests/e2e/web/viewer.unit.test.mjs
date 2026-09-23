@@ -1077,3 +1077,35 @@ test('a signed-out load shows the login form without requesting the snapshot', a
     ['/auth/session', 'refresh', 'applyRoute'],
   );
 });
+
+test('a request answered without content still reads the empty body to its end', async () => {
+  // Finding G-4: Chromium reports a fetch whose 202 or 204 body is never
+  // read as net::ERR_ABORTED although the server completed it. Reading the
+  // empty body lets the request finish in the browser too.
+  const run = async status => {
+    let read = false;
+    const context = vm.createContext({
+      upgradeAwareFetch: async () => ({
+        status,
+        ok: status < 400,
+        arrayBuffer: async () => { read = true; return new ArrayBuffer(0); },
+        json: async () => { read = true; return {}; },
+      }),
+      showLogin: () => {},
+      JSON,
+    });
+    vm.runInContext(sourceBetween('async function request(', '/// Upload one image'), context);
+    const result = await vm.runInContext(
+      "request('/api/actions', { method: 'POST', body: '{}' })",
+      context,
+    ).catch(error => error);
+    return { read, result };
+  };
+  for (const status of [202, 204]) {
+    const { read, result } = await run(status);
+    assert.equal(result, null);
+    assert.ok(read, `a ${status} body was left unread`);
+  }
+  const { read } = await run(401);
+  assert.ok(read, 'a 401 body was left unread');
+});

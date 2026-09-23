@@ -157,6 +157,7 @@ async function request(url, options = {}) {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
   if (response.status === 401) {
+    await drainBody(response);
     // Authentication expired. Every route has to reach the login swap, not
     // only the snapshot refresh, or a phone sits on a dead page issuing
     // requests that will never succeed.
@@ -171,8 +172,19 @@ async function request(url, options = {}) {
     failure.status = response.status;
     throw failure;
   }
-  if (response.status === 202 || response.status === 204) return null;
+  if (response.status === 202 || response.status === 204) {
+    await drainBody(response);
+    return null;
+  }
   return response.json();
+}
+
+/// Read a response body nobody needs to its end. Chromium reports a fetch
+/// whose body is left unread as `net::ERR_ABORTED` once the response is
+/// dropped, although the server completed it; cancelling the body would
+/// abort it outright.
+async function drainBody(response) {
+  await response.arrayBuffer().catch(() => {});
 }
 
 /// Upload one image as raw bytes. JSON action requests have a deliberately
