@@ -526,10 +526,14 @@ async fn suspend_session(client: &ApiClient, session_id: &str, timing: ExitTimin
             session.state
         )
     })?;
+    let progress = Progress::since(&session);
     watch(client, session_id, timing, timing.finish, "suspend", |session| {
         let Some(session) = session else {
             return Watch::Failed("it no longer exists".to_owned());
         };
+        if progress.not_taken_up(session) {
+            return Watch::Pending;
+        }
         match session.lifecycle {
             ViewerLifecycleCategory::Suspended => Watch::Done,
             ViewerLifecycleCategory::Failed => {
@@ -588,14 +592,15 @@ async fn destroy_session(client: &ApiClient, session_id: &str, timing: ExitTimin
             "{error:#}; it was not destroyed, and `mj destroy --session {session_id}` removes it"
         );
     }
-    if look(client, session_id).await?.is_none() {
+    let Some(before) = look(client, session_id).await? else {
         return Ok(());
-    }
+    };
     client.destroy(session_id, false).await.with_context(|| {
         format!(
             "destroy session {session_id}; it was left as it was, and `mj destroy --session {session_id}` retries"
         )
     })?;
+    let progress = Progress::since(&before);
     watch(
         client,
         session_id,
@@ -606,6 +611,9 @@ async fn destroy_session(client: &ApiClient, session_id: &str, timing: ExitTimin
             let Some(session) = session else {
                 return Watch::Done;
             };
+            if progress.not_taken_up(session) {
+                return Watch::Pending;
+            }
             match session.lifecycle {
                 ViewerLifecycleCategory::Failed => {
                     Watch::Failed(format!("it ended {}{}", session.state, reason(session)))
@@ -625,6 +633,37 @@ async fn destroy_session(client: &ApiClient, session_id: &str, timing: ExitTimin
         },
     )
     .await
+}
+
+/// Whether the daemon has taken up a suspension or destruction it admitted.
+///
+/// The daemon answers before the operation changes the session, so the first
+/// looks after can still show the state it was asked about, including a failed
+/// state or a failure an earlier operation recorded. Until the session moves
+/// on from that, neither is this operation's outcome.
+struct Progress<'a> {
+    before: &'a ApiSession,
+    taken_up: std::cell::Cell<bool>,
+}
+
+impl<'a> Progress<'a> {
+    fn since(before: &'a ApiSession) -> Self {
+        Self {
+            before,
+            taken_up: std::cell::Cell::new(false),
+        }
+    }
+
+    fn not_taken_up(&self, session: &ApiSession) -> bool {
+        if self.taken_up.get() {
+            return false;
+        }
+        if session.lifecycle == self.before.lifecycle && session.error == self.before.error {
+            return true;
+        }
+        self.taken_up.set(true);
+        false
+    }
 }
 
 /// What one look at a session says about the operation being watched.
@@ -1464,6 +1503,39 @@ mod tests {
                 r#"destroy session-1 {"delete_branch":false}"#,
                 r#"destroy session-2 {"delete_branch":false}"#,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_is_not_reported_before_its_destruction_is_taken_up() {
+        // The daemon admits the destruction before it touches the session, so
+        // the looks right after still show the failure it was asked to remove.
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let failed = Look::Session {
+            lifecycle: "failed",
+            state: "error",
+            chat_phase: "idle",
+            error: Some("the provision failed"),
+        };
+        daemon.script(
+            "session-1",
+            &[
+                failed.clone(),
+                failed.clone(),
+                failed.clone(),
+                failed,
+                Look::Missing,
+            ],
+        );
+        let adapter = adapter_with(ExitPolicy::Destroy, &["session-1"]);
+
+        exit(&adapter, client)
+            .await
+            .expect("the failed session is destroyed");
+
+        assert_eq!(
+            daemon.lifecycle_calls(),
+            [r#"destroy session-1 {"delete_branch":false}"#]
         );
     }
 
