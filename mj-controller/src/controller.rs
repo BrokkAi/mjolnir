@@ -1030,7 +1030,11 @@ impl Controller {
                 crate::database::rename_profile_references(&journal.old_id, &journal.new_id)?;
             }
             ConfigRenameKind::Target => {
-                Config::update(|config| {
+                // The file's own entries, not `Config::update`'s view: that one
+                // adds the standard local targets, so after a built-in id such
+                // as `localhost` was renamed away, its default would reappear
+                // beside the new id and read as a rename that cannot finish.
+                Config::update_to(&mj_core::config::config_path(), |config| {
                     finish_config_map_rename(
                         &mut config.targets,
                         &journal.old_id,
