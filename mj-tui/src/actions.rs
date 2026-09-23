@@ -1578,9 +1578,16 @@ impl DashboardState {
                     self.session_operation_kind(&session.id)
                         .map(|kind| (session.id.clone(), kind))
                 });
-                operation.map_or(DashboardAction::None, |(session_id, kind)| {
-                    DashboardAction::CancelOperation { session_id, kind }
-                })
+                match operation {
+                    Some((session_id, kind)) => {
+                        DashboardAction::CancelOperation { session_id, kind }
+                    }
+                    None => {
+                        // A key that does nothing silently reads as broken.
+                        self.set_notice("Nothing to cancel");
+                        DashboardAction::None
+                    }
+                }
             }
             CommandId::ToggleProject => {
                 self.toggle_selected_project();

@@ -857,6 +857,19 @@ fn remote_operation_cancel_action_carries_the_operation_kind() {
     );
 }
 
+/// Launch campaign finding A-7: the cancel chord with nothing in flight
+/// says so instead of doing nothing silently.
+#[test]
+fn cancel_with_nothing_in_flight_shows_a_notice() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    assert_eq!(
+        chord(&mut dashboard, CommandId::CancelOperation),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("Nothing to cancel"));
+}
+
 /// A launching session parks its conversation behind a composer the user
 /// can type into; the draft survives to be taken by the chat that opens.
 #[test]
