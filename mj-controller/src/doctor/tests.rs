@@ -1357,6 +1357,7 @@ fn harness_discovery_reports_each_authentication_state() {
             },
         ],
         true,
+        "ctrl+b s",
     );
 
     assert_eq!(check.status, CheckStatus::Ready);
@@ -1372,14 +1373,42 @@ fn harness_discovery_reports_each_authentication_state() {
     );
 }
 
+/// Settings opens with `prefix+s`; F7 is not bound, so no fix may send the
+/// user there, and every fix names the key the configuration binds.
+#[test]
+fn settings_fixes_name_the_bound_settings_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.toml");
+    let (_, checks) = configuration_checks(&missing);
+    let empty = Config::default();
+    let executor = FakeExecutor::new([]);
+    let checks = checks
+        .into_iter()
+        .chain(harness_checks(Ok(&empty), &executor))
+        .collect::<Vec<_>>();
+    for check in &checks {
+        let remediation = check.remediation.as_deref().unwrap_or_default();
+        assert!(!remediation.contains("F7"), "{remediation}");
+    }
+    assert!(
+        checks
+            .iter()
+            .filter_map(|check| check.remediation.as_deref())
+            .all(|fix| !fix.contains("Settings") || fix.contains("ctrl+b s")),
+        "{checks:?}"
+    );
+}
+
 #[test]
 fn missing_harness_homes_are_fixable_without_a_configured_profile() {
-    let check = harness_discovery_check_from(&[], false);
+    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
 
     assert_eq!(check.status, CheckStatus::Fixable);
     assert_eq!(
         check.remediation.as_deref(),
-        Some("Install and sign in to a supported harness, then open F7 Settings → Agent Profiles.")
+        Some(
+            "Install and sign in to a supported harness, then open Mjolnir, press ctrl+b s for Settings, and choose Agent Profiles."
+        )
     );
 }
 

@@ -280,12 +280,14 @@ fn harness_discovery_check(
     harness_discovery_check_from(
         &discovered,
         config.is_ok_and(|config| !config.profiles.is_empty()),
+        &settings_key(config.ok()),
     )
 }
 
 fn harness_discovery_check_from(
     discovered: &[DiscoveredHome],
     has_configured_profiles: bool,
+    settings_key: &str,
 ) -> DoctorCheck {
     if discovered.is_empty() {
         return if has_configured_profiles {
@@ -299,7 +301,9 @@ fn harness_discovery_check_from(
                 "harness.discovery",
                 "Harness home discovery",
                 "No Codex, Claude Code, Kimi Code, or Grok Build home was found in the default or environment-overridden locations.",
-                "Install and sign in to a supported harness, then open F7 Settings → Agent Profiles.",
+                format!(
+                    "Install and sign in to a supported harness, then open Mjolnir, press {settings_key} for Settings, and choose Agent Profiles."
+                ),
             )
         };
     }
@@ -446,7 +450,10 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "config",
                 "Mjolnir configuration",
                 format!("{} does not exist", path.display()),
-                "Open Mjolnir and press F7 for Settings to add an agent profile.",
+                format!(
+                    "Open Mjolnir and press {} for Settings to add an agent profile.",
+                    settings_key(None)
+                ),
             )],
         );
     }
@@ -539,7 +546,10 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
             "harness.profiles",
             "Harness profiles",
             "No harness profiles are configured.",
-            "Open F7 Settings → Agent Profiles to detect accounts or add a profile.",
+            format!(
+                "Open Mjolnir, press {} for Settings, and choose Agent Profiles to detect accounts or add a profile.",
+                settings_key(Some(config))
+            ),
         )];
     }
     config
