@@ -63,8 +63,9 @@ struct Cli {
         value_name = "NAME"
     )]
     instance: Option<String>,
-    /// Select a workspace by name for workspace-scoped commands.
-    #[arg(long, global = true)]
+    /// Open the dashboard in this workspace, by name. Given before a command,
+    /// it applies to that command when the command works in a workspace.
+    #[arg(long, value_name = "NAME")]
     workspace: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -89,7 +90,6 @@ enum Command {
     DaemonRun,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
-    #[command(hide = true)]
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
@@ -151,6 +151,24 @@ enum Command {
     CancelTurn(RemovedCommandArgs),
 }
 
+/// `--workspace` for the commands that work in a workspace. It was a global
+/// option, so `--help` showed it on every command, including the many where
+/// it did nothing (F-16).
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct WorkspaceName {
+    /// Workspace to work in, by name. Needed when the instance has more than
+    /// one.
+    #[arg(long = "workspace", id = "workspace_name", value_name = "NAME")]
+    pub(crate) name: Option<String>,
+}
+
+impl WorkspaceName {
+    /// The name given with the command, or else the one given before it.
+    pub(crate) fn or(&self, before_command: Option<String>) -> Option<String> {
+        self.name.clone().or(before_command)
+    }
+}
+
 /// Whatever was passed to a removed command. It is accepted only so the
 /// command can name its replacement instead of failing on its arguments.
 #[derive(Debug, Args)]
@@ -204,6 +222,7 @@ enum DaemonCommand {
 
 #[derive(Debug, Args)]
 struct CheckpointArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
 }
@@ -275,6 +294,7 @@ struct RecoverArgs {
 enum RecoverCommand {
     /// List managed worker resources not present in controller state.
     Scan {
+        /// Print the response as JSON instead of text.
         #[arg(long)]
         json: bool,
         /// Also list workers created by other Mjolnir instances, or by builds
@@ -284,8 +304,10 @@ enum RecoverCommand {
     },
     /// Probe a managed worker and add it back to controller state.
     Adopt {
+        /// Session id of the worker, as `mj recover scan` lists it.
         #[arg(long)]
         session: String,
+        /// Target the worker runs on, as `mj recover scan` lists it.
         #[arg(long)]
         target: String,
         /// Required only for current-v1 workers created before ownership markers.
@@ -301,10 +323,13 @@ enum RecoverCommand {
     },
     /// Destroy an untracked managed resource after exact-ID confirmation.
     Destroy {
+        /// Session id of the worker, as `mj recover scan` lists it.
         #[arg(long)]
         session: String,
+        /// Target the worker runs on, as `mj recover scan` lists it.
         #[arg(long)]
         target: String,
+        /// The session id again, to confirm the destruction.
         #[arg(long)]
         confirm: String,
         /// Allow destroying a worker another instance created, or one with no
@@ -334,6 +359,7 @@ struct SetupArgs {
 enum SetupCommand {
     /// Print coding-agent instructions for preparing a host.
     Instructions {
+        /// Platform to prepare.
         #[arg(long, value_enum)]
         platform: SetupPlatform,
     },
@@ -528,13 +554,18 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Acp(args)) => acp::serve(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            acp::serve(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {
-            let workspace_id = resolve_store_workspace(requested_workspace.as_deref()).await?;
+            let workspace_id =
+                resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
+                    .await?;
             tokio::task::spawn_blocking(move || import(args, &workspace_id))
                 .await
                 .context("import task panicked")??;
@@ -554,9 +585,12 @@ async fn run_command(
         }
         Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
-        Some(Command::New(args)) => api_commands::new_session(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::New(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::new_session(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Prompt(args)) => api_commands::prompt(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -572,9 +606,12 @@ async fn run_command(
         Some(Command::Respond(args)) => api_commands::respond(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Events(args)) => api_commands::events(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Events(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::events(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Usage(args)) => api_commands::usage(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -587,18 +624,24 @@ async fn run_command(
         Some(Command::Export(args)) => api_commands::export(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Sessions(args)) => api_commands::sessions(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Sessions(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::sessions(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Suspend(args)) => api_commands::suspend(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Resume(args)) => api_commands::resume(args)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Resume(mut args)) => {
+            args.workspace.name = args.workspace.or(requested_workspace);
+            api_commands::resume(args)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -1416,6 +1459,14 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&scan)?);
             } else {
+                // An empty scan printed nothing, which reads the same as a
+                // command that did not run (F-16).
+                if scan.candidates.is_empty() {
+                    match scan.hidden_other_instances {
+                        0 => println!("nothing to recover"),
+                        _ => println!("nothing to recover for this instance"),
+                    }
+                }
                 for candidate in &scan.candidates {
                     let instance = match candidate.instance_id.as_deref() {
                         Some(instance) if instance == scan.instance_id => {
@@ -1649,6 +1700,77 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use mj_core::state::{SessionRecord, SessionState, State};
+
+    /// F-16: `--session`, `--json`, and other flags had no description in
+    /// `--help`. Every visible argument of every command now says what it is.
+    #[test]
+    fn every_visible_argument_is_described_in_help() {
+        fn undescribed(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() || ["help", "version"].contains(&arg.get_id().as_str()) {
+                    continue;
+                }
+                if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                    missing.push(format!("{path} --{}", arg.get_id()));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                if subcommand.is_hide_set() {
+                    continue;
+                }
+                undescribed(
+                    subcommand,
+                    &format!("{path} {}", subcommand.get_name()),
+                    missing,
+                );
+            }
+        }
+        let mut missing = Vec::new();
+        undescribed(
+            &<Cli as clap::CommandFactory>::command(),
+            "mj",
+            &mut missing,
+        );
+        assert!(missing.is_empty(), "undescribed arguments: {missing:#?}");
+    }
+
+    /// F-16: `--workspace` was global, so every command's help offered it.
+    #[test]
+    fn workspace_is_offered_only_where_it_selects_something() {
+        for argv in [
+            vec!["mj", "new", "--workspace", "w", "--project-directory", "/p"],
+            vec!["mj", "sessions", "--workspace", "w"],
+            vec!["mj", "events", "--workspace", "w"],
+            vec!["mj", "resume", "--wiki", "x", "--workspace", "w"],
+            vec!["mj", "import", "codex", "--latest", "--workspace", "w"],
+            vec!["mj", "acp", "--workspace", "w"],
+            vec!["mj", "--workspace", "w", "new", "--project-directory", "/p"],
+            vec!["mj", "--workspace", "w"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+        for argv in [
+            vec!["mj", "prompt", "--session", "s", "hi", "--workspace", "w"],
+            vec!["mj", "wait", "--session", "s", "--workspace", "w"],
+            vec!["mj", "doctor", "--workspace", "w"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["mj", "sessions", "--workspace", "w"]).unwrap();
+        let Some(Command::Sessions(args)) = cli.command else {
+            panic!("expected the sessions command");
+        };
+        assert_eq!(args.workspace.or(None).as_deref(), Some("w"));
+    }
+
+    /// F-16: `mj acp` is documented, so `mj --help` lists it.
+    #[test]
+    fn acp_is_listed_in_help() {
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        assert!(help.contains("acp"), "{help}");
+    }
 
     /// F-10: the removed names got clap's generic "unrecognized subcommand".
     #[test]

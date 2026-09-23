@@ -48,12 +48,14 @@ pub(crate) struct AcpArgs {
     /// the project, which is what a local target needs.
     #[arg(long)]
     pub(crate) bundle: Option<String>,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
 }
 
 /// What the adapter needs beyond one request.
 struct Adapter {
     args: AcpArgs,
-    /// The workspace named with the global `--workspace`, resolved to its id
+    /// The workspace named with `--workspace`, resolved to its id
     /// when a session is created.
     workspace: Option<String>,
     /// The client every request goes through, when one was supplied. The
@@ -912,6 +914,7 @@ mod tests {
             profile: Some("codex-work".to_owned()),
             target: Some("builder-podman".to_owned()),
             bundle: Some("product".to_owned()),
+            workspace: crate::WorkspaceName::default(),
         };
         let managed = start_request(&args, None, StdPath::new("/work/project"));
         assert_eq!(managed.profile_id.as_deref(), Some("codex-work"));

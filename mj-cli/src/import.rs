@@ -82,6 +82,21 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
+}
+
+impl ImportArgs {
+    /// The workspace named with the command.
+    pub(crate) fn workspace(&self) -> &crate::WorkspaceName {
+        match &self.command {
+            ImportCommand::Claude(args)
+            | ImportCommand::Codex(args)
+            | ImportCommand::Kimi(args)
+            | ImportCommand::Grok(args)
+            | ImportCommand::Muse(args) => &args.workspace,
+        }
+    }
 }
 
 impl ImportCommand {
@@ -193,6 +208,7 @@ pub(crate) fn import_named_native_session(
             title: None,
             allow_dirty_local: false,
             allow_omitted_non_git: false,
+            workspace: crate::WorkspaceName::default(),
         },
         &source,
         workspace_id,

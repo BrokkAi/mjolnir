@@ -32,6 +32,8 @@ pub(crate) struct EventsArgs {
     /// Replay events after this sequence; omit to follow new events only.
     #[arg(long)]
     after_seq: Option<u64>,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
 }
 
 pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>) -> Result<()> {
@@ -98,10 +100,11 @@ pub(crate) struct NewArgs {
     /// the remote default branch (bundle) and diff against it.
     #[arg(long, value_name = "REV")]
     base: Option<String>,
-    /// Workspace id to create the session in. The global `--workspace NAME`
+    /// Workspace id to create the session in. `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
     workspace_id: Option<String>,
+    /// Title shown in session lists. Defaults to the project and profile.
     #[arg(long)]
     title: Option<String>,
     /// Harness model to select before the first prompt.
@@ -115,12 +118,16 @@ pub(crate) struct NewArgs {
     /// Read the first prompt from this file instead.
     #[arg(long)]
     prompt_file: Option<PathBuf>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct PromptArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// The prompt text. `-` reads it from standard input.
@@ -137,12 +144,14 @@ pub(crate) struct PromptArgs {
     /// Return when the harness asks for structured input.
     #[arg(long)]
     return_on_input: bool,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct WaitArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// The turn to wait for, as `mj prompt` printed it. Omit it to wait until
@@ -155,21 +164,27 @@ pub(crate) struct WaitArgs {
     /// Return when the harness asks for structured input.
     #[arg(long)]
     return_on_input: bool,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct TranscriptArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// Resume from the highest sequence already read.
     #[arg(long)]
     after_seq: Option<u64>,
+    /// Most items to return in one page.
     #[arg(long)]
     limit: Option<usize>,
+    /// Return only items with this role: user, agent, thought, tool, terminal,
+    /// plan, plan_proposal, or system.
     #[arg(long, value_parser = parse_transcript_role)]
     role: Option<mj_core::transcript::TranscriptRole>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -180,12 +195,16 @@ fn parse_transcript_role(value: &str) -> Result<mj_core::transcript::TranscriptR
 
 #[derive(Debug, Args)]
 pub(crate) struct UsageArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
+    /// Return entries after this sequence number.
     #[arg(long)]
     after_seq: Option<u64>,
+    /// Most entries to return in one page.
     #[arg(long)]
     limit: Option<usize>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -195,13 +214,69 @@ pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
         .await?
         .usage(&args.session, args.after_seq, args.limit)
         .await?;
-    // Usage is structured even without --json: scope and coverage must travel
-    // with counters so partial provider reports cannot look like full totals.
-    print_json(&page)
+    if args.json {
+        return print_json(&page);
+    }
+    for line in usage_lines(&page) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// What `mj usage` prints without `--json`.
+///
+/// The coverage is printed with the totals, never apart from them: a harness
+/// that reports only its last request, or nothing, would otherwise make a
+/// partial count read as the whole session's.
+fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
+    let coverage = &page.coverage;
+    let mut lines = vec![format!(
+        "totals from the {} of {} turns that reported a whole turn:",
+        coverage.full_turn_reports, coverage.recorded_turns
+    )];
+    if page.totals.is_empty() {
+        lines.push("  no counters".to_owned());
+    }
+    for (counter, total) in &page.totals {
+        lines.push(format!(
+            "  {counter}  {}  ({} turns)",
+            total.tokens, total.reported_turns
+        ));
+    }
+    let left_out = [
+        (
+            coverage.last_request_reports,
+            "reported only their last request",
+        ),
+        (coverage.unspecified_reports, "reported an unknown scope"),
+        (coverage.missing_reports, "reported nothing"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{count} {what}"))
+    .collect::<Vec<_>>();
+    if !left_out.is_empty() {
+        lines.push(format!(
+            "not in the totals: {} (turns)",
+            left_out.join(", ")
+        ));
+    }
+    if let Some(cost) = &page.provider_session_cost {
+        lines.push(format!(
+            "provider cost for the session so far: {:.4} {}",
+            cost.amount, cost.currency
+        ));
+    }
+    lines.push(format!(
+        "next after seq {}; latest seq {}",
+        page.next_after_seq, page.latest_seq
+    ));
+    lines
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct PutFileArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// Destination relative to the session workspace.
@@ -209,28 +284,35 @@ pub(crate) struct PutFileArgs {
     path: String,
     /// Source file, or - for stdin.
     source: PathBuf,
+    /// Replace the file if it already exists.
     #[arg(long)]
     overwrite: bool,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ElicitationsArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct RespondArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
+    /// Id of the input request to answer, as `mj elicitations` lists it.
     #[arg(long)]
     elicitation: String,
     /// JSON response, or - for stdin.
     response: Option<String>,
+    /// Read the JSON response from this file instead.
     #[arg(long)]
     response_file: Option<PathBuf>,
 }
@@ -283,19 +365,23 @@ pub(crate) async fn respond(args: RespondArgs) -> Result<()> {
 
 #[derive(Debug, Args)]
 pub(crate) struct DiffArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// Compare against this Git commit or revision instead of the launch base.
     #[arg(long)]
     base: Option<String>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ExportArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
+    /// What to export: a patch, a pushed branch, a git bundle, or one file.
     #[arg(long, value_enum, default_value_t = ExportKindArg::Patch)]
     kind: ExportKindArg,
     /// Branch to push, required by `--kind branch`.
@@ -308,6 +394,7 @@ pub(crate) struct ExportArgs {
     /// Write the export here instead of standard output.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -327,20 +414,26 @@ pub(crate) struct SessionsArgs {
     /// Show one session, including how its last turn ended.
     #[arg(long)]
     session: Option<String>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SessionArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: Option<String>,
     /// Taken only so the command can explain itself. `mj suspend <id>` is a
@@ -349,17 +442,20 @@ pub(crate) struct SuspendArgs {
     /// the person guessing which option it wanted.
     #[arg(value_name = "SESSION", hide = true)]
     misplaced_session: Option<String>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct DestroyArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
     /// Also delete the managed branch. Work held only in the environment is lost either way.
     #[arg(long)]
     delete_branch: bool,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -392,8 +488,11 @@ pub(crate) struct ResumeArgs {
     /// What to do with prompts queued when the session was suspended.
     #[arg(long, value_enum)]
     queue: Option<ResumeQueueArg>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -413,12 +512,14 @@ impl From<ResumeQueueArg> for mj_core::state::ResumeQueueDisposition {
 
 #[derive(Debug, Args)]
 pub(crate) struct ApiInfoArgs {
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct WorkspacesListArgs {
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -428,6 +529,7 @@ pub(crate) struct WorkspaceCreateArgs {
     /// Workspace name, 1-64 characters. Naming one that already exists selects
     /// it instead of failing, so this is safe to run before every session.
     name: String,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -1031,7 +1133,7 @@ async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
         } => {
             let workspace_id = match args.workspace_id.clone() {
                 Some(workspace_id) => workspace_id,
-                None => crate::resolve_store_workspace(None).await?,
+                None => crate::resolve_store_workspace(args.workspace.name.as_deref()).await?,
             };
             let indexed_at = info.path.clone();
             let imported = {
@@ -1179,21 +1281,29 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 #[derive(Debug, Args)]
 pub(crate) struct ModelsArgs {
+    /// Profile whose harness to ask.
     #[arg(long)]
     profile: String,
+    /// List the efforts this model offers instead of the default model's.
     #[arg(long)]
     model: Option<String>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 #[derive(Debug, Args)]
 pub(crate) struct SetConfigArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    #[arg(long)]
-    key: String,
-    #[arg(long)]
-    value: String,
+    /// Setting to change, such as `model` or `effort`. Omit it and --value to
+    /// list the settings this session's agent offers, with their choices.
+    #[arg(long, requires = "value")]
+    key: Option<String>,
+    /// Value to set: one of the choices the setting lists.
+    #[arg(long, requires = "key")]
+    value: Option<String>,
+    /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
@@ -1205,43 +1315,79 @@ pub(crate) async fn models(args: ModelsArgs) -> Result<()> {
     if args.json {
         return print_json(&choices);
     }
-    for model in choices.models {
+    if choices.models.is_empty() && choices.efforts.is_empty() {
+        println!("this profile's harness reports no models or efforts");
+    }
+    for model in &choices.models {
         println!("{}  {}", model.value, model.name);
     }
-    println!(
-        "effort ({}): {}",
-        choices.model.as_deref().unwrap_or("default"),
-        choices
-            .efforts
-            .iter()
-            .map(|c| c.value.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    Ok(())
-}
-pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
-    let session = ApiClient::connect()
-        .await?
-        .set_config(
-            &args.session,
-            &mj_controller::server::api::SetConfigRequest {
-                key: args.key,
-                value: args.value,
-            },
-        )
-        .await?;
-    if args.json {
-        return print_json(&session);
-    }
-    for option in session.config_options {
+    // A harness without efforts, or one whose efforts are not known yet,
+    // printed a bare "effort (default):" line, which reads as a value that
+    // failed to print (F-16).
+    if !choices.efforts.is_empty() {
         println!(
-            "{} {}",
-            option.key,
-            option.current.as_deref().unwrap_or("unknown")
+            "effort ({}): {}",
+            choices.model.as_deref().unwrap_or("default model"),
+            choices
+                .efforts
+                .iter()
+                .map(|c| c.value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     Ok(())
+}
+pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let session = match (args.key, args.value) {
+        (Some(key), Some(value)) => {
+            client
+                .set_config(
+                    &args.session,
+                    &mj_controller::server::api::SetConfigRequest { key, value },
+                )
+                .await?
+        }
+        // The settings are the agent's, so they differ by harness and model;
+        // listing them is how a user learns which keys this command takes.
+        (None, None) => client
+            .session_if_known(&args.session)
+            .await?
+            .with_context(|| format!("no session {}", args.session))?,
+        (Some(_), None) => bail!("pass --value with --key"),
+        (None, Some(_)) => bail!("pass --key with --value"),
+    };
+    if args.json {
+        return print_json(&session);
+    }
+    if session.config_options.is_empty() {
+        println!("this session's agent offers no settings right now");
+    }
+    for line in config_option_lines(&session.config_options) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// One line per setting: its key, its current value, and what it accepts.
+fn config_option_lines(options: &[mj_controller::server::ViewerConfigOption]) -> Vec<String> {
+    options
+        .iter()
+        .map(|option| {
+            format!(
+                "{}  {}  (choices: {})",
+                option.key,
+                option.current.as_deref().unwrap_or("unknown"),
+                option
+                    .choices
+                    .iter()
+                    .map(|choice| choice.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1373,6 +1519,32 @@ mod tests {
         // reason recorded, and that is still a failure.
         let failed_resume = suspended(serde_json::json!("the archive was missing"));
         assert!(report_wait(&failed_resume, false).is_err());
+    }
+
+    /// F-16: `mj usage` printed JSON unless asked for text.
+    #[test]
+    fn usage_text_keeps_the_coverage_beside_the_totals() {
+        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
+            "session_id": "s1",
+            "turns": [],
+            "next_after_seq": 4,
+            "latest_seq": 4,
+            "totals": {"input_tokens": {"tokens": 1200, "reported_turns": 2}},
+            "coverage": {
+                "recorded_turns": 3, "full_turn_reports": 2, "last_request_reports": 1,
+                "unspecified_reports": 0, "missing_reports": 0
+            }
+        }))
+        .unwrap();
+        let lines = usage_lines(&page);
+        assert_eq!(
+            lines[..3],
+            [
+                "totals from the 2 of 3 turns that reported a whole turn:",
+                "  input_tokens  1200  (2 turns)",
+                "not in the totals: 1 reported only their last request (turns)",
+            ]
+        );
     }
 
     #[test]
