@@ -1740,7 +1740,11 @@ mod tests {
             Some(socket_dir.path()),
             &masters,
         );
-        assert_eq!(masters.commands(), 0, "a probe never checks or opens a master");
+        assert_eq!(
+            masters.commands(),
+            0,
+            "a probe never checks or opens a master"
+        );
         assert!(!validation.contains(&"ProxyCommand=false".to_owned()));
         set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
             socket_dir.path().to_path_buf(),

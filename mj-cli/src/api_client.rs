@@ -887,7 +887,10 @@ mod tests {
                             Json(serde_json::json!({ "error": "at its concurrent action limit" })),
                         );
                     }
-                    (StatusCode::ACCEPTED, Json(serde_json::json!({ "turn_id": 7 })))
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({ "turn_id": 7 })),
+                    )
                 }),
             )
             .layer(axum::middleware::from_fn(

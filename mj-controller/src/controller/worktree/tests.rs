@@ -1141,7 +1141,12 @@ fn ssh_option_changes_do_not_block_a_resume_but_a_new_location_does() {
     };
 
     let changed_options = with_args(
-        vec!["-o", "ControlPath=/tmp/mine", "-o", "ServerAliveInterval=30"],
+        vec![
+            "-o",
+            "ControlPath=/tmp/mine",
+            "-o",
+            "ServerAliveInterval=30",
+        ],
         "builder",
     );
     assert_eq!(
