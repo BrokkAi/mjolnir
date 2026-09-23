@@ -550,7 +550,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ClosePane,
         label: "Close pane",
-        description: "Remove the conversation pane you are in; the last one is emptied instead.",
+        description: "Remove the conversation pane you are in; the last one is emptied instead. The Browse pane cannot be closed; move it with Swap pane.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::ClosePane),
@@ -562,7 +562,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::FocusPaneLeft,
         label: "Focus pane left",
-        description: "Move the keyboard to the conversation pane left this one.",
+        description: "Move the keyboard to the conversation pane left of this one.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneLeft),
@@ -598,7 +598,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::FocusPaneRight,
         label: "Focus pane right",
-        description: "Move the keyboard to the conversation pane right this one.",
+        description: "Move the keyboard to the conversation pane right of this one.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneRight),
