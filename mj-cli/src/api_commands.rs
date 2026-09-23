@@ -1577,7 +1577,9 @@ mod tests {
         };
         assert_eq!(args.session.as_deref(), Some("s1"));
         assert!(Cli::try_parse_from(["mj", "suspend", "--session", "s1", "--force"]).is_err());
-        assert!(Cli::try_parse_from(["mj", "close", "--session", "s1"]).is_err());
+        // `close` is gone; its old name only says what replaced it.
+        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
+        assert!(crate::replacement_notice(cli.command.as_ref()).is_some());
 
         // Resume names the session and nothing else by default: the session's
         // own record supplies the profile and target.
