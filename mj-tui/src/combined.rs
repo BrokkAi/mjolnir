@@ -954,6 +954,11 @@ fn render_combined_themed(
                             footer: None,
                             overlay: pane_rect,
                             title_controls: title_controls(close_chip),
+                            title_lead: crate::pane_controls::pane_chrome_width(
+                                dashboard,
+                                pane_id,
+                                transcript_area.width,
+                            ),
                             pane_focused: false,
                         },
                         false,
@@ -1056,6 +1061,11 @@ fn render_combined_themed(
                             overlay: pane_rect,
                             title_controls: title_controls(close_chip)
                                 + zoom_title_controls(zoom_chip),
+                            title_lead: crate::pane_controls::pane_chrome_width(
+                                dashboard,
+                                pane_id,
+                                transcript_area.width,
+                            ),
                             pane_focused: focus_borders,
                         },
                         prompt_focused,

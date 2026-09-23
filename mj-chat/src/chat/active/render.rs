@@ -33,6 +33,7 @@ pub(crate) fn render_full_frame(
             footer: Some(test_footer(chunks[2])),
             overlay: inner,
             title_controls: 0,
+            title_lead: 0,
             pane_focused: false,
         },
         true,
@@ -121,6 +122,7 @@ pub(crate) fn render_in(
             chat,
             transcript_selected,
             regions.title_controls,
+            regions.title_lead,
             regions.pane_focused,
         );
         if question_height > 0
@@ -176,6 +178,7 @@ pub(crate) fn render_in(
         chat,
         transcript_selected,
         regions.title_controls,
+        regions.title_lead,
         regions.pane_focused,
     );
     chat.reviewer_area = None;

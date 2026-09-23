@@ -233,6 +233,34 @@ impl DashboardState {
     }
 }
 
+const PANE_CHROME_SUFFIX: &str = "| Conversation ";
+
+/// The pane's own name in its title row: Browse, its pin badge, or Empty.
+fn pane_chrome_label(dashboard: &DashboardState, pane: PaneId) -> String {
+    let badge = dashboard
+        .pane_session(pane)
+        .and_then(|id| dashboard.pin_id(id));
+    if pane == dashboard.browse_pane() {
+        "Browse".to_owned()
+    } else if let Some(badge) = badge {
+        format!("{} {}", theme::glyphs().pinned, theme::pin_label(badge))
+    } else {
+        "Empty".to_owned()
+    }
+}
+
+/// How many columns at the left of a pane's title row `render_pane_chrome`
+/// draws over, so the conversation drawn beneath can start its own title
+/// after them instead of losing its first words.
+pub(crate) fn pane_chrome_width(dashboard: &DashboardState, pane: PaneId, width: u16) -> u16 {
+    if width < 12 {
+        return 0;
+    }
+    let label = pane_chrome_label(dashboard, pane);
+    let drawn = Line::from(format!(" {label} {PANE_CHROME_SUFFIX}")).width();
+    u16::try_from(drawn).unwrap_or(u16::MAX).min(width - 12)
+}
+
 pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) {
     for &(pane, transcript, _) in &dashboard.conversation_pane_areas {
         if transcript.width < 12 || transcript.height == 0 {
@@ -240,13 +268,7 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
         }
         let session = dashboard.pane_session(pane);
         let badge = session.and_then(|id| dashboard.pin_id(id));
-        let label = if pane == dashboard.browse_pane() {
-            "Browse".to_owned()
-        } else if let Some(badge) = badge {
-            format!("{} {}", theme::glyphs().pinned, theme::pin_label(badge))
-        } else {
-            "Empty".to_owned()
-        };
+        let label = pane_chrome_label(dashboard, pane);
         let style = badge.map_or_else(theme::muted, |id| Style::default().fg(theme::pin_color(id)));
         let badge_style = if dashboard.focus() == Focus::Sessions
             && session.is_some()
@@ -259,7 +281,7 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
         };
         let header = Line::from(vec![
             ratatui::text::Span::styled(format!(" {label} "), badge_style),
-            ratatui::text::Span::styled("| Conversation ", theme::muted()),
+            ratatui::text::Span::styled(PANE_CHROME_SUFFIX, theme::muted()),
         ]);
         frame.render_widget(
             Paragraph::new(header),

@@ -659,6 +659,7 @@ async fn transcript_scrollbar_gestures_bypass_text_selection() {
                     footer: None,
                     overlay: frame.area(),
                     title_controls: 0,
+                    title_lead: 0,
                     pane_focused: false,
                 },
                 true,
@@ -1735,4 +1736,49 @@ async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
             .all(mj_chat::chat::ActiveChat::session_feed_open)
     );
     assert!(notices.iter().all(|notices| notices.current().is_none()));
+}
+
+/// Launch findings B-2 and D-1: the pane chrome ("Browse | Conversation")
+/// was drawn over the start of the conversation's own title, so the title
+/// row read `Conversation e` for Idle. The title must start after the
+/// chrome, so the target and the state word stay whole.
+#[tokio::test]
+async fn the_pane_chrome_does_not_cover_the_conversation_title() {
+    let mut dashboard = populated_dashboard();
+    let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+    let chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity {
+            target: "podman-target".into(),
+            profile: "fake".into(),
+            title: "S4".into(),
+            ..SessionHeaderIdentity::default()
+        },
+        String::new(),
+        Notices::default(),
+    );
+    let mut chats = focused_chats(&mut dashboard, chat);
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let title = rows
+        .iter()
+        .find(|row| row.contains("| Conversation"))
+        .unwrap_or_else(|| panic!("no pane title row:\n{}", rows.join("\n")));
+    assert!(title.contains("| Conversation  podman-target  "), "{title}");
+    assert!(title.contains("  fake  S4"), "{title}");
 }

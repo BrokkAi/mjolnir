@@ -177,6 +177,10 @@ pub struct ChatRegions<'a> {
     pub footer: Option<ChatFooter<'a>>,
     pub overlay: Rect,
     pub title_controls: u16,
+    /// How many columns the host draws its own label into at the left of the
+    /// transcript's title row. The title starts after them, so the label does
+    /// not cover the title's first words.
+    pub title_lead: u16,
     pub pane_focused: bool,
 }
 

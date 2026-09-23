@@ -2240,6 +2240,7 @@ async fn the_task_dialog_and_setup_form_are_centred_within_their_overlay_rect() 
         footer: None,
         overlay: pane,
         title_controls: 0,
+        title_lead: 0,
         pane_focused: true,
     };
     let outside_is_untouched = |terminal: &Terminal<TestBackend>, what: &str| {
@@ -2335,6 +2336,7 @@ fn the_task_dialog_claims_only_the_pointer_over_itself() {
                     footer: None,
                     overlay: pane,
                     title_controls: 0,
+                    title_lead: 0,
                     pane_focused: true,
                 },
                 false,
@@ -2380,6 +2382,7 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         footer: None,
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 
@@ -2517,6 +2520,7 @@ fn draw_in_draws_a_cursor_only_when_the_prompt_has_focus() {
         footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 

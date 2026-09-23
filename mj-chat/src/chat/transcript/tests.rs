@@ -476,7 +476,7 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, 0, false);
+            render_transcript(frame, frame.area(), &mut chat, false, 0, 0, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -505,7 +505,7 @@ fn the_transcript_border_follows_the_hosts_pane_focus() {
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                render_transcript(frame, frame.area(), &mut chat, false, 0, pane_focused);
+                render_transcript(frame, frame.area(), &mut chat, false, 0, 0, pane_focused);
             })
             .expect("render conversation");
         terminal.backend().buffer()[(0, 0)].fg
@@ -527,7 +527,7 @@ fn a_long_title_stops_short_of_the_columns_the_host_reserved() {
     let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, reserve, false);
+            render_transcript(frame, frame.area(), &mut chat, false, reserve, 0, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -555,7 +555,7 @@ fn long_conversation_titles_use_the_header_width_while_working() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_transcript(frame, area, &mut chat, false, 0, false);
+                render_transcript(frame, area, &mut chat, false, 0, 0, false);
             })
             .expect("render conversation");
         let buffer = terminal.backend().buffer();
