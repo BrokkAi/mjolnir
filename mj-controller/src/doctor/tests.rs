@@ -146,6 +146,54 @@ fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
     assert!(!remediation.contains("mj setup"), "{remediation}");
 }
 
+/// Sessions start from a plain project directory without any bundle, so a
+/// configuration with an enabled profile and no bundle is complete.
+#[test]
+fn a_config_without_a_bundle_is_ready_for_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: directory.path().join("codex-home"),
+        environment: std::collections::BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    Config {
+        profiles: [("work".to_owned(), profile)].into_iter().collect(),
+        ..Config::default()
+    }
+    .save_to(&path)
+    .unwrap();
+
+    let (_, checks) = configuration_checks(&path);
+
+    let check = checks
+        .iter()
+        .find(|check| check.id == "config.session-prerequisites")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
+    assert!(all_ready(&checks));
+}
+
+#[test]
+fn a_config_without_an_enabled_profile_cannot_start_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    Config::default().save_to(&path).unwrap();
+
+    let (_, checks) = configuration_checks(&path);
+
+    let check = checks
+        .iter()
+        .find(|check| check.id == "config.session-prerequisites")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert!(check.detail.contains("profile"), "{}", check.detail);
+    assert!(!check.detail.contains("bundle"), "{}", check.detail);
+}
+
 /// A newer build's configuration is the one case doctor cannot read and the
 /// user cannot repair in the file, so no check in the run may send them to fix
 /// TOML; the checks that depend on a configuration skip and say why.

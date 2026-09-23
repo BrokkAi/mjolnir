@@ -327,6 +327,17 @@ fn harness_discovery_check_from(
     )
 }
 
+/// The key that opens Settings, as the help overlay labels it (`ctrl+b s`
+/// by default). Without a readable configuration the default bindings apply.
+fn settings_key(config: Option<&Config>) -> String {
+    let keybinds = config.map_or_else(mj_core::config::Keybinds::default, Config::keybinds);
+    keybinds
+        .labels(mj_core::config::KeyAction::OpenSettings)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "the Settings command in the command palette".to_owned())
+}
+
 pub fn all_ready(checks: &[DoctorCheck]) -> bool {
     checks
         .iter()
@@ -464,12 +475,24 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "Mjolnir configuration",
                 format!("{} is valid", path.display()),
             )];
-            if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
+            // A bundle only names a set of repositories to start from; a
+            // session can start from any project directory without one, so
+            // only the missing profile keeps sessions from starting.
+            if config.enabled_profiles().next().is_none() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
                     "Session configuration",
-                    "An enabled profile and project bundle are required for configured bundle sessions. Local targets are supplied automatically.",
-                    "Open F7 Settings to add or enable agent profiles and projects.",
+                    "No agent profile is enabled, so no session can start. Local targets are supplied automatically.",
+                    format!(
+                        "Open Mjolnir and press {} for Settings to add or enable an agent profile.",
+                        settings_key(Some(&config))
+                    ),
+                ));
+            } else if config.bundles.is_empty() {
+                checks.push(DoctorCheck::ready(
+                    "config.session-prerequisites",
+                    "Session configuration",
+                    "An agent profile is enabled. No project bundle is configured; sessions start from a project directory, and a bundle is only needed to start from a saved set of repositories.",
                 ));
             } else {
                 checks.push(DoctorCheck::ready(
