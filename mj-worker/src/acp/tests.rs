@@ -6502,6 +6502,34 @@ async fn live_adapter_compacts_and_replaces_context() {
 }
 
 #[test]
+fn a_permission_form_shows_the_command_it_approves() {
+    // I2-5: Kimi's reviewer asked "requests permission: Bash" with no command.
+    assert_eq!(
+        permission_title_with_command("Bash", Some(&serde_json::json!({"command": "ls -la"}))),
+        "Bash\n$ ls -la"
+    );
+    assert_eq!(
+        permission_title_with_command(
+            "Shell",
+            Some(&serde_json::json!({"command": ["git", "status"]}))
+        ),
+        "Shell\n$ git status"
+    );
+    // A title that already names the command is not repeated.
+    assert_eq!(
+        permission_title_with_command(
+            "Run ls -la",
+            Some(&serde_json::json!({"command": "ls -la"}))
+        ),
+        "Run ls -la"
+    );
+    assert_eq!(
+        permission_title_with_command("Edit a.py", None),
+        "Edit a.py"
+    );
+}
+
+#[test]
 fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
     // form stayed open on an idle session.

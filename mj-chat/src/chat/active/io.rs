@@ -229,6 +229,10 @@ impl ActiveChat {
                 let _ = acknowledged.send(());
                 return;
             }
+            ChatIoUpdate::ReviewerNotice(notice) => {
+                self.state.conversation_notice(notice);
+                return;
+            }
             ChatIoUpdate::ReviewerStarted(result) => {
                 if let Err(error) = result {
                     if let Some(view) = self.state.second_opinion_mut() {

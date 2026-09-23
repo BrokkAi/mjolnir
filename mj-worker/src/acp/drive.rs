@@ -516,7 +516,10 @@ where
                     .map(str::trim)
                     .filter(|title| !title.is_empty())
                 {
-                    Some(title) => title.to_owned(),
+                    Some(title) => permission_title_with_command(
+                        title,
+                        request.tool_call.fields.raw_input.as_ref(),
+                    ),
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
                 };
@@ -986,6 +989,33 @@ where
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// A permission form's text: the tool call's title, and the command it would
+/// run when the title does not already show it. Kimi titles a shell request
+/// just "Bash", which left the person approving a command they could not
+/// see (I2-5).
+pub(super) fn permission_title_with_command(
+    title: &str,
+    raw_input: Option<&serde_json::Value>,
+) -> String {
+    let command = raw_input.and_then(|input| {
+        let value = input.get("command").or_else(|| input.get("cmd"))?;
+        match value {
+            serde_json::Value::String(command) => Some(command.trim().to_owned()),
+            serde_json::Value::Array(parts) => {
+                let parts: Vec<&str> = parts.iter().filter_map(serde_json::Value::as_str).collect();
+                (!parts.is_empty()).then(|| parts.join(" "))
+            }
+            _ => None,
+        }
+    });
+    match command {
+        Some(command) if !command.is_empty() && !title.contains(&command) => {
+            format!("{title}\n$ {command}")
+        }
+        _ => title.to_owned(),
+    }
 }
 
 /// Drops the answer channel of every pending tool permission request. Each
