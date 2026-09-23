@@ -805,6 +805,23 @@ impl ChatState {
                 top,
             };
         }
+        // The opening reveal parks the view on the latest reply, but the
+        // reader did not scroll there. Once something newer arrives, follow
+        // the tail again. Any scroll by the reader moves the anchor off the
+        // revealed row and ends this.
+        if let Some((revealed, last)) = self.revealed_anchor {
+            let still_revealed = matches!(
+                self.anchor,
+                TranscriptAnchor::Row { entry, row: 0 }
+                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
+            );
+            if !still_revealed {
+                self.revealed_anchor = None;
+            } else if self.entries.last().map(|entry| entry.start_seq) != Some(last) {
+                self.anchor = TranscriptAnchor::Bottom;
+                self.revealed_anchor = None;
+            }
+        }
         if self.reveal_latest_agent_on_draw
             && self.unconverted_prefix == 0
             && self.anchor == TranscriptAnchor::Bottom
@@ -820,6 +837,10 @@ impl ChatState {
             });
             if let Some(entry) = latest_agent.filter(|_| agent_is_above_tail) {
                 self.anchor = TranscriptAnchor::Row { entry, row: 0 };
+                self.revealed_anchor = self
+                    .entries
+                    .last()
+                    .map(|last| (self.entries[entry].start_seq, last.start_seq));
             } else {
                 return tail;
             }

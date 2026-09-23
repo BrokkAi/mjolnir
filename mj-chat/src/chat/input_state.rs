@@ -35,6 +35,7 @@ impl ChatState {
         self.autocomplete = None;
         self.anchor = TranscriptAnchor::Bottom;
         self.reveal_latest_agent_on_draw = true;
+        self.revealed_anchor = None;
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
         self.transcript_scrollbar.clear();

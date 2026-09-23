@@ -611,6 +611,10 @@ pub struct ChatState {
     /// On entry, reveal the response advertised by the session list when later
     /// tool activity would otherwise push it above the first viewport.
     reveal_latest_agent_on_draw: bool,
+    /// The revealed reply's `start_seq` and the newest entry's `start_seq`
+    /// when the reveal happened, while the view still rests there. Newer
+    /// content then returns the view to the tail.
+    revealed_anchor: Option<(u64, u64)>,
     last_viewport_height: usize,
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
@@ -790,6 +794,7 @@ impl ChatState {
             config_picker: None,
             anchor: TranscriptAnchor::Bottom,
             reveal_latest_agent_on_draw: true,
+            revealed_anchor: None,
             last_viewport_height: 0,
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
