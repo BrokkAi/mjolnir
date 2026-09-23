@@ -289,7 +289,14 @@ const ROOT_GROUPS: &[(&str, &[&str])] = &[
     ("Setup", &["profiles", "bundles", "targets", "machines"]),
     (
         "Sessions",
-        &["review", "subagents", "sessionwiki", "build_cache", "phone"],
+        &[
+            "review",
+            "continuation",
+            "subagents",
+            "sessionwiki",
+            "build_cache",
+            "phone",
+        ],
     ),
     ("Display", &["interface", "notify", "advanced"]),
 ];

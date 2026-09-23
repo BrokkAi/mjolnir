@@ -392,6 +392,8 @@ impl TileLayout {
         sessions: &std::collections::BTreeMap<PaneId, String>,
     ) -> ConversationLayout {
         ConversationLayout {
+            browse: None,
+            pins: Default::default(),
             root: saved_node(&self.root),
             focus: self.focus.raw(),
             sessions: sessions

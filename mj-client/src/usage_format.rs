@@ -34,6 +34,7 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 pub struct SessionActivity {
     pub pursuing_goal: bool,
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     /// Durable turn start retained through the background work it launched.
     pub activity_turn_started_at_ms: Option<i64>,
     pub prompt_in_flight: bool,
@@ -69,6 +70,11 @@ impl SessionActivity {
         Self {
             pursuing_goal: operational.goal.active(),
             capacity_retry: operational.capacity_retry.clone(),
+            quota_recovery: operational
+                .continuation
+                .quota_recovery
+                .clone()
+                .filter(|r| !r.submitted),
             activity_turn_started_at_ms: operational
                 .active_prompt
                 .as_ref()
@@ -114,7 +120,8 @@ impl SessionActivity {
         match self.kind(current_turn_started_at) {
             SessionActivityKind::Idle
             | SessionActivityKind::Goal
-            | SessionActivityKind::Expecting => false,
+            | SessionActivityKind::Expecting
+            | SessionActivityKind::CheckingContinuation => false,
             SessionActivityKind::Lifecycle => {
                 self.execution == Some(mj_core::relay::RelayExecutionState::Closing)
             }
@@ -135,11 +142,17 @@ impl SessionActivity {
         current_step_started_at_ms: Option<u64>,
         detailed: bool,
     ) -> String {
+        if let Some(recovery) = &self.quota_recovery {
+            return quota_status(recovery, now_epoch_seconds);
+        }
         if let Some(retry) = &self.capacity_retry {
             return retry
                 .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
         }
         let kind = self.kind(current_turn_started_at);
+        if kind == SessionActivityKind::CheckingContinuation {
+            return "Checking continuation".into();
+        }
         if kind == SessionActivityKind::Expecting {
             return "expecting the agent to continue".into();
         }
@@ -257,6 +270,7 @@ impl SessionActivity {
         let label = match kind {
             SessionActivityKind::Lifecycle => Some(self.lifecycle_label().to_owned()),
             SessionActivityKind::Goal => Some("Pursuing goal".into()),
+            SessionActivityKind::CheckingContinuation => Some("Checking continuation".into()),
             SessionActivityKind::Expecting => Some("expecting the agent to continue".into()),
             _ => None,
         };
@@ -357,6 +371,7 @@ impl SessionActivity {
             ActivityState::Goal | ActivityState::Retry => SessionActivityKind::Goal,
             ActivityState::Idle { .. } => SessionActivityKind::Idle,
             ActivityState::Expecting { .. } => SessionActivityKind::Expecting,
+            ActivityState::CheckingContinuation => SessionActivityKind::CheckingContinuation,
             // A state this build does not know is something happening, and
             // "Turn" is the honest way to render an unnamed something.
             ActivityState::Unknown { .. } | ActivityState::Unrecognized => {
@@ -401,6 +416,7 @@ impl SessionActivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivityKind {
     Expecting,
+    CheckingContinuation,
     Goal,
     Turn,
     Step,
@@ -452,6 +468,9 @@ pub fn format_activity_columns(
     current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
 ) -> Vec<String> {
+    if let Some(recovery) = &activity.quota_recovery {
+        return vec![quota_status(recovery, now_epoch_seconds)];
+    }
     if let Some(retry) = &activity.capacity_retry {
         return vec![
             retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
@@ -500,6 +519,7 @@ pub fn format_activity_columns(
         SessionActivityKind::Lifecycle => vec![activity.lifecycle_label().to_owned()],
         SessionActivityKind::Idle => vec!["[idle]".into()],
         SessionActivityKind::Goal => vec!["Pursuing goal".into()],
+        SessionActivityKind::CheckingContinuation => vec!["Checking continuation".into()],
         SessionActivityKind::Expecting => vec!["expecting the agent to continue".into()],
     }
 }
@@ -510,6 +530,9 @@ pub fn format_activity_clock(
     current_turn_started_at: Option<u64>,
     activity: &SessionActivity,
 ) -> String {
+    if let Some(recovery) = &activity.quota_recovery {
+        return quota_status(recovery, now_epoch_seconds);
+    }
     if let Some(retry) = &activity.capacity_retry {
         return retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
     }
@@ -535,13 +558,49 @@ pub fn format_activity_clock(
         SessionActivityKind::Lifecycle => format!("[{}]", activity.lifecycle_label()),
         SessionActivityKind::Idle => "[idle]".into(),
         SessionActivityKind::Goal => "Pursuing goal".into(),
+        SessionActivityKind::CheckingContinuation => "Checking continuation".into(),
         SessionActivityKind::Expecting => "expecting the agent to continue".into(),
+    }
+}
+
+fn quota_status(recovery: &mj_core::continuation::QuotaRecovery, now_seconds: u64) -> String {
+    match recovery.retry_at_ms {
+        Some(deadline) => format!(
+            "Quota limit · resumes in {}",
+            format_clock((deadline.max(0) as u64 / 1000).saturating_sub(now_seconds))
+        ),
+        None => "Quota limit · reset time unknown".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_recovery_status_shows_wait_and_unknown_deadline() {
+        let mut activity = SessionActivity {
+            quota_recovery: Some(mj_core::continuation::QuotaRecovery {
+                user_command_id: "user-request".into(),
+                completed_command_id: "completed".into(),
+                profile_id: "test".into(),
+                reset_at_ms: Some(60_000),
+                retry_at_ms: Some(120_000),
+                notice: "waiting".into(),
+                submitted: false,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            activity.display_clock(60, None, None, false),
+            "Quota limit · resumes in 1m00s"
+        );
+        activity.quota_recovery.as_mut().unwrap().retry_at_ms = None;
+        assert_eq!(
+            format_activity_clock(60, None, &activity),
+            "Quota limit · reset time unknown"
+        );
+    }
 
     #[test]
     fn expected_continuation_is_visible_without_claiming_running_work() {
@@ -669,6 +728,7 @@ mod tests {
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
             pursuing_goal: false,
+            quota_recovery: None,
             capacity_retry: None,
             execution: None,
             activity_turn_started_at_ms: None,

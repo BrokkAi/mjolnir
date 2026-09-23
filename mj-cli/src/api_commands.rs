@@ -78,18 +78,24 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
 
 #[derive(Debug, Args)]
 pub(crate) struct NewArgs {
-    /// Profile the session runs its harness from.
+    /// Profile the session runs its harness from. Omit it to use the saved
+    /// default that `mj go` records.
     #[arg(long)]
-    profile: String,
-    /// Target template the session is provisioned on.
+    profile: Option<String>,
+    /// Target template the session is provisioned on. Omit it to use the
+    /// saved default that `mj go` records.
     #[arg(long)]
-    target: String,
+    target: Option<String>,
     /// Existing bundle to run. Omit it to bundle `--project-directory`.
     #[arg(long)]
     bundle: Option<String>,
     /// Directory to bundle and run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
+    /// Start the session at this Git revision instead of HEAD (worktree) or
+    /// the remote default branch (bundle) and diff against it.
+    #[arg(long, value_name = "REV")]
+    base: Option<String>,
     /// Workspace id to create the session in. The global `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
@@ -277,6 +283,9 @@ pub(crate) async fn respond(args: RespondArgs) -> Result<()> {
 pub(crate) struct DiffArgs {
     #[arg(long)]
     session: String,
+    /// Compare against this Git commit or revision instead of the launch base.
+    #[arg(long)]
+    base: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -475,6 +484,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         mjolnir_subagents: None,
         create_managed_worktree: None,
+        launch_base: args.base.clone(),
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
@@ -586,6 +596,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     {
         lines.push(diagnostic.message.clone());
     }
+    if let Some(recovery) = &response.quota_recovery {
+        lines.push(recovery.notice.clone());
+    }
     if let Some(retry) = &response.capacity_retry {
         lines.push(format!(
             "a capacity retry is armed (attempt {}); do not send another prompt yet",
@@ -660,14 +673,28 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
 
 pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let diff = client.diff(&args.session).await?;
-    match args.json {
-        true => print_json(&serde_json::json!({ "diff": diff })),
-        false => {
-            print!("{diff}");
-            std::io::stdout().flush().context("write the session diff")
-        }
+    // The metadata form is always requested: the plain form prints only the
+    // patch, but the divergence warning comes from the same answer.
+    let body = client
+        .diff(&args.session, args.base.as_deref(), true)
+        .await?;
+    let details = serde_json::from_str::<mj_checkpoint::archive::SessionDiff>(&body)
+        .context("decode session diff metadata")?;
+    if args.json {
+        return print_json(&details);
     }
+    print!("{}", details.diff);
+    std::io::stdout()
+        .flush()
+        .context("write the session diff")?;
+    if details.head_descends_from_base == Some(false) {
+        let head = details.head.chars().take(12).collect::<String>();
+        let base = details.base.chars().take(12).collect::<String>();
+        eprintln!(
+            "warning: HEAD {head} does not descend from base {base}; the diff includes history changes, not only session work. Pass --base to pick another base."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn export(args: ExportArgs) -> Result<()> {
@@ -1188,6 +1215,43 @@ mod tests {
         serde_json::from_value(body).expect("wait response")
     }
 
+    #[test]
+    fn new_accepts_a_launch_base_and_leaves_it_unset_otherwise() {
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--profile",
+            "codex",
+            "--target",
+            "raw",
+            "--project-directory",
+            "/srv/project",
+            "--base",
+            "HEAD~1",
+        ])
+        .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.base.as_deref(), Some("HEAD~1"));
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--profile",
+            "codex",
+            "--target",
+            "raw",
+            "--project-directory",
+            "/srv/project",
+        ])
+        .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.base, None);
+    }
+
     /// A turn the worker failed for going quiet has to say why, where a script
     /// waiting on it can see it. Before this the reason lived only in the
     /// transcript and `mj wait` printed the bare word "error" (#1020).
@@ -1250,8 +1314,8 @@ mod tests {
         let Some(Command::New(args)) = cli.command else {
             panic!("expected the new subcommand");
         };
-        assert_eq!(args.profile, "codex");
-        assert_eq!(args.target, "local");
+        assert_eq!(args.profile.as_deref(), Some("codex"));
+        assert_eq!(args.target.as_deref(), Some("local"));
         assert_eq!(args.project_directory, Some(PathBuf::from(".")));
         assert_eq!(args.model.as_deref(), Some("gpt-5"));
         assert_eq!(args.effort.as_deref(), Some("high"));
@@ -1299,6 +1363,20 @@ mod tests {
         assert_eq!(args.workspace_id.as_deref(), Some("workspace-7"));
         assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn creating_a_session_does_not_require_naming_a_profile_or_target() {
+        // Both identifiers fall back to the default `mj go` records, so a
+        // caller that has never read its configuration can still start work.
+        let cli = Cli::try_parse_from(["mj", "new", "--bundle", "bundle-1", "add a README line"])
+            .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new subcommand");
+        };
+        assert!(args.profile.is_none());
+        assert!(args.target.is_none());
+        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
     }
 
     #[test]
@@ -1436,6 +1514,22 @@ mod tests {
         assert_eq!(args.profile.as_deref(), Some("deepseek"));
         assert_eq!(args.target.as_deref(), Some("localhost"));
         assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
+        assert!(args.json);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "diff",
+            "--session",
+            "s1",
+            "--base",
+            "HEAD~2",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Diff(args)) = cli.command else {
+            panic!("expected the diff subcommand");
+        };
+        assert_eq!(args.base.as_deref(), Some("HEAD~2"));
         assert!(args.json);
 
         for (argv, matched) in [

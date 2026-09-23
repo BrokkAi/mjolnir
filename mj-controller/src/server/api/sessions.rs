@@ -63,11 +63,10 @@ pub(super) async fn start_session(
     if let Some(prompt) = &request.prompt {
         validate_prompt_text(prompt, false)?;
     }
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
-    crate::server::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    let (profile_id, target_id) = resolve_launch(&state, &request)?;
     if request.model.is_some() || request.effort.is_some() {
         let mut choices = backend
-            .profile_config(request.profile_id.clone(), request.model.clone(), false)
+            .profile_config(profile_id.clone(), request.model.clone(), false)
             .await
             .map_err(|error| {
                 ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
@@ -80,7 +79,7 @@ pub(super) async fn start_session(
         .is_err()
         {
             choices = backend
-                .profile_config(request.profile_id.clone(), request.model.clone(), true)
+                .profile_config(profile_id.clone(), request.model.clone(), true)
                 .await
                 .map_err(|error| {
                     ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
@@ -107,11 +106,12 @@ pub(super) async fn start_session(
     };
     let action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
+        launch_base: request.launch_base.clone(),
         mjolnir_subagents: request.mjolnir_subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
-        profile_id: request.profile_id.clone(),
+        profile_id,
         bundle_id,
-        target_id: request.target_id.clone(),
+        target_id,
         title: request.title.clone(),
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),
@@ -157,6 +157,69 @@ pub(super) async fn start_session(
             turn_id: None,
         }),
     ))
+}
+
+/// Resolve the profile and target for a new session.
+///
+/// A caller may leave either identifier unnamed, and the two resolve
+/// independently, so naming a profile while taking the saved default target is
+/// allowed. The fallback is the pair the `mj go` workflow saves beside
+/// `config.toml`, which is what lets a caller that has never read that file
+/// create a session at all. Resolution happens here rather than in the
+/// controller so that every caller of this route behaves the same way and the
+/// controller always receives two explicit identifiers.
+///
+/// A saved default can name something the user has since deleted. That is worth
+/// its own sentence: the caller named nothing, so "unknown profile" alone would
+/// read as though it had.
+fn resolve_launch(
+    state: &ServerState,
+    request: &StartSessionRequest,
+) -> Result<(String, String), ApiFailure> {
+    let snapshot = state.snapshot_rx.borrow();
+    let saved = saved_default(&state.preferences_path);
+    let profile_id = resolve_launch_id(
+        request.profile_id.as_deref(),
+        saved.as_ref().map(|saved| saved.profile_id.as_str()),
+        "profile_id",
+    )?;
+    let target_id = resolve_launch_id(
+        request.target_id.as_deref(),
+        saved.as_ref().map(|saved| saved.target_id.as_str()),
+        "target_id",
+    )?;
+    if let Err(error) = crate::server::require_profile(&snapshot, &profile_id) {
+        return Err(if request.profile_id.is_some() {
+            error.into()
+        } else {
+            ApiFailure::bad_request(format!(
+                "the saved default names an unknown profile \"{profile_id}\"; name a profile_id"
+            ))
+        });
+    }
+    if let Err(error) = crate::server::require_target(&snapshot, &target_id) {
+        return Err(if request.target_id.is_some() {
+            error.into()
+        } else {
+            ApiFailure::bad_request(format!(
+                "the saved default names an unknown target \"{target_id}\"; name a target_id"
+            ))
+        });
+    }
+    Ok((profile_id, target_id))
+}
+
+/// One launch identifier the caller may have left unnamed.
+fn resolve_launch_id(
+    named: Option<&str>,
+    saved: Option<&str>,
+    field: &str,
+) -> Result<String, ApiFailure> {
+    named.or(saved).map(str::to_owned).ok_or_else(|| {
+        ApiFailure::bad_request(format!(
+            "name a {field}; this instance has no saved default to fall back on"
+        ))
+    })
 }
 
 /// Resume a stopped session from its checkpoint.

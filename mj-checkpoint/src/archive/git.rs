@@ -1351,13 +1351,36 @@ impl From<anyhow::Error> for SessionExportError {
 /// whether or not it committed. The base is resolved in the order the caller
 /// can trust: an explicit base, then the immutable base a managed network
 /// workspace records, then the commit the session branch was created at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDiff {
+    pub diff: String,
+    pub base: String,
+    pub head: String,
+    /// Whether the base is an ancestor of HEAD. `false` means the session
+    /// rewrote history the base was on, so the diff carries changes the
+    /// session did not make. `None` is an older worker whose JSON predates
+    /// this field.
+    #[serde(default)]
+    pub head_descends_from_base: Option<bool>,
+}
+
 pub fn session_diff(
     runner: &dyn GitCommandRunner,
     repository: &Path,
     base: Option<&str>,
     branch: Option<&str>,
 ) -> Result<String, SessionExportError> {
-    let base = match base.map(str::trim).filter(|base| !base.is_empty()) {
+    Ok(session_diff_details(runner, repository, base, branch)?.diff)
+}
+
+pub fn session_diff_details(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> Result<SessionDiff, SessionExportError> {
+    let base = match base.map(str::trim) {
+        Some("") => return Err(SessionExportError::refused("diff base must not be empty")),
         Some(base) => base.to_owned(),
         None => {
             let recorded = match branch {
@@ -1370,6 +1393,48 @@ pub fn session_diff(
             recorded.ok_or_else(|| SessionExportError::refused("no session base recorded"))?
         }
     };
+    let resolved = run_git(
+        runner,
+        repository,
+        [
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+        &[],
+    )?;
+    if resolved.status != 0 {
+        return Err(SessionExportError::refused(format!(
+            "diff base {base:?} does not resolve to a commit"
+        )));
+    }
+    let base = trim_output(&resolved.stdout, "resolve the session diff base")?;
+    let head = git_text(
+        runner,
+        repository,
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+    )
+    .context("resolve the session diff head")?;
+    // A base that HEAD no longer descends from means the session rewrote the
+    // history the base sits on, so the diff reverts commits the session never
+    // touched. Status 1 is Git's plain "not an ancestor", not a failure.
+    let ancestry = run_git(
+        runner,
+        repository,
+        ["merge-base", "--is-ancestor", &base, &head],
+        &[],
+    )?;
+    let head_descends_from_base = match ancestry.status {
+        0 => Some(true),
+        1 => Some(false),
+        _ => {
+            return Err(SessionExportError::Failed(git_failure(
+                "compare the session base with HEAD",
+                &ancestry,
+            )));
+        }
+    };
     let base_tree = git_text(
         runner,
         repository,
@@ -1377,12 +1442,13 @@ pub fn session_diff(
     )
     .context("resolve the session base tree")?;
     let current = capture_worktree_tree(runner, repository)?;
-    Ok(diff_between_trees(
-        runner,
-        repository,
-        Some(&base_tree),
-        &current,
-    )?)
+    let diff = diff_between_trees(runner, repository, Some(&base_tree), &current)?;
+    Ok(SessionDiff {
+        diff,
+        base,
+        head,
+        head_descends_from_base,
+    })
 }
 
 /// The commit a branch was created at, read from its reflog.

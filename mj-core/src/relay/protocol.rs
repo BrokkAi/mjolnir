@@ -65,6 +65,11 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     Status,
+    /// Atomically admit a checkpoint barrier only when no work would be lost.
+    /// Uses the existing barrier journal and connection-disconnect cleanup.
+    ReserveIdle {
+        command_id: String,
+    },
     AttachmentPresent {
         reference: crate::attachment::AttachmentRef,
     },
@@ -287,6 +292,7 @@ impl RelayRequest {
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
             Self::Status => "status",
+            Self::ReserveIdle { .. } => "reserve_idle",
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
@@ -318,6 +324,7 @@ impl RelayRequest {
     /// non-steering turn cancellation in 7.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
             | Self::CompleteHistoryRequest { .. } => 16,
@@ -398,6 +405,10 @@ pub enum RelayResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
+    /// `None` means work won the race; no barrier or other mutation occurred.
+    IdleReservation {
+        ordinal: Option<u64>,
+    },
     Hello {
         negotiated: u32,
         relay_version: String,

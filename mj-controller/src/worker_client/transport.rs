@@ -51,9 +51,20 @@ impl Drop for RelayClient {
             return;
         };
         let session_id = self.session_id.clone();
+        // The proxy's SSH session stays leased until the reaper is done with
+        // the child.
+        let ssh_session = self.ssh_session.take();
         if let Err(error) = std::thread::Builder::new()
             .name("hel-relay-reaper".into())
-            .spawn(move || reap_dropped_relay_proxy(child, session_id))
+            .spawn(move || {
+                reap_dropped_relay_proxy(child, session_id);
+                // Hold the lease until this closure returns, which is after the
+                // reaper has finished with the child. The hold is a binding
+                // rather than an explicit `drop` because on a platform with no
+                // connection sharing the lease has no destructor, so dropping
+                // it explicitly is a no-op that clippy denies.
+                let _lease = ssh_session;
+            })
         {
             tracing::warn!(
                 session_id = %self.session_id,

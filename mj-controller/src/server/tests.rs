@@ -49,6 +49,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -102,6 +103,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: BTreeMap::from([(
             "session-1".into(),
             SessionRecord {
+                launch_base: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -1208,6 +1210,46 @@ fn run_viewer_script(name: &str, script: &str) {
     run_web_check(name, script);
 }
 
+#[test]
+fn web_upgrade_waits_for_readiness_and_retries_only_explicit_refusals() {
+    let source = viewer_source(
+        "async function upgradeAwareFetch",
+        "async function request(",
+    );
+    run_viewer_script(
+        "upgrade-admission",
+        &format!(
+            r#"
+{source}
+const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
+globalThis.setTimeout = callback => {{ callback(); }};
+const options = {{ method: 'POST', body: JSON.stringify({{command_id:'steer-1', active_prompt_id:'turn-1'}}) }};
+let actions = 0, probes = 0;
+const response = (status, pending = false) => ({{ status, ok:status === 200,
+  headers:{{get:() => pending ? 'pending' : null}}, body:{{cancel:async () => {{}}}} }});
+globalThis.fetch = async (url, sent) => {{
+  if (url === '/') {{
+    probes++;
+    if (probes === 1) throw new Error('old listener stopped');
+    return response(200);
+  }}
+  assert(sent === options, 'request identity or steering target changed');
+  return ++actions === 1 ? response(503, true) : response(200);
+}};
+assert((await upgradeAwareFetch('/api/actions', options)).ok, 'request did not complete');
+assert(actions === 2 && probes === 2, 'handoff did not wait for the replacement');
+globalThis.fetch = async () => {{ throw new Error('acknowledgement lost'); }};
+let failed = false;
+try {{ await upgradeAwareFetch('/api/actions', options); }} catch {{ failed = true; }}
+assert(failed, 'an ambiguous mutation must not be replayed');
+globalThis.fetch = async () => response(503);
+assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
+  'unrelated service failures must not trigger an upgrade retry');
+"#
+        ),
+    );
+}
+
 /// Live path suggestions are the only place the browser types and asks at
 /// once, so the shipped source has to drop an answer that no longer matches
 /// what the field holds, and accepting a row has to re-announce the edit.
@@ -1370,12 +1412,17 @@ if (sessionActivityLabel(session, 121000) !== 'Model at capacity · retrying in 
 
 #[test]
 fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
-    let source = viewer_source("function isResumeSession(", "const resumeDrafts =");
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function isSubagentSession(", "function liveSessions("),
+        viewer_source("function isResumeSession(", "const resumeDrafts ="),
+    );
     let setup = r#"
 const snapshot = {
   sessions: [
 { id: "history-a", workspace_id: "workspace-a", capabilities: { resume: true } },
 { id: "history-b", workspace_id: "workspace-b", capabilities: { resume: true } },
+{ id: "child-a", workspace_id: "workspace-a", subagent_parent_id: "absent-parent", capabilities: { resume: true } },
 { id: "running-a", workspace_id: "workspace-a", lifecycle: "live", has_error: true, capabilities: { resume: false, open: false } },
 { id: "move-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "failed" } },
 { id: "moving-a", workspace_id: "workspace-a", capabilities: { resume: false }, move_recovery: { checkpoint_retained: true, phase: "starting_queue" } },
@@ -1397,6 +1444,33 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 "#;
     run_viewer_script(
         "workspace-resume-history",
+        &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+#[test]
+fn embedded_viewer_lists_no_sub_agent_among_live_sessions() {
+    let source = viewer_source("function isSubagentSession(", "/// Sessions grouped by");
+    let setup = r#"
+const route = {};
+const snapshot = {
+  sessions: [
+{ id: "parent", workspace_id: "workspace-a", subagent_session_ids: ["listed-child"] },
+{ id: "listed-child", workspace_id: "workspace-a", subagent_parent_id: "parent" },
+{ id: "orphan-child", workspace_id: "workspace-a", subagent_parent_id: "absent-parent" },
+  ],
+};
+function selectedWorkspaceId() { return "workspace-a"; }
+function isDashboardSession() { return true; }
+"#;
+    let checks = r#"
+const ids = liveSessions().map(session => session.id);
+if (JSON.stringify(ids) !== JSON.stringify(["parent"])) {
+  throw new Error(`live sessions listed a sub-agent: ${JSON.stringify(ids)}`);
+}
+"#;
+    run_viewer_script(
+        "live-sessions-without-sub-agents",
         &format!("{setup}\n{source}\n{checks}"),
     );
 }
@@ -3088,6 +3162,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
     assert_eq!(
         action.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -3111,6 +3186,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -4006,4 +4082,419 @@ fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
     assert!(key.len() >= COOKIE_KEY_BYTES);
     assert_eq!(std::fs::read(&path).unwrap(), key);
     assert_eq!(load_or_create_cookie_key(&path).unwrap(), key);
+}
+
+#[tokio::test]
+async fn bookmarked_qr_login_survives_restart_and_is_revoked_with_the_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    for _ in 0..2 {
+        let mut restarted = detached_options();
+        restarted
+            .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+            .unwrap();
+        let app = router(restarted);
+        let response = app
+            .clone()
+            .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[LOCATION], "/");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let cookie = response.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let snapshot = app
+            .oneshot(
+                Request::get("/api/snapshot")
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+    }
+    std::fs::remove_file(&path).unwrap();
+    let mut rotated = detached_options();
+    rotated
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let response = router(rotated)
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn authenticated_requests_renew_cookies_without_changing_viewer_identity() {
+    for ttl in [Duration::from_secs(3600), Duration::ZERO] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let mut options = detached_options();
+            options.session_ttl = ttl;
+            let key = options.cookie_key.clone();
+            let now = now_unix();
+            let old_expiry = now + 60;
+            let viewer = if ttl.is_zero() {
+                "session:existing-viewer"
+            } else {
+                "phone:existing-viewer"
+            };
+            let old_cookie = signed_cookie_value(&key, viewer, old_expiry);
+            let response = router(options)
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={old_cookie}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            let header = response.headers()[SET_COOKIE].to_str().unwrap();
+            let renewed = cookie_value(header, COOKIE_NAME).unwrap();
+            assert_eq!(
+                cookie_viewer(&key, renewed, old_expiry).as_deref(),
+                Some(viewer)
+            );
+            let expiry = renewed.split('.').nth(1).unwrap().parse::<u64>().unwrap();
+            let validity = if ttl.is_zero() {
+                EPHEMERAL_SESSION_TTL
+            } else {
+                ttl
+            };
+            assert!(expiry >= now + validity.as_secs());
+            assert!(expiry <= now_unix() + validity.as_secs());
+            assert!(header.contains("HttpOnly"));
+            assert!(header.contains("SameSite=Strict"));
+            assert!(header.contains("Secure"));
+            assert_eq!(header.contains("Max-Age="), !ttl.is_zero());
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejected_cookies_are_not_renewed_and_bearer_auth_does_not_mint_a_cookie() {
+    let mut options = detached_options();
+    let key = options.cookie_key.clone();
+    options.set_api_token("test-bearer".into());
+    let app = router(options);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for value in [
+            None,
+            Some("malformed".to_owned()),
+            Some(signed_cookie_value(&key, "expired-viewer", now_unix())),
+            Some(signed_cookie_value(
+                b"wrong-key",
+                "wrong-viewer",
+                now_unix() + 3600,
+            )),
+        ] {
+            let mut request = Request::get(route);
+            if let Some(value) = value {
+                request = request.header(COOKIE, format!("{COOKIE_NAME}={value}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/sessions")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() {
+    let (app, mut bundles) = app_with_bundle_receiver();
+    let cookie = login_cookie(&app).await;
+    let other_viewer = login_cookie(&app).await;
+    let early = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let early_cookie = early.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let pending = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/api/bundles")
+                .header(COOKIE, &cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"source":"owner/repo"}"#))
+                .unwrap(),
+        ),
+    );
+    let bundle = bundles.recv().await.unwrap();
+    let logout = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert!(
+        logout.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    bundle
+        .reply
+        .send(Err(BundleFailure::InvalidSource))
+        .unwrap();
+    let late = pending.await.unwrap().unwrap();
+    assert!(
+        !late.headers().contains_key(SET_COOKIE),
+        "a delayed response must not renew after logout"
+    );
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for revoked in [&cookie, &early_cookie] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, revoked)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, &other_viewer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
+    let options = detached_options();
+    let key = options.cookie_key.clone();
+    let desktop = mint_desktop_session_cookie(&key).unwrap();
+    let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
+    let app = router(options);
+    for value in [desktop, legacy] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={value}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+}
+
+#[tokio::test]
+async fn logout_survives_restart_without_revoking_the_bookmarked_login_url() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .load_cookie_credentials(path.clone())
+        .await
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    let app = router(original);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let logout = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted.load_cookie_credentials(path).await.unwrap();
+    let restarted = router(restarted);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        let denied = restarted
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    let fresh = restarted
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::SEE_OTHER);
+    let new_cookie = fresh.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let accepted = restarted
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, new_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_reports_persistence_failure_and_revokes_in_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut options = detached_options();
+    options.load_cookie_credentials(path).await.unwrap();
+    let url = format!("/auth/login?token={}", options.login_token());
+    // A directory at the ledger path deterministically refuses the atomic write.
+    std::fs::create_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let app = router(options);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    std::fs::remove_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let retried = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted
+        .load_cookie_credentials(directory.path().join("phone-cookie-key"))
+        .await
+        .unwrap();
+    let denied = router(restarted)
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const session = { lifecycle: 'live', quota_recovery: { retry_at_ms: 120000 } };
+if (!sessionActivityLabel(session, 60000).startsWith('Quota limit · resumes ')) throw Error('missing quota deadline');
+session.quota_recovery.retry_at_ms = null;
+if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown') throw Error('missing unknown reset');
+"#;
+    run_viewer_script("quota-recovery", &format!("{setup}\n{source}\n{checks}"));
 }

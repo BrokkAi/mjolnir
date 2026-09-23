@@ -789,7 +789,7 @@ pub fn content_block_text(content: &ContentBlock) -> Option<String> {
     }
 }
 
-pub(crate) fn truncate_string_start(value: &mut String, maximum_bytes: usize) -> bool {
+pub fn truncate_string_start(value: &mut String, maximum_bytes: usize) -> bool {
     if value.len() <= maximum_bytes {
         return false;
     }

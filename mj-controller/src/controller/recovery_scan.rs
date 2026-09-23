@@ -508,6 +508,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         mjolnir_subagents: None,
         // The adopting caller probes the running container for this.
@@ -1008,11 +1009,10 @@ fn execute_scan(
 
 fn ssh_spec(ssh: &SshConnection, remote: impl IntoIterator<Item = String>) -> CommandSpec {
     let backend = SshTarget::from(ssh);
-    let mut args = backend.ssh_args;
-    mj_core::targets::push_connection_sharing_args(&mut args);
+    let mut args = backend.ssh_args.clone();
     args.push(backend.destination.clone());
     args.extend(remote);
-    CommandSpec::new("ssh", args).ssh_destination(backend.destination)
+    CommandSpec::new("ssh", args).ssh_session(&backend)
 }
 
 fn read_recovery_ownership(

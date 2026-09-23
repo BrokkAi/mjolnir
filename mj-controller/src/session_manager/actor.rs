@@ -455,7 +455,10 @@ pub(super) async fn run_session_actor(
                         }
                         if matches!(
                             &command,
-                            RelayCommand::Prompt { .. } | RelayCommand::ClearContext
+                            RelayCommand::Prompt { .. }
+                                | RelayCommand::ContinueAuthorizedWork { .. }
+                                | RelayCommand::ResumeAfterQuota { .. }
+                                | RelayCommand::ClearContext
                         ) && !admitted
                             && let Some(refusal) =
                                 crate::review_host::prompt_refusal(&target.session_id)
@@ -475,6 +478,18 @@ pub(super) async fn run_session_actor(
                             let _ = reply.send(Err(
                                 "/clear requires an idle session; a lifecycle operation is running"
                                     .into(),
+                            ));
+                            continue;
+                        }
+                        if lifecycle.is_leased()
+                            && matches!(
+                                command,
+                                RelayCommand::ContinueAuthorizedWork { .. }
+                                    | RelayCommand::ResumeAfterQuota { .. }
+                            )
+                        {
+                            let _ = reply.send(Err(
+                                "automatic continuation cancelled by lifecycle operation".into(),
                             ));
                             continue;
                         }
@@ -769,7 +784,23 @@ pub(super) async fn run_session_actor(
                             );
                         }
                     }
-                    ActorCommand::Lease { reply } => {
+                    ActorCommand::Lease {
+                        idle_harness,
+                        reply,
+                    } => {
+                        if idle_harness.is_some()
+                            && (lifecycle.is_leased()
+                                || !reviewer_tasks.is_empty()
+                                || crate::review_host::prompt_refusal(&target.session_id).is_some())
+                        {
+                            if reply
+                                .send(Err(super::handle::SessionNotIdle.into()))
+                                .is_err()
+                            {
+                                tracing::debug!(session_id = %target.session_id, "idle lease requester disconnected");
+                            }
+                            continue;
+                        }
                         if lifecycle.is_leased() {
                             tracing::debug!(
                                 session_id = %target.session_id,
@@ -791,37 +822,43 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let lease_id = next_lease_id;
+                        let synced = sync_actor_connection(&target, &mut connection).await;
+                        if let Err(error) = synced {
+                            connection = None;
+                            tracing::warn!(session_id = %target.session_id, %error, "could not sync before leasing the session");
+                            if reply.send(Err(error)).is_err() {
+                                tracing::debug!(session_id = %target.session_id, "lease requester disconnected");
+                            }
+                            continue;
+                        }
+                        // Decide before taking the control channel or cancelling
+                        // reviewers. A stale idle observation must not hold steering.
+                        if idle_harness.is_some_and(|harness| {
+                            !connection
+                                .as_ref()
+                                .expect("synced connection")
+                                .snapshot()
+                                .operational
+                                .safe_to_replace(harness)
+                        }) {
+                            if reply
+                                .send(Err(super::handle::SessionNotIdle.into()))
+                                .is_err()
+                            {
+                                tracing::debug!(session_id = %target.session_id, "idle lease requester disconnected");
+                            }
+                            continue;
+                        }
                         reviewer_cancellation.cancel();
                         reviewer_cancellation = tokio_util::sync::CancellationToken::new();
                         reviewer_connections.clear();
                         reviewer_tails.clear();
-                        let result =
-                            sync_actor_connection(&target, &mut connection)
-                                .await
-                                .map(|_| {
-                                    next_lease_id = next_lease_id.wrapping_add(1).max(1);
-                                    (
-                                        lease_id,
-                                        connection
-                                            .take()
-                                            .expect("successful sync retained its connection"),
-                                    )
-                                });
-                        if result.is_err() {
-                            connection = None;
-                        }
-                        if let Err(error) = &result {
-                            tracing::warn!(
-                                session_id = %target.session_id,
-                                operation = "lease",
-                                error = %error,
-                                "could not acquire relay session lease"
-                            );
-                        }
-                        let acquired = result.is_ok();
-                        match reply.send(result) {
-                            Ok(()) if acquired => lifecycle.activate_lease(lease_id),
-                            Ok(()) => {}
+                        next_lease_id = next_lease_id.wrapping_add(1).max(1);
+                        match reply.send(Ok((
+                            lease_id,
+                            connection.take().expect("synced connection"),
+                        ))) {
+                            Ok(()) => lifecycle.activate_lease(lease_id),
                             Err(Ok((_lease_id, returned))) => connection = Some(returned),
                             Err(Err(_)) => {}
                         }
@@ -897,6 +934,18 @@ pub(super) async fn deliver_submit(
     {
         let _ = reply.send(Err("review delivery admission is no longer valid".into()));
         return;
+    }
+    if matches!(
+        command,
+        RelayCommand::ContinueAuthorizedWork { .. } | RelayCommand::ResumeAfterQuota { .. }
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        if let Some(refusal) = crate::review_host::prompt_refusal(&target.session_id) {
+            let _ = reply.send(Err(refusal.into()));
+            return;
+        }
     }
     let started = Instant::now();
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,

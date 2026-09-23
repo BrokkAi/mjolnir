@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use mj_controller::database::DetachedSessionDraft;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ComposerDraftCache {
     drafts: BTreeMap<String, DetachedSessionDraft>,
 }

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::Request;
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, SET_COOKIE};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
@@ -423,6 +423,7 @@ struct FakeBackend {
     /// Export answers. `None` stands for a refusal, which is what an
     /// export that cannot be produced looks like to a handler.
     diff: Option<String>,
+    diff_options: Mutex<Vec<DiffOptions>>,
     file: Option<Vec<u8>>,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
@@ -584,8 +585,13 @@ impl SubagentBackend for FakeBackend {
             Ok(self.transcript.lock().unwrap().clone())
         })
     }
-    fn diff(&self, _session_id: String) -> BoxFuture<'_, Result<String, ExportError>> {
-        Box::pin(async {
+    fn diff(
+        &self,
+        _session_id: String,
+        options: DiffOptions,
+    ) -> BoxFuture<'_, Result<String, ExportError>> {
+        Box::pin(async move {
+            self.diff_options.lock().unwrap().push(options);
             if self.diff_fails {
                 return Err(ExportError::Failed(anyhow::anyhow!("git exploded")));
             }
@@ -785,6 +791,34 @@ fn api_app(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    api_app_with_preferences(backend, adjust, absent_preferences_path())
+}
+
+/// A path that cannot hold fast-start preferences, so a test that does not
+/// name one never reads the developer's real `go.json`. The directory does not
+/// exist, which is the ordinary "nothing saved yet" case.
+fn absent_preferences_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir()
+        .join(format!(
+            "mjolnir-api-options-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+        .join("go.json")
+}
+
+fn api_app_with_preferences(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -818,6 +852,7 @@ fn api_app(
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.shutdown = backend.shutdown.clone();
     options.set_subagent_backend(backend);
+    options.set_preferences_path(preferences_path);
     (router(options), action_rx, snapshot_tx, bundle_rx)
 }
 
@@ -1079,6 +1114,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1107,6 +1143,30 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         followups[0].1.prompt.as_deref(),
         Some("add a README line"),
         "the first prompt is the backend's to submit once the harness is ready"
+    );
+}
+
+#[tokio::test]
+async fn start_forwards_the_launch_base_to_the_controller() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response =
+        tokio::spawn(app.oneshot(start_request(start_body(r#","launch_base":"origin/main""#))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { launch_base, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(launch_base.as_deref(), Some("origin/main"));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
     );
 }
 
@@ -1284,6 +1344,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
     assert_eq!(
         request.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1345,6 +1406,10 @@ async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
+    // A paging caller needs both halves of the cursor contract: the session it
+    // is reading, and the sequence to continue from.
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["next_after_seq"], 9);
     assert_eq!(body["latest_seq"], 9);
     assert_eq!(
         body["items"][0]["seq"], 9,
@@ -2206,6 +2271,45 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
 }
 
 #[tokio::test]
+async fn the_diff_route_forwards_the_base_and_returns_resolved_metadata() {
+    let details = mj_checkpoint::archive::SessionDiff {
+        diff: "--- a/task\n+++ b/task\n".into(),
+        base: "a".repeat(40),
+        head: "c".repeat(40),
+        head_descends_from_base: Some(false),
+    };
+    let backend = Arc::new(FakeBackend {
+        diff: Some(serde_json::to_string(&details).unwrap()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<mj_checkpoint::archive::SessionDiff>(&body).unwrap(),
+        details
+    );
+    assert_eq!(
+        *backend.diff_options.lock().unwrap(),
+        vec![DiffOptions {
+            base: Some("HEAD^".into()),
+            json: true
+        }]
+    );
+}
+
+#[tokio::test]
 async fn the_diff_route_answers_a_patch_and_maps_export_failures() {
     let backend = Arc::new(FakeBackend {
         diff: Some("--- a/one\n+++ b/one\n".to_owned()),
@@ -2859,4 +2963,334 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
         assert_eq!(response.status(), expected, "{route}: {body}");
         assert!(actions.try_recv().is_err());
     }
+}
+
+#[test]
+fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary() {
+    let observation = WaitObservation {
+        checking_continuation: true,
+        execution: MaterializedExecutionState::Idle,
+        last_turn_outcome: Some(completed(7, "end_turn")),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_wait(&observation, &request).unwrap().outcome,
+        WaitOutcome::Finished
+    );
+}
+
+#[test]
+fn quota_recovery_keeps_wait_pending_and_unknown_reset_reports_quota() {
+    let mut pending = idle(Some(completed(10, "end_turn")));
+    pending.quota_recovery = Some(mj_core::continuation::QuotaRecovery {
+        user_command_id: "user-request".into(),
+        completed_command_id: pending
+            .last_turn_outcome
+            .as_ref()
+            .unwrap()
+            .command_id
+            .clone(),
+        profile_id: "test-profile".into(),
+        reset_at_ms: Some(1000),
+        retry_at_ms: Some(61000),
+        notice: "No reliable reset time".into(),
+        submitted: false,
+    });
+    assert!(resolve_wait(&pending, &WaitRequest::default()).is_none());
+    pending.quota_recovery.as_mut().unwrap().retry_at_ms = None;
+    assert_eq!(
+        resolve_wait(&pending, &WaitRequest::default())
+            .unwrap()
+            .outcome,
+        WaitOutcome::QuotaLimit
+    );
+}
+
+/// Every secret the sample fixture holds: a profile home and environment, a
+/// container image and environment, a local repository source, and a native
+/// session id. The options route narrows the public projection to a launch
+/// decision, so none of them may appear in its body.
+const SAMPLE_SECRETS: [&str; 6] = [
+    "/highly/secret/codex",
+    "secret-token",
+    "secret.registry/image",
+    "secret-target",
+    "/private/source/hel",
+    "native-secret-id",
+];
+
+#[tokio::test]
+async fn options_list_what_a_caller_may_launch_without_leaking_configuration() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(API_VERSION_HEADER).unwrap(),
+        API_VERSION
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    for secret in SAMPLE_SECRETS {
+        assert!(
+            !text.contains(secret),
+            "the launch options published {secret}"
+        );
+    }
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(body["revision"].as_u64(), Some(1));
+    assert_eq!(body["profiles"][0]["id"], "codex-1");
+    assert_eq!(body["profiles"][0]["harness"], "codex");
+    assert_eq!(body["bundles"][0]["id"], "hel");
+    assert_eq!(body["bundles"][0]["repositories"][0]["github"], "owner/hel");
+
+    let targets = body["targets"].as_array().unwrap();
+    let raw = targets.iter().find(|target| target["id"] == "raw").unwrap();
+    assert_eq!(raw["kind"], "local-bare");
+    assert_eq!(raw["requires_project_directory"].as_bool(), Some(true));
+    // No host reading covers this target in this test. An unchecked target is
+    // unknown, not unavailable: nothing has said it is broken.
+    assert_eq!(raw["availability"], "unknown");
+    assert!(raw["host"].is_null());
+    assert!(raw["unavailable_reason"].is_null());
+
+    // Nothing has been saved as this instance's default.
+    assert!(body["default"].is_null());
+}
+
+#[tokio::test]
+async fn options_explain_a_failed_host_without_repeating_its_probe() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+            id: "host-1".into(),
+            label: "builder".into(),
+            target_ids: vec!["podman".into()],
+            cpu_percent: Some(20),
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            logical_cores: None,
+            disk_total_bytes: None,
+            virtual_machines: None,
+            sampled_at_epoch_seconds: Some(1),
+            refreshing: false,
+            stale: false,
+            has_error: true,
+        }];
+    });
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+
+    let targets = body["targets"].as_array().unwrap();
+    let podman = targets
+        .iter()
+        .find(|target| target["id"] == "podman")
+        .unwrap();
+    assert_eq!(podman["availability"], "unavailable");
+    assert_eq!(podman["host"], "builder");
+    let reason = podman["unavailable_reason"].as_str().unwrap();
+    assert!(
+        reason.contains("builder"),
+        "the reason names the host a person knows: {reason}"
+    );
+
+    // A target the reading does not cover stays unknown while its neighbour
+    // is unavailable.
+    let raw = targets.iter().find(|target| target["id"] == "raw").unwrap();
+    assert_eq!(raw["availability"], "unknown");
+
+    assert_eq!(body["hosts"][0]["label"], "builder");
+    assert_eq!(body["hosts"][0]["has_error"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn options_report_the_saved_default_and_publish_only_its_two_identifiers() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    mj_core::go::GoPreferences::save_recipe(
+        &path,
+        PathBuf::from("/private/project"),
+        mj_core::go::GoRecipe {
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            bundle_id: Some("hel".into()),
+            project_directory: Some(PathBuf::from("/private/project")),
+            create_managed_worktree: None,
+            mjolnir_subagents: None,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        },
+        true,
+    )
+    .unwrap();
+
+    let (app, _, _, _) = api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+
+    assert_eq!(body["default"]["profile_id"], "codex-1");
+    assert_eq!(body["default"]["target_id"], "podman");
+    // A saved recipe also carries a bundle and a project directory. Those are
+    // per-project choices and must not travel as part of the default.
+    assert_eq!(body["default"].as_object().unwrap().len(), 2);
+    assert!(!body.to_string().contains("/private/project"));
+}
+
+/// Save a fast-start default the way `mj go --global-default` does.
+fn save_global_default(path: &std::path::Path, profile_id: &str, target_id: &str) {
+    mj_core::go::GoPreferences::save_recipe(
+        path,
+        PathBuf::from("/private/project"),
+        mj_core::go::GoRecipe {
+            profile_id: profile_id.into(),
+            target_id: target_id.into(),
+            bundle_id: None,
+            project_directory: None,
+            create_managed_worktree: None,
+            mjolnir_subagents: None,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        },
+        true,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn start_without_identifiers_uses_the_saved_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    save_global_default(&path, "codex-1", "podman");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let response = tokio::spawn(app.oneshot(start_request(r#"{"bundle_id":"hel"}"#.into())));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    // The controller always receives two explicit identifiers, whatever the
+    // caller left out: a session whose profile was implicit would be a session
+    // nobody could explain afterwards.
+    assert_eq!(profile_id, "codex-1");
+    assert_eq!(target_id, "podman");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_resolves_only_the_identifier_the_caller_left_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    // The saved default names the bare target; the caller names the container
+    // target instead, and only the profile still falls back.
+    save_global_default(&path, "codex-1", "raw");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let body = r#"{"target_id":"podman","bundle_id":"hel"}"#;
+    let response = tokio::spawn(app.oneshot(start_request(body.into())));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "codex-1", "the profile falls back");
+    assert_eq!(target_id, "podman", "the named target wins");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_identifiers_and_no_saved_default_names_what_is_missing() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("profile_id"), "{message}");
+    assert!(message.contains("no saved default"), "{message}");
+    assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn start_explains_a_saved_default_that_names_a_missing_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    save_global_default(&path, "gone", "podman");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let response = app
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The caller named nothing, so "unknown profile" alone would read as
+    // though it had.
+    assert!(message.contains("saved default"), "{message}");
+    assert!(message.contains("gone"), "{message}");
+    assert!(actions.try_recv().is_err());
 }

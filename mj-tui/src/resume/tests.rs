@@ -35,6 +35,99 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
     }
 }
 
+#[test]
+fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    for width in [120, 60] {
+        for reason in [
+            "missing Git repo",
+            "Legacy Codex history cannot be imported",
+        ] {
+            let mut dashboard =
+                DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+            let mut session = native(
+                "native-unavailable",
+                "Unavailable",
+                NEWER_THAN_THE_CHECKPOINT,
+            );
+            session.unavailable_reason = Some(reason.into());
+            dashboard.show_resume_dialog(
+                1,
+                vec![codex_profile(vec![
+                    session,
+                    native("native-ready", "Ready", 1),
+                ])],
+            );
+            switch_to_import(&mut dashboard);
+            let lines = drawn(&mut dashboard, width, 34);
+            let rendered = lines.join("\n");
+            let label = if reason == "missing Git repo" {
+                "Cannot import: missing Git repo"
+            } else {
+                "Cannot import"
+            };
+            assert!(rendered.contains(label), "{rendered}");
+            assert!(!rendered.contains("native-unavailable"), "{rendered}");
+            assert!(!rendered.contains("Enter imports"), "{rendered}");
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::None
+            );
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                assert_eq!(
+                    dashboard.handle_mouse(mouse_at(kind, point(&lines, label))),
+                    DashboardAction::None
+                );
+            }
+            assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+            let copy = point(&lines, "Copy session ID");
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
+            assert_eq!(
+                dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy)),
+                DashboardAction::CopyNativeSessionId {
+                    native_session_id: "native-unavailable".into()
+                }
+            );
+            assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+            // Tab navigation must reach the same copy action.
+            if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+                dialog.form.get_mut().focus(ResumeFocus::Sessions);
+            }
+            dashboard.handle_key(key(KeyCode::Tab));
+            dashboard.handle_key(key(KeyCode::Tab));
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::CopyNativeSessionId {
+                    native_session_id: "native-unavailable".into()
+                }
+            );
+
+            if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+                dialog.form.get_mut().focus(ResumeFocus::Sessions);
+            }
+            dashboard.handle_key(key(KeyCode::Down));
+            dashboard.clear_notice();
+            let ready = drawn(&mut dashboard, width, 34).join("\n");
+            assert!(!ready.contains("Copy session ID"), "{ready}");
+            assert!(!ready.contains("Cannot import"), "{ready}");
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::ImportSession {
+                    profile_id: "codex-1".into(),
+                    native_session_id: "native-ready".into(),
+                    display_title: "Ready".into()
+                }
+            );
+        }
+    }
+}
+
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
         subagents: Default::default(),
@@ -2335,6 +2428,76 @@ fn the_dialog_footer_names_its_own_keys() {
 
 /// A query's hits are counted on every tab, not only the one on screen, and
 /// an empty tab says where the other hits are rather than switching by itself.
+#[test]
+fn sub_agents_are_never_offered_for_resume() {
+    let owner = stopped_session();
+    let managed_child = SessionRecord {
+        id: "child-1".into(),
+        acp_session_title: Some("Managed lane".into()),
+        native_session_id: Some("native-child".into()),
+        ..stopped_session()
+    };
+    let mut state = state_with(vec![owner.clone(), managed_child.clone()]);
+    state.subagents.insert(
+        managed_child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: managed_child.id.clone(),
+            parent_session_id: owner.id.clone(),
+            task_name: "lane".into(),
+            profile_id: managed_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: std::path::PathBuf::new(),
+            initial_prompt: "work in the lane".into(),
+            request_key: "request-1".into(),
+            created_at: managed_child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    // A harness-owned child the owner spawned, shown the way the TUI shows it:
+    // as a stopped copy of the owner's record.
+    let agent = mj_core::native_agent::NativeAgent {
+        owner_session_id: owner.id.clone(),
+        session_id: "a0c7080aee7ead7c5".into(),
+        parent_session_id: None,
+        name: "Regression: bridge derivation conflict".into(),
+        task: "Fix the regression".into(),
+        capabilities: Default::default(),
+        state: mj_core::native_agent::NativeAgentState::Completed,
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
+    };
+    dashboard.set_native_agents(vec![mj_core::native_agent::NativeAgentView {
+        generation_ordinal: 1,
+        projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
+        agent,
+    }]);
+    dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
+
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+
+    // A search hit on a child counts on no tab.
+    replace_search(&mut dashboard, "the phrase");
+    apply_ready_rows(
+        &mut dashboard,
+        vec![
+            WikiRow {
+                hel_session_id: Some(managed_child.id.clone()),
+                ..wiki_row("child-hit", false)
+            },
+            WikiRow {
+                hel_session_id: Some(owner.id.clone()),
+                ..wiki_row("owner-hit", false)
+            },
+        ],
+    );
+    assert_eq!(dashboard.resume_hit_counts, [0, 1, 0, 0]);
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+}
+
 #[test]
 fn search_counts_hits_on_every_tab() {
     let mut dashboard = DashboardState::new(

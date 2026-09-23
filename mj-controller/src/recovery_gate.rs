@@ -80,6 +80,7 @@ impl Default for RecoveryGate {
 
 #[derive(Default)]
 struct RecoveryGateState {
+    upgrade_work: BTreeMap<String, crate::upgrade::Work>,
     /// In-flight copies, each with the cancel flag its executor watches, so a
     /// foreground lifecycle operation can preempt one instead of waiting.
     busy: BTreeMap<String, Arc<AtomicBool>>,
@@ -116,6 +117,8 @@ impl RecoveryGate {
             if state.busy.contains_key(session_id) || state.reservations.contains_key(session_id) {
                 return None;
             }
+            let work = crate::upgrade::activity("recovery or worker replacement").ok()?;
+            state.upgrade_work.insert(session_id.to_owned(), work);
             let cancelled = Arc::new(AtomicBool::new(false));
             state.busy.insert(session_id.to_owned(), cancelled.clone());
             cancelled
@@ -125,11 +128,11 @@ impl RecoveryGate {
     }
 
     pub fn finish(&self, session_id: &str) {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .busy
-            .remove(session_id);
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.busy.remove(session_id);
+            state.upgrade_work.remove(session_id);
+        }
         self.publish_busy();
     }
 

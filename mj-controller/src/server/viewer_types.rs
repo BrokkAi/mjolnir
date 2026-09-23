@@ -87,7 +87,13 @@ impl ViewerSnapshot {
                     .map(|child| child.child_session_id.clone())
                     .collect();
                 ViewerSession {
+                    targeted_turn_control_supported: false,
+                    native_subagents: Vec::new(),
+                    steering: None,
+                    active_prompt_id: None,
+                    cancelling_prompt_id: None,
                     capacity_retry: None,
+                    quota_recovery: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
                     title: session.display_title().to_owned(),
@@ -268,8 +274,20 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default)]
+    pub targeted_turn_control_supported: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<mj_core::relay::SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_prompt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,

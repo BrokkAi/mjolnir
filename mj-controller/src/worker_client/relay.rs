@@ -72,7 +72,7 @@ impl RelayClient {
             .await?
         {
             RelayResponsePayload::Attached {
-                state,
+                mut state,
                 events,
                 through_ordinal,
                 through_digest,
@@ -90,6 +90,7 @@ impl RelayClient {
                 if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
                     bail!("relay attachment frontier does not match its event chain");
                 }
+                state.relay_protocol_version = Some(self.protocol_version);
                 self.latest_ordinal = state.latest_ordinal;
                 self.latest_digest = state.latest_digest.clone();
                 Ok(RelayAttachment {
@@ -176,7 +177,8 @@ impl RelayClient {
 
     pub async fn status(&mut self) -> Result<RelayOperationalState> {
         match self.call(RelayRequest::Status).await? {
-            RelayResponsePayload::Status(status) => {
+            RelayResponsePayload::Status(mut status) => {
+                status.relay_protocol_version = Some(self.protocol_version);
                 self.latest_ordinal = status.latest_ordinal;
                 self.latest_digest = status.latest_digest.clone();
                 Ok(status)
@@ -387,6 +389,13 @@ impl RelayClient {
                 ..
             } => bail!("relay accepted command under ID {accepted_id}, expected {command_id}"),
             _ => bail!("relay returned an unexpected command response"),
+        }
+    }
+
+    pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
+        match self.call(RelayRequest::ReserveIdle { command_id }).await? {
+            RelayResponsePayload::IdleReservation { ordinal } => Ok(ordinal.is_some()),
+            _ => bail!("relay returned an unexpected idle reservation response"),
         }
     }
 }

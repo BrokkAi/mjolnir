@@ -552,6 +552,7 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
 #[test]
 fn the_primary_profile_can_run_an_independent_reviewer() {
     let session = mj_core::state::SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

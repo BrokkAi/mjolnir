@@ -58,8 +58,8 @@ pub(super) fn is_agent_output(update: &SessionUpdate) -> bool {
 /// into the model for that stop, so no turn and no origin marker follow it.
 /// Only the prefix is stable: the name that follows is whatever the adapter
 /// currently calls the task, which later level and start messages rename.
-/// Checked against claude-agent-acp 0.73.0 `dist/async-tasks.js`
-/// (`taskStopped`) on 2026-09-14.
+/// Checked against claude-agent-acp 0.81.0 `dist/async-tasks.js`
+/// (`taskStopped`, via `noticeTranscriptText`) on 2026-09-22.
 pub(super) const CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX: &str = "**Task stopped by user:** ";
 
 /// The text of an agent message chunk whose content is a single text block.

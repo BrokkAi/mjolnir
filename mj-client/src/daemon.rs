@@ -342,6 +342,9 @@ pub struct ResumeSessionRequest {
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
+    /// Git revision the session starts at, as the caller typed it.
+    #[serde(default)]
+    pub launch_base: Option<String>,
     /// None follows the global `[subagents] enabled` setting at launch time.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
@@ -379,8 +382,10 @@ pub struct DraftPreview {
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
 /// clients and daemons of *any* protocol version rely on them to identify,
-/// stop, and replace each other. Every other action may change freely behind a
-/// `PROTOCOL_VERSION` bump.
+/// stop, and replace each other. `PrepareUpgrade` and its `Done` /
+/// `UpgradePending` replies are also frozen from protocol 33 onward: they
+/// drain accepted work before closing admission atomically. Every other
+/// action may change freely behind a `PROTOCOL_VERSION` bump.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
@@ -390,6 +395,18 @@ pub enum DaemonAction {
         before: Option<(u64, String)>,
     },
     Ping,
+    /// Frozen upgrade handshake, available from daemon protocol 33 onward.
+    /// Busy replies leave every operation and control channel running.
+    PrepareUpgrade,
+    /// Names the daemon-owned work that is currently holding an automatic
+    /// handoff open, for the CLI's wait notice.
+    ///
+    /// Added after protocol 33, so it is not part of the frozen management
+    /// subset. A daemon that predates it cannot deserialize the frame: it
+    /// fails the request and closes the connection. Callers must therefore
+    /// treat any failure, including a dropped connection or an error frame,
+    /// as "unknown" and say nothing about what the upgrade is waiting for.
+    UpgradeBlockers,
     Status,
     WebViewerAccess,
     RecoverWebViewer(crate::web::WebViewerRecovery),
@@ -645,6 +662,10 @@ pub struct ResponseEnvelope {
 pub enum DaemonReply {
     NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
+    UpgradePending,
+    /// Labels for the work holding an automatic handoff open, empty when
+    /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
+    UpgradeBlockers(Vec<String>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     WebListeners(Vec<crate::web::WebListenerProcess>),
@@ -854,8 +875,10 @@ pub fn process_is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        let process_id = sysinfo::Pid::from_u32(pid);
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[process_id]), true);
+        system.process(process_id).is_some()
     }
 }
 
@@ -929,6 +952,42 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        self.request_with_reconnect(action, || async {
+            loop {
+                if let Ok(client) = connect_existing().await {
+                    return Ok(client);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+    }
+
+    async fn request_with_reconnect<F, Fut>(
+        &mut self,
+        action: DaemonAction,
+        mut reconnect: F,
+    ) -> Result<DaemonReply>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+    {
+        loop {
+            let response = self.request_once(action.clone()).await?;
+            if matches!(response, DaemonReply::UpgradePending)
+                && !matches!(action, DaemonAction::PrepareUpgrade)
+            {
+                // Only an explicit refusal guarantees non-admission. Never
+                // replay arbitrary mutations after a lost acknowledgement.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                *self = reconnect().await?;
+            } else {
+                return Ok(response);
+            }
+        }
+    }
+
+    async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
@@ -1802,7 +1861,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 33;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -1842,6 +1901,68 @@ mod tests {
     use super::*;
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
+
+    #[tokio::test]
+    async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test-token".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let action = DaemonAction::SubmitSessionCommand {
+            inherited_draft: None,
+            session_id: "test-session".into(),
+            command_id: "steer-command".into(),
+            command: RelayCommand::Steer {
+                active_prompt_id: "active-command".into(),
+                queued_prompt_id: "queued-command".into(),
+            },
+        };
+        let expected = serde_json::to_value(&action).unwrap();
+        let server = tokio::spawn(async move {
+            for reply in [
+                Some(DaemonReply::UpgradePending),
+                Some(DaemonReply::Done),
+                None,
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert_eq!(serde_json::to_value(&request.action).unwrap(), expected);
+                if let Some(reply) = reply {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result: Ok(reply),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let reply = client
+            .request_with_reconnect(action.clone(), || DaemonClient::connect(metadata.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        assert!(
+            client
+                .request_with_reconnect(action, || async {
+                    panic!("an ambiguous acknowledgement must not replay a mutation");
+                })
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
 
     #[test]
     fn unsupported_protocol_message_names_both_binaries_and_versions() {

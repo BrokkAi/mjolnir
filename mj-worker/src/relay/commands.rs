@@ -13,6 +13,91 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
+    fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
+        match command {
+            RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            } => {
+                if self.snapshot.checkpoint_barrier.is_some() {
+                    return Err("A checkpoint is already admitted".into());
+                }
+                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
+                    != Some(active_prompt_id)
+                {
+                    return Err("The requested turn is no longer running".into());
+                }
+                if !self.snapshot.queued_prompts.first().is_some_and(|q|
+                    q.command_id == *queued_prompt_id && matches!(q.payload, StoredQueuedRelayPayload::Prompt { .. }))
+                {
+                    return Err("The queued prompt changed; steering was not sent".into());
+                }
+                if self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .is_some_and(|s| s.holds_queue())
+                    || self.snapshot.cancelling_prompt_id.is_some()
+                {
+                    return Err(
+                        "Turn control is already pending; no additional request was sent".into(),
+                    );
+                }
+            }
+            RelayCommand::CancelTurnFor { active_prompt_id } => {
+                if self.snapshot.checkpoint_barrier.is_some() {
+                    return Err("A checkpoint is already admitted".into());
+                }
+                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
+                    != Some(active_prompt_id)
+                {
+                    return Err("The requested turn is no longer running".into());
+                }
+                if self.snapshot.cancelling_prompt_id.is_some() {
+                    return Err("Cancellation is already pending".into());
+                }
+            }
+            RelayCommand::ResolveSteering { steering_id } => {
+                let Some(steering) = self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .filter(|s| &s.command_id == steering_id)
+                else {
+                    return Err("The steering operation changed".into());
+                };
+                if steering.status != mj_core::relay::SteeringStatus::Unconfirmed
+                    || self.snapshot.active_prompt.is_some()
+                {
+                    return Err(
+                        "Wait for the original turn to settle before retrying uncertain input"
+                            .into(),
+                    );
+                }
+            }
+            RelayCommand::RemoveQueuedPrompt { queued_command_id }
+                if self.snapshot.steering.as_ref().is_some_and(|s| {
+                    &s.queued_prompt_id == queued_command_id && s.holds_queue()
+                }) && self.snapshot.active_prompt.is_some() =>
+            {
+                return Err("Wait for steering to settle before removing its prompt".into());
+            }
+            RelayCommand::ClearQueuedPrompts
+                if self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .is_some_and(|s| s.holds_queue())
+                    && self.snapshot.active_prompt.is_some() =>
+            {
+                return Err("Wait for steering to settle before clearing the queue".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(super) fn submit_command(
         &mut self,
         command_id: &str,
@@ -253,7 +338,21 @@ impl DurableRelay {
                 None,
             )));
         }
+        if let Err(message) = self.validate_turn_control(&command) {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                message,
+                false,
+                None,
+            )));
+        }
         if let RelayCommand::Cancel = command
+            && self
+                .snapshot
+                .continuation
+                .quota_recovery
+                .as_ref()
+                .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
             && self
                 .snapshot
@@ -348,6 +447,98 @@ impl DurableRelay {
                 None,
             )));
         }
+        if let RelayCommand::SetQuotaRecovery { expected, recovery } = &command {
+            let valid = expected.ordinal == self.snapshot.latest_ordinal
+                && expected.digest == self.snapshot.latest_digest
+                && recovery.as_ref().is_none_or(|r| {
+                    self.quota_recovery_admissible(&r.user_command_id, &r.completed_command_id)
+                        && !r.submitted
+                        && r.notice.len() <= 4096
+                        && !r.profile_id.is_empty()
+                        && match (r.reset_at_ms, r.retry_at_ms) {
+                            (Some(reset), Some(retry)) => reset.checked_add(60_000) == Some(retry),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                });
+            if !valid {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "quota recovery evidence is stale",
+                    false,
+                    None,
+                )));
+            }
+        }
+        if let RelayCommand::ResumeAfterQuota {
+            expected,
+            completed_command_id,
+        } = &command
+        {
+            let valid = expected.ordinal == self.snapshot.latest_ordinal
+                && expected.digest == self.snapshot.latest_digest
+                && self
+                    .snapshot
+                    .continuation
+                    .quota_recovery
+                    .as_ref()
+                    .is_some_and(|r| {
+                        !r.submitted
+                            && r.completed_command_id == *completed_command_id
+                            && r.retry_at_ms
+                                .is_some_and(|deadline| deadline <= epoch_millis())
+                            && self
+                                .quota_recovery_admissible(&r.user_command_id, completed_command_id)
+                    });
+            if !valid {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "quota recovery is not due or its evidence changed",
+                    false,
+                    None,
+                )));
+            }
+        }
+        if let RelayCommand::ContinueAuthorizedWork {
+            expected,
+            user_command_id,
+            completed_command_id,
+            attempt,
+        } = &command
+        {
+            let state = &self.snapshot.continuation;
+            let facts = self.activity_facts();
+            let planning = self.verdict_harness.is_some_and(|harness| {
+                mj_core::acp::AcpSessionFacts::from_operational(
+                    harness,
+                    &self.snapshot.config,
+                    &self.snapshot.config_options,
+                    self.snapshot.modes.as_ref(),
+                )
+                .plan_mode_active()
+            });
+            if planning
+                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
+                || !state.eligible()
+                || state.user_command_id.as_ref() != Some(user_command_id)
+                || state.completed_command_id.as_ref() != Some(completed_command_id)
+                || *attempt != state.attempts + 1
+                || self.snapshot.latest_ordinal != expected.ordinal
+                || self.snapshot.latest_digest != expected.digest
+                || !mj_core::activity::is_quiet(&facts)
+                || facts.background_commands != 0
+                || !self.snapshot.queued_prompts.is_empty()
+                || self.snapshot.goal.active()
+                || self.pending_close_barrier_id().is_some()
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "continuation evidence is stale or the allowance is exhausted",
+                    false,
+                    None,
+                )));
+            }
+        }
         let created_at_ms = epoch_millis();
         let accepted_ordinal = self.append_relay_event(
             Some(command_id),
@@ -436,8 +627,14 @@ impl DurableRelay {
         // Recorded before the command starts, and unguarded by dispatch state:
         // a retry that repeats this append is harmless because the projection
         // keys the transcript line on this command, not on the event ordinal.
-        if let RelayCommand::RecordNotice { text } = &command {
-            let message = text.clone();
+        if let Some(message) = match &command {
+            RelayCommand::RecordNotice { text } => Some(text.clone()),
+            RelayCommand::SetQuotaRecovery {
+                recovery: Some(recovery),
+                ..
+            } => Some(recovery.notice.clone()),
+            _ => None,
+        } {
             self.append_relay_event(Some(command_id), RelayObservation::Notice { message })?;
         }
         if state == RelayDispatchState::Queued {
@@ -475,7 +672,9 @@ impl DurableRelay {
             RelayCommand::CompleteCheckpoint { .. } => RelayCommandOutcome::CheckpointCompleted,
             RelayCommand::ReleaseCheckpoint { .. } => RelayCommandOutcome::CheckpointReleased,
             RelayCommand::AdvanceRecoveryFloor { .. } => RelayCommandOutcome::RecoveryFloorAdvanced,
-            RelayCommand::RecordNotice { .. } => RelayCommandOutcome::NoticeRecorded,
+            RelayCommand::RecordNotice { .. }
+            | RelayCommand::SetQuotaRecovery { .. }
+            | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,
             _ => RelayCommandOutcome::QueueChanged {
                 removed_command_ids,
             },
@@ -518,7 +717,43 @@ impl DurableRelay {
         if self.checkpoint_only || !acp_session_configured || maximum == 0 {
             return Ok(Vec::new());
         }
+        // Reject controls whose targets settled between admission and dispatch.
+        let stale: Vec<_> = self
+            .snapshot
+            .dispatches
+            .iter()
+            .filter_map(|(id, d)| {
+                if !matches!(
+                    d.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                ) {
+                    return None;
+                }
+                let target = match &d.command {
+                    RelayCommand::Steer {
+                        active_prompt_id, ..
+                    }
+                    | RelayCommand::CancelTurnFor { active_prompt_id } => active_prompt_id,
+                    _ => return None,
+                };
+                (self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(target))
+                    .then_some(id.clone())
+            })
+            .collect();
+        for id in stale {
+            self.record_command_rejected(&id, "The requested turn is no longer running")?;
+        }
         self.promote_next_queued_command()?;
+        if self
+            .snapshot
+            .steering
+            .as_ref()
+            .is_some_and(|s| s.holds_queue())
+        {
+            while let Some((barrier_id, _)) = self.next_queued_checkpoint() {
+                self.record_command_rejected(&barrier_id, "Resolve uncertain steering delivery before checkpointing or moving this session")?;
+            }
+        }
         if self.snapshot.checkpoint_barrier.is_none() {
             if let Some((barrier_id, barrier_ordinal)) = self.next_queued_checkpoint() {
                 let mut earlier_controls = self.queued_controls_before(barrier_ordinal);
@@ -529,6 +764,11 @@ impl DurableRelay {
                 // agent's workspace, so the barrier waits for it exactly as it
                 // waits for a prompt.
                 } else if !self.effectful_command_in_progress()
+                    && !self
+                        .snapshot
+                        .steering
+                        .as_ref()
+                        .is_some_and(|s| s.holds_queue())
                     && self.snapshot.harness_turn.is_none()
                 {
                     self.append_relay_event(
@@ -577,7 +817,7 @@ impl DurableRelay {
         for (accepted_ordinal, command_id) in claimable {
             let steering_prompt = matches!(
                 next_snapshot.dispatches[&command_id].command,
-                RelayCommand::Cancel
+                RelayCommand::Cancel | RelayCommand::Steer { .. }
             )
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
@@ -594,32 +834,34 @@ impl DurableRelay {
                 .get_mut(&command_id)
                 .expect("claimable command disappeared");
             dispatch.state = RelayDispatchState::InFlight;
-            let hidden_prompt_context = matches!(&dispatch.command, RelayCommand::Prompt { prompt }
-                if !mj_core::acp::prompt_requests_compaction(prompt))
-            .then(|| {
-                let mut contexts = Vec::new();
-                if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
-                    if context.attached_command_id.is_none() {
-                        context.attached_command_id = Some(command_id.clone());
+            let hidden_prompt_context = dispatch
+                .command
+                .prompt_blocks()
+                .is_some_and(|prompt| !mj_core::acp::prompt_requests_compaction(&prompt))
+                .then(|| {
+                    let mut contexts = Vec::new();
+                    if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
+                        if context.attached_command_id.is_none() {
+                            context.attached_command_id = Some(command_id.clone());
+                        }
+                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                            contexts.push(context.text.clone());
+                        }
                     }
-                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                        contexts.push(context.text.clone());
+                    for context in &mut next_snapshot.pending_user_shell_contexts {
+                        if context.accepted_ordinal >= accepted_ordinal {
+                            continue;
+                        }
+                        if context.attached_command_id.is_none() {
+                            context.attached_command_id = Some(command_id.clone());
+                        }
+                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                            contexts.push(context.text.clone());
+                        }
                     }
-                }
-                for context in &mut next_snapshot.pending_user_shell_contexts {
-                    if context.accepted_ordinal >= accepted_ordinal {
-                        continue;
-                    }
-                    if context.attached_command_id.is_none() {
-                        context.attached_command_id = Some(command_id.clone());
-                    }
-                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                        contexts.push(context.text.clone());
-                    }
-                }
-                (!contexts.is_empty()).then(|| contexts.join("\n\n"))
-            })
-            .flatten();
+                    (!contexts.is_empty()).then(|| contexts.join("\n\n"))
+                })
+                .flatten();
             claimed.push(ClaimedRelayCommand {
                 command_id,
                 accepted_ordinal,
@@ -634,7 +876,7 @@ impl DurableRelay {
             self.commit_snapshot(next_snapshot)?;
             if claimed
                 .iter()
-                .any(|claim| matches!(claim.command, RelayCommand::Prompt { .. }))
+                .any(|claim| claim.command.prompt_blocks().is_some())
             {
                 self.capacity_response = CapacityResponse::default();
             }
@@ -837,6 +1079,8 @@ impl DurableRelay {
                     && !matches!(
                         dispatch.command,
                         RelayCommand::Cancel
+                            | RelayCommand::Steer { .. }
+                            | RelayCommand::CancelTurnFor { .. }
                             | RelayCommand::CancelTurn
                             | RelayCommand::GoalControl { .. }
                     )
@@ -888,6 +1132,28 @@ impl DurableRelay {
                     .map(|handled| (command_id.clone(), handled.accepted_ordinal))
             })
             .min_by_key(|(_, accepted)| *accepted)
+    }
+
+    fn quota_recovery_admissible(&self, user: &str, completed: &str) -> bool {
+        let c = &self.snapshot.continuation;
+        let planning = self.verdict_harness.is_some_and(|harness| {
+            mj_core::acp::AcpSessionFacts::from_operational(
+                harness,
+                &self.snapshot.config,
+                &self.snapshot.config_options,
+                self.snapshot.modes.as_ref(),
+            )
+            .plan_mode_active()
+        });
+        !planning
+            && !c.quota_suppressed
+            && c.user_command_id.as_deref() == Some(user)
+            && c.completed_command_id.as_deref() == Some(completed)
+            && mj_core::activity::is_quiet(&self.activity_facts())
+            && self.activity_facts().background_commands == 0
+            && self.snapshot.queued_prompts.is_empty()
+            && !self.snapshot.goal.active()
+            && self.pending_close_barrier_id().is_none()
     }
 
     pub fn capacity_retry_deadline(&self) -> Option<i64> {
@@ -957,6 +1223,8 @@ impl DurableRelay {
             }
             self.capacity_response = CapacityResponse::default();
         }
+        let awaiting_input = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
+            if stop_reason == mj_core::acp::AWAITING_INPUT_STOP_REASON);
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
@@ -991,7 +1259,16 @@ impl DurableRelay {
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
-        self.replied_verdict_pending |= classify_reply;
+        if awaiting_input {
+            // The running classifier already established the handoff. Keep independently
+            // tracked children and their controls while making the parent ready for input.
+            self.apply_replied_decision(
+                self.turn_context.generation(),
+                mj_core::activity::verdict::Decision::InferIdle,
+                mj_core::clock::epoch_millis(),
+            )?;
+        }
+        self.replied_verdict_pending |= classify_reply && !awaiting_input;
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1150,6 +1427,11 @@ impl DurableRelay {
         // `active_prompt` is the real gate on dispatch.
         if self.checkpoint_only
             || self.snapshot.active_prompt.is_some()
+            || self
+                .snapshot
+                .steering
+                .as_ref()
+                .is_some_and(|s| s.holds_queue())
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(

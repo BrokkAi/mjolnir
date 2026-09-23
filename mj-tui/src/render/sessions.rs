@@ -468,7 +468,7 @@ pub(crate) fn expanded_session_lines(
     // The ellipsis action occupies the last three cells of the first line.
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
-    let title_width = width.saturating_sub(3);
+    let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
     let name_room = usize::from(title_width).saturating_sub(Line::raw(prefix).width());
     let title = truncate_to_cells(&name, name_room, Truncate::PLAIN);
     let mut title_spans = vec![Span::styled(format!("{prefix}{title}"), style)];
@@ -573,6 +573,13 @@ pub(crate) fn session_activity_line(
         )
     } else if facts.unreachable {
         "Unreachable".to_owned()
+    } else if detail.is_some_and(|d| {
+        matches!(
+            d.activity.state().last_known(),
+            mj_core::activity::ActivityState::CheckingContinuation
+        )
+    }) {
+        "Checking continuation".to_owned()
     } else if facts.needs_input() {
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
@@ -719,7 +726,7 @@ pub(crate) fn compact_session_lines(
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
     // The ellipsis action occupies the last three cells of the first line;
     // retain the full width for the status line below it.
-    let title_width = width.saturating_sub(3);
+    let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
     lines.push(Line::styled(
         format!(
             "{prefix}{}",

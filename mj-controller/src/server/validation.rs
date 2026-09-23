@@ -360,6 +360,7 @@ fn validate_action_against(
             project_directory,
             dirty_ack,
             create_managed_worktree,
+            launch_base: _,
             mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {
@@ -478,6 +479,28 @@ fn validate_action_against(
             let session = require_session_record(snapshot, session_id)?;
             if !session.capabilities.rename {
                 return Err(ApiError::bad_request("this session cannot be renamed"));
+            }
+        }
+        ControllerAction::TurnControl {
+            session_id,
+            command,
+        } => {
+            validate_public_id(session_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            let allowed = match command {
+                mj_core::relay::RelayCommand::CancelTurnFor { .. } => {
+                    session.capabilities.interrupt_turn
+                }
+                mj_core::relay::RelayCommand::Steer { .. }
+                | mj_core::relay::RelayCommand::ResolveSteering { .. } => {
+                    session.capabilities.prompt
+                }
+                _ => false,
+            };
+            if !allowed {
+                return Err(ApiError::bad_request(
+                    "this turn-control action is unavailable",
+                ));
             }
         }
         ControllerAction::InterruptTurn { session_id } => {

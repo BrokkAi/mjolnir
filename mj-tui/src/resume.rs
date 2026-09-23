@@ -69,6 +69,7 @@ pub(crate) enum ResumeFocus {
     Sessions,
     Cancel,
     Destroy,
+    CopyId,
     Open,
 }
 
@@ -592,7 +593,8 @@ pub(crate) fn merged_resume_rows(
         if let Some(native_session_id) = &session.native_session_id {
             adopted.insert((session.harness_kind, native_session_id.clone()));
         }
-        if session.state.is_active() {
+        // A sub-agent is resumed through its parent, never on its own.
+        if session.state.is_active() || state.is_subagent_session(&session.id) {
             continue;
         }
         let last_activity_ms = session
@@ -1625,6 +1627,14 @@ impl DashboardState {
                 return self.activate_selected_resume_row(row);
             }
             Some(Interaction::Activate(Destroy)) => return self.destroy_selected_resume_row(),
+            Some(Interaction::Activate(CopyId)) => {
+                if let Some(row) = self.selected_resume_row()
+                    && row.unavailable_reason.is_some()
+                    && let ResumeRowKey::Native(_, native_session_id) = row.key
+                {
+                    return DashboardAction::CopyNativeSessionId { native_session_id };
+                }
+            }
             _ => {}
         }
         DashboardAction::None
@@ -1671,7 +1681,12 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if let Some(reason) = &row.unavailable_reason {
-            self.notices.set(format!("Cannot resume: {reason}"));
+            let action = if matches!(row.key, ResumeRowKey::Native(..)) {
+                "import"
+            } else {
+                "resume"
+            };
+            self.notices.set(format!("Cannot {action}: {reason}"));
             return DashboardAction::None;
         }
         match row.key {
@@ -2007,30 +2022,26 @@ pub(crate) fn render_resume_dialog(
         match dialog.tab {
             ResumeTab::Live => "Enter opens · ←/→ tabs · / searches · Tab moves · a/b/w/i/d filter",
             ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
+            ResumeTab::Import if selected.is_some_and(|row| row.unavailable_reason.is_some()) => {
+                "←/→ tabs · / searches · Tab moves"
+            }
             ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Archive => "Enter restores · ←/→ tabs · / searches · Tab moves",
         },
         Style::default().fg(theme::palette().muted),
     ));
-    let note_area = Rect::new(
-        footer_band.x,
-        footer_band.y,
-        footer_band.width,
-        footer_band.height.saturating_sub(1),
-    );
-    frame.render_widget(
-        Paragraph::new(footer)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        note_area,
-    );
-    let button_area = Rect::new(
-        footer_band.x,
-        footer_band.bottom().saturating_sub(1),
-        footer_band.width,
-        u16::from(footer_band.height > 0),
-    );
     let mut buttons = vec![(ResumeFocus::Cancel, "Cancel", true)];
+    let unavailable_import = selected
+        .filter(|row| matches!(row.key, ResumeRowKey::Native(..)))
+        .and_then(|row| row.unavailable_reason.as_deref());
+    if unavailable_import.is_some() {
+        buttons.push((ResumeFocus::CopyId, "Copy session ID", true));
+    }
+    let import_label = match unavailable_import {
+        Some("missing Git repo") => "Cannot import: missing Git repo",
+        Some(_) => "Cannot import",
+        None => "Import",
+    };
     if dialog.tab == ResumeTab::Hel {
         buttons.push((
             ResumeFocus::Destroy,
@@ -2043,12 +2054,44 @@ pub(crate) fn render_resume_dialog(
         match dialog.tab {
             ResumeTab::Live => "Open",
             ResumeTab::Hel => "Resume",
-            ResumeTab::Import => "Import",
+            ResumeTab::Import => import_label,
             ResumeTab::Archive => "Restore",
         },
         dialog.can_open(list_rows),
     ));
-    Dialog::render_actions(frame, button_area, &buttons, &mut form);
+    // Keep the unavailable explanation visible when the action row would overflow.
+    let split_actions = unavailable_import.is_some() && footer_band.width < 68;
+    let action_height = if split_actions { 2 } else { 1 };
+    let note_area = Rect::new(
+        footer_band.x,
+        footer_band.y,
+        footer_band.width,
+        footer_band.height.saturating_sub(action_height),
+    );
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        note_area,
+    );
+    let button_area = Rect::new(
+        footer_band.x,
+        footer_band.bottom().saturating_sub(action_height),
+        footer_band.width,
+        u16::from(footer_band.height > 0),
+    );
+    if split_actions {
+        Dialog::render_actions(frame, button_area, &buttons[..2], &mut form);
+        let explanation_area = Rect::new(
+            button_area.x,
+            button_area.y + 1,
+            button_area.width,
+            button_area.height,
+        );
+        Dialog::render_actions(frame, explanation_area, &buttons[2..], &mut form);
+    } else {
+        Dialog::render_actions(frame, button_area, &buttons, &mut form);
+    }
     form.end_frame(ResumeFocus::Sessions);
 }
 

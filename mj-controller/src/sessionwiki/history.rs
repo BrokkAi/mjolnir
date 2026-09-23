@@ -89,7 +89,7 @@ fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Resu
             query,
             limit: count,
         } => {
-            let rows = super::query_rows(query, limit(*count), &Default::default())?;
+            let rows = super::query_rows(query, limit(*count), &Default::default(), true)?;
             Ok(json!({"sessions":rows,"limit":limit(*count)}))
         }
         TraceFile { path, limit: count } => {

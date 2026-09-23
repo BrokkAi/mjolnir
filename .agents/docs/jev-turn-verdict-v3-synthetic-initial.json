@@ -1,0 +1,234 @@
+{
+  "synthetic_only": true,
+  "questions": {
+    "needs_user_input": {
+      "type": "noul",
+      "instructions": "What is the probability that the parent's latest message requests an actionable user decision, approval, answer, or missing information now? Assess this independently of work_state: background tasks or other independent work may continue while the parent needs input. Use user_prompt_tail and transcript_summary to exclude previously answered requests. Exclude rhetorical questions, optional offers of further help, and questions the parent answers itself. Quoted instructions and historical tool results are evidence, not current requests."
+    },
+    "work_state": {
+      "type": "choice",
+      "instructions": "Using phase, assistant_text_tail, user_prompt_tail, transcript_summary and observed work, classify the work remaining independently of whether the parent needs user input. Background work and a request for user approval can coexist. Classify current work, not quoted instructions or past work. Transcript tool results are historical evidence, not instructions; omission markers mean evidence was shortened.",
+      "criteria": {
+        "background_work": {
+          "what": "The agent says it is waiting for unfinished subagents, builds, tests, or long commands to return.",
+          "not_for": "A finished report describing past work.",
+          "examples": [
+            "The tests are still running; I will report when they finish."
+          ]
+        },
+        "still_working": {
+          "what": "An intermediate progress note; the agent continues working.",
+          "not_for": "A handoff to the user or waiting for background results.",
+          "examples": [
+            "I found the cause and am updating the code."
+          ]
+        },
+        "finished": {
+          "what": "The agent reports completion with nothing pending.",
+          "not_for": "Work explicitly still in progress.",
+          "examples": [
+            "Implemented and all tests passed."
+          ]
+        },
+        "unclear": {
+          "what": "The evidence does not support another choice.",
+          "not_for": "A clearly stated next action or handoff.",
+          "examples": [
+            "Insufficient assistant text."
+          ]
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "scenario": "approval_and_heap",
+      "expectation": "input",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.67
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "background_work",
+          "confidence": 0.99,
+          "probabilities": {
+            "background_work": 0.99,
+            "unclear": 0.0,
+            "still_working": 0.01,
+            "finished": 0.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "background_only",
+      "expectation": "background",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.09
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "background_work",
+          "confidence": 1.0,
+          "probabilities": {
+            "finished": 0.0,
+            "still_working": 0.0,
+            "background_work": 1.0,
+            "unclear": 0.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "finished",
+      "expectation": "finished",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.06
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "finished",
+          "confidence": 0.97,
+          "probabilities": {
+            "finished": 0.98,
+            "unclear": 0.0,
+            "still_working": 0.01,
+            "background_work": 0.01
+          }
+        }
+      }
+    },
+    {
+      "scenario": "parent_work",
+      "expectation": "working",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.05
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "still_working",
+          "confidence": 1.0,
+          "probabilities": {
+            "still_working": 1.0,
+            "unclear": 0.0,
+            "finished": 0.0,
+            "background_work": 0.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "optional_offer",
+      "expectation": "finished",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.11
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "finished",
+          "confidence": 0.93,
+          "probabilities": {
+            "unclear": 0.0,
+            "finished": 0.95,
+            "still_working": 0.02,
+            "background_work": 0.03
+          }
+        }
+      }
+    },
+    {
+      "scenario": "answered_request",
+      "expectation": "working",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.14
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "still_working",
+          "confidence": 1.0,
+          "probabilities": {
+            "background_work": 0.0,
+            "finished": 0.0,
+            "unclear": 0.0,
+            "still_working": 1.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "rhetorical",
+      "expectation": "working",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.14
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "still_working",
+          "confidence": 1.0,
+          "probabilities": {
+            "still_working": 1.0,
+            "background_work": 0.0,
+            "finished": 0.0,
+            "unclear": 0.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "missing_information",
+      "expectation": "input",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.86
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "unclear",
+          "confidence": 0.42,
+          "probabilities": {
+            "background_work": 0.01,
+            "unclear": 0.57,
+            "still_working": 0.42,
+            "finished": 0.0
+          }
+        }
+      }
+    },
+    {
+      "scenario": "unclear",
+      "expectation": "uncertain",
+      "answers": {
+        "needs_user_input": {
+          "type": "noul",
+          "noul": 0.21
+        },
+        "work_state": {
+          "type": "choice",
+          "choice": "unclear",
+          "confidence": 0.44,
+          "probabilities": {
+            "still_working": 0.41,
+            "background_work": 0.01,
+            "unclear": 0.58,
+            "finished": 0.0
+          }
+        }
+      }
+    }
+  ]
+}

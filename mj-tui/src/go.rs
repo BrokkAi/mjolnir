@@ -68,7 +68,7 @@ impl DashboardState {
         let eligible = |session: &&mj_core::state::SessionRecord| {
             self.active_workspace_id.as_deref() == Some(session.workspace_id.as_str())
                 && !session.archived
-                && !self.state.subagents.contains_key(&session.id)
+                && !self.state.is_subagent_session(&session.id)
                 && session.state != mj_core::state::SessionState::DestroyedWithDataLoss
         };
         self.go
@@ -320,6 +320,37 @@ mod tests {
             dashboard.begin_go(go, false),
             DashboardAction::Open {
                 session_id: "newer".into()
+            }
+        );
+    }
+
+    #[test]
+    fn reopening_skips_a_remembered_harness_owned_sub_agent() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let agent = mj_core::native_agent::NativeAgent {
+            owner_session_id: "session-1".into(),
+            session_id: "child".into(),
+            parent_session_id: None,
+            name: "Explore".into(),
+            task: "Map the code".into(),
+            capabilities: Default::default(),
+            state: mj_core::native_agent::NativeAgentState::Completed,
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
+        };
+        let child = agent.view_id();
+        dashboard.set_native_agents(vec![mj_core::native_agent::NativeAgentView {
+            generation_ordinal: 1,
+            projection: mj_core::state::MaterializedSession::empty(child.clone()),
+            agent,
+        }]);
+        let mut go = mode();
+        go.last_session_id = Some(child);
+        assert_eq!(
+            dashboard.begin_go(go, false),
+            DashboardAction::Open {
+                session_id: "session-1".into()
             }
         );
     }

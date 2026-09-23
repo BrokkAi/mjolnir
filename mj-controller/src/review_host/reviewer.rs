@@ -263,7 +263,7 @@ pub(super) fn seed_from_session(
     let mut task = String::new();
     let mut user_messages = Vec::new();
     let mut initial_result = String::new();
-    let mut trajectory = Vec::new();
+
     let context_start = session
         .transcript
         .iter()
@@ -283,7 +283,13 @@ pub(super) fn seed_from_session(
                 if text.is_empty() {
                     continue;
                 }
-                if mj_core::second_opinion::is_control_origin_prompt(text) {
+                if mj_core::second_opinion::is_control_origin_prompt(text)
+                    || mj_core::continuation::is_generated_prompt(
+                        item.stable_id
+                            .strip_prefix("user:")
+                            .unwrap_or(&item.stable_id),
+                    )
+                {
                     continue;
                 }
                 task = text.to_owned();
@@ -292,9 +298,6 @@ pub(super) fn seed_from_session(
                 // earlier requirement. `task` separately identifies the
                 // latest outer prompt.
                 user_messages.push(UserMessage::prompt(text));
-                if item.position > reviewed_through {
-                    trajectory.push(format!("user: {text}"));
-                }
             }
             mj_core::state::TranscriptBody::Agent { chunks, .. } => {
                 if !item.is_nonempty_agent_message() {
@@ -306,32 +309,26 @@ pub(super) fn seed_from_session(
                     continue;
                 }
                 initial_result = text.to_owned();
-                if item.position > reviewed_through {
-                    trajectory.push(format!("agent: {text}"));
-                }
-            }
-            mj_core::state::TranscriptBody::Tool { call, .. } => {
-                // The tool's own title, straight out of the stored ACP call:
-                // the trajectory says what the agent did, and the captured
-                // patch already carries what it changed.
-                let title = call
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .trim();
-                if item.position > reviewed_through && !title.is_empty() {
-                    trajectory.push(format!("tool: {title}"));
-                }
             }
             _ => {}
         }
     }
+    let mut summary = mj_transcript::summary::TranscriptSummary::from_materialized(session);
+    summary.entries.retain(|entry| {
+        entry.position > reviewed_through
+            && !(entry.role == mj_transcript::summary::SummaryRole::User
+                && (mj_core::second_opinion::is_control_origin_prompt(&entry.text)
+                    || mj_core::continuation::is_generated_prompt(
+                        entry.id.strip_prefix("user:").unwrap_or(&entry.id),
+                    )))
+    });
+    let trajectory = summary.render(mj_review::lanes::LANE_TRAJECTORY_LIMIT);
     TurnReviewSeed {
         tier,
         task,
         user_messages,
         initial_result,
-        trajectory: trajectory.join("\n"),
+        trajectory,
         baselines: state.baselines.clone(),
         through_ordinal: session.applied_event_ordinal,
         prior_review: state.prior_review.clone(),

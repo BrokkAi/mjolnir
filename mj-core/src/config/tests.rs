@@ -385,6 +385,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -1485,6 +1486,7 @@ fn a_review_section_names_the_profile_that_reviews() {
 #[test]
 fn auto_review_can_be_enabled_without_an_explicit_profile() {
     let config = Config {
+        continuation: Default::default(),
         review: ReviewConfig {
             enabled: true,
             ..Default::default()
@@ -1497,6 +1499,7 @@ fn auto_review_can_be_enabled_without_an_explicit_profile() {
 #[test]
 fn auto_rejects_manual_model_overrides() {
     let config = Config {
+        continuation: Default::default(),
         review: ReviewConfig {
             model: Some("custom".into()),
             ..Default::default()
@@ -1515,6 +1518,7 @@ fn auto_rejects_manual_model_overrides() {
 #[test]
 fn a_review_profile_that_names_nothing_is_refused() {
     let config = Config {
+        continuation: Default::default(),
         review: ReviewConfig {
             profile: Some("missing".into()),
             ..ReviewConfig::default()
@@ -2081,7 +2085,10 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     println!("{saved}");
-    assert!(saved.starts_with("version = 12"), "{saved}");
+    assert!(
+        saved.starts_with(&format!("version = {CONFIG_VERSION}")),
+        "{saved}"
+    );
     for expected in [
         "[machines.local]",
         "[machines.local.build_cache]",
@@ -2241,4 +2248,15 @@ fn keys_section_is_omitted_from_serialized_defaults() {
         rebound.keybinds().labels(KeyAction::Refresh),
         vec!["ctrl+b shift+r".to_owned(), "f5".to_owned()]
     );
+}
+
+#[test]
+fn automatic_continuation_defaults_on_and_disabled_setting_survives_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut config = Config::default();
+    assert!(config.continuation.enabled);
+    config.continuation.enabled = false;
+    config.save_to(&path).unwrap();
+    assert!(!Config::load_from(&path).unwrap().continuation.enabled);
 }

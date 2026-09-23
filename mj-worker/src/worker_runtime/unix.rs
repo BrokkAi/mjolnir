@@ -1096,7 +1096,7 @@ pub(super) async fn serve_client_with_memory(
                     .await?;
                 continue;
             }
-            let wakes_dispatch = matches!(&envelope.request, RelayRequest::Submit { .. });
+            let wakes_dispatch = matches!(&envelope.request, RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. });
             let checkpoint_change = checkpoint_change(&envelope.request);
             let operation = envelope.request.method_name();
             let response = match handle_request(&relay, envelope).await {
@@ -1126,6 +1126,7 @@ pub(super) async fn serve_client_with_memory(
                 &response.body,
                 RelayResponseBody::Ok {
                     payload: RelayResponsePayload::Accepted { .. }
+                        | RelayResponsePayload::IdleReservation { ordinal: Some(_) }
                 }
             );
             if accepted {

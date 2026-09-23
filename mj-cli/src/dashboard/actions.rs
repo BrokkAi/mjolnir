@@ -66,6 +66,9 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        DashboardAction::CopyNativeSessionId { native_session_id } => {
+            context.copy_text(&native_session_id, "Copied session ID")?;
+        }
         DashboardAction::ToggleTranscriptRendering => {
             let (dashboard, chat) = context.dashboard_and_visible_chat();
             apply_chat_toggle(dashboard, chat, ChatToggle::TranscriptRendering);
@@ -920,6 +923,19 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
+        }
+        DashboardAction::PinSession { session_id, pane } => {
+            if context.dashboard.pane_session(pane).is_none() {
+                context.pin_session_in(&session_id, pane);
+            } else {
+                context
+                    .dashboard
+                    .set_notice("That pane is no longer empty.");
+            }
+        }
+        DashboardAction::UnpinSession { session_id } => context.unpin_session(&session_id),
+        DashboardAction::SplitConversation { pane, direction } => {
+            context.split_conversation_pane(pane, direction)
         }
         DashboardAction::OpenSessionInSplit {
             session_id,

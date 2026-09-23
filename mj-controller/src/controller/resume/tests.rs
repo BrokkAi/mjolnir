@@ -978,6 +978,7 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

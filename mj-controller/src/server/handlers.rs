@@ -51,30 +51,27 @@ pub(super) fn issue_session_cookie(
     state: &ServerState,
     status: StatusCode,
 ) -> Result<Response<Body>, ApiError> {
-    let ephemeral = state.session_ttl.is_zero();
-    let validity = if ephemeral {
-        EPHEMERAL_SESSION_TTL
+    let viewer = generate_viewer_id()
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "cookie creation failed"))?;
+    let policy = if state.session_ttl.is_zero() {
+        "session"
     } else {
-        state.session_ttl
+        "phone"
     };
-    let value = signed_cookie_value(
-        &state.cookie_key,
-        &generate_viewer_id().map_err(|_| {
-            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "cookie creation failed")
-        })?,
-        now_unix().saturating_add(validity.as_secs()),
-    );
-    let cookie = session_cookie_header(
-        &value,
-        (!ephemeral).then_some(validity.as_secs()),
-        state.secure_cookie,
-    )?;
+    let cookie = viewer_session_cookie(state, &format!("{policy}:{viewer}"), now_unix())?;
     let mut response = status.into_response();
     response.headers_mut().insert(SET_COOKIE, cookie);
     Ok(response)
 }
 
-pub(super) async fn clear_session(State(state): State<ServerState>) -> Response<Body> {
+pub(super) async fn clear_session(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(error) = revoke_viewer(&state, &headers).await {
+        // Keep the cookie so retrying logout can persist the same revocation.
+        return error.into_response();
+    }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -441,6 +438,7 @@ pub(super) async fn preflight_new(
     let action = ControllerAction::New {
         mjolnir_subagents: None,
         create_managed_worktree: None,
+        launch_base: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),

@@ -117,6 +117,7 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            launch_base: None,
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.
             build_cache: parent.build_cache.clone(),

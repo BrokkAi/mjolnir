@@ -76,7 +76,9 @@ fn group(id: CommandId) -> &'static str {
         OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
         | ContainerSettings | MoveSession | DestroySession | MarkAllRead | FilterSessions
         | NextAttention | PreviousAttention | CancelOperation | ToggleProject => GROUPS[2],
-        OpenSessionSplitRight
+        PinSession
+        | UnpinSession
+        | OpenSessionSplitRight
         | OpenSessionSplitBelow
         | ClosePane
         | FocusPaneLeft

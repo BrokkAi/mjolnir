@@ -5,6 +5,7 @@
 //! [`server`] implements the daemon-owned phone control, [`pollers`] the background
 //! feeds both of them read, and [`import`] session adoption.
 
+mod acp;
 mod api_client;
 mod api_commands;
 mod daemon;
@@ -86,6 +87,10 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
+    /// Serve the Agent Client Protocol on standard input and output, running
+    /// each session it creates through this daemon.
+    #[command(hide = true)]
+    Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
     /// Discover local agent homes and create an initial Mjolnir configuration.
@@ -356,8 +361,8 @@ fn run(cli: Cli) -> Result<()> {
     }
     let result = runtime.block_on(run_command(cli.command, cli.workspace));
     if matches!(
-        result,
-        Ok(DashboardExit::Detached | DashboardExit::Interrupted)
+        &result,
+        Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
         // A dashboard has already drained durable mutations and restored its
         // terminal. Do not let disposable blocking reads delay process exit.
@@ -374,7 +379,10 @@ fn run(cli: Cli) -> Result<()> {
             RUNTIME_SHUTDOWN_GRACE,
         );
     }
-    result.map(|_| ())
+    match result? {
+        DashboardExit::Restart { target, resume } => resume.restart(&target),
+        _ => Ok(()),
+    }
 }
 
 fn install_panic_logging() {
@@ -408,6 +416,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
+        Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
@@ -487,6 +496,7 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => acp::serve(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {
@@ -927,11 +937,21 @@ async fn run_workspace_dashboard(
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
+    let resume = dashboard::UpgradeResume::load().await?;
+    if resume.is_some() {
+        go = None;
+    }
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some((mode, _)) = &mut go {
+    let selected = if let Some(resume) = &resume
+        && workspaces
+            .iter()
+            .any(|workspace| workspace.workspace.id == resume.workspace_id)
+    {
+        resume.workspace_id.clone()
+    } else if let Some((mode, _)) = &mut go {
         go::resolve_workspace(&mut daemon, mode).await?
-    } else if let Some(requested) = requested_workspace {
+    } else if let Some(requested) = requested_workspace.filter(|_| resume.is_none()) {
         workspaces
             .iter()
             .find(|candidate| {
@@ -950,11 +970,15 @@ async fn run_workspace_dashboard(
     };
     daemon.touch_workspace(selected.clone()).await?;
 
-    let client_id = format!(
-        "tui-{}-{}",
-        std::process::id(),
-        mj_core::workspace::new_workspace_id()?
-    );
+    let client_id = if let Some(resume) = &resume {
+        resume.client_id.clone()
+    } else {
+        format!(
+            "tui-{}-{}",
+            std::process::id(),
+            mj_core::workspace::new_workspace_id()?
+        )
+    };
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment = daemon::maintain_attachment(
@@ -968,6 +992,7 @@ async fn run_workspace_dashboard(
         open_workspace_manager,
         go,
         attachment.presence,
+        resume,
     )
     .await;
     attachment_cancellation.cancel();
@@ -1783,6 +1808,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                launch_base: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,

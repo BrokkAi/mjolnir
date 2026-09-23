@@ -529,6 +529,10 @@ pub(super) fn command_over_ssh(mut command: CommandSpec, ssh: &SshTarget) -> Com
     let wrapped = ssh_command_owned(ssh, remote);
     command.program = wrapped.program;
     command.args = wrapped.args;
+    // The wrapped command now opens an SSH session, so it is admitted and
+    // placed on a shared connection like any other.
+    command.ssh_destination = wrapped.ssh_destination;
+    command.ssh_session = wrapped.ssh_session;
     command
 }
 

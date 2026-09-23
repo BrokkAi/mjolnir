@@ -127,6 +127,11 @@ pub struct ConversationLayout {
     pub root: LayoutNode,
     pub focus: u32,
     pub sessions: std::collections::BTreeMap<u32, String>,
+    /// Missing only in layouts saved before Browse/pins existed.
+    #[serde(default)]
+    pub browse: Option<u32>,
+    #[serde(default)]
+    pub pins: std::collections::BTreeMap<String, u32>,
 }
 
 impl Default for ConversationLayout {
@@ -135,6 +140,8 @@ impl Default for ConversationLayout {
             root: LayoutNode::Pane { id: 1 },
             focus: 1,
             sessions: std::collections::BTreeMap::new(),
+            browse: Some(1),
+            pins: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -146,6 +153,24 @@ impl ConversationLayout {
         self.root.collect_pane_ids(&mut ids)?;
         if !ids.contains(&self.focus) {
             bail!("focused pane {} is not in the layout", self.focus);
+        }
+        if let Some(browse) = self.browse {
+            if !ids.contains(&browse) {
+                bail!("Browse pane {browse} is not in the layout");
+            }
+            let mut badges = std::collections::BTreeSet::new();
+            for (session, badge) in &self.pins {
+                if !self
+                    .sessions
+                    .iter()
+                    .any(|(pane, shown)| *pane != browse && shown == session)
+                {
+                    bail!("pin {session} is not in a pinned pane");
+                }
+                if !badges.insert(badge) {
+                    bail!("duplicate pin badge {badge}");
+                }
+            }
         }
         for pane in self.sessions.keys() {
             if !ids.contains(pane) {
@@ -263,6 +288,8 @@ mod tests {
 
     fn two_pane_layout() -> ConversationLayout {
         ConversationLayout {
+            browse: None,
+            pins: Default::default(),
             root: LayoutNode::Split {
                 axis: SplitAxis::Horizontal,
                 ratio: 0.5,
@@ -290,6 +317,8 @@ mod tests {
                 },
                 "focus": 2,
                 "sessions": { "2": "session-b" },
+                "browse": null,
+                "pins": {},
             })
         );
         assert_eq!(
@@ -337,5 +366,48 @@ mod tests {
         let mut unknown_session = two_pane_layout();
         unknown_session.sessions.insert(9, "session-c".to_owned());
         assert!(unknown_session.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod pin_layout_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_layouts_decode_without_inventing_a_browse_location() {
+        let layout: ConversationLayout = serde_json::from_value(serde_json::json!({
+            "root": {"kind": "pane", "id": 17}, "focus": 17, "sessions": {"17": "session"}
+        }))
+        .unwrap();
+        assert_eq!(layout.browse, None);
+        assert!(layout.pins.is_empty());
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn browse_and_pin_identity_round_trip_and_reject_orphaned_metadata() {
+        let mut layout = ConversationLayout {
+            root: LayoutNode::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Pane { id: 1 }),
+                second: Box::new(LayoutNode::Pane { id: 2 }),
+            },
+            focus: 1,
+            sessions: [(1, "pinned".to_owned()), (2, "preview".to_owned())].into(),
+            browse: Some(2),
+            pins: [("pinned".to_owned(), 5)].into(),
+        };
+        assert!(layout.validate().is_ok());
+        let decoded: ConversationLayout =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(decoded, layout);
+        layout.browse = Some(1);
+        assert!(layout.validate().is_err());
+        layout.browse = Some(999);
+        assert!(layout.validate().is_err());
+        layout.browse = Some(2);
+        layout.pins.insert("missing".into(), 6);
+        assert!(layout.validate().is_err());
     }
 }

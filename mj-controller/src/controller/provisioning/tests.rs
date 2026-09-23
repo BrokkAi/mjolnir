@@ -467,6 +467,7 @@ fn mounts_without_an_overlay_are_not_probed() {
 fn failed_new_session_provisioning_retains_error_record() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -549,6 +550,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "docker",
             "failed image",
             SessionLaunchOptions {
+                launch_base: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -628,6 +630,7 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
             "docker",
             "borrow the parent container",
             SessionLaunchOptions {
+                launch_base: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -722,6 +725,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "docker",
             "missing Node",
             SessionLaunchOptions {
+                launch_base: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -770,6 +774,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

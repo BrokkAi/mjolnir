@@ -19,6 +19,7 @@ pub use mj_core::relay::*;
 mod background;
 mod commands;
 mod journal;
+mod native_history;
 mod replay;
 mod requests;
 mod serving;
@@ -134,7 +135,7 @@ pub struct DurableRelay {
     /// reads the same tool calls, and when it could not, a turn blocked in a
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
-    turn_context: mj_core::activity::verdict::TurnContext,
+    turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict_pending: bool,
     replied_verdict: verdict::RepliedVerdictState,
@@ -339,6 +340,9 @@ impl DurableRelay {
         let retained_through = snapshot.retained_through();
         let retained_digest = snapshot.retained_digest().to_owned();
         let snapshot_ordinal = snapshot.latest_ordinal;
+        let missing_native_history = snapshot.native_session_id.is_some()
+            && snapshot.native_session_opened_ordinal.is_none()
+            && !snapshot.native_session_used;
         let (journal_spans, hot_events) = open_relay_journal(
             &root.join(RELAY_JOURNAL_DIR),
             retained_through,
@@ -391,6 +395,57 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
+        let recovered_native_history =
+            missing_native_history && !checkpoint_only && relay.recover_native_history_evidence();
+        // Startup already reads the active journal into the bounded hot window.
+        // Reuse it: old sealed history must not make worker startup slow or fail.
+        if !checkpoint_only {
+            let mut prompts = BTreeMap::<String, String>::new();
+            if relay
+                .hot_events
+                .front()
+                .is_none_or(|event| event.ordinal > 1)
+                && relay.snapshot.latest_ordinal > 0
+            {
+                relay.turn_context.mark_earlier_history_omitted();
+            }
+            for event in &relay.hot_events {
+                if let RelayObservation::CommandQueued {
+                    command_id,
+                    command,
+                    ..
+                } = &event.observation
+                    && let Some(prompt) = command.prompt_blocks()
+                {
+                    prompts.insert(
+                        command_id.clone(),
+                        prompt
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                let prompt = if let Some(command_id) =
+                    mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
+                {
+                    prompts.remove(command_id)
+                } else {
+                    if let RelayObservation::CommandCompleted { command_id, .. } =
+                        &event.observation
+                    {
+                        prompts.remove(command_id);
+                    }
+                    None
+                };
+                relay
+                    .turn_context
+                    .observe_relay(&event.observation, prompt.as_deref());
+            }
+        }
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.
         let replayed = relay.snapshot.latest_ordinal > snapshot_ordinal;
@@ -402,7 +457,7 @@ impl DurableRelay {
         if idle {
             relay.snapshot.activity_turn_started_at_ms = None;
         }
-        if !state_path.exists() || replayed || assigned_store_id {
+        if !state_path.exists() || replayed || assigned_store_id || recovered_native_history {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
@@ -432,8 +487,13 @@ impl DurableRelay {
                 continue;
             };
             let payload = match &dispatch.command {
-                RelayCommand::Prompt { prompt } => StoredQueuedRelayPayload::Prompt {
-                    prompt: prompt.clone(),
+                command @ (RelayCommand::Prompt { .. }
+                | RelayCommand::ContinueAuthorizedWork { .. }
+                | RelayCommand::ResumeAfterQuota { .. }) => StoredQueuedRelayPayload::Prompt {
+                    prompt: command
+                        .prompt_blocks()
+                        .expect("prompt command")
+                        .into_owned(),
                 },
                 RelayCommand::SetConfig { key, value } => StoredQueuedRelayPayload::SetConfig {
                     key: key.clone(),
@@ -638,10 +698,16 @@ impl DurableRelay {
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
         self.verdict_harness = Some(harness);
+        if self.turn_context.decision_log().is_none() {
+            match mj_core::jev::DecisionLog::open(self.root.join("jev-decisions")) {
+                Ok(log) => self.turn_context.set_decision_log(log),
+                Err(error) => tracing::warn!(%error, "Jev diagnostic log unavailable"),
+            }
+        }
         self.turn_context.set_session_id(&self.snapshot.session_id);
     }
 
-    pub fn turn_context(&self) -> mj_core::activity::verdict::TurnContext {
+    pub fn turn_context(&self) -> mj_transcript::turn_context::TurnContext {
         self.turn_context.clone()
     }
 
@@ -717,13 +783,10 @@ impl DurableRelay {
         }
         // A prompt that only waits in the durable queue never reached the
         // agent. Anything past admission may have.
-        self.snapshot.dispatches.values().any(|dispatch| {
-            matches!(dispatch.command, RelayCommand::Prompt { .. })
-                && !matches!(
-                    dispatch.state,
-                    RelayDispatchState::Queued | RelayDispatchState::Pending
-                )
-        })
+        self.snapshot
+            .dispatches
+            .values()
+            .any(native_history::prompt_may_have_reached_agent)
     }
 
     /// Record that the native thread has been used and can never be replaced.
@@ -771,7 +834,6 @@ impl DurableRelay {
     }
 
     pub fn record_session_update(&mut self, mut update: SessionUpdate) -> Result<u64> {
-        self.turn_context.observe(&update);
         // An ACP file edit arrives as the whole file before and the whole file
         // after. Store the patch between them instead: nothing downstream
         // reconstructs a file from those copies, and the patch is proportional
@@ -1045,3 +1107,6 @@ mod tests;
 
 #[cfg(test)]
 mod attachment_tests;
+
+#[cfg(test)]
+mod continuation_tests;

@@ -535,6 +535,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
+        launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,
@@ -566,6 +567,37 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
         .unwrap_err();
 
     assert!(error.to_string().contains("disabled"));
+    assert!(controller.state.sessions.is_empty());
+}
+
+#[test]
+fn registration_rejects_a_launch_base_it_cannot_honour() {
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+
+    let mut options = launch_options(Vec::new());
+    options.launch_base = Some("   ".into());
+    let error = controller
+        .register_session_with_resources("codex", "project", "podman", "blank", options)
+        .unwrap_err();
+    assert!(error.to_string().contains("launch base must not be empty"));
+
+    // Without a worktree there is nowhere to apply the base: the session runs
+    // in the selected directory as it stands.
+    let mut options = launch_options(Vec::new());
+    options.launch_base = Some("HEAD~1".into());
+    options.create_managed_worktree = Some(false);
+    let error = controller
+        .register_session_with_resources("codex", "project", "podman", "no worktree", options)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires a managed worktree or a bundle session")
+    );
+
     assert!(controller.state.sessions.is_empty());
 }
 

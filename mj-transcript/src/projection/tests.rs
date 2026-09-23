@@ -2464,3 +2464,19 @@ fn clear_preserves_history_and_adds_one_durable_context_boundary() {
         1
     );
 }
+
+#[test]
+fn classifier_notice_is_shown_without_warning_prefix() {
+    let mut session = MaterializedSession::empty("session-1");
+    let message =
+        "Classifier: The agent appears to be waiting for you. The harness may still be running.";
+    apply_observation(
+        &mut session,
+        RelayObservation::Notice {
+            message: message.into(),
+        },
+    );
+    assert!(
+        matches!(&session.transcript[0].body, TranscriptBody::System { text } if text == message)
+    );
+}

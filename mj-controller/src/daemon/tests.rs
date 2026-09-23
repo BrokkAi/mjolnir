@@ -434,6 +434,145 @@ fn test_runtime_state() -> Arc<RuntimeState> {
     ))
 }
 
+/// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
+/// must report a live gate label and stop reporting it once released. The gate
+/// is process-wide and other tests hold their own labels beside this one, so
+/// the test asserts only on a label nothing else uses.
+#[tokio::test]
+async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
+    const LABEL: &str = "test-only upgrade blocker";
+    let state = test_runtime_state();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    let labels = |reply: DaemonReply| match reply {
+        DaemonReply::UpgradeBlockers(labels) => labels,
+        other => panic!("expected named blockers, got {other:?}"),
+    };
+    let held = crate::upgrade::activity(LABEL).unwrap();
+    let named = labels(
+        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+    );
+    assert!(named.contains(&LABEL.to_owned()), "{named:?}");
+    drop(held);
+    let released = labels(
+        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+    );
+    assert!(
+        !released.contains(&LABEL.to_owned()),
+        "released work is still named: {released:?}"
+    );
+}
+
+#[tokio::test]
+async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
+    const CHILD: &str = "MJ_UPGRADE_DRAIN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::automatic_upgrade_drains_a_lifecycle_without_cancelling_it",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        crate::controller::test_support::IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = state
+        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Create, {
+            let release = release.clone();
+            move |_, _, cancelled| async move {
+                release.notified().await;
+                ensure!(
+                    !cancelled.load(Ordering::Acquire),
+                    "upgrade cancelled provisioning"
+                );
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::time::pause();
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(60 * 60 * 24)).await;
+        assert!(matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ));
+        assert!(!shutdown.is_cancelled());
+        assert!(matches!(
+            handle_action(DaemonAction::Ping, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::Pong
+        ));
+        assert!(
+            crate::upgrade::activity("another control request").is_ok(),
+            "waiting must leave controls available"
+        );
+    }
+    tokio::time::resume();
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(operation)
+        .await
+        .unwrap();
+    let (updates, mut receiver) = crate::session_manager::coalesced_update_channel();
+    updates.send(crate::session_manager::SessionManagerUpdate {
+        session_id: "completed-turn".into(),
+        view: ManagedSessionView::default(),
+    });
+    assert!(
+        matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ),
+        "a queued completion can still start a review or continuation"
+    );
+    receiver.recv().await.unwrap();
+    assert!(
+        matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ),
+        "the consumer still owns the completion until it asks for another update"
+    );
+    assert!(receiver.try_recv().is_err());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                    .await
+                    .unwrap(),
+                DaemonReply::Done
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(shutdown.is_cancelled());
+    assert!(crate::upgrade::activity("late operation").is_err());
+}
+
 struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
@@ -697,6 +836,7 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -2160,6 +2300,11 @@ fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
 fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
+        continuation: Default::default(),
+        relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,

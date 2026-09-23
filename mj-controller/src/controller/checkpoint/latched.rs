@@ -170,6 +170,7 @@ impl Controller {
                     worker_root: &worker_root,
                     reconnect: &reconnect,
                     launch: None,
+                    prepared: false,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
                 exclusivity == LatchExclusivity::HoldThroughClose

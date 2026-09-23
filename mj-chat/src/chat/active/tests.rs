@@ -277,12 +277,18 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
             operational: mj_core::relay::RelayOperationalState {
+                continuation: Default::default(),
+                relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+                native_agents: Vec::new(),
+                steering: None,
+                cancelling_prompt_id: None,
                 clear_context: false,
                 clear_context_started_at_ms: None,
                 native_agent_count: 0,
                 expected_continuation: None,
                 inferred_idle_since_ms: None,
                 goal: Default::default(),
+
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
@@ -959,6 +965,7 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -1726,109 +1733,140 @@ async fn escape_names_steering_through_submission_and_acceptance() {
 
     use mj_core::relay::{ActiveRelayPrompt, RelayCommand};
 
-    for (supported, queue_kind, hint, sending, _requested) in [
-        (
-            Some(true),
-            Some(QueuedCommandKind::Prompt),
-            "Esc steers next",
-            "Steering turn…",
-            "Steering requested",
-        ),
-        (
-            Some(false),
-            Some(QueuedCommandKind::Prompt),
-            "Esc cancels",
-            "Interrupting turn…",
-            "Cancellation requested",
-        ),
-        (
-            None,
-            Some(QueuedCommandKind::Prompt),
-            "Esc applies next",
-            "Applying queued prompt…",
-            "Queued prompt requested",
-        ),
-        (
-            Some(true),
-            Some(QueuedCommandKind::SetConfig {
-                key: "model".into(),
-                value: "next-model".into(),
-            }),
-            "Esc cancels",
-            "Interrupting turn…",
-            "Cancellation requested",
-        ),
-        (
-            Some(true),
-            None,
-            "Esc cancels",
-            "Interrupting turn…",
-            "Cancellation requested",
-        ),
-    ] {
-        let mut fixture =
-            mj_client::session::replacement_session_test_fixture("steering-session", 12);
-        let mut chat = ActiveChat::open(
-            fixture.stopped,
-            "bundle-1",
-            None,
-            fixture.control,
-            SessionHeaderIdentity::default(),
-            String::new(),
-            Notices::default(),
-        );
-        let mut materialized = MaterializedSession::empty("steering-session");
-        if let Some(kind) = queue_kind {
-            materialized.queued_prompts.push(MaterializedQueuedPrompt {
-                accepted_ordinal: None,
-                command_id: "queued-correction".into(),
-                kind,
-                content: vec![serde_json::json!({"type": "text", "text": "change direction"})],
-                queued_at_ms: 0,
-            });
-        }
-        let mut view = managed_view(materialized);
-        let operational = &mut view.snapshot.as_mut().unwrap().operational;
-        operational.steering_supported = supported;
-        operational.active_prompt = Some(ActiveRelayPrompt {
-            command_id: "running-prompt".into(),
-            created_at_ms: 0,
-            started_at_ms: 0,
-        });
-        apply_session_view(&mut chat.state, Ok(view));
-        let screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
-        assert!(screen.contains(hint), "{screen}");
-
-        let previous_feedback = chat.state.notice();
-        chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert_eq!(chat.state.notice(), previous_feedback);
-        let pending_screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
-        assert!(pending_screen.contains(sending), "{pending_screen}");
-
-        let result = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let result = chat
-                    .remote
-                    .recv()
-                    .await
-                    .expect("remote worker remains open");
-                if matches!(result, ChatRemoteResult::Cancel { .. }) {
-                    break result;
-                }
+    for protocol in [None, Some(16), Some(17)] {
+        for (supported, queue_kind, hint, sending, _requested) in [
+            (
+                Some(true),
+                Some(QueuedCommandKind::Prompt),
+                "Esc steers next",
+                "Steering turn…",
+                "Steering requested",
+            ),
+            (
+                Some(false),
+                Some(QueuedCommandKind::Prompt),
+                "Esc steers next",
+                "Steering turn…",
+                "Cancellation requested",
+            ),
+            (
+                None,
+                Some(QueuedCommandKind::Prompt),
+                "Esc steers next",
+                "Steering turn…",
+                "Queued prompt requested",
+            ),
+            (
+                Some(true),
+                Some(QueuedCommandKind::SetConfig {
+                    key: "model".into(),
+                    value: "next-model".into(),
+                }),
+                "Esc cancels",
+                "Interrupting turn…",
+                "Cancellation requested",
+            ),
+            (
+                Some(true),
+                None,
+                "Esc cancels",
+                "Interrupting turn…",
+                "Cancellation requested",
+            ),
+        ] {
+            let mut fixture =
+                mj_client::session::replacement_session_test_fixture("steering-session", 12);
+            let mut chat = ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                SessionHeaderIdentity::default(),
+                String::new(),
+                Notices::default(),
+            );
+            let mut materialized = MaterializedSession::empty("steering-session");
+            let targeted = protocol.is_some_and(|version| version >= 17);
+            let hint = if targeted { hint } else { "Esc cancels" };
+            let sending = if targeted {
+                sending
+            } else {
+                "Interrupting turn…"
+            };
+            let steering = targeted && queue_kind.as_ref().is_some_and(|kind| kind.is_prompt());
+            if let Some(kind) = queue_kind {
+                materialized.queued_prompts.push(MaterializedQueuedPrompt {
+                    accepted_ordinal: None,
+                    command_id: "queued-correction".into(),
+                    kind,
+                    content: vec![serde_json::json!({"type": "text", "text": "change direction"})],
+                    queued_at_ms: 0,
+                });
             }
-        })
-        .await
-        .expect("turn control request completes");
-        assert!(matches!(
-            fixture.submitted.recv().await,
-            Some(RelayCommand::Cancel)
-        ));
+            let mut view = managed_view(materialized);
+            let operational = &mut view.snapshot.as_mut().unwrap().operational;
+            operational.relay_protocol_version = protocol;
+            operational.steering_supported = supported;
+            operational.active_prompt = Some(ActiveRelayPrompt {
+                command_id: "running-prompt".into(),
+                created_at_ms: 0,
+                started_at_ms: 0,
+            });
+            apply_session_view(&mut chat.state, Ok(view));
+            let screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
+            assert!(screen.contains(hint), "{screen}");
 
-        // A newer view may already have consumed the queue. The reply
-        // must still describe the request that was actually submitted.
-        chat.state.queued_prompts.clear();
-        apply_chat_remote_result(&mut chat.state, result);
-        assert_eq!(chat.state.notice(), previous_feedback);
+            let previous_feedback = chat.state.notice();
+            chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert_eq!(chat.state.notice(), previous_feedback);
+            let pending_screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
+            assert!(pending_screen.contains(sending), "{pending_screen}");
+
+            let result = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let result = chat
+                        .remote
+                        .recv()
+                        .await
+                        .expect("remote worker remains open");
+                    if matches!(result, ChatRemoteResult::Cancel { .. }) {
+                        break result;
+                    }
+                }
+            })
+            .await
+            .expect("turn control request completes");
+            assert_eq!(
+                fixture.submitted.recv().await,
+                Some(if !targeted {
+                    RelayCommand::CancelTurn
+                } else if steering {
+                    RelayCommand::Steer {
+                        active_prompt_id: "running-prompt".into(),
+                        queued_prompt_id: "queued-correction".into(),
+                    }
+                } else {
+                    RelayCommand::CancelTurnFor {
+                        active_prompt_id: "running-prompt".into(),
+                    }
+                })
+            );
+
+            // A newer view may already have consumed the queue. The reply
+            // must still describe the request that was actually submitted.
+            chat.state.queued_prompts.clear();
+            apply_chat_remote_result(&mut chat.state, result);
+            assert_eq!(chat.state.notice(), previous_feedback);
+            assert!(
+                chat.state.operation_feedback.contains_key("turn-control"),
+                "acceptance is not execution"
+            );
+            chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert!(
+                fixture.submitted.try_recv().is_err(),
+                "Escape cannot escalate while waiting for execution state"
+            );
+        }
     }
 }
 
@@ -1843,6 +1881,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -1864,6 +1903,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -1986,7 +2026,7 @@ fn subagents_are_blue_highlighted_as_clickable_on_prompt_border() {
     let label = (area.x..area.right())
         .map(|x| buffer[(x, area.y)].symbol())
         .collect::<String>();
-    assert_eq!(label, " Sub-agents (2) ");
+    assert_eq!(label, " Subagents · 0 working ");
     assert!((area.x..area.right()).all(|x| {
         let cell = &buffer[(x, area.y)];
         cell.bg == theme::palette().selection && cell.fg == theme::palette().text
@@ -1998,6 +2038,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,

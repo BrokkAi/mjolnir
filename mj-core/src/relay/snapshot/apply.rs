@@ -14,7 +14,8 @@ use super::*;
 /// fails if the two ever disagree.
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
-        RelayObservation::AgentInitialized { .. }
+        RelayObservation::SteeringUnconfirmed { .. }
+        | RelayObservation::AgentInitialized { .. }
         | RelayObservation::SessionOpened { .. }
         | RelayObservation::SessionConfigured { .. }
         | RelayObservation::SessionModesConfigured { .. }
@@ -39,7 +40,7 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
                 | SessionUpdate::CurrentModeUpdate(_)
                 | SessionUpdate::SessionInfoUpdate(_)
         ),
-        RelayObservation::NativeAgent { event } => !matches!(event, crate::native_agent::NativeAgentEvent::Update { .. } | crate::native_agent::NativeAgentEvent::ReplayCommit),
+        RelayObservation::NativeAgent { event } => !matches!(event, crate::native_agent::NativeAgentEvent::Update { .. }),
         RelayObservation::PermissionAutoApproved { .. }
         | RelayObservation::ElicitationRequested { .. }
         | RelayObservation::ElicitationResolved { .. }
@@ -54,6 +55,22 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
+        RelayObservation::SteeringUnconfirmed {
+            command_id,
+            message,
+        } => {
+            let steering = snapshot
+                .steering
+                .as_mut()
+                .ok_or_else(|| anyhow!("unknown steering operation"))?;
+            if steering.command_id != *command_id {
+                bail!("steering identity changed");
+            }
+            if steering.holds_queue() {
+                steering.status = SteeringStatus::Unconfirmed;
+                steering.message = Some(message.clone());
+            }
+        }
         RelayObservation::AgentInitialized {
             capabilities,
             agent_info,
@@ -67,6 +84,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             native_continuity_lost,
             resumed,
         } => {
+            snapshot.continuation.suppressed = true;
+            if *native_continuity_lost {
+                snapshot.continuation.quota_recovery = None;
+                snapshot.continuation.quota_suppressed = true;
+            }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
             // A normal open clears the flag; only the fallback sets it.
@@ -89,6 +111,86 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command,
             created_at_ms,
         } => {
+            match command {
+                RelayCommand::Steer {
+                    active_prompt_id,
+                    queued_prompt_id,
+                } => {
+                    snapshot.steering = Some(SteeringOperation {
+                        command_id: command_id.clone(),
+                        active_prompt_id: active_prompt_id.clone(),
+                        queued_prompt_id: queued_prompt_id.clone(),
+                        status: SteeringStatus::Pending,
+                        message: None,
+                    });
+                }
+                RelayCommand::CancelTurnFor { active_prompt_id } => {
+                    snapshot.cancelling_prompt_id = Some(active_prompt_id.clone())
+                }
+                _ => {}
+            }
+            match command {
+                RelayCommand::Prompt { prompt }
+                    if !crate::continuation::is_generated_prompt(command_id)
+                        && !crate::continuation::is_generated_prompt_text(
+                            &prompt
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ContentBlock::Text(t) = b {
+                                        Some(t.text.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ) =>
+                {
+                    snapshot.continuation = crate::continuation::ContinuationState {
+                        user_command_id: Some(command_id.clone()),
+                        suppressed: crate::acp::context_command(prompt).is_some(),
+                        quota_suppressed: crate::acp::context_command(prompt).is_some(),
+                        ..Default::default()
+                    };
+                }
+                RelayCommand::ContinueAuthorizedWork { attempt, .. } => {
+                    snapshot.continuation.attempts = *attempt;
+                    snapshot.continuation.completed_command_id = None;
+                }
+                RelayCommand::SetQuotaRecovery { recovery, .. } => {
+                    snapshot.continuation.quota_recovery = recovery.as_deref().cloned();
+                }
+                RelayCommand::ResumeAfterQuota { .. } => {
+                    if let Some(recovery) = &mut snapshot.continuation.quota_recovery {
+                        recovery.submitted = true;
+                    }
+                    snapshot.continuation.completed_command_id = None;
+                    snapshot.continuation.suppressed = false;
+                }
+                RelayCommand::Cancel
+                | RelayCommand::CancelTurn
+                | RelayCommand::CancelTurnFor { .. }
+                | RelayCommand::ClearContext
+                | RelayCommand::GoalControl { .. }
+                | RelayCommand::SetSessionMode { .. } => {
+                    snapshot.continuation.suppressed = true;
+                    snapshot.continuation.quota_suppressed = true;
+                }
+                _ => {}
+            }
+            if cancels_capacity_retry(command)
+                || matches!(
+                    command,
+                    RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ClearContext
+                        | RelayCommand::BeginCheckpoint { .. }
+                )
+            {
+                snapshot.continuation.quota_recovery = None;
+                if !matches!(command, RelayCommand::Prompt { .. }) {
+                    snapshot.continuation.quota_suppressed = true;
+                }
+            }
             if cancels_capacity_retry(command) {
                 if let Some(retry) = snapshot.capacity_retry.as_mut()
                     && retry.command_id == *command_id
@@ -117,9 +219,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             // Prompts and configuration changes share one FIFO queue so they
             // reach the agent in the order the user submitted them.
             let payload = match command {
-                RelayCommand::Prompt { prompt } => Some(StoredQueuedRelayPayload::Prompt {
-                    prompt: prompt.clone(),
-                }),
+                command if command.prompt_blocks().is_some() => {
+                    Some(StoredQueuedRelayPayload::Prompt {
+                        prompt: command
+                            .prompt_blocks()
+                            .expect("prompt command")
+                            .into_owned(),
+                    })
+                }
                 RelayCommand::SetConfig { key, value } => {
                     Some(StoredQueuedRelayPayload::SetConfig {
                         key: key.clone(),
@@ -164,7 +271,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("started unknown relay command {command_id}"))?;
             dispatch.state = RelayDispatchState::Pending;
             match &dispatch.command {
-                RelayCommand::Prompt { .. } => {
+                RelayCommand::Prompt { .. }
+                | RelayCommand::ContinueAuthorizedWork { .. }
+                | RelayCommand::ResumeAfterQuota { .. } => {
                     let index = snapshot
                         .queued_prompts
                         .iter()
@@ -235,6 +344,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
+                snapshot.continuation.completed_command_id =
+                    (snapshot.continuation.user_command_id.as_ref() == Some(command_id)
+                        || matches!(
+                            command,
+                            RelayCommand::ContinueAuthorizedWork { .. }
+                                | RelayCommand::ResumeAfterQuota { .. }
+                        ))
+                    .then(|| command_id.clone());
+                if crate::state::classify_prompt_completion(stop_reason)
+                    != crate::state::PromptCompletion::Finished
+                {
+                    snapshot.continuation.suppressed = true;
+                }
                 let accepted = snapshot.handled_commands[command_id].accepted_ordinal;
                 let superseded = snapshot.handled_commands.values().any(|handled| {
                     handled.accepted_ordinal > accepted && cancels_capacity_retry(&handled.command)
@@ -255,7 +377,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 };
             }
             match (command, outcome) {
-                (RelayCommand::Prompt { .. }, RelayCommandOutcome::Prompt { .. }) => {
+                (
+                    RelayCommand::Prompt { .. }
+                    | RelayCommand::ContinueAuthorizedWork { .. }
+                    | RelayCommand::ResumeAfterQuota { .. },
+                    RelayCommandOutcome::Prompt { .. },
+                ) => {
                     if snapshot
                         .active_prompt
                         .as_ref()
@@ -263,6 +390,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         == Some(command_id)
                     {
                         snapshot.active_prompt = None;
+                        if snapshot.cancelling_prompt_id.as_ref() == Some(command_id) {
+                            snapshot.cancelling_prompt_id = None;
+                        }
                     }
                     // ACP completion must not settle a later native goal turn.
                     if !snapshot.goal.running() {
@@ -349,8 +479,29 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
-                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled) => {}
-                (RelayCommand::Cancel, RelayCommandOutcome::Steered { queued_command_id }) => {
+                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
+                | (RelayCommand::CancelTurnFor { .. }, RelayCommandOutcome::Cancelled) => {}
+                (
+                    RelayCommand::ResolveSteering { steering_id },
+                    RelayCommandOutcome::NoticeRecorded,
+                ) => {
+                    if let Some(steering) = snapshot.steering.as_mut() {
+                        if steering.command_id != steering_id {
+                            bail!("steering identity changed");
+                        }
+                        steering.status = SteeringStatus::Resolved;
+                    }
+                }
+                (
+                    RelayCommand::Cancel | RelayCommand::Steer { .. },
+                    RelayCommandOutcome::Steered { queued_command_id },
+                ) => {
+                    if let Some(steering) = snapshot.steering.as_mut()
+                        && steering.command_id == *command_id
+                    {
+                        steering.status = SteeringStatus::Applied;
+                        steering.message = None;
+                    }
                     let queued = snapshot
                         .queued_prompts
                         .first()
@@ -365,7 +516,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .get_mut(queued_command_id)
                         .ok_or_else(|| anyhow!("steered unknown queued prompt"))?;
                     if target.state != RelayDispatchState::Queued
-                        || !matches!(target.command, RelayCommand::Prompt { .. })
+                        || target.command.prompt_blocks().is_none()
                     {
                         bail!("steered target is not a queued prompt");
                     }
@@ -458,6 +609,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         memory,
                     },
                 ) => {
+                    snapshot.continuation.suppressed = true;
                     snapshot.native_session_id = Some(native_session_id.clone());
                     snapshot.native_session_opened_ordinal = Some(event.ordinal);
                     snapshot.native_session_used = false;
@@ -481,7 +633,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     };
                     snapshot.execution = RelayExecutionState::Idle;
                 }
-                (RelayCommand::RecordNotice { .. }, RelayCommandOutcome::NoticeRecorded) => {}
+                (
+                    RelayCommand::RecordNotice { .. } | RelayCommand::SetQuotaRecovery { .. },
+                    RelayCommandOutcome::NoticeRecorded,
+                ) => {}
                 (RelayCommand::BeginCheckpoint { .. }, _) => {
                     bail!("checkpoint barriers complete through checkpoint-ready")
                 }
@@ -516,6 +671,21 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .clone();
             if command.kind() != *observed_command {
                 bail!("terminated command {command_id} has the wrong command identity");
+            }
+            if let Some(steering) = snapshot.steering.as_mut()
+                && steering.command_id == *command_id
+            {
+                steering.status = if state == RelayDispatchState::Rejected {
+                    SteeringStatus::Failed
+                } else {
+                    SteeringStatus::Unconfirmed
+                };
+                steering.message = Some(message.clone());
+            }
+            if let RelayCommand::CancelTurnFor { active_prompt_id } = &command
+                && snapshot.cancelling_prompt_id.as_ref() == Some(active_prompt_id)
+            {
+                snapshot.cancelling_prompt_id = None;
             }
             snapshot
                 .dispatches
@@ -641,6 +811,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.checkpoint_ready_digest = Some(event.digest.clone());
         }
         RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            if snapshot
+                .continuation
+                .quota_recovery
+                .as_ref()
+                .is_some_and(|r| !r.submitted)
+            {
+                snapshot.continuation.quota_recovery = None;
+                snapshot.continuation.quota_suppressed = true;
+            }
             snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
                 started_at_ms: *started_at_ms,
@@ -706,6 +885,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         RelayObservation::NativeAgent { event } => {
             use crate::native_agent::{NativeAgent, NativeAgentEvent, NativeAgentState};
             match event {
+                NativeAgentEvent::Availability { reports, complete } => {
+                    for agent in snapshot.native_agents.values_mut() {
+                        agent.apply_availability(reports, *complete);
+                    }
+                }
                 NativeAgentEvent::Spawned {
                     session_id,
                     parent_session_id,
@@ -713,32 +897,55 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     task,
                     capabilities,
                 } => {
-                    snapshot.native_agents.insert(
-                        session_id.clone(),
-                        NativeAgent {
-                            owner_session_id: snapshot.session_id.clone(),
-                            session_id: session_id.clone(),
-                            parent_session_id: parent_session_id.clone(),
-                            name: name.clone(),
-                            task: task.clone(),
-                            capabilities: capabilities.clone(),
-                            state: NativeAgentState::Running,
-                        },
-                    );
+                    snapshot
+                        .native_agent_replay
+                        .as_mut()
+                        .unwrap_or(&mut snapshot.native_agents)
+                        .insert(
+                            session_id.clone(),
+                            NativeAgent {
+                                availability: Default::default(),
+                                availability_reason: None,
+                                stable_id: None,
+                                owner_session_id: snapshot.session_id.clone(),
+                                session_id: session_id.clone(),
+                                parent_session_id: parent_session_id.clone(),
+                                name: name.clone(),
+                                task: task.clone(),
+                                capabilities: capabilities.clone(),
+                                state: NativeAgentState::Running,
+                            },
+                        );
                 }
                 NativeAgentEvent::State { session_id, state } => {
-                    if let Some(agent) = snapshot.native_agents.get_mut(session_id) {
+                    if let Some(agent) = snapshot
+                        .native_agent_replay
+                        .as_mut()
+                        .unwrap_or(&mut snapshot.native_agents)
+                        .get_mut(session_id)
+                    {
                         agent.state = *state;
                     }
                 }
                 NativeAgentEvent::ReplayBegin | NativeAgentEvent::Disconnected => {
+                    snapshot.native_agent_replay =
+                        matches!(event, NativeAgentEvent::ReplayBegin).then(BTreeMap::new);
                     for agent in snapshot.native_agents.values_mut() {
+                        agent.invalidate_availability();
                         if agent.state == NativeAgentState::Running {
                             agent.state = NativeAgentState::Disconnected;
                         }
                     }
                 }
-                NativeAgentEvent::Update { .. } | NativeAgentEvent::ReplayCommit => {}
+                NativeAgentEvent::ReplayCommit => {
+                    if let Some(mut replayed) = snapshot.native_agent_replay.take() {
+                        for agent in replayed.values_mut() {
+                            agent.finish_replay();
+                        }
+                        snapshot.native_agents.extend(replayed);
+                    }
+                }
+                NativeAgentEvent::Update { .. } => {}
             }
         }
         RelayObservation::PermissionAutoApproved { .. }
@@ -749,6 +956,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => {}
+    }
+    if let Some(steering) = snapshot.steering.as_mut()
+        && (steering.holds_queue() || steering.status == SteeringStatus::Failed)
+        && !snapshot
+            .queued_prompts
+            .iter()
+            .any(|q| q.command_id == steering.queued_prompt_id)
+    {
+        steering.status = SteeringStatus::Resolved;
+    }
+    if snapshot
+        .cancelling_prompt_id
+        .as_ref()
+        .is_some_and(|id| snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(id))
+    {
+        snapshot.cancelling_prompt_id = None;
     }
     snapshot.latest_ordinal = event.ordinal;
     snapshot.latest_digest = event.digest.clone();

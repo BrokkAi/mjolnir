@@ -177,17 +177,14 @@ impl ChatState {
     }
 
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
-        if self.prompt_in_flight
+        if self.targeted_turn_control_supported
+            && self.prompt_in_flight
             && self
                 .queued_prompts
                 .front()
                 .is_some_and(|queued| queued.kind.is_prompt())
         {
-            match self.steering_supported {
-                Some(true) => TurnControlIntent::Steer,
-                Some(false) => TurnControlIntent::Cancel,
-                None => TurnControlIntent::ApplyQueued,
-            }
+            TurnControlIntent::Steer
         } else {
             TurnControlIntent::Cancel
         }
@@ -230,6 +227,10 @@ impl ChatState {
     #[must_use]
     pub(crate) fn subagent_count(&self) -> usize {
         self.subagent_count
+    }
+
+    pub fn set_subagent_working_count(&mut self, count: usize) {
+        self.subagent_working_count = count;
     }
 
     pub fn set_subagent_count(&mut self, count: usize) {

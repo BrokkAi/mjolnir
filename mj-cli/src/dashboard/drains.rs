@@ -413,6 +413,8 @@ impl DashboardContext {
             }
             let count = dashboard.subagent_count_for(chat.session_id());
             chat.set_subagent_count(count);
+            let working = dashboard.working_subagent_count_for(chat.session_id());
+            chat.set_subagent_working_count(working);
         }
     }
 
@@ -624,8 +626,9 @@ impl DashboardContext {
                         }
                         Err(error) => {
                             self.dashboard.finish_import();
+                            tracing::error!(error = %format!("{error:#}"), "Session import failed");
                             self.dashboard
-                                .set_notice(format!("Import failed: {error:#}"));
+                                .set_failure_notice(format!("Import failed: {error:#}"));
                         }
                     }
                 }

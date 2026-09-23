@@ -1,4 +1,6 @@
 use super::*;
+use crate::chat::TurnControlIntent;
+use mj_core::relay::RelayCommand;
 
 impl ActiveChat {
     /// Applies one terminal event and reports what it asked for.
@@ -157,19 +159,51 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
+            ChatAction::TurnControl(command) => {
+                let Some(command_id) = self.command_id("turn-control") else {
+                    return ChatEventOutcome::Handled;
+                };
+                self.state.turn_control_submitting = true;
+                if let RelayCommand::CancelTurnFor { active_prompt_id } = &command {
+                    self.state.turn_control_target = Some(active_prompt_id.clone());
+                    self.state.turn_control_awaiting_state = Some(command_id.clone());
+                }
+                queue_chat_remote_operation(
+                    self.remote.operations(),
+                    ChatRemoteOperation::Cancel {
+                        command_id,
+                        intent: TurnControlIntent::Cancel,
+                        cancel_agent: true,
+                        command: Some(command),
+                        shell_command_ids: Vec::new(),
+                    },
+                    &mut self.state,
+                );
+            }
             ChatAction::Cancel => {
                 let Some(command_id) = self.command_id("cancel") else {
                     return ChatEventOutcome::Handled;
                 };
                 let intent = self.state.turn_control_intent();
+                let command = self.state.escape_command();
+                self.state.turn_control_submitting = true;
+                self.state.turn_control_error = None;
+                self.state.turn_control_target = self.state.active_prompt_id.clone();
+                self.state.turn_control_awaiting_state = self
+                    .state
+                    .active_prompt_id
+                    .as_ref()
+                    .map(|_| command_id.clone());
 
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::Cancel {
                         command_id,
                         intent,
+                        command,
                         cancel_agent: self.state.prompt_in_flight()
-                            || self.state.session_activity.capacity_retry.is_some(),
+                            || (self.state.session_activity.capacity_retry.is_some()
+                                || self.state.session_activity.quota_recovery.is_some()),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
                     &mut self.state,

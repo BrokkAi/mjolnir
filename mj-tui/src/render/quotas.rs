@@ -313,7 +313,8 @@ pub(crate) fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> St
     } else if remaining >= HOUR {
         let hours = remaining / HOUR;
         let minutes = remaining % HOUR / MINUTE;
-        if hours == 1 && minutes > 0 {
+        // Under ten hours the minutes decide whether to wait, so show them.
+        if hours < 10 && minutes > 0 {
             format!("{hours}h {minutes}m")
         } else {
             format!("{hours}h")

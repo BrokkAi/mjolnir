@@ -196,38 +196,56 @@ impl Drop for SessionManagerShutdown {
 }
 
 #[derive(Clone)]
-pub(super) struct CoalescedUpdateSender {
-    pub(super) pending: Arc<Mutex<BTreeMap<String, SessionManagerUpdate>>>,
+pub(crate) struct CoalescedUpdateSender {
+    pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
     pub(super) wake: mpsc::Sender<()>,
 }
 
 /// Bounded latest-state feed for the dashboard. At most one snapshot per
 /// session is retained while the consumer is busy.
 pub struct SessionManagerUpdates {
-    pub(super) pending: Arc<Mutex<BTreeMap<String, SessionManagerUpdate>>>,
+    pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
     pub(super) wake: mpsc::Receiver<()>,
+    // Keep the update owned until the consumer asks for another one. Its
+    // completion edge can schedule a review or continuation in the meantime.
+    delivered_work: Option<crate::upgrade::Work>,
+}
+
+pub(super) struct PendingUpdate {
+    update: SessionManagerUpdate,
+    work: Option<crate::upgrade::Work>,
 }
 
 impl CoalescedUpdateSender {
-    pub(super) fn send(&self, update: SessionManagerUpdate) {
+    pub(crate) fn send(&self, update: SessionManagerUpdate) {
         if self.wake.is_closed() {
             return;
         }
         self.pending
             .lock()
             .expect("session update coalescer poisoned")
-            .insert(update.session_id.clone(), update);
+            .insert(
+                update.session_id.clone(),
+                PendingUpdate {
+                    update,
+                    work: crate::upgrade::activity("session update").ok(),
+                },
+            );
         let _ = self.wake.try_send(());
     }
 }
 
 impl SessionManagerUpdates {
-    pub(super) fn pop_pending(&self) -> Option<SessionManagerUpdate> {
-        self.pending
+    pub(super) fn pop_pending(&mut self) -> Option<SessionManagerUpdate> {
+        self.delivered_work = None;
+        let pending = self
+            .pending
             .lock()
             .expect("session update coalescer poisoned")
             .pop_first()
-            .map(|(_, update)| update)
+            .map(|(_, update)| update)?;
+        self.delivered_work = pending.work;
+        Some(pending.update)
     }
 
     pub async fn recv(&mut self) -> Option<SessionManagerUpdate> {
@@ -250,7 +268,7 @@ impl SessionManagerUpdates {
     }
 }
 
-pub(super) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
+pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
     let pending = Arc::new(Mutex::new(BTreeMap::new()));
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
@@ -261,6 +279,7 @@ pub(super) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
         SessionManagerUpdates {
             pending,
             wake: wake_rx,
+            delivered_work: None,
         },
     )
 }

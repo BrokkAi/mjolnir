@@ -93,7 +93,9 @@ There is one case Mjolnir cannot recover from: an adapter that finished the work
 
 Mjolnir automatically uses TypeSafe's Jev classifier to distinguish a question from ongoing work. By default, it sends bounded recent prompt and assistant text, tool titles, and activity counts through Mjolnir's public Cloudflare proxy to TypeSafe after a minute of silence and after a completed reply. No API key is required. With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, requests go directly to TypeSafe using your key; the daemon forwards that key to container and SSH workers. During a running turn, a confident user-input verdict marks the turn as waiting for you (`mj wait` returns `input_required`); the harness may still be running. After a completed reply, Jev also considers sessions whose harness still lists background tasks. A confident finished or user-input verdict shows the agent as idle, while preserving the task list, stop controls, and protections against replacing a worker that owns background work. A confident background-work verdict retains the background activity status when tasks are recorded, or shows “expecting the agent to continue” otherwise. New foreground activity or changed task inventory invalidates the inference. Low confidence, rate limits, and API failures preserve the existing activity and retry after one minute, backing off to five minutes; conclusive decisions remain until the evidence changes. The proxy does not log request content and limits requests per client IP; users sharing an IP share that allowance.
 
-Each session’s local `worker.log` records Jev’s bounded input evidence, verdict, confidence, and whether the decision was applied, discarded, or cancelled. Requests and outcomes share a request ID, session, and evidence generation. This includes the recent prompt and assistant text sent to the classifier, but no authentication credentials. These events are enabled by default under the `mj_jev` logging target; an explicit `RUST_LOG` overrides the default (`warn,mj_jev=info`). Existing worker processes gain this behavior only when updated worker code runs.
+Jev checks are recorded in local diagnostic logs, including scores, thresholds, timing, classifier questions, exact submitted JSON, and the actual application outcome. A positive assessment and an accepted continuation are recorded separately. Ordinary checks and retries do not add transcript messages. When the classifier identifies a running turn as waiting for input, the transcript shows: **Classifier: The agent appears to be waiting for you. The harness may still be running.**
+
+Exact inputs contain conversation text and live runtime facts. They are stored in `jev-decisions/decisions.*.jsonl` under the daemon data directory and each worker root, with four rotating 8 MiB segments per owner. HTTP authentication headers and configured TypeSafe keys are not recorded. The hosted proxy does not log request content. Details expire through rotation; no permanent audit database or history backfill is created.
 
 ## Detach and reattach
 
@@ -458,3 +460,20 @@ Only older current-v1 workers without ownership markers need `--profile` and `--
 After a Mjolnir upgrade, live workers are replaced at their next quiet point, when no prompt, shell command, or queued work is active. A continuously busy session keeps its original worker until it becomes quiet or is suspended.
 
 Continue with [durability and recovery](/durability/) for the archive guarantees, or [troubleshooting](/troubleshooting/) when a launch, checkpoint, or resume fails.
+
+## Automatic continuation
+
+Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
+
+This is enabled by default. Uncheck **Enabled** under **Settings → Automatically continue unfinished requests** to disable it, or set:
+
+```toml
+[continuation]
+enabled = false
+```
+
+The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
+
+Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, active goals, failed turns, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+
+The check uses user messages since the last context reset and recent assistant replies, including earlier exchanges that establish what “go ahead” refers to. It excludes tool history and generated prompts. Evidence has size limits; required user history is never clipped to fit. TypeSafe processes this text, through the public Jev proxy when no local TypeSafe key is configured. The proxy does not log or store message bodies.

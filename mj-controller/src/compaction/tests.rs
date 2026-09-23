@@ -137,14 +137,10 @@ fn exchanges(turns: &[(&str, &str)]) -> CanonicalSessionSnapshot {
     )
 }
 
-fn completed_tool_output(text: &str) -> TurnEvent {
-    TurnEvent::Tool(tool_call("completed", text))
-}
-
 /// With no utility model the handoff is built without a model at all:
 /// newest turns first until the budget is spent, emitted in order.
 #[test]
-fn a_verbatim_handoff_keeps_the_newest_turns_that_fit_and_reads_in_order() {
+fn fallback_history_preserves_recent_context_and_marks_oversize_bodies() {
     let padding = "y".repeat(8 * 1024);
     let input = exchanges(&[
         ("oldest question", padding.as_str()),
@@ -159,15 +155,17 @@ fn a_verbatim_handoff_keeps_the_newest_turns_that_fit_and_reads_in_order() {
     let oldest = full.find("oldest question").expect("oldest turn present");
     assert!(oldest < newest, "turns must read oldest-first");
 
-    // A budget that fits only the last turn drops the earlier ones.
+    // Large bodies are shortened explicitly so user requirements survive.
     let tight = render_recent_snapshot(&input, 12 * 1024);
     assert!(tight.len() <= 12 * 1024, "{}", tight.len());
     assert!(tight.contains("newest question"), "{tight}");
-    assert!(!tight.contains("oldest question"));
+    assert!(tight.contains("oldest question"));
+    assert!(tight.contains("entries omitted"));
 
     // Even a budget that cannot hold one turn sends what it can rather
     // than handing the target an empty conversation.
-    let starved = render_recent_snapshot(&input, MIN_CONTEXT_BYTES);
+    let starved = render_recent_snapshot(&input, 1024);
+    assert!(starved.contains("bytes omitted"));
     assert!(starved.len() <= MIN_CONTEXT_BYTES, "{}", starved.len());
     assert!(starved.starts_with(HANDOFF_PREAMBLE));
 }
@@ -509,59 +507,6 @@ async fn handoff_over_the_budget_is_an_error() {
 }
 
 #[test]
-fn old_tool_outputs_follow_opencode_v2_pruning_policy() {
-    let large_output = "x".repeat(TOOL_OUTPUT_PROTECT_BYTES + 1);
-    let turns = vec![
-        Turn {
-            user: "old".into(),
-            events: vec![completed_tool_output(&large_output)],
-        },
-        Turn {
-            user: "middle".into(),
-            events: Vec::new(),
-        },
-        Turn {
-            user: "recent".into(),
-            events: vec![completed_tool_output(&large_output)],
-        },
-        Turn {
-            user: "latest".into(),
-            events: Vec::new(),
-        },
-    ];
-
-    let pruned = prune_old_tool_outputs(&turns);
-    let rendered_head = render_turns(&pruned[..2], 0);
-    let rendered_tail = render_turns(&pruned[2..], 2);
-    assert!(rendered_head.contains(CLEARED_TOOL_RESULT));
-    assert!(!rendered_head.contains(&large_output));
-    assert!(rendered_tail.contains(&large_output));
-}
-
-#[test]
-fn unfinished_tool_output_is_never_pruned() {
-    let large_output = "x".repeat(TOOL_OUTPUT_PROTECT_BYTES + 1);
-    let turns = vec![
-        Turn {
-            user: "old".into(),
-            events: vec![TurnEvent::Tool(tool_call("in_progress", &large_output))],
-        },
-        Turn {
-            user: "recent".into(),
-            events: vec![completed_tool_output(&large_output)],
-        },
-        Turn {
-            user: "latest".into(),
-            events: Vec::new(),
-        },
-    ];
-
-    let pruned = prune_old_tool_outputs(&turns);
-
-    assert!(!render_turns(&pruned, 0).contains(CLEARED_TOOL_RESULT));
-}
-
-#[test]
 fn prior_handoff_turn_keeps_its_work_under_a_placeholder() {
     for preamble in [
         HANDOFF_PREAMBLE,
@@ -689,4 +634,41 @@ async fn clear_boundary_excludes_old_history_from_both_handoff_paths() {
             .all(|prompt| !prompt.contains("old secret") && !prompt.contains("old answer"))
     );
     assert!(prompts.iter().any(|prompt| prompt.contains("new question")));
+}
+
+#[tokio::test]
+async fn all_compaction_paths_use_the_eight_call_projection() {
+    let mut bodies = vec![user("retain this requirement")];
+    for n in 0..9 {
+        bodies.push(CanonicalTranscriptBody::Tool {
+            call: serde_json::json!({"toolCallId":format!("c-{n}"),"title":"Run command","kind":"execute","status":"completed","rawInput":{"command":format!("cargo test --arg=ARG_{n}")},"rawOutput":{"exit_code":0,"output":format!("RESULT_{n}")}}),
+            terminal_outputs:Vec::new(),terminal_refs:Vec::new(),presentation:None,
+        });
+    }
+    bodies.push(agent("latest answer"));
+    for oversized in [false, true] {
+        let mut bodies = bodies.clone();
+        if oversized {
+            bodies.insert(1, agent(&"padding".repeat(20_000)));
+        }
+        let snapshot = snapshot(bodies);
+        let backend = FakeBackend::default();
+        let output = compact_snapshot(
+            &snapshot,
+            CompactionBudget::uniform(MIN_CONTEXT_BYTES),
+            &backend,
+        )
+        .await
+        .unwrap();
+        let fallback = render_recent_snapshot(&snapshot, MIN_CONTEXT_BYTES);
+        let prompts = backend.prompts.lock().unwrap().join("\n");
+        for text in [&output, &fallback, &prompts] {
+            assert!(!text.contains("ARG_0"));
+            assert!(!text.contains("RESULT_0"));
+            assert!(text.contains("ARG_8"));
+            assert!(text.contains("RESULT_8"));
+        }
+        assert!(output.contains("retain this requirement"));
+        assert!(output.contains("latest answer"));
+    }
 }

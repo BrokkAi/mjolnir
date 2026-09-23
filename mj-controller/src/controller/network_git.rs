@@ -30,7 +30,13 @@ impl Controller {
         let root = workspace_root(backend, session.container_workspace.as_deref());
         for repository in &bundle.repositories {
             let directory = std::path::Path::new(&root).join(&repository.destination);
-            initialize_workspace(executor, backend, session_id, &directory)?;
+            initialize_workspace(
+                executor,
+                backend,
+                session_id,
+                &directory,
+                session.launch_base.as_deref(),
+            )?;
         }
         Ok(())
     }
@@ -62,6 +68,7 @@ fn initialize_workspace(
     backend: &targets::TargetLocator,
     session_id: &str,
     directory: &std::path::Path,
+    launch_base: Option<&str>,
 ) -> Result<()> {
     let git = |arguments: &[&str]| -> Result<targets::CommandOutput> {
         let mut args = vec![
@@ -100,19 +107,38 @@ fn initialize_workspace(
         );
         return Ok(());
     }
-    // Clone obtains origin/HEAD from the server, independent of host HEAD and
-    // init.defaultBranch. An empty or misconfigured remote cannot seed work.
-    let default_ref = checked(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        .context("the network remote has no usable default branch")?;
-    ensure!(
-        default_ref.starts_with("refs/remotes/origin/"),
-        "invalid default remote branch"
-    );
-    let base = checked(&[
-        "rev-parse",
-        "--verify",
-        &format!("{default_ref}^{{commit}}"),
-    ])?;
+    let base = match launch_base {
+        // The clone holds only what the remote sent, so a host-only branch
+        // name is not there to resolve. Say so rather than repeat Git's
+        // "unknown revision".
+        Some(revision) => checked(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ])
+        .with_context(|| {
+            format!(
+                "launch base {revision:?} is not in the clone; name a commit SHA, a tag, or origin/<branch>"
+            )
+        })?,
+        // Clone obtains origin/HEAD from the server, independent of host HEAD
+        // and init.defaultBranch. An empty or misconfigured remote cannot seed
+        // work.
+        None => {
+            let default_ref = checked(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+                .context("the network remote has no usable default branch")?;
+            ensure!(
+                default_ref.starts_with("refs/remotes/origin/"),
+                "invalid default remote branch"
+            );
+            checked(&[
+                "rev-parse",
+                "--verify",
+                &format!("{default_ref}^{{commit}}"),
+            ])?
+        }
+    };
     let branch = format!("mj/{session_id}");
     checked(&["switch", "--no-track", "-c", &branch, &base])?;
     for (key, value) in [
@@ -276,6 +302,86 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_base_pins_an_isolated_workspace_to_the_revision_it_names() {
+        let host = committed_repository();
+        let initial = test_git(host.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(host.path().join("nested/file.txt"), "later\n").unwrap();
+        test_git(host.path(), &["commit", "-am", "later"]);
+        let later = test_git(host.path(), &["rev-parse", "HEAD"]);
+        let root = tempfile::tempdir().unwrap();
+
+        // A local bare worker root must end with the session id it serves.
+        let clone_into = |session_id: &str| -> PathBuf {
+            let destination = root.path().join(session_id);
+            test_git(
+                root.path(),
+                &[
+                    "clone",
+                    host.path().to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            );
+            destination
+        };
+
+        // A commit SHA is what the session starts at, and what its diff base
+        // becomes.
+        let pinned = clone_into("11111111-1111-4111-8111-111111111111");
+        initialize_workspace(
+            &ProcessExecutor,
+            &targets::TargetLocator::LocalBare {
+                worker_root: pinned.to_string_lossy().into_owned(),
+            },
+            "11111111-1111-4111-8111-111111111111",
+            &pinned,
+            Some(&initial),
+        )
+        .unwrap();
+        assert_eq!(test_git(&pinned, &["rev-parse", "HEAD"]), initial);
+        assert_eq!(test_git(&pinned, &["config", "mj.baseCommit"]), initial);
+        assert_eq!(
+            test_git(&pinned, &["branch", "--show-current"]),
+            "mj/11111111-1111-4111-8111-111111111111"
+        );
+
+        // A remote-tracking branch names the same thing the clone knows about.
+        let tracked = clone_into("22222222-2222-4222-8222-222222222222");
+        initialize_workspace(
+            &ProcessExecutor,
+            &targets::TargetLocator::LocalBare {
+                worker_root: tracked.to_string_lossy().into_owned(),
+            },
+            "22222222-2222-4222-8222-222222222222",
+            &tracked,
+            Some("origin/master"),
+        )
+        .unwrap();
+        assert_eq!(test_git(&tracked, &["rev-parse", "HEAD"]), later);
+        assert_eq!(test_git(&tracked, &["config", "mj.baseCommit"]), later);
+
+        // A branch that only the host checkout holds was never fetched, so the
+        // refusal says where to look instead of repeating Git's wording.
+        test_git(host.path(), &["branch", "host-only"]);
+        let missing = clone_into("33333333-3333-4333-8333-333333333333");
+        let error = initialize_workspace(
+            &ProcessExecutor,
+            &targets::TargetLocator::LocalBare {
+                worker_root: missing.to_string_lossy().into_owned(),
+            },
+            "33333333-3333-4333-8333-333333333333",
+            &missing,
+            Some("host-only"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not in the clone"),
+            "unexpected error: {error:#}"
+        );
+        // The refusal happens before the checkout is switched or marked.
+        assert_eq!(test_git(&missing, &["branch", "--show-current"]), "master");
+    }
+
+    #[test]
     fn isolated_sessions_start_at_remote_default_and_publish_without_changing_the_host() {
         let host = committed_repository();
         let root = tempfile::tempdir().unwrap();
@@ -381,7 +487,7 @@ mod tests {
             let backend = targets::TargetLocator::LocalBare {
                 worker_root: destination.to_string_lossy().into_owned(),
             };
-            initialize_workspace(&executor, &backend, session_id, &destination).unwrap();
+            initialize_workspace(&executor, &backend, session_id, &destination, None).unwrap();
             assert_eq!(test_git(&destination, &["rev-parse", "HEAD"]), initial);
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
@@ -410,7 +516,7 @@ mod tests {
                 head
             );
             test_git(&destination, &["switch", "-c", "user-selected"]);
-            initialize_workspace(&executor, &backend, session_id, &destination).unwrap();
+            initialize_workspace(&executor, &backend, session_id, &destination, None).unwrap();
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
                 "user-selected"

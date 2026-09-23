@@ -737,9 +737,11 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
-        if let RelayObservation::CommandStarted { command_id, .. } = &event.observation
+        let mut summary_prompt = None;
+        if let Some(command_id) =
+            mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
             && let Some(dispatch) = self.snapshot.dispatches.get(command_id)
-            && let RelayCommand::Prompt { prompt } = &dispatch.command
+            && let Some(prompt) = dispatch.command.prompt_blocks()
         {
             let prompt_text = prompt
                 .iter()
@@ -751,9 +753,11 @@ impl DurableRelay {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            self.turn_context.reset(&prompt_text);
+            summary_prompt = Some(prompt_text);
             self.replied_verdict_pending = false;
         }
+        self.turn_context
+            .observe_relay(&event.observation, summary_prompt.as_deref());
         if matches!(
             event.observation,
             RelayObservation::HarnessTurnStarted { .. }

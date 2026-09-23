@@ -277,14 +277,20 @@ impl Controller {
         if matches!(target, ManagedWorktreeTarget::Local)
             && local_project_repository(selected, executor)?.is_none()
         {
+            // A requested launch base asks for the same worktree an explicit
+            // request does, so it must fail here rather than launch without
+            // one and silently ignore the base.
             ensure!(
-                session.create_managed_worktree != Some(true),
+                session.create_managed_worktree != Some(true) && session.launch_base.is_none(),
                 "managed worktree creation requires a Git project"
             );
             return Ok(false);
         }
         let inspection = inspect_raw_project(executor, &target, selected)?;
-        if !inspection.primary_checkout && session.create_managed_worktree != Some(true) {
+        if !inspection.primary_checkout
+            && session.create_managed_worktree != Some(true)
+            && session.launch_base.is_none()
+        {
             return Ok(false);
         }
         let relative_directory = inspection
@@ -297,10 +303,29 @@ impl Controller {
             .join(".mj")
             .join("worktrees")
             .join(session_id);
-        // The worktree branch is created from the repository's HEAD, so record
-        // that commit as the session base rather than rediscovering it later.
-        let base_commit =
-            read_checkout_position(executor, &target, &inspection.source_repository)?.head_commit;
+        // The worktree branch is created from the repository's HEAD, or from
+        // the requested launch base, so record that commit as the session base
+        // rather than rediscovering it later.
+        let base_commit = match session.launch_base.as_deref() {
+            Some(revision) => managed_git_stdout(
+                executor,
+                &target,
+                &inspection.source_repository,
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{revision}^{{commit}}"),
+                ],
+                "resolve the launch base",
+            )?
+            .trim()
+            .to_owned(),
+            None => {
+                read_checkout_position(executor, &target, &inspection.source_repository)?
+                    .head_commit
+            }
+        };
         let managed = ManagedWorktree {
             source_project_directory: inspection.source_project_directory,
             source_repository: inspection.source_repository,
@@ -1450,7 +1475,7 @@ pub(super) fn create_managed_worktree(
                 "-b",
                 &worktree.branch,
                 &worktree.worktree_root.to_string_lossy(),
-                "HEAD",
+                worktree.base_commit.as_deref().unwrap_or("HEAD"),
             ],
             "create managed raw-session worktree",
         ),

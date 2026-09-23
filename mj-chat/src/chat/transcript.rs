@@ -297,7 +297,7 @@ impl TranscriptSnapshot {
 /// Where the transcript viewport is pinned. Anchoring to an entry rather than an
 /// absolute row keeps the view stable while the agent appends new rows below,
 /// and lets the renderer touch only the entries the viewport covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum TranscriptAnchor {
     /// Follow the newest rows.
     Bottom,

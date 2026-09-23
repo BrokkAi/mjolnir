@@ -49,8 +49,7 @@ impl DashboardState {
         self.pane_sessions.values().cloned().collect()
     }
 
-    /// Focus a pane and move the Sessions selection onto what it shows, so
-    /// the highlighted row and the conversation with the keyboard agree.
+    /// Move keyboard focus without changing the Sessions cursor or Browse.
     pub fn focus_pane(&mut self, pane: PaneId) {
         if self.conversation_layout.focused() == pane {
             return;
@@ -58,9 +57,6 @@ impl DashboardState {
         self.conversation_layout.focus_pane(pane);
         if self.conversation_layout.focused() != pane {
             return;
-        }
-        if let Some(session_id) = self.pane_sessions.get(&pane).cloned() {
-            self.select_active_session(&session_id);
         }
         self.mark_layout_modified();
         self.clamp_selections();
@@ -107,65 +103,117 @@ impl DashboardState {
         direction: Direction,
         session: Option<&str>,
     ) -> Option<PaneId> {
-        // A split is about seeing two conversations at once, so it ends a
-        // zoom rather than hiding the pane it just made.
-        self.conversation_zoomed = false;
-        let area = self.conversation_area();
-        let focused = self.conversation_layout.focused();
-        let pane = self
-            .conversation_layout
-            .split_pane(focused, direction, 0.5, area)?;
-        if let Some(session_id) = session {
-            self.pane_sessions.insert(pane, session_id.to_owned());
+        let pane = self.split_conversation_pane(self.focused_pane(), direction)?;
+        if let Some(session) = session {
+            self.set_pane_session(pane, Some(session));
         }
-        self.conversation_layout.focus_pane(pane);
-        if let Some(session_id) = session {
-            self.select_active_session(session_id);
-        }
-        self.mark_layout_modified();
-        self.clamp_selections();
         Some(pane)
     }
 
-    /// The split commands, whether they came from a palette or a key.
-    ///
-    /// With a session selected the split shows it, which is what "Open in
-    /// split" means. From a key there may be no selection at all — the
-    /// Sessions list can be empty — and the split then makes an empty pane
-    /// rather than doing nothing.
-    pub(crate) fn split_command(&mut self, direction: Direction) -> DashboardAction {
-        if self.selected_session().is_some() {
-            return self.open_selected_session_in_split(direction);
-        }
-        DashboardAction::SplitPane { direction }
+    pub fn has_conversation_pane(&self, pane: PaneId) -> bool {
+        self.conversation_layout.pane_ids().contains(&pane)
     }
 
-    /// Remove `pane` and report the session it showed. The last pane is
-    /// emptied rather than removed: the conversation area always has
-    /// somewhere to open the next session. Closing a pane that does not hold
-    /// the keyboard leaves the focus and its history alone.
-    pub fn close_pane(&mut self, pane: PaneId) -> Option<String> {
-        // Closing changes which panes exist, so the band goes back to showing
-        // all of them rather than hiding survivors behind a stale zoom.
+    pub fn split_conversation_pane(
+        &mut self,
+        target: PaneId,
+        direction: Direction,
+    ) -> Option<PaneId> {
+        let pane = self.conversation_layout.split_pane(
+            target,
+            direction,
+            0.5,
+            self.conversation_area(),
+        )?;
         self.conversation_zoomed = false;
-        let session_id = self.pane_sessions.remove(&pane);
-        if self.conversation_layout.pane_count() > 1 {
-            self.conversation_layout.close_pane(pane);
+        self.browse_pane = Some(pane);
+        self.conversation_layout.focus_pane(pane);
+        self.pending_browse = None;
+        self.reconcile_pins();
+        self.focus_sessions();
+        self.mark_layout_modified();
+        Some(pane)
+    }
+
+    pub(crate) fn split_command(&mut self, direction: Direction) -> DashboardAction {
+        DashboardAction::SplitConversation {
+            pane: self.focused_pane(),
+            direction,
         }
-        // The Sessions highlight follows the keyboard. After closing the
-        // focused pane the keyboard is in a surviving pane, and leaving the
-        // highlight on the closed pane's session would pull that conversation
-        // into the pane that took the focus.
-        if let Some(surviving) = self
-            .pane_sessions
-            .get(&self.conversation_layout.focused())
-            .cloned()
-        {
-            self.select_active_session(&surviving);
+    }
+
+    /// Remove a pinned or empty pane and report the session it showed.
+    /// Browse remains available for list navigation.
+    pub fn close_pane(&mut self, pane: PaneId) -> Option<String> {
+        if pane == self.browse_pane() {
+            self.set_notice("Browse must remain; move it with Swap pane.");
+            return None;
         }
+        self.conversation_zoomed = false;
+        let session = self.pane_sessions.remove(&pane);
+        self.conversation_layout.close_pane(pane);
+        self.reconcile_pins();
         self.mark_layout_modified();
         self.clamp_selections();
-        session_id
+        session
+    }
+
+    pub fn browse_pane(&self) -> PaneId {
+        self.browse_pane
+            .unwrap_or_else(|| self.conversation_layout.pane_ids()[0])
+    }
+
+    pub fn pin_id(&self, session: &str) -> Option<u32> {
+        self.pin_ids.get(session).copied()
+    }
+
+    pub(crate) fn reconcile_pins(&mut self) {
+        let browse = self.browse_pane();
+        self.pin_ids.retain(|session, _| {
+            self.pane_sessions
+                .iter()
+                .any(|(pane, shown)| *pane != browse && shown == session)
+        });
+        for (pane, session) in &self.pane_sessions {
+            if *pane == browse || self.pin_ids.contains_key(session) {
+                continue;
+            }
+            let badge = (0..)
+                .find(|id| !self.pin_ids.values().any(|used| used == id))
+                .expect("available pin identity");
+            self.pin_ids.insert(session.clone(), badge);
+        }
+    }
+
+    pub fn request_selected_browse(&mut self) {
+        self.pending_browse = self.selected_session_id.clone();
+        if let Some(id) = &self.pending_browse {
+            let target = self.pane_for_session(id).unwrap_or(self.browse_pane());
+            if target != self.focused_pane() {
+                self.conversation_zoomed = false;
+            }
+        }
+    }
+
+    pub fn take_navigation_session(&mut self) -> Option<String> {
+        self.navigation_session.take()
+    }
+
+    pub fn take_browse_request(&mut self) -> Option<String> {
+        self.pending_browse.take()
+    }
+
+    pub fn reveal_pane(&mut self, pane: PaneId) {
+        if pane != self.focused_pane() {
+            self.conversation_zoomed = false;
+        }
+    }
+
+    pub fn swap_conversation_panes(&mut self, source: PaneId, target: PaneId) {
+        if self.conversation_layout.swap_panes(source, target) {
+            self.conversation_zoomed = false;
+            self.mark_layout_modified();
+        }
     }
 
     /// Whether resize mode currently owns ordinary keyboard input.
@@ -275,8 +323,12 @@ impl DashboardState {
 
     /// The live arrangement in the form the workspace store keeps.
     pub fn export_conversation_layout(&self) -> ConversationLayout {
-        self.conversation_layout
-            .to_conversation_layout(&self.pane_sessions)
+        let mut layout = self
+            .conversation_layout
+            .to_conversation_layout(&self.pane_sessions);
+        layout.browse = Some(self.browse_pane().raw());
+        layout.pins = self.pin_ids.clone();
+        layout
     }
 
     /// The arrangement saved for one workspace: the live tree when it is the
@@ -329,6 +381,9 @@ impl DashboardState {
     pub(crate) fn restore_conversation_layout(&mut self, layout: &ConversationLayout) {
         let (tree, sessions) = TileLayout::from_conversation_layout(layout);
         self.conversation_layout = tree;
+        self.browse_pane = Some(PaneId::from_raw(layout.browse.unwrap_or(layout.focus)));
+        self.pin_ids = layout.pins.clone();
+        self.pending_browse = None;
         self.conversation_zoomed = false;
         // A session belongs to one pane. A stored arrangement that names the
         // same session twice keeps the first pane and empties the rest, so the
@@ -339,20 +394,17 @@ impl DashboardState {
             .filter(|(_, session_id)| self.state.sessions.contains_key(session_id))
             .filter(|(_, session_id)| claimed.insert(session_id.clone()))
             .collect();
-        // The highlight follows the keyboard, and the keyboard is in the pane
-        // the arrangement named. Without this the clamp below would leave the
-        // highlight on the first row, and following that selection would pull
-        // its conversation into the restored focus pane.
-        if let Some(session_id) = self.pane_sessions.get(&self.conversation_layout.focused()) {
-            let session_id = session_id.clone();
-            self.select_active_session(&session_id);
-        }
+        self.reconcile_pins();
     }
 
     /// Start over with one empty pane, for a workspace with nothing stored.
     pub(crate) fn reset_conversation_layout(&mut self) {
         self.conversation_layout = TileLayout::new().0;
         self.pane_sessions.clear();
+        self.browse_pane = None;
+        self.pin_ids.clear();
+        self.pending_browse = None;
+        self.pane_menu = None;
         self.conversation_zoomed = false;
     }
 
@@ -360,5 +412,126 @@ impl DashboardState {
         if let Some(workspace_id) = &self.active_workspace_id {
             self.workspace_layouts_modified.insert(workspace_id.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::test_support::{dashboard_with_session, key, running_session};
+
+    fn dashboard() -> DashboardState {
+        let mut dashboard = dashboard_with_session(running_session());
+        for i in 2..=6 {
+            let mut session = running_session();
+            session.id = format!("session-{i}");
+            dashboard.state.sessions.insert(session.id.clone(), session);
+        }
+        dashboard.conversation_area = Some(Rect::new(0, 0, 160, 60));
+        dashboard.set_current_session(Some("session-1"));
+        dashboard
+    }
+
+    #[test]
+    fn splitting_builds_a_grid_with_one_browse_and_stable_pins() {
+        let mut d = dashboard();
+        let left = d.browse_pane();
+        let right = d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        assert_eq!(d.pin_id("session-1"), Some(0));
+        d.set_pane_session(right, Some("session-2"));
+        d.focus_pane(left);
+        let lower_left = d.split_focused_pane(Direction::Vertical, None).unwrap();
+        assert_eq!(d.pin_id("session-2"), Some(1));
+        d.set_pane_session(lower_left, Some("session-3"));
+        d.focus_pane(right);
+        let lower_right = d.split_focused_pane(Direction::Vertical, None).unwrap();
+        assert_eq!(d.browse_pane(), lower_right);
+        assert_eq!(d.pin_id("session-3"), Some(2));
+        assert_eq!(d.pane_session(lower_right), None);
+        let pins = d.pin_ids.clone();
+        d.swap_conversation_panes(left, lower_right);
+        assert_eq!(d.browse_pane(), lower_right);
+        assert_eq!(d.pin_ids, pins);
+        d.select_active_session("session-4");
+        d.request_selected_browse();
+        d.focus_pane(right);
+        assert_eq!(d.selected_session_id(), Some("session-4"));
+        assert_eq!(d.take_browse_request().as_deref(), Some("session-4"));
+        assert_eq!(d.pane_session(left), Some("session-1"));
+        assert_eq!(d.pane_session(right), Some("session-2"));
+        assert_eq!(d.pane_session(lower_left), Some("session-3"));
+        assert!(d.export_conversation_layout().validate().is_ok());
+    }
+
+    #[test]
+    fn a_refused_split_preserves_focus_zoom_and_roles() {
+        let mut d = dashboard();
+        d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.conversation_zoomed = true;
+        d.conversation_area = Some(Rect::new(0, 0, 40, 8));
+        let before = d.export_conversation_layout();
+        assert!(d.split_focused_pane(Direction::Horizontal, None).is_none());
+        assert_eq!(d.export_conversation_layout(), before);
+        assert!(d.conversation_zoomed);
+    }
+
+    #[test]
+    fn restore_keeps_browse_separate_from_focus_and_legacy_layouts_convert() {
+        let mut d = dashboard();
+        let pin = d.browse_pane();
+        let browse = d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.set_pane_session(browse, Some("session-2"));
+        d.focus_pane(pin);
+        d.select_active_session("session-3");
+        let saved = d.export_conversation_layout();
+        d.restore_conversation_layout(&saved);
+        assert_eq!(d.focused_pane(), pin);
+        assert_eq!(d.browse_pane(), browse);
+        assert_eq!(d.selected_session_id(), Some("session-3"));
+        assert_eq!(d.pin_id("session-1"), Some(0));
+        let mut legacy = saved;
+        legacy.browse = None;
+        legacy.pins.clear();
+        d.restore_conversation_layout(&legacy);
+        assert_eq!(d.browse_pane(), pin);
+        assert_eq!(d.pin_id("session-2"), Some(0));
+    }
+
+    #[test]
+    fn refresh_clamping_does_not_request_a_preview_and_missing_pins_leave_slots() {
+        let mut d = dashboard();
+        let pin = d.browse_pane();
+        d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.select_active_session("session-2");
+        let mut state = d.state.clone();
+        state.sessions.remove("session-1");
+        state.sessions.remove("session-2");
+        d.set_state(state);
+        assert!(d.take_browse_request().is_none());
+        assert_eq!(d.pane_session(pin), None);
+        assert_eq!(d.conversation_layout.pane_count(), 2);
+        assert!(d.pin_ids.is_empty());
+        d.focus_sessions();
+        d.handle_key(key(KeyCode::Down));
+        assert!(d.take_browse_request().is_some());
+    }
+
+    #[test]
+    fn clearing_a_pin_keeps_the_slot_and_does_not_renumber_other_pins() {
+        let mut d = dashboard();
+        let first = d.browse_pane();
+        let second = d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.set_pane_session(second, Some("session-2"));
+        d.split_focused_pane(Direction::Vertical, None).unwrap();
+        let before = d.conversation_layout.pane_count();
+        d.set_pane_session(first, None);
+        assert_eq!(d.conversation_layout.pane_count(), before);
+        assert_eq!(d.pin_id("session-2"), Some(1));
+        assert_eq!(d.pin_id("session-1"), None);
+        let browse = d.browse_pane();
+        assert_eq!(d.close_pane(browse), None);
+        assert_eq!(d.conversation_layout.pane_count(), before);
+        d.close_pane(first);
+        assert_eq!(d.conversation_layout.pane_count(), before - 1);
     }
 }

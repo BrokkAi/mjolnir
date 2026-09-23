@@ -87,7 +87,7 @@ pub fn record_api_activities(
     })
 }
 
-fn record_api_activities_with(
+pub(super) fn record_api_activities_with(
     connection: &mut Connection,
     activities: Vec<(String, ApiActivityState)>,
     recorded_at_ms: i64,

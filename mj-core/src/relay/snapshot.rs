@@ -50,6 +50,21 @@ pub enum RelayCommand {
     Prompt {
         prompt: Vec<ContentBlock>,
     },
+    /// A fixed prompt admitted only against the exact classified state.
+    ContinueAuthorizedWork {
+        expected: RelayCursor,
+        user_command_id: String,
+        completed_command_id: String,
+        attempt: u8,
+    },
+    SetQuotaRecovery {
+        expected: RelayCursor,
+        recovery: Option<Box<crate::continuation::QuotaRecovery>>,
+    },
+    ResumeAfterQuota {
+        expected: RelayCursor,
+        completed_command_id: String,
+    },
     RunUserShell {
         command: String,
     },
@@ -77,6 +92,19 @@ pub enum RelayCommand {
     /// separate from [`RelayCommand::Cancel`], whose UI semantics may steer
     /// the next queued prompt into the running turn.
     CancelTurn,
+    /// Steer exactly this queued prompt into exactly this running turn.
+    Steer {
+        active_prompt_id: String,
+        queued_prompt_id: String,
+    },
+    /// Explicit cancellation cannot drift onto a subsequent turn.
+    CancelTurnFor {
+        active_prompt_id: String,
+    },
+    /// Release held input only after the user reviews uncertain delivery.
+    ResolveSteering {
+        steering_id: String,
+    },
     Cancel,
     Close {
         barrier_command_id: String,
@@ -109,8 +137,21 @@ pub enum RelayCommand {
 }
 
 impl RelayCommand {
+    pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
+        match self {
+            Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
+            Self::ContinueAuthorizedWork { .. } | Self::ResumeAfterQuota { .. } => {
+                Some(std::borrow::Cow::Owned(crate::continuation::prompt_blocks()))
+            }
+            _ => None,
+        }
+    }
+
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
+            Self::ContinueAuthorizedWork { .. } => 18,
+            Self::Steer { .. } | Self::CancelTurnFor { .. } | Self::ResolveSteering { .. } => 17,
             Self::ClearContext => 15,
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
             Self::GoalControl { .. } => 11,
@@ -130,18 +171,26 @@ impl RelayCommand {
 
     /// Whether this command waits its turn in the durable command queue.
     pub fn is_queue_entry(&self) -> bool {
-        matches!(self, Self::Prompt { .. } | Self::SetConfig { .. })
+        matches!(
+            self,
+            Self::Prompt { .. }
+                | Self::ContinueAuthorizedWork { .. }
+                | Self::ResumeAfterQuota { .. }
+                | Self::SetConfig { .. }
+        )
     }
 
     pub fn is_relay_local(&self) -> bool {
         matches!(
             self,
-            Self::RemoveQueuedPrompt { .. }
+            Self::ResolveSteering { .. }
+                | Self::RemoveQueuedPrompt { .. }
                 | Self::ClearQueuedPrompts
                 | Self::CompleteCheckpoint { .. }
                 | Self::ReleaseCheckpoint { .. }
                 | Self::AdvanceRecoveryFloor { .. }
                 | Self::RecordNotice { .. }
+                | Self::SetQuotaRecovery { .. }
         )
     }
 
@@ -150,10 +199,14 @@ impl RelayCommand {
             self,
             Self::ClearContext
                 | Self::Prompt { .. }
+                | Self::ContinueAuthorizedWork { .. }
+                | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
                 | Self::CancelTurn
+                | Self::Steer { .. }
+                | Self::CancelTurnFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
         )
@@ -169,7 +222,9 @@ impl RelayCommand {
     pub const fn kind(&self) -> RelayCommandKind {
         match self {
             Self::ClearContext => RelayCommandKind::ClearContext,
-            Self::Prompt { .. } => RelayCommandKind::Prompt,
+            Self::Prompt { .. }
+            | Self::ContinueAuthorizedWork { .. }
+            | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
             Self::CancelUserShell { .. } => RelayCommandKind::CancelUserShell,
             Self::RemoveQueuedPrompt { .. } => RelayCommandKind::RemoveQueuedPrompt,
@@ -178,13 +233,18 @@ impl RelayCommand {
             Self::GoalControl { .. } => RelayCommandKind::GoalControl,
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
+            Self::Steer { .. } => RelayCommandKind::Steer,
+            Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
             Self::Close { .. } => RelayCommandKind::Close,
             Self::BeginCheckpoint { .. } => RelayCommandKind::BeginCheckpoint,
             Self::CompleteCheckpoint { .. } => RelayCommandKind::CompleteCheckpoint,
             Self::ReleaseCheckpoint { .. } => RelayCommandKind::ReleaseCheckpoint,
             Self::AdvanceRecoveryFloor { .. } => RelayCommandKind::AdvanceRecoveryFloor,
-            Self::RecordNotice { .. } => RelayCommandKind::RecordNotice,
+            Self::RecordNotice { .. } | Self::SetQuotaRecovery { .. } => {
+                RelayCommandKind::RecordNotice
+            }
         }
     }
 }
@@ -192,6 +252,8 @@ impl RelayCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayCommandKind {
+    Steer,
+    ResolveSteering,
     ClearContext,
     Prompt,
     RunUserShell,
@@ -209,6 +271,35 @@ pub enum RelayCommandKind {
     ReleaseCheckpoint,
     AdvanceRecoveryFloor,
     RecordNotice,
+}
+
+/// Durable delivery state, independent of transport acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringStatus {
+    Pending,
+    Unconfirmed,
+    Failed,
+    Applied,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringOperation {
+    pub command_id: String,
+    pub active_prompt_id: String,
+    pub queued_prompt_id: String,
+    pub status: SteeringStatus,
+    pub message: Option<String>,
+}
+
+impl SteeringOperation {
+    pub fn holds_queue(&self) -> bool {
+        matches!(
+            self.status,
+            SteeringStatus::Pending | SteeringStatus::Unconfirmed
+        )
+    }
 }
 
 /// Payload-free queue identity exposed in attach/status responses.
@@ -405,6 +496,17 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     #[serde(default)]
+    pub continuation: crate::continuation::ContinuationState,
+    /// Negotiated connection protocol, supplied by the controller after hello.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_protocol_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_agents: Vec<crate::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
+    #[serde(default)]
     pub clear_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clear_context_started_at_ms: Option<i64>,
@@ -526,6 +628,18 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Targeted turn control was introduced with relay protocol 17.
+    #[must_use]
+    pub fn supports_targeted_turn_control(&self) -> bool {
+        self.relay_protocol_version.is_some_and(|version| {
+            version
+                >= RelayCommand::CancelTurnFor {
+                    active_prompt_id: String::new(),
+                }
+                .minimum_protocol()
+        })
+    }
+
     /// Whether this worker has a usable native ACP session.
     ///
     /// Workers predating `acp_ready` are treated as ready for compatibility;
@@ -705,6 +819,10 @@ pub struct RelayEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    SteeringUnconfirmed {
+        command_id: String,
+        message: String,
+    },
     NativeAgent {
         event: crate::native_agent::NativeAgentEvent,
     },
@@ -935,8 +1053,16 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default)]
+    pub continuation: crate::continuation::ContinuationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub native_agents: BTreeMap<String, crate::native_agent::NativeAgent>,
+    #[serde(default)]
+    pub native_agent_replay: Option<BTreeMap<String, crate::native_agent::NativeAgent>>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1012,7 +1138,11 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            continuation: Default::default(),
+            steering: None,
+            cancelling_prompt_id: None,
             native_agents: BTreeMap::new(),
+            native_agent_replay: None,
             goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
@@ -1055,6 +1185,11 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            continuation: self.continuation.clone(),
+            relay_protocol_version: None,
+            native_agents: self.native_agents.values().cloned().collect(),
+            steering: self.steering.clone(),
+            cancelling_prompt_id: self.cancelling_prompt_id.clone(),
             clear_context: false,
             clear_context_started_at_ms: self
                 .dispatches

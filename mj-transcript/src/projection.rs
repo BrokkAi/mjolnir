@@ -425,3 +425,5 @@ pub fn project_native_update(
     session_update::project_session_update(current, &index, event, update, &mut mutation)?;
     Ok(mutation)
 }
+
+pub(crate) use terminals::tool_call_terminal_ids;

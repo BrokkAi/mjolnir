@@ -123,6 +123,9 @@ enum WorkerCommand {
         /// The session branch, whose reflog names the commit it was created at.
         #[arg(long)]
         branch: Option<String>,
+        /// Include the resolved base and HEAD commit in JSON output.
+        #[arg(long)]
+        json: bool,
     },
     /// Write one file from the session workspace to standard output.
     ReadFile {
@@ -441,15 +444,20 @@ async fn run_command(command: Command) -> Result<()> {
             repository,
             base,
             branch,
+            json,
         } => {
-            let diff = mj_checkpoint::archive::session_diff(
+            let result = mj_checkpoint::archive::session_diff_details(
                 &mj_checkpoint::archive::SystemGit,
                 &repository,
                 base.as_deref(),
                 branch.as_deref(),
             )
             .map_err(export_error)?;
-            write_stdout(diff.as_bytes())
+            if json {
+                write_stdout(&serde_json::to_vec(&result)?)
+            } else {
+                write_stdout(result.diff.as_bytes())
+            }
         }
         WorkerCommand::ReadFile { root, path } => write_stdout(
             &mj_checkpoint::archive::read_session_file(&root, &path).map_err(export_error)?,
@@ -589,6 +597,20 @@ mod tests {
             "diff",
             "--repository",
             "/workspace/app",
+            "--base=HEAD^",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Worker(WorkerArgs {
+            command: WorkerCommand::Diff { base: Some(base), json: true, .. }
+        }) if base == "HEAD^"));
+
+        let cli = Cli::try_parse_from([
+            "hel",
+            "worker",
+            "diff",
+            "--repository",
+            "/workspace/app",
             "--branch",
             "mj/session-1",
         ])
@@ -600,6 +622,7 @@ mod tests {
                     repository,
                     base: None,
                     branch: Some(branch),
+                    json: false,
                 },
             }) if repository == Path::new("/workspace/app") && branch == "mj/session-1"
         ));

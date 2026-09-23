@@ -311,6 +311,11 @@ fn ready_view(model: &str) -> ManagedSessionView {
         }))
         .expect("the fixture describes a select the schema accepts");
     let operational = mj_core::relay::RelayOperationalState {
+        continuation: Default::default(),
+        relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,
@@ -401,6 +406,7 @@ impl ExportRuntime for ParentExports {
 
 fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         container_workspace: None,

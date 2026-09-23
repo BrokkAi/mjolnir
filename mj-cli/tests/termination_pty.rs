@@ -237,6 +237,72 @@ fn spawn_dashboard_pty() -> DashboardPty {
     spawn_dashboard_pty_with_idle_exit(true)
 }
 
+#[test]
+fn an_open_terminal_automatically_reexecs_after_an_upgrade() {
+    let mut fixture = spawn_dashboard_pty_with_idle_exit(false);
+    let mut output = Vec::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+    );
+    output.clear();
+    let metadata_path = fixture._storage.path().join("data/hel/daemon.json");
+    let mut metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    // Advertise a newer release while retaining the real daemon and executable.
+    // This drives the actual keep-alive, terminal teardown, exec, and restore.
+    metadata.build_version = "999.0.0".into();
+    mj_core::config::atomic_write(&metadata_path, &serde_json::to_vec(&metadata).unwrap()).unwrap();
+    wait_for_output(
+        &mut fixture.master,
+        &mut output,
+        b"reconnecting this terminal",
+        Instant::now() + STARTUP_TIMEOUT,
+    );
+    wait_for_output(
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+        Instant::now() + STARTUP_TIMEOUT,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        drain(&mut fixture.master, &mut output);
+        assert!(fixture.child.child_mut().try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&output)
+            .matches("reconnecting this terminal")
+            .count(),
+        1,
+        "the same daemon must not cause an exec loop"
+    );
+    let handoff = fixture
+        ._storage
+        .path()
+        .join("data/hel/terminal-upgrades")
+        .join(format!("{}.json", fixture.child.child_mut().id()));
+    assert!(
+        !handoff.exists(),
+        "the replacement must consume its handoff"
+    );
+    fixture.master.write_all(QUIT_KEY).unwrap();
+    let status = wait_for_exit(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        "quit upgraded terminal",
+    );
+    assert!(status.success());
+    assert_eq!(
+        stable_local_flags(termios(fixture.master.as_raw_fd()).c_lflag),
+        stable_local_flags(fixture.original_termios.c_lflag)
+    );
+}
+
 fn spawn_dashboard_pty_with_idle_exit(exit_when_idle: bool) -> DashboardPty {
     spawn_dashboard_pty_fixture(exit_when_idle, false)
 }
@@ -249,6 +315,15 @@ fn spawn_dashboard_pty_with_local_target(
     exit_when_idle: bool,
     pending_session: bool,
     local_target: bool,
+) -> DashboardPty {
+    spawn_dashboard_pty_with_prefix(exit_when_idle, pending_session, local_target, None)
+}
+
+fn spawn_dashboard_pty_with_prefix(
+    exit_when_idle: bool,
+    pending_session: bool,
+    local_target: bool,
+    prefix: Option<&str>,
 ) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
     let config_directory = directory.path().join("config/hel");
@@ -283,6 +358,12 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
+    if let Some(prefix) = prefix {
+        let path = config_root.join("hel/config.toml");
+        let mut config = mj_core::config::Config::load_from(&path).unwrap();
+        config.keys.prefix = prefix.into();
+        config.save_to(&path).unwrap();
+    }
     if local_target {
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
@@ -377,6 +458,7 @@ image = "ubuntu:24.04"
         // into thousands of threads on large CI machines during parallel runs.
         .env("TOKIO_WORKER_THREADS", "2")
         .env("RAYON_NUM_THREADS", "2");
+    command.args(["--instance", "terminal-regression"]);
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
         command.args(["--workspace", workspace]);
@@ -711,6 +793,30 @@ fn sigterm_restores_real_pty_terminal() {
         output.contains("\x1b[?25h"),
         "missing cursor restoration: {output:?}"
     );
+}
+
+#[test]
+fn control_backslash_prefix_detaches_from_a_real_terminal() {
+    let mut fixture = spawn_dashboard_pty_with_prefix(true, false, false, Some(r"ctrl+\"));
+    let mut output = Vec::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+    );
+    // The actual byte emitted by a traditional terminal for Ctrl+backslash.
+    fixture
+        .master
+        .write_all(b"\x1cq")
+        .expect("send configured detach chord");
+    let status = wait_for_exit(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        "Ctrl+backslash q",
+    );
+    assert!(status.success(), "PTY child exit: {status}");
 }
 
 #[test]

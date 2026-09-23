@@ -364,6 +364,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             &snapshot.materialized,
         );
         state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
+        state.sync_turn_control(&snapshot.operational);
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
         if state.steering_supported != snapshot.operational.steering_supported {
             state.steering_supported = snapshot.operational.steering_supported;
@@ -678,6 +679,7 @@ impl ActiveChat {
                     &snapshot.materialized,
                 );
                 state.set_current_step_start(snapshot.operational.current_step_started_at_ms);
+                state.sync_turn_control(&snapshot.operational);
                 state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
                 state.steering_supported = snapshot.operational.steering_supported;
                 state.set_session_activity(mj_client::usage_format::SessionActivity::of(

@@ -21,7 +21,7 @@ use mj_controller::server::api_token_path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::daemon::{self, WebViewerStatus};
+use crate::daemon;
 
 /// How long an ordinary request may take. Every route but `wait` and the
 /// exports answers from memory or from SQLite, so this only has to outlast a
@@ -46,20 +46,7 @@ impl ApiClient {
     /// daemon if it is not running.
     pub(crate) async fn connect() -> Result<Self> {
         let mut client = daemon::connect_or_start().await?;
-        let status = client.status().await?;
-        let viewer_url = match status.phone_status {
-            WebViewerStatus::Ready { viewer_url, .. } => viewer_url,
-            WebViewerStatus::Disabled => bail!(
-                "the web viewer is disabled, so the API is not served; enable [phone] in config.toml and run `mj daemon restart`"
-            ),
-            WebViewerStatus::Starting => bail!(
-                "the web viewer is still starting; retry in a moment or check `mj daemon status`"
-            ),
-            WebViewerStatus::Stopped => bail!("the web viewer is stopped; run `mj daemon restart`"),
-            WebViewerStatus::Error { message } => {
-                bail!("the web viewer failed to start: {message}; run `mj daemon restart`")
-            }
-        };
+        let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
         probe_api(&viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)
@@ -367,14 +354,22 @@ impl ApiClient {
         .await
     }
 
-    pub(crate) async fn diff(&self, session_id: &str) -> Result<String> {
-        let response = self
-            .send(
-                self.http
-                    .get(self.url(&format!("/sessions/{session_id}/diff")))
-                    .timeout(EXPORT_TIMEOUT),
-            )
-            .await?;
+    pub(crate) async fn diff(
+        &self,
+        session_id: &str,
+        base: Option<&str>,
+        json: bool,
+    ) -> Result<String> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}/diff")));
+        if let Some(base) = base {
+            request = request.query(&[("base", base)]);
+        }
+        if json {
+            request = request.query(&[("json", "true")]);
+        }
+        let response = self.send(request.timeout(EXPORT_TIMEOUT)).await?;
         response.text().await.context("read the session diff")
     }
 
@@ -674,7 +669,15 @@ mod tests {
             )
             .route(
                 "/api/v1/sessions/{session_id}/diff",
-                get(|| async {
+                get(|State(seen): State<Seen>, Query(query): Query<std::collections::BTreeMap<String, String>>, headers: HeaderMap| async move {
+                    record_authorization(&seen, &headers);
+                    if query.get("json").is_some_and(|value| value == "true") {
+                        seen.lock().unwrap().push(format!("base={}", query["base"]));
+                        return (StatusCode::OK, Json(serde_json::json!({
+                            "diff": "+task work\n", "base": "a".repeat(40), "head": "c".repeat(40),
+                            "head_descends_from_base": false
+                        })));
+                    }
                     (
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({ "error": "no session base recorded" })),
@@ -707,6 +710,31 @@ mod tests {
                 .unwrap()
                 .push(authorization.to_str().unwrap_or_default().to_owned());
         }
+    }
+
+    #[tokio::test]
+    async fn diff_metadata_requests_encode_the_revision_and_preserve_resolved_commits() {
+        let (url, seen) = serve(Some("1")).await;
+        let client = ApiClient::new(url, "secret-token".into()).unwrap();
+        let body = client
+            .diff("session-1", Some("HEAD@{1}"), true)
+            .await
+            .unwrap();
+        let diff: mj_checkpoint::archive::SessionDiff = serde_json::from_str(&body).unwrap();
+        assert_eq!(diff.diff, "+task work\n");
+        assert_eq!(diff.base, "a".repeat(40));
+        assert_eq!(diff.head, "c".repeat(40));
+        assert_eq!(diff.head_descends_from_base, Some(false));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Bearer secret-token", "base=HEAD@{1}"]
+        );
+
+        // A worker from before the field answers without it, and the absence
+        // reads as "unknown" rather than failing the whole decode.
+        let older: mj_checkpoint::archive::SessionDiff =
+            serde_json::from_str(r#"{"diff":"+task work\n","base":"aaaa","head":"cccc"}"#).unwrap();
+        assert_eq!(older.head_descends_from_base, None);
     }
 
     #[tokio::test]
@@ -744,7 +772,7 @@ mod tests {
         );
 
         // A refusal reaches the caller as the reason the API gave it.
-        let error = client.diff("session-1").await.unwrap_err();
+        let error = client.diff("session-1", None, false).await.unwrap_err();
         assert!(
             format!("{error:#}").contains("no session base recorded"),
             "unexpected error: {error:#}"

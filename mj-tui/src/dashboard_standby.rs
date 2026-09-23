@@ -33,6 +33,7 @@ impl DashboardState {
                 self.pane_sessions.remove(&pane);
             }
         }
+        self.reconcile_pins();
         self.mark_layout_modified();
         self.clamp_selections();
     }
@@ -158,7 +159,7 @@ impl DashboardState {
     /// Stopping/Destroying) and failed ones keep the status panel instead:
     /// there is no conversation to type toward.
     pub(crate) fn standby_prompt_session(&self) -> Option<&str> {
-        let session_id = self.selected_session_id()?;
+        let session_id = self.current_session_id()?;
         let parked = self.transition_kind(session_id).is_some_and(|kind| {
             matches!(
                 kind,
@@ -222,6 +223,7 @@ impl DashboardState {
             self.notices.clone(),
         ));
         self.launch_standby_anchor = self.selected_session_id.clone();
+        self.focus_pane(self.browse_pane());
         self.set_current_session(None);
         self.focus_prompt();
     }
@@ -236,7 +238,9 @@ impl DashboardState {
     /// session's conversation; the launch standby keeps its text until the
     /// launch registers.
     pub fn launch_standby_capturing(&self) -> bool {
-        self.launch_standby.is_some() && self.selected_session_id == self.launch_standby_anchor
+        self.launch_standby.is_some()
+            && self.focused_pane() == self.browse_pane()
+            && self.selected_session_id == self.launch_standby_anchor
     }
 
     /// Hands the launch standby to the session that has just registered: it

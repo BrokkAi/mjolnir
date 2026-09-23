@@ -417,7 +417,10 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
 
     let (reply, response) = oneshot::channel();
     commands_tx
-        .send(ActorCommand::Lease { reply })
+        .send(ActorCommand::Lease {
+            reply,
+            idle_harness: None,
+        })
         .await
         .unwrap();
     let error = response
@@ -810,6 +813,11 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                continuation: Default::default(),
+                relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+                native_agents: Vec::new(),
+                steering: None,
+                cancelling_prompt_id: None,
                 clear_context: false,
                 clear_context_started_at_ms: None,
                 native_agent_count: 0,
@@ -1853,6 +1861,7 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 #[cfg(unix)]
 fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -1918,7 +1927,10 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
 
     let (reply, response) = oneshot::channel();
     commands_tx
-        .send(ActorCommand::Lease { reply })
+        .send(ActorCommand::Lease {
+            reply,
+            idle_harness: None,
+        })
         .await
         .unwrap();
     let (lease_id, connection) = response
@@ -1955,7 +1967,10 @@ async fn released_connection_can_be_leased_again_immediately() {
     let (reply, response) = oneshot::channel();
     actor
         .commands
-        .try_send(ActorCommand::Lease { reply })
+        .try_send(ActorCommand::Lease {
+            reply,
+            idle_harness: None,
+        })
         .unwrap();
     assert!(
         response.await.unwrap().is_err(),
@@ -1974,7 +1989,10 @@ async fn released_connection_can_be_leased_again_immediately() {
             .unwrap();
         actor
             .commands
-            .try_send(ActorCommand::Lease { reply })
+            .try_send(ActorCommand::Lease {
+                reply,
+                idle_harness: None,
+            })
             .unwrap();
         (lease_id, connection) = response
             .await

@@ -3,13 +3,13 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use mj_controller::desktop::{DesktopLaunch, sibling_executable};
 use mj_controller::server::{
     cookie_key_path, load_or_create_cookie_key, mint_desktop_session_cookie,
 };
 
-use crate::daemon::{self, WebViewerStatus};
+use crate::daemon;
 
 pub(crate) async fn run_desktop_app() -> Result<()> {
     let executable = desktop_executable()?;
@@ -36,24 +36,7 @@ pub(crate) async fn run_desktop_app() -> Result<()> {
 /// stdout; it must never be sent through argv or the environment.
 pub(crate) async fn desktop_bootstrap() -> Result<()> {
     let mut client = daemon::connect_or_start().await?;
-    let status = client.status().await?;
-    let viewer_url = match status.phone_status {
-        WebViewerStatus::Ready { viewer_url, .. } => viewer_url,
-        WebViewerStatus::Disabled => {
-            bail!(
-                "the web viewer is disabled; enable [phone] in config.toml and run `mj daemon restart`"
-            )
-        }
-        WebViewerStatus::Starting => {
-            bail!("the web viewer is still starting; retry in a moment or check `mj daemon status`")
-        }
-        WebViewerStatus::Stopped => {
-            bail!("the web viewer is stopped; run `mj daemon restart`")
-        }
-        WebViewerStatus::Error { message } => {
-            bail!("the web viewer failed to start: {message}; run `mj daemon restart`")
-        }
-    };
+    let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
 
     let key = load_or_create_cookie_key(&cookie_key_path())
         .context("read the viewer cookie signing key")?;

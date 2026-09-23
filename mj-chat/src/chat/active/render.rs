@@ -276,6 +276,10 @@ pub(crate) fn render_in(
     // A new elicitation can arrive while the task list is open.
     // Keep the task dialog state so it can reappear afterwards, but let the
     // question render and receive input on top of it.
+    if chat.turn_control_dialog_open && chat.elicitation.is_none() {
+        crate::chat::turn_control::render(frame, inner, chat);
+        return;
+    }
     if chat.task_dialog_open() && chat.elicitation.is_none() {
         render_background_task_dialog(frame, inner, chat);
         return;
@@ -517,8 +521,8 @@ pub(crate) fn render_composer_band(
     let queue_control = prompt_bottom_queue_control(chat);
     let task_label = (chat.background_task_count() > 0)
         .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
-    let subagent_label =
-        (chat.subagent_count() > 0).then(|| format!(" Sub-agents ({}) ", chat.subagent_count()));
+    let subagent_label = (chat.subagent_count() > 0)
+        .then(|| format!(" Subagents · {} working ", chat.subagent_working_count));
     let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
         // A standby composer cannot send, so the hint says what Enter does
         // there instead of advertising a send that would be refused.
@@ -887,7 +891,10 @@ pub(crate) fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'stat
     if !chat.queued_prompts.is_empty() {
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
-    if chat.prompt_in_flight() || chat.session_activity.capacity_retry.is_some() {
+    if chat.prompt_in_flight()
+        || (chat.session_activity.capacity_retry.is_some()
+            || chat.session_activity.quota_recovery.is_some())
+    {
         labels.push(chat.turn_control_intent().escape_hint().to_owned());
     }
     (!labels.is_empty()).then(|| {

@@ -473,6 +473,37 @@ mod tests {
     }
 
     #[test]
+    fn control_punctuation_prefixes_accept_legacy_and_enhanced_terminal_events() {
+        for (prefix, legacy, enhanced) in [
+            (r"ctrl+\", '4', '\\'),
+            ("ctrl+]", '5', ']'),
+            ("ctrl+^", '6', '^'),
+            ("ctrl+_", '7', '_'),
+        ] {
+            for character in [legacy, enhanced] {
+                let mut dashboard = dashboard_with_session(running_session());
+                let mut config = config();
+                config.keys.prefix = prefix.into();
+                dashboard.set_config(config);
+                let event = KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+                assert_eq!(dashboard.route_bound_key(&event), KeyRoute::Consumed);
+                assert!(dashboard.prefix_pending(), "{prefix}: {character}");
+                assert_eq!(
+                    dashboard.route_bound_key(&plain('?')),
+                    KeyRoute::Command {
+                        id: CommandId::Help,
+                        index: None,
+                    }
+                );
+                assert!(!dashboard.prefix_pending());
+                assert_eq!(dashboard.route_bound_key(&event), KeyRoute::Consumed);
+                assert_eq!(dashboard.route_bound_key(&event), KeyRoute::Forward);
+                assert!(!dashboard.prefix_pending());
+            }
+        }
+    }
+
+    #[test]
     fn set_config_replaces_the_live_bindings() {
         let mut dashboard = dashboard_with_session(running_session());
         assert_eq!(dashboard.keybinds().prefix_label(), "ctrl+b");

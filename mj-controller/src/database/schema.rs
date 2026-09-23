@@ -95,7 +95,25 @@ pub fn database_path() -> PathBuf {
     data_dir().join("mj.sqlite3")
 }
 
+/// Verify that this client can read the daemon's store without creating or
+/// migrating it. Startup must pass this gate before handing out a connection,
+/// even when an older daemon happens to speak the same wire protocol.
+pub fn check_read_compatibility() -> Result<()> {
+    open_reader_strict(&database_path()).map(drop)
+}
+
+/// A writer-capable connection whose transactions take the WAL write lock at
+/// `BEGIN`, where the busy handler applies. A DEFERRED transaction that has
+/// already read cannot wait: SQLite only calls the busy handler when the
+/// connection holds no transaction, so the upgrade to a write returns
+/// `SQLITE_BUSY` at once (issue 1117).
 pub(super) fn open_writer(path: &Path) -> Result<Connection> {
+    let mut connection = open_writable(path)?;
+    connection.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
+    Ok(connection)
+}
+
+fn open_writable(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Mjolnir data directory {}", parent.display()))?;
@@ -128,8 +146,10 @@ pub(super) fn open_reader(path: &Path) -> Result<Connection> {
 pub(super) fn open_reader(path: &Path) -> Result<Connection> {
     // Path-taking database helpers are migration fixtures in unit tests: they
     // intentionally open old or not-yet-created schemas. Production query
-    // entry points compile against the strict reader above.
-    open_writer(path)
+    // entry points compile against the strict reader above. The connection is
+    // writable but keeps SQLite's DEFERRED default, so a fixture read does not
+    // take the write lock.
+    open_writable(path)
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -206,9 +226,8 @@ pub(super) fn forget_verified_schema(path: &Path) {
         .remove(&schema_cache_key(path));
 }
 
-/// The oldest revision this build upgrades in place: the revision Mjolnir 2.7.2
-/// shipped. A new store is created directly at this revision from
-/// `baseline.sql`; stores written by older builds are refused.
+/// New stores start at the revision Mjolnir 2.7.2 shipped. Existing stores
+/// retain the complete migration path, even when users skip many releases.
 const BASELINE_SCHEMA_VERSION: i64 = 33;
 
 /// The compatibility floor a baseline store records. Migration 32 (ZCode) was
@@ -224,15 +243,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version == 0 {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
-        // Every release from 2.7.2 through 2.9.x still carries the migration
-        // chain below the baseline; every later release refuses, as this one
-        // does. That range is closed, so the advice never goes stale.
-        bail!(
-            "Mjolnir database schema {version} was written by a Mjolnir release older than 2.7.2, \
-             which this build cannot upgrade; upgrade through any Mjolnir release from 2.7.2 \
-             through 2.9.x first, or start with a fresh data directory (--instance NAME or \
-             MJ_DATA_DIR)"
-        );
+        super::legacy_schema::migrate_to_baseline(connection)
+            .context("upgrade historical database schema")?;
     }
     // Compatible: adds one table. Older readers ignore it and treat read-write
     // mounts as copy-on-write, a behaviour difference rather than lost data.
@@ -382,6 +394,64 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older layout writers discard Browse identity and pin badges.
+    if version < 42 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 42 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (42, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 42;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: durable steering commands/observations and native availability
+    // cannot be interpreted or preserved by older readers and writers.
+    if version < 43 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            UPDATE schema_compatibility SET minimum_compatible_version = 43 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (43, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 43;
+            COMMIT;")?;
+    }
+
+    // Breaking: new quota recovery commands in stored relay JSON cannot be
+    // read or preserved by older binaries, even though the cache is additive.
+    if version < 44 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE quota_reset_cache (identity TEXT PRIMARY KEY, body TEXT NOT NULL);
+            UPDATE schema_compatibility SET minimum_compatible_version = 44 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (44, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 44;
+            COMMIT;")?;
+    }
+
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable relaunching such a session starts it at
+    // HEAD or the remote default branch instead of the recorded revision,
+    // which is a behaviour difference, not data loss. The compatibility floor
+    // stays where it is.
+    if version < 45 {
+        // The column is added only when it is absent, the way migration 34
+        // creates its table only when absent: a store rolled back to an older
+        // revision still carries the column, and a second ALTER would refuse.
+        let add_column =
+            match super::legacy_schema::table_has_column(connection, "sessions", "launch_base")? {
+                true => "",
+                false => "ALTER TABLE sessions ADD COLUMN launch_base TEXT;",
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (45, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 45;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -459,9 +529,89 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 mod reader_tests {
     use super::*;
 
+    #[test]
+    fn every_historical_revision_upgrades_directly_and_preserves_user_data() {
+        for revision in 1..SCHEMA_VERSION {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("mj.sqlite3");
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(include_str!("legacy_v1.sql"))
+                .unwrap();
+            connection.execute_batch(
+                "INSERT INTO session_contexts VALUES ('old-session', 'project', '2026-01-01T00:00:00Z');
+                 INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                     target_template_id, state, updated_at, native_session_id)
+                     VALUES ('old-session', 'Keep my work', 'codex', 'codex', 'local', 'error',
+                         '2026-01-01T00:00:00Z', 'native-original');
+                 INSERT INTO prompt_history(session_id, event_sequence, submitted_at, text)
+                     VALUES ('old-session', 1, '2026-01-01T00:00:00Z', 'Keep my prompt');"
+            ).unwrap();
+            // Interrupt at each historical transaction boundary. Closing the
+            // connection rolls back the interrupted step, exactly as a killed
+            // updater would. Reopening must resume without manual cleanup.
+            connection
+                .execute_batch(&format!(
+                    "CREATE TRIGGER stop_at_revision BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version > {revision}
+                 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;"
+                ))
+                .unwrap();
+            if revision < BASELINE_SCHEMA_VERSION {
+                assert!(super::super::legacy_schema::migrate_to_baseline(&connection).is_err());
+            } else {
+                super::super::legacy_schema::migrate_to_baseline(&connection).unwrap();
+                assert!(migrate_schema(&connection).is_err());
+            }
+            drop(connection);
+            let connection = Connection::open(&path).unwrap();
+            let found: i64 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(found, revision);
+            connection
+                .execute_batch("DROP TRIGGER stop_at_revision")
+                .unwrap();
+            drop(connection);
+
+            let writer =
+                open_writer(&path).unwrap_or_else(|error| panic!("revision {revision}: {error:#}"));
+            assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
+            assert_eq!(
+                writer
+                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            assert!(
+                !writer
+                    .prepare("PRAGMA foreign_key_check")
+                    .unwrap()
+                    .exists([])
+                    .unwrap()
+            );
+            drop(writer);
+            let reader = open_reader_strict(&path).unwrap();
+            let prompt: String = reader
+                .query_row("SELECT text FROM prompt_history", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(prompt, "Keep my prompt");
+            let state = load_state_from(&path).unwrap();
+            assert_eq!(state.sessions["old-session"].title, "Keep my work");
+            assert_eq!(
+                state.sessions["old-session"].native_session_id.as_deref(),
+                Some("native-original")
+            );
+            drop(reader);
+            // A fresh writer process must not apply any migration twice.
+            forget_verified_schema(&path);
+            drop(open_writer(&path).unwrap());
+        }
+    }
+
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 41 adds native context replacement.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 41;
+    /// `SCHEMA_VERSION`. Migration 44 adds durable quota recovery commands.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 44;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -500,6 +650,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
+             DROP TABLE quota_reset_cache;
              DROP TABLE native_agent_transcript;
              DROP TABLE native_agents;
              DROP TABLE native_agent_replay;
@@ -511,7 +662,7 @@ mod reader_tests {
             .unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 41);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let event = ApiEventData::InputRequired {
             request: None,
@@ -652,30 +803,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(41));
-    }
-
-    #[test]
-    fn a_store_from_before_the_baseline_is_refused_with_upgrade_advice() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mj.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(&format!(
-                "PRAGMA user_version = {};",
-                COMPATIBILITY_METADATA_VERSION - 1
-            ))
-            .unwrap();
-        drop(connection);
-
-        let error = open_writer(&path).unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(message.contains("older than 2.7.2"), "{message}");
-        assert!(
-            message.contains("from 2.7.2 through 2.9.x"),
-            "advice must name the closed range of releases that can migrate: {message}"
-        );
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
     }
 
     /// A store ahead of this build cannot be fixed by starting a daemon of

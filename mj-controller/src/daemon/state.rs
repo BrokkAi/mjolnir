@@ -97,7 +97,10 @@ impl RuntimeState {
             self.wiki.request_sync(false);
         }
         let live = self.live_session_ids();
-        let rows = blocking(move || crate::sessionwiki::query_rows(&query, limit, &live)).await?;
+        // Every caller is a resume list, and a sub-agent is never resumed on
+        // its own.
+        let rows =
+            blocking(move || crate::sessionwiki::query_rows(&query, limit, &live, false)).await?;
         // The status is read after the rows, so a sync that finished while the
         // query ran is reported as finished.
         Ok(WikiSearchPage {
@@ -179,6 +182,7 @@ impl RuntimeState {
         .context("find or create a bundle for the restored session's project")?;
         let registered = self
             .start_create_session(CreateSessionRequest {
+                launch_base: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,
@@ -209,7 +213,7 @@ impl RuntimeState {
         Ok(Some(registered))
     }
 
-    fn live_session_ids(&self) -> BTreeSet<String> {
+    pub(super) fn live_session_ids(&self) -> BTreeSet<String> {
         self.controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -662,6 +666,7 @@ impl RuntimeState {
             return Ok(());
         }
         let cancel = cancellation.child_token();
+        let upgrade_work = crate::upgrade::activity("startup prompt delivery")?;
         queues.insert(
             session_id.to_owned(),
             StartupQueue {
@@ -676,6 +681,7 @@ impl RuntimeState {
         // Outer task supervises inner task: a panic in the drain becomes a
         // reported failure that restores the text, not a queue nobody drains.
         let task = tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
             let supervised = {
                 let runtime = Arc::clone(&runtime);
                 let session_id = drain_session.clone();

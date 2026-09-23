@@ -128,8 +128,31 @@ const pendingLifecycleActions = new Map();
 /// the row without losing the inline error that tells the person what failed.
 const backgroundTaskErrors = new Map();
 
+async function upgradeAwareFetch(url, options = {}) {
+  for (;;) {
+    const response = await fetch(url, options);
+    if (response.status !== 503 || response.headers.get('x-mj-upgrade') !== 'pending') {
+      return response;
+    }
+    // The daemon explicitly refused admission. Keep the exact request body,
+    // including command IDs and steering targets, until its replacement is ready.
+    await response.body?.cancel();
+    for (;;) {
+      options.signal?.throwIfAborted();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        const probe = await fetch('/', { signal: options.signal, cache: 'no-store' });
+        await probe.body?.cancel();
+        if (probe.ok && probe.headers.get('x-mj-upgrade') !== 'pending') break;
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+      }
+    }
+  }
+}
+
 async function request(url, options = {}) {
-  const response = await fetch(url, {
+  const response = await upgradeAwareFetch(url, {
     ...options,
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
@@ -156,7 +179,7 @@ async function request(url, options = {}) {
 /// different content type and body limit, so keeping this path separate makes
 /// it impossible to accidentally base64 an image back into the prompt.
 async function uploadAttachment(sessionId, file, signal) {
-  const response = await fetch(
+  const response = await upgradeAwareFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/attachments`,
     {
       method: 'POST',
@@ -611,6 +634,12 @@ function orderedSessions(live) {
   );
 }
 
+/// Whether a session is a sub-agent rather than one the person started. Every
+/// list of top-level sessions filters with this, so the lists cannot disagree.
+function isSubagentSession(session) {
+  return Boolean(session?.subagent_parent_id);
+}
+
 function liveSessions() {
   if (route.subagentParentId) {
     const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
@@ -618,13 +647,10 @@ function liveSessions() {
     return (snapshot.sessions || []).filter(session => children.has(session.id));
   }
   const workspaceId = selectedWorkspaceId();
-  const childIds = new Set(
-    (snapshot.sessions || []).flatMap(session => session.subagent_session_ids || []),
-  );
   return (snapshot.sessions || []).filter(
     session =>
       session.workspace_id === workspaceId &&
-      !childIds.has(session.id) &&
+      !isSubagentSession(session) &&
       isDashboardSession(session),
   );
 }
@@ -656,7 +682,9 @@ function renderSessions() {
   if (openSessionMenuId && !groups.some(group => group.sessions.some(session => session.id === openSessionMenuId))) {
     closeSessionMenu();
   }
-  if (!groups.length) {
+  const parent = snapshot.sessions.find(s => s.id === route.subagentParentId);
+  const nativeGroups = renderNativeSubagents(parent);
+  if (!groups.length && !nativeGroups.length) {
     sessions.replaceChildren(el(
       'p',
       'dim',
@@ -705,7 +733,67 @@ function renderSessions() {
     reconcileChildren(section._sessionList, items);
     return section;
   });
-  reconcileChildren(sessions, renderedGroups);
+  reconcileChildren(sessions, [...renderedGroups, ...nativeGroups]);
+}
+
+function renderNativeSubagents(parent) {
+  if (!parent) return [];
+  const agents = parent.native_subagents || [];
+  return [
+    ['Working', a => a.state === 'running'],
+    ['Idle and reusable', a => a.state !== 'running' && a.availability === 'available'],
+    ['History and availability unknown', a => a.state !== 'running' && a.availability !== 'available'],
+  ].flatMap(([label, matches]) => {
+    const entries = agents.filter(matches);
+    if (!entries.length) return [];
+    const section = el('section', 'project'); section.append(el('h2', '', label));
+    for (const agent of entries) {
+      const row = el('div', 'session-card');
+      const availability = agent.availability === 'available' ? 'reusable' : agent.availability === 'unavailable' ? 'unavailable' : 'availability unknown';
+      row.append(el('strong', '', agent.name), el('p', '', `${agent.state} · ${availability}`));
+      if (agent.availability_reason) row.append(el('p', 'dim', agent.availability_reason));
+      const history = button('View history');
+      history.onclick = () => openNativeHistory(parent.id, agent);
+      row.append(history); section.append(row);
+    }
+    return [section];
+  });
+}
+
+async function openNativeHistory(owner, agent) {
+  const modal = el('dialog', 'native-agent-history');
+  const close = button('Close'); close.onclick = () => modal.close();
+  const earlier = button('Load earlier');
+  const content = el('div');
+  const error = el('p', 'error');
+  modal.append(el('h2', '', agent.name), close, earlier, error, content);
+  document.body.append(modal); modal.addEventListener('close', () => modal.remove()); modal.showModal();
+  let before = null;
+  let generation = null;
+  async function load() {
+    earlier.disabled = true;
+    try {
+      const query = before ? `?before_position=${before.position}&before_id=${encodeURIComponent(before.stable_id)}` : '';
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(owner)}/native-agents/${encodeURIComponent(agent.session_id)}/history${query}`);
+      if (!modal.open) return;
+      if (generation !== null && generation !== page.generation) {
+        content.replaceChildren(); before = null; generation = null;
+        error.textContent = 'History changed during reload. Load it again.';
+        return;
+      }
+      generation = page.generation;
+      const rows = page.items.map(item => {
+        const row = el('section'); row.append(el('h3', '', item.role), renderMarkdown(item.text)); return row;
+      });
+      content.prepend(...rows);
+      before = page.items[0] || before;
+      earlier.hidden = !page.has_more;
+      if (!before) content.textContent = 'No recorded transcript.';
+    } catch (failure) { if (modal.open) error.textContent = failure.message; }
+    finally { earlier.disabled = false; }
+  }
+  earlier.onclick = load;
+  await load();
 }
 
 /// One session row.
@@ -912,6 +1000,10 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
+  }
+  if (session.quota_recovery) {
+    const deadline = session.quota_recovery.retry_at_ms;
+    return deadline == null ? 'Quota limit · reset time unknown' : `Quota limit · resumes ${new Date(deadline).toLocaleString()}`;
   }
   if (session.capacity_retry) {
     const seconds = Math.max(0, Math.ceil((session.capacity_retry.retry_at_ms - now) / 1000));
@@ -1821,7 +1913,10 @@ function resumeActivityMs(session) {
 
 function resumeSessions(workspaceId = selectedWorkspaceId()) {
   return (snapshot?.sessions || [])
-    .filter(session => session.workspace_id === workspaceId && isResumeSession(session))
+    .filter(session =>
+      session.workspace_id === workspaceId
+      && !isSubagentSession(session)
+      && isResumeSession(session))
     .sort((left, right) =>
       resumeActivityMs(right) - resumeActivityMs(left) || left.id.localeCompare(right.id));
 }
@@ -4155,7 +4250,7 @@ async function transcribeVoice(operation, wav) {
     operation.controller.abort();
   }, VOICE_TRANSCRIPTION_TIMEOUT_MS);
   try {
-    const response = await fetch(
+    const response = await upgradeAwareFetch(
       `/api/sessions/${encodeURIComponent(operation.sessionId)}/dictation`,
       {
         method: 'POST',
@@ -5492,15 +5587,90 @@ function renderPromptSettings(session) {
   promptSettings.classList.toggle('hidden', settings.length === 0);
 }
 
+// Operation delivery survives reconnect in the server snapshot. Local state only
+// prevents duplicate clicks before the server accepts a request.
+const pendingTurnControls = new Set();
+const dismissedTurnControls = new Map();
+const failedTurnControls = new Map();
+
+function turnControlState(session) {
+  const steering = session?.steering;
+  const pending = Boolean(session?.cancelling_prompt_id) || steering?.status === 'pending';
+  const uncertain = steering?.status === 'unconfirmed';
+  const failed = steering?.status === 'failed';
+  const targeted = session?.targeted_turn_control_supported === true;
+  const queued = targeted && (session?.queued_prompts || [])[0];
+  return {
+    pending, uncertain, failed,
+    label: session?.cancelling_prompt_id ? 'Interrupting turn…' : steering?.status === 'pending' ? 'Steering…'
+      : uncertain ? 'Delivery unconfirmed' : queued ? 'Steer queued prompt' : 'Interrupt turn',
+    command: targeted && session?.active_prompt_id ? queued
+      ? { type: 'steer', data: { active_prompt_id: session.active_prompt_id, queued_prompt_id: queued.id || queued.command_id } }
+      : { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null,
+  };
+}
+
+async function submitTurnControl(session, command) {
+  if (!session || pendingTurnControls.has(session.id)) return;
+  pendingTurnControls.add(session.id);
+  failedTurnControls.delete(session.id);
+  dismissedTurnControls.delete(session.id);
+  renderTurnControl(session);
+  try {
+    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'turn-control', session_id: session.id, command }) });
+    await refresh();
+  } catch (error) {
+    failedTurnControls.set(session.id, { message: error.message, activePromptId: command.data?.active_prompt_id });
+  } finally {
+    pendingTurnControls.delete(session.id);
+    if (currentSession === session.id) renderTurnControl(snapshot.sessions.find(s => s.id === session.id) || session);
+  }
+}
+
+function renderTurnControl(session) {
+  const control = turnControlState(session);
+  cancelTurnButton.textContent = control.label;
+  cancelTurnButton.disabled = control.pending || control.uncertain || pendingTurnControls.has(session.id);
+  let panel = document.querySelector('#turn-control-status');
+  if (!panel) {
+    panel = el('div', 'turn-control-status'); panel.id = 'turn-control-status';
+    panel.setAttribute('role', 'status'); cancelTurnButton.parentElement.append(panel);
+  }
+  panel.replaceChildren();
+  const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
+  const localError = failedTurnControls.get(session.id);
+  if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
+  const message = session.steering?.message || localError?.message || 'Steering failed; the prompt remains queued.';
+  panel.append(el('p', '', message + (control.uncertain ? ' Delivery may already have occurred; retrying can deliver it twice.' : '')));
+  const keep = button('Keep queued');
+  keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
+  panel.append(keep);
+  if (session.active_prompt_id && !session.cancelling_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
+    const cancel = button(control.uncertain ? 'Cancel turn' : 'Cancel turn and apply queued prompt');
+    cancel.onclick = () => submitTurnControl(session, { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } });
+    panel.append(cancel);
+  } else if (control.uncertain && !session.active_prompt_id) {
+    const retry = button('Retry queued prompt');
+    retry.onclick = () => submitTurnControl(session, { type: 'resolve_steering', data: { steering_id: session.steering.command_id } });
+    const remove = button('Remove queued prompt');
+    remove.onclick = () => sendAction({ action: 'remove-queued-prompt', session_id: session.id, queue_id: session.steering.queued_prompt_id });
+    panel.append(retry, remove);
+  }
+}
+
 function renderConversationHeader(session) {
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
   const children = session?.subagent_session_ids || [];
-  subagentsButton.textContent = `Sub-agents${children.length ? ` ${children.length}` : ''}`;
+  const native = session?.native_subagents || [];
+  const working = children.filter(id => snapshot.sessions.some(s => s.id === id && s.chat_phase === 'running')).length
+    + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
+  subagentsButton.textContent = `Subagents · ${working} working`;
+  subagentsButton.title = `${children.length + native.length} retained agents`;
   subagentsButton.classList.toggle(
     'hidden',
-    children.length === 0 || Boolean(route.subagentParentId),
+    children.length + native.length === 0 || Boolean(route.subagentParentId),
   );
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);
@@ -5513,6 +5683,7 @@ function renderConversationHeader(session) {
       || !session.capabilities?.interrupt_turn,
   );
 
+  renderTurnControl(session);
   const running = session.chat_phase === 'running';
   const queued = (session.queued_prompts || []).length;
   promptText.dataset.placeholder = running
@@ -5548,7 +5719,7 @@ function renderConversationHeader(session) {
 
 subagentsButton.onclick = () => {
   const session = activeSession();
-  if (!session?.subagent_session_ids?.length) return;
+  if (!session?.subagent_session_ids?.length && !session?.native_subagents?.length) return;
   navigate({ name: 'dashboard', subagentParentId: session.id });
 };
 
@@ -5957,7 +6128,11 @@ feedScroll.addEventListener('scroll', () => {
 });
 
 cancelTurnButton.onclick = async () => {
-  await sendAction({ action: 'interrupt-turn', session_id: currentSession });
+  const session = snapshot.sessions.find(s => s.id === currentSession);
+  const control = turnControlState(session);
+  if (control.pending || control.uncertain) return;
+  if (control.command) await submitTurnControl(session, control.command);
+  else await sendAction({ action: 'interrupt-turn', session_id: currentSession });
 };
 conversationTransitionCancel.onclick = async () => {
   const id = conversationTransitionCancel.dataset.id || currentSession;
@@ -6046,6 +6221,15 @@ promptText.addEventListener('keydown', e => {
       commandPalette.classList.add('hidden');
       return e.preventDefault();
     }
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (e.repeat) return;
+    const panel = document.querySelector('#turn-control-status');
+    const keep = panel?.querySelector('button');
+    if (keep) keep.click();
+    else if (!cancelTurnButton.disabled && !cancelTurnButton.classList.contains('hidden')) cancelTurnButton.click();
+    return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();

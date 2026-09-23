@@ -94,28 +94,24 @@ impl DashboardContext {
         chat.restore_elicitation_drafts(drafts.into_iter().map(|cached| cached.draft).collect());
     }
 
-    /// Opens a session in the focused pane.
-    ///
-    /// A session already open in another pane moves the focus there instead
-    /// of drawing the same conversation twice. Otherwise the pane changes
-    /// what it shows: the conversation leaving it is saved and dropped, and
-    /// the new one is attached in the background.
+    /// Enters an existing pin or opens the session in Browse.
+    /// The replaced view is saved and the new chat attaches in the background.
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
-        if self.dashboard.is_native_agent(session_id) {
-            self.cancel_chat_open();
-            self.dashboard.set_current_session(Some(session_id));
+        let pane = self
+            .dashboard
+            .pane_for_session(session_id)
+            .unwrap_or(self.dashboard.browse_pane());
+        self.dashboard.reveal_pane(pane);
+        self.dashboard.focus_pane(pane);
+        self.open_chat_session_into(pane, session_id);
+    }
+
+    pub(crate) fn open_chat_session_into(&mut self, pane: PaneId, session_id: &str) {
+        if !self.dashboard.has_conversation_pane(pane) {
             return;
         }
-        if !self.session_in_active_workspace(session_id) {
-            return;
-        }
-        let pane = self.dashboard.focused_pane();
-        if let Some(other) = self.dashboard.pane_for_session(session_id)
-            && other != pane
-        {
-            self.dashboard.focus_pane(other);
-            self.sync_opening_session();
-            self.selection.clear();
+        let native = self.dashboard.is_native_agent(session_id);
+        if !native && !self.session_in_active_workspace(session_id) {
             return;
         }
         let outgoing = self
@@ -125,7 +121,6 @@ impl DashboardContext {
             .map(str::to_owned);
         if let Some(outgoing) = outgoing {
             self.selection.clear();
-            self.previous_pane_sessions.insert(pane, outgoing.clone());
             // The pane is changing session. Save what the conversation
             // leaving it holds, then drop it unless another pane shows it —
             // which it cannot, since a session is in at most one pane.
@@ -136,8 +131,12 @@ impl DashboardContext {
                 self.chats.remove(&outgoing);
             }
         }
+        if native {
+            self.cancel_chat_open_in(pane);
+            self.dashboard.set_pane_session(pane, Some(session_id));
+            return;
+        }
         self.capture_composer_draft(session_id);
-        self.dashboard.select_active_session(session_id);
         self.attachments.entry(pane).or_default().select(session_id);
         self.save_question_draft(session_id);
         // A lifecycle owns the row's conversation until its authoritative
@@ -145,9 +144,10 @@ impl DashboardContext {
         // and put a retiring chat back on screen.
         if self.dashboard.transition_kind(session_id).is_some()
             || self.dashboard.transition_failure_kind(session_id).is_some()
+            || self.dashboard.session_failed(session_id)
         {
-            self.defer_chat_open();
-            self.dashboard.set_current_session(None);
+            self.defer_chat_open_in(pane);
+            self.dashboard.set_pane_session(pane, Some(session_id));
             return;
         }
         if self
@@ -155,15 +155,15 @@ impl DashboardContext {
             .get(session_id)
             .is_some_and(mj_chat::chat::ActiveChat::session_feed_open)
         {
-            self.cancel_chat_open();
-            self.dashboard.set_current_session(Some(session_id));
+            self.cancel_chat_open_in(pane);
+            self.dashboard.set_pane_session(pane, Some(session_id));
             self.acknowledge_visible_chats();
             return;
         }
         if self.opening_chat_sessions.get(&pane).map(String::as_str) == Some(session_id) {
             return;
         }
-        self.cancel_chat_open();
+        self.cancel_chat_open_in(pane);
         let Some(session_record) = self.controller.state.sessions.get(session_id).cloned() else {
             self.dashboard.set_notice(format!(
                 "Could not open session: unknown session {session_id}"
@@ -252,8 +252,7 @@ impl DashboardContext {
             }
         });
         self.opening_chat_sessions.insert(pane, session_id.clone());
-        self.dashboard.set_current_session(Some(&session_id));
-        self.dashboard.select_active_session(&session_id);
+        self.dashboard.set_pane_session(pane, Some(&session_id));
         self.sync_opening_session();
         let detach = self
             .dashboard

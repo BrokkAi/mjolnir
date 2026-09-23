@@ -74,7 +74,7 @@ pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 pub use mbx::preview_build_cache;
 use provisioning::apply_failed_new_session_rollback;
-pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
+pub(crate) use worker_binary::refresh_target_worker_binary_if_stale;
 pub(crate) use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
@@ -452,6 +452,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 
 pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
+    pub launch_base: Option<String>,
     pub mjolnir_subagents: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -674,6 +675,7 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             create_managed_worktree,
+            launch_base,
             mjolnir_subagents,
             initial_prompt,
             workspace_id,
@@ -682,6 +684,19 @@ impl Controller {
             project_directory,
             session_title_override,
         } = options;
+        let launch_base = match launch_base {
+            Some(base) => {
+                let base = base.trim();
+                if base.is_empty() {
+                    bail!("launch base must not be empty");
+                }
+                Some(base.to_owned())
+            }
+            None => None,
+        };
+        if launch_base.is_some() && create_managed_worktree == Some(false) {
+            bail!("a launch base requires a managed worktree or a bundle session");
+        }
         let session_title_override = match session_title_override {
             Some(title) => {
                 Some(normalize_session_title(&title).context("session name cannot be empty")?)
@@ -752,6 +767,7 @@ impl Controller {
         let record = SessionRecord {
             build_cache: None,
             create_managed_worktree,
+            launch_base,
             mjolnir_subagents,
             archived: false,
             container_cpus: None,

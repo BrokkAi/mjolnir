@@ -12,7 +12,7 @@ pub(super) fn terminal_item_id(terminal_id: &str) -> String {
 ///
 /// Content hel cannot read as an ACP block names no terminal; the renderer
 /// already reports such a call as invalid, so this hides no failure.
-pub(super) fn tool_call_terminal_ids(call: &Value) -> Vec<String> {
+pub(crate) fn tool_call_terminal_ids(call: &Value) -> Vec<String> {
     let Some(Value::Array(content)) = call.get("content") else {
         return Vec::new();
     };

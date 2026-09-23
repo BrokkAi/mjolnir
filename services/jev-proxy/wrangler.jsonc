@@ -6,6 +6,7 @@
   "workers_dev": true,
   "preview_urls": false,
   "ratelimits": [
+    { "name": "CONTINUATION_RATE_LIMITER", "namespace_id": "1938471203", "simple": { "limit": 120, "period": 60 } },
     {
       "name": "HELP_RATE_LIMITER",
       "namespace_id": "1938471202",

@@ -387,6 +387,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,

@@ -1312,6 +1312,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        launch_base: None,
                         mjolnir_subagents,
                         create_managed_worktree,
                         initial_prompt: None,

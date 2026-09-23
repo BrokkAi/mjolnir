@@ -12,8 +12,8 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::session_manager::{
-    ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
-    WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
+    DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, WorkerBinaryRefresh,
+    WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
 use crate::targets::{self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget};
 use mj_core::config::{

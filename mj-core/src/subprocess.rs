@@ -312,6 +312,18 @@ pub fn run_inherited(command: &mut Command) -> Result<ExitStatus> {
         .context("run child process")
 }
 
+/// Transfer the terminal to a foreground child, including its input. Used
+/// for process replacement on platforms without exec; the caller must have
+/// released its own terminal event reader before waiting here.
+pub fn run_interactive(command: &mut Command) -> Result<ExitStatus> {
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("run interactive child process")
+}
+
 /// Send `signal` to the process group led by `pid`.
 ///
 /// Every caller signals a group it created for its own child, and wants that

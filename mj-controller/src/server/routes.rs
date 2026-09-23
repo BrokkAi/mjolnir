@@ -18,11 +18,15 @@ pub(super) struct ServerState {
     pub(super) viewer_code: Arc<str>,
     pub(super) login_token: Arc<str>,
     pub(super) cookie_key: Arc<[u8]>,
+    pub(super) viewer_revocations: Arc<ViewerRevocations>,
     pub(super) session_ttl: Duration,
     pub(super) secure_cookie: bool,
     pub(super) code_guard: Arc<Mutex<CodeGuard>>,
     pub(super) api_token: Arc<str>,
     pub(super) subagent: Option<Arc<dyn api::SubagentBackend>>,
+    /// Where the remembered fast-start preferences live, so a handler can
+    /// report the saved default without reading the process environment.
+    pub(super) preferences_path: PathBuf,
 }
 
 /// Online-guessing defence for the deliberately small viewer code.
@@ -94,11 +98,13 @@ pub(super) fn router(options: ServerOptions) -> Router {
         viewer_code: options.viewer_code.into(),
         login_token: options.login_token.into(),
         cookie_key: options.cookie_key.into(),
+        viewer_revocations: options.viewer_revocations,
         session_ttl: options.session_ttl,
         secure_cookie: options.secure_cookie,
         code_guard: Arc::new(Mutex::new(CodeGuard::default())),
         api_token: options.api_token.into(),
         subagent: options.subagent,
+        preferences_path: options.preferences_path,
     };
     let protected = Router::new()
         .route("/api/snapshot", get(snapshot))
@@ -166,7 +172,40 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .nest("/api/v1", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn(upgrade_admission))
         .with_state(state)
+}
+
+/// Include queued HTTP work and finite response bodies in daemon draining.
+/// Event feeds remain reconnectable and must not pin the old daemon forever.
+async fn upgrade_admission(request: Request, next: Next) -> Response<Body> {
+    use futures::StreamExt;
+    let work = match crate::upgrade::activity("HTTP request") {
+        Ok(work) => work,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1"), ("x-mj-upgrade", "pending")],
+                "Mjolnir is completing an upgrade",
+            )
+                .into_response();
+        }
+    };
+    let response = next.run(request).await;
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS
+        || response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"))
+    {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let stream = body.into_data_stream().map(move |chunk| {
+        let _work = &work;
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 pub(super) async fn require_session(
@@ -174,14 +213,8 @@ pub(super) async fn require_session(
     request: Request,
     next: Next,
 ) -> Result<Response<Body>, ApiError> {
-    let cookie = request
-        .headers()
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|header| cookie_value(header, COOKIE_NAME));
-    if cookie.is_some_and(|value| session_cookie_valid(&state.cookie_key, value, now_unix())) {
-        Ok(next.run(request).await)
-    } else {
-        Err(ApiError::unauthorized())
-    }
+    let cookie = authenticated_viewer(&state, request.headers())?;
+    let mut response = next.run(request).await;
+    renew_viewer_response(&state, &cookie, &mut response)?;
+    Ok(response)
 }

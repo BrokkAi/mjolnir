@@ -515,6 +515,7 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
+            continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),

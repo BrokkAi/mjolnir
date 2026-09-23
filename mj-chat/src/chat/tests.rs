@@ -585,6 +585,7 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
     let task_area = chat.task_control_area.expect("task control hitbox");
     chat.mark_prompt_submitted("continue");
     chat.steering_supported = Some(true);
+    chat.targeted_turn_control_supported = true;
     chat.queued_prompts.push_back(queued("next", "follow up"));
     let rows = drawn_transcript(&mut chat, 100, 24);
     let shifted_task_area = chat.task_control_area.expect("shifted task control hitbox");
@@ -701,7 +702,7 @@ fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
     chat.set_subagent_count(2);
 
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Sub-agents (2)"), "{screen}");
+    assert!(screen.contains("Subagents · 0 working"), "{screen}");
     let area = chat
         .subagent_control_area
         .expect("sub-agent control hitbox");

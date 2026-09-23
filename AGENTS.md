@@ -100,8 +100,65 @@ Do not create a new workspace crate only to reorganize code. Create one only
 when a clear dependency, compilation, publication, or ownership boundary
 requires it.
 
-Fix the source of a problem. Do not add a narrow fallback that hides a failure
-in the primary design.
+Build for correctness and general use.
+
+A narrow fallback usually indicates a design problem. Find the source of the
+problem and correct the root cause, even when the correction affects a larger
+area. Report the failure; do not paper over it with a second path that hides
+the primary design not working. This includes options in third-party tools
+that quietly degrade, such as OpenSSH's `ControlMaster=auto` opening a direct
+connection when sharing fails: choose the configuration that fails visibly.
+
+Upgrades must complete without user intervention after installation or initial
+upgrade consent. Ordinary startup must coordinate daemon replacement, database
+migration, and service readiness before serving the upgraded client, including
+when the wire protocol is unchanged. Retain forward migrations for every shipped
+database revision; never require an intermediate release, manual daemon restart,
+or data reset. Preserve active workers and terminal drafts across handoff, and
+never automatically downgrade a newer daemon or incompatible store. Changes to
+startup, schema, protocol, or release installation must preserve the isolated
+upgrade regressions. Keep terminal upgrade handoff formats backward compatible.
+
+## Control plane and data plane
+
+The daemon (`mj daemon-run`, mj-controller) is the control plane. It owns the
+database, session records, lifecycle operations (provision, checkpoint, close,
+destroy, recovery), the HTTP API, review orchestration, and client attachments.
+It holds no agent state that cannot be rebuilt from the database and from
+workers.
+
+Workers (mj-worker, one per session, local or remote) are the data plane. They
+run the harness process and the agent's turn, own the relay journal and
+checkpoint barriers, and keep running when no daemon is attached. A worker's
+turn, its pending questions, and its review sessions continue across a daemon
+restart; the next daemon reattaches and replays from the journal.
+
+A consequence for design: any daemon-side task must be either short and bounded,
+finishing with the command or response that started it, or resumable from durable
+state at daemon startup. Never make daemon liveness or daemon replacement depend
+on worker state. Never store in daemon memory anything a worker or the database
+cannot give back.
+
+A consequence for upgrades: replacing the daemon waits only for its own bounded
+control operations; replacing a worker waits for that worker to be idle, because
+the worker holds the turn.
+
+Automatic upgrades must never cancel accepted work or use a timeout as permission
+to stop a busy process. Daemon handoff waits only for daemon-owned work:
+lifecycle operations, startup and session recovery, admissions, automatic
+continuations, and in-flight request and response delivery, including after the
+originating client disconnects. It never waits for worker turns, pending
+questions, or reviews; those live in workers and survive the handoff. New
+daemon-owned background operations must participate in this ownership. Close
+admission and verify no outstanding work in one decision, and name the blocking
+work in the wait notice so the user can see what the upgrade is waiting for.
+Worker replacement is separate and still requires atomic idle admission: reserve
+workers only after that admission, and prepare downloads before taking their
+control connection. Retry only explicitly unaccepted requests, preserving command
+IDs and steering targets; a lost acknowledgement does not authorize replay of an
+arbitrary mutation. Test these races in isolated instances. Legacy daemons
+without atomic admission can only provide an observed idle check; never describe
+that bootstrap as having the new guarantee.
 
 Keep file and path handling independent of the operating system. Use `Path` and
 `PathBuf`; normalize path text only at protocol or rendering boundaries.
@@ -140,11 +197,36 @@ actually show up; toy-sized fixtures prove nothing about this class of bug.
 
 Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` holds the PTY termination test, and `tests/e2e/` holds the shell/expect harness.
 
+## Harness pins
+
+Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
+change a pin, update the agent-dev container image in the same commit, so
+container sessions run the same harness versions as managed bare workers:
+
+- Codex and Claude bridges: update the `npm install --global` line in
+  `containers/Containerfile.agent-dev`, as well as the package files in
+  `mj-worker/assets/harnesses/`. The test
+  `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
+  Containerfile and the pins disagree.
+- Muse: update `mj-worker/assets/muse/runtime.json`. The image installs Muse
+  from that file.
+- Grok and Kimi are not in the image. They install on demand.
+
+Pushing the commit to master runs `publish-agent-dev-image.yml`, which
+publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run
+succeeds.
+
 ## Coding Style & Naming Conventions
 
 Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that match the existing runtime/UI split. Name files and modules with `snake_case`; use `PascalCase` for types and enum variants, `snake_case` for functions and variables, and `SCREAMING_SNAKE_CASE` for constants. Keep comments short and useful, especially around async runtime behavior, terminal ownership, or protocol edge cases. Repository-facing text, code comments, and documentation should be written in English.
 
 ## Testing Guidelines
+
+Always test new code in a separate named instance using `--instance <test-name>`.
+Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
+the new build. Never point a test build at the host's default instance or live
+session data: protocol and store changes must not disrupt ongoing session work.
+Keep automated tests' existing isolated configuration and data directories.
 
 Classify every new database migration as compatible or breaking, with a short
 reason beside it. Advance the migration revision for every change; raise the

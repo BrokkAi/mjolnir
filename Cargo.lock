@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -686,6 +686,7 @@ dependencies = [
  "brokk-mj-worker",
  "brokk-sessionwiki",
  "chrono",
+ "chrono-tz",
  "dirs 6.0.0",
  "flate2",
  "futures",
@@ -718,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -741,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -773,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "brokk-mj-core",
  "serde",
@@ -782,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -790,6 +791,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
@@ -797,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -813,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -829,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -861,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.14.0"
+version = "2.20.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -881,6 +883,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1054,6 +1057,16 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf 0.12.1",
 ]
 
 [[package]]
@@ -4002,6 +4015,15 @@ dependencies = [
 
 [[package]]
 name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
+]
+
+[[package]]
+name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
@@ -4082,6 +4104,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
 ]

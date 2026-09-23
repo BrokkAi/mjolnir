@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -611,6 +612,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
         base_commit: None,
     });
     record.resource_allocation = None;
+    record.launch_base = Some("origin/main".into());
     record.target = Some(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     });
@@ -3211,6 +3213,8 @@ fn workspace_layout_row_count(path: &Path, workspace_id: &str) -> i64 {
 fn split_layout(first_session: &str, second_session: &str) -> ConversationLayout {
     use mj_core::workspace::{LayoutNode, SplitAxis};
     ConversationLayout {
+        browse: None,
+        pins: Default::default(),
         root: LayoutNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.6,
@@ -3248,7 +3252,9 @@ fn workspace_layout_round_trips_after_reopening_the_database() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
-    let layout = split_layout("session-1", "session-2");
+    let mut layout = split_layout("session-1", "session-2");
+    layout.browse = Some(2);
+    layout.pins.insert("session-1".into(), 5);
 
     save_workspace_layout_to(&database, &workspace.id, &layout).unwrap();
     drop(open(&database).unwrap());
@@ -3268,6 +3274,8 @@ fn workspace_layouts_are_isolated_between_workspaces() {
     let second = create_workspace_at(&database, "Second").unwrap();
     let first_layout = split_layout("session-1", "session-2");
     let second_layout = ConversationLayout {
+        browse: None,
+        pins: Default::default(),
         focus: 1,
         sessions: BTreeMap::from([(1, "session-3".to_owned())]),
         ..ConversationLayout::default()
@@ -4404,6 +4412,65 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     (parent, child)
 }
 
+thread_local! {
+    static AFTER_STATE_SESSIONS_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
+
+pub(super) fn after_state_sessions_read() {
+    let hook = AFTER_STATE_SESSIONS_READ.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[test]
+fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_changes() {
+    for creating_child in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let (_parent, child) = subagent_pair(&path);
+        let mut with_child = load_state_from(&path).unwrap();
+        with_child
+            .mount_history
+            .insert("host".into(), vec![directory.path().join("with-child")]);
+        let mut without_child = with_child.clone();
+        without_child.sessions.remove(&child.id);
+        without_child.subagents.remove(&child.id);
+        without_child
+            .mount_history
+            .insert("host".into(), vec![directory.path().join("without-child")]);
+        let (before, after) = if creating_child {
+            (without_child, with_child)
+        } else {
+            (with_child, without_child)
+        };
+        save_state_to(&path, &before).unwrap();
+        let writer_path = path.clone();
+        let committed = after.clone();
+        AFTER_STATE_SESSIONS_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // Commit a real creation/deletion between the reader's queries.
+                // WAL permits this while a read transaction remains open.
+                save_state_to(&writer_path, &committed).unwrap();
+                let writer = open(&writer_path).unwrap();
+                let violations: i64 = writer
+                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(violations, 0);
+            }));
+        });
+        let observed = load_state_from(&path).unwrap();
+        assert!(AFTER_STATE_SESSIONS_READ.with(|hook| hook.borrow().is_none()));
+        assert_eq!(
+            observed, before,
+            "mixed state while creating_child={creating_child}"
+        );
+        assert_eq!(load_state_from(&path).unwrap(), after);
+    }
+}
+
 /// Deleting a child takes its sub-agent relation with it, so this is not how
 /// a relation is left behind. Kept as the control for the test below.
 #[test]
@@ -4636,4 +4703,204 @@ fn projection_reads_keep_one_snapshot_when_a_writer_commits_after_the_frontier_r
             8
         );
     }
+}
+
+#[test]
+fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontier() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("continuation.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut materialized = materialized_session("session-1");
+    materialized.transcript = vec![
+        Arc::new(TranscriptItem {
+            stable_id: "user:request".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::User {
+                content: vec![
+                    serde_json::json!({"type":"text","text":"Implement the parser and run tests"}),
+                ],
+            },
+        }),
+        Arc::new(TranscriptItem {
+            stable_id: "system:notice".into(),
+            position: 2,
+            latest_content_event_ordinal: None,
+            created_at_ms: 2,
+            last_changed_at_ms: 2,
+            body: TranscriptBody::System {
+                text: "not authorization".into(),
+            },
+        }),
+        Arc::new(TranscriptItem {
+            stable_id: "agent:reply".into(),
+            position: 3,
+            latest_content_event_ordinal: Some(3),
+            created_at_ms: 3,
+            last_changed_at_ms: 3,
+            body: TranscriptBody::Agent {
+                chunks: vec![
+                    serde_json::json!({"content":{"type":"text","text":"Implemented. Shall I test?"}}),
+                ],
+                streaming: false,
+            },
+        }),
+    ];
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let (window, metadata) = load_materialized_projection_tail_from(&database, "session-1", 1)
+        .unwrap()
+        .unwrap();
+    assert!(metadata.omitted_items > 0);
+    assert!(crate::continuation::evidence(&window).is_err());
+    let collected = load_continuation_evidence_from(
+        &database,
+        "session-1",
+        materialized.applied_event_ordinal,
+        &materialized.applied_event_digest,
+    )
+    .unwrap();
+    assert_eq!(
+        collected,
+        crate::continuation::evidence(&materialized).unwrap()
+    );
+    assert_eq!(
+        collected.messages[0].text,
+        "Implement the parser and run tests"
+    );
+    assert!(
+        load_continuation_evidence_from(
+            &database,
+            "session-1",
+            materialized.applied_event_ordinal + 1,
+            &materialized.applied_event_digest
+        )
+        .is_err()
+    );
+    assert!(
+        load_continuation_evidence_from(
+            &database,
+            "session-1",
+            materialized.applied_event_ordinal,
+            "wrong-digest"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("isolated-quota-migration.sqlite3");
+    drop(open(&path).unwrap());
+    forget_verified_schema(&path);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TABLE quota_reset_cache;
+        DELETE FROM schema_migrations WHERE version >= 44;
+        UPDATE schema_compatibility SET minimum_compatible_version = 43;
+        PRAGMA user_version = 43;",
+    )
+    .unwrap();
+    drop(raw);
+    let connection = open(&path).unwrap();
+    let state = schema::read_schema_state(&connection).unwrap();
+    assert_eq!(state.revision, SCHEMA_VERSION);
+    let floor: i64 = connection
+        .query_row(
+            "SELECT minimum_compatible_version FROM schema_compatibility",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 44, "older JSON readers must be refused");
+    connection
+        .execute("INSERT INTO quota_reset_cache VALUES ('account', '{}')", [])
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&path);
+    let connection = open(&path).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM quota_reset_cache WHERE identity='account'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, "{}");
+}
+
+/// A deferred transaction that has already read cannot wait for the WAL write
+/// lock: SQLite only calls the busy handler when the connection holds no
+/// transaction, so the upgrade returns `SQLITE_BUSY` at once. Writer-capable
+/// connections therefore begin IMMEDIATE (issue 1117).
+#[test]
+fn writer_connections_wait_for_a_concurrent_writer_instead_of_failing() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut recorder = open(&database).unwrap();
+    let mut holder = open(&database).unwrap();
+    let (holding_tx, holding) = sync_channel(1);
+    let hold = thread::spawn(move || {
+        let transaction = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        holding_tx.send(()).unwrap();
+        // Well under the writer's five-second busy timeout.
+        thread::sleep(Duration::from_millis(300));
+        transaction.commit().unwrap();
+    });
+    holding.recv().unwrap();
+
+    let activity = ApiActivityState {
+        state: "running".into(),
+        details: None,
+        is_idle: false,
+        waiting_for_input: false,
+        capacity_retry: false,
+    };
+    record_api_activities_with(
+        &mut recorder,
+        vec![("session-1".into(), activity.clone())],
+        1_000,
+    )
+    .unwrap();
+    hold.join().unwrap();
+
+    let body: String = recorder
+        .query_row(
+            "SELECT body FROM api_session_activity WHERE session_id = ?1",
+            ["session-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ApiActivityState>(&body).unwrap(),
+        activity
+    );
+}
+
+/// The `cfg(test)` `open_reader` alias must stay DEFERRED: fixture reads may
+/// not take the write lock, or a reader would block the writer under test.
+#[test]
+fn test_reader_connections_keep_deferred_transactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let reader = open_reader(&database).unwrap();
+    let snapshot = reader.unchecked_transaction().unwrap();
+    let sessions: i64 = snapshot
+        .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sessions, 1);
+
+    let mut writer = open(&database).unwrap();
+    let write = writer.transaction().unwrap();
+    write
+        .execute("DELETE FROM api_session_activity", [])
+        .unwrap();
+    write.commit().unwrap();
+    drop(snapshot);
 }

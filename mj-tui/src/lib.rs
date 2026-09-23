@@ -180,6 +180,17 @@ pub enum DashboardAction {
     },
     /// Open a session in a new conversation pane beside or under the focused
     /// one. `Horizontal` puts the new pane to the right, `Vertical` below.
+    PinSession {
+        session_id: String,
+        pane: tile_layout::PaneId,
+    },
+    UnpinSession {
+        session_id: String,
+    },
+    SplitConversation {
+        pane: tile_layout::PaneId,
+        direction: ratatui::layout::Direction,
+    },
     OpenSessionInSplit {
         session_id: String,
         direction: ratatui::layout::Direction,
@@ -399,6 +410,9 @@ pub enum DashboardAction {
     /// Read the system clipboard on a worker before applying its contents.
     /// Clipboard providers may perform IPC and must never run on the TUI loop.
     PasteFromClipboard,
+    CopyNativeSessionId {
+        native_session_id: String,
+    },
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },
@@ -763,6 +777,7 @@ pub struct DashboardState {
     /// pane shows different row sets at different explicit sizes, so a
     /// position could silently point at a different session after resizing.
     pub(crate) selected_session_id: Option<String>,
+    pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
     /// top every frame. Written by the renderer after it lets the table settle.
@@ -784,6 +799,11 @@ pub struct DashboardState {
     /// The session each conversation pane shows. A pane with no entry is
     /// empty, which is what an unfilled split starts as.
     pub(crate) pane_sessions: BTreeMap<tile_layout::PaneId, String>,
+    pub(crate) browse_pane: Option<tile_layout::PaneId>,
+    pub(crate) pin_ids: BTreeMap<String, u32>,
+    pub(crate) pending_browse: Option<String>,
+    pub(crate) navigation_session: Option<String>,
+    pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
     /// arrangement underneath is untouched, so unzooming puts every pane back
     /// where it was. It is a view state, not part of the stored layout: a
@@ -953,6 +973,7 @@ mod dashboard_conversation;
 mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
+mod pane_controls;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
@@ -994,6 +1015,7 @@ impl DashboardState {
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
             selected_session_id: None,
+            command_session_override: None,
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
@@ -1004,6 +1026,11 @@ impl DashboardState {
             pane_sizes: PaneSizes::default(),
             conversation_layout: tile_layout::TileLayout::new().0,
             pane_sessions: BTreeMap::new(),
+            browse_pane: None,
+            pin_ids: BTreeMap::new(),
+            pending_browse: None,
+            navigation_session: None,
+            pane_menu: None,
             conversation_zoomed: false,
             opening_session: None,
             pane_areas: None,

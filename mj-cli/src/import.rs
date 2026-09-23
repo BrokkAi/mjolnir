@@ -5,6 +5,7 @@
 //! session file, and the dashboard's background import runs the same steps with
 //! progress reporting and cancellation.
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -364,10 +365,24 @@ pub(crate) fn discover_import_profile(
         error: None,
     };
     let mut last_publish: Option<Instant> = None;
+    let mut git_availability = HashMap::new();
     let discovered = scan_native_sessions(harness_kind, &home, cache, |progress| {
         profile.scan_progress = Some((progress.scanned, progress.total));
         if let Some(session) = progress.session {
-            profile.sessions.push(import_session_option(session));
+            let reason = git_availability
+                .entry(session.cwd.clone())
+                .or_insert_with(
+                    || match mj_controller::import::git_root_for_path(&session.cwd) {
+                        Ok(Some(_)) => None,
+                        Ok(None) => Some("missing Git repo".to_owned()),
+                        Err(error) => Some(format!("could not inspect Git repo: {error:#}")),
+                    },
+                );
+            let mut option = import_session_option(session);
+            if option.unavailable_reason.is_none() {
+                option.unavailable_reason = reason.clone();
+            }
+            profile.sessions.push(option);
         }
         if last_publish.is_none_or(|last| last.elapsed() >= SCAN_PUBLISH_INTERVAL) {
             last_publish = Some(Instant::now());
@@ -704,6 +719,62 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn discovery_checks_current_git_availability_even_with_cached_session_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("profile");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let sessions = home.join("projects/test");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("native-test.jsonl"),
+            serde_json::json!({
+                "type": "user", "cwd": project, "sessionId": "native-test",
+                "message": {"role": "user", "content": "Investigate a hang"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cache = NativeScanCache::new();
+        let scan = || {
+            discover_import_profile(
+                "test".into(),
+                HarnessKind::Claude,
+                home.clone(),
+                &cache,
+                |_| {},
+            )
+        };
+        let profile = scan();
+        assert!(profile.error.is_none(), "{:?}", profile.error);
+        assert_eq!(profile.sessions.len(), 1);
+        assert_eq!(
+            profile.sessions[0].unavailable_reason.as_deref(),
+            Some("missing Git repo")
+        );
+
+        assert!(
+            mj_core::subprocess::run_with_input(
+                std::process::Command::new("git")
+                    .arg("init")
+                    .arg("--quiet")
+                    .arg(&project),
+                &[],
+            )
+            .unwrap()
+            .status
+            .success()
+        );
+        assert_eq!(scan().sessions[0].unavailable_reason, None);
+
+        std::fs::write(project.join(".git/config"), "[broken").unwrap();
+        let profile = scan();
+        let reason = profile.sessions[0].unavailable_reason.as_deref().unwrap();
+        assert!(reason.contains("could not inspect Git repo"), "{reason}");
+        assert!(reason.contains("bad config"), "{reason}");
+    }
 
     fn parse_import(arguments: &[&str]) -> (HarnessKind, NativeImportArgs) {
         let cli = crate::Cli::try_parse_from(arguments).expect("import subcommand parses");

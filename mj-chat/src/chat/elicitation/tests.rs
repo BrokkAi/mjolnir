@@ -4,6 +4,34 @@ use mj_core::elicitation::ElicitationOption;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+#[test]
+fn an_upgrade_preserves_unsubmitted_form_answers() {
+    let request = request(
+        ElicitationFieldKind::Text {
+            default: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            format: None,
+        },
+        true,
+    );
+    let mut dialog = ElicitationDialog::new(request.clone());
+    let text = "Keep this answer 🦀 ".repeat(8_000);
+    dialog.paste(&text);
+    let encoded = serde_json::to_vec(&dialog.draft()).unwrap();
+    assert!(encoded.len() > 64 * 1024);
+    let draft = serde_json::from_slice(&encoded).unwrap();
+    let mut restored = ElicitationDialog::from_draft(request, draft).unwrap();
+    restored.focus_control(1);
+    assert_eq!(
+        restored.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([("question_0".into(), ElicitationValue::String(text))]),
+        })
+    );
+}
+
 fn request(kind: ElicitationFieldKind, required: bool) -> ElicitationRequest {
     ElicitationRequest {
         id: "ask-1".into(),
@@ -862,7 +890,7 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
     assert_eq!(dialog.focus_index(), 1);
 
     let width = 78;
-    for height in [dialog.natural_height(width), 10, 8, 6] {
+    for height in [dialog.natural_height(width), 10, 8, 6, 5] {
         let text = buffer_text(&rendered_in_pane(&dialog, width, height));
         assert!(
             text.contains("Enabled"),
@@ -872,11 +900,34 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
             text.contains("☐ No"),
             "boolean control missing at height {height}:\n{text}"
         );
+        assert!(text.contains("Submit"), "actions missing:\n{text}");
     }
+}
 
-    // A pane with a single field row keeps the control it cannot label.
-    let text = buffer_text(&rendered_in_pane(&dialog, width, 5));
-    assert!(text.contains("☐ No"), "boolean control missing:\n{text}");
+#[test]
+fn compact_question_keeps_validation_errors_and_the_labeled_control_visible() {
+    let mut dialog = ElicitationDialog::new(request(
+        ElicitationFieldKind::Text {
+            default: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            format: None,
+        },
+        true,
+    ));
+    dialog.focus_control(1);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    let text = buffer_text(&rendered_in_pane(&dialog, 78, 5));
+    assert!(
+        text.contains("1/1  Architecture"),
+        "field title missing:\n{text}"
+    );
+    assert!(
+        text.contains("Architecture is required"),
+        "error missing:\n{text}"
+    );
+    assert!(text.contains("Submit"), "actions missing:\n{text}");
 }
 
 #[test]

@@ -36,12 +36,27 @@ use unicode_segmentation::UnicodeSegmentation;
 /// allowed to allocate an unbounded buffer.
 const MAXIMUM_OFFSCREEN_ROWS: usize = 4_096;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum FieldValue {
-    Text(TextInput),
+    Text(#[serde(with = "draft_text")] TextInput),
     Single(Option<usize>),
     Multi(BTreeSet<usize>),
     Boolean(bool),
+}
+
+/// Carry user-authored form text across a binary upgrade without coupling the
+/// handoff format to readline's internal history, undo, and cursor state.
+mod draft_text {
+    use super::TextInput;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(input: &TextInput, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(input.value())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<TextInput, D::Error> {
+        String::deserialize(deserializer).map(TextInput::from_value)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +77,7 @@ enum ElicitationControl {
 /// A process-local copy of an unanswered form. The request is retained in the
 /// snapshot deliberately: an id can be reused by a harness for a different
 /// form, and local answers must never be applied to that new form.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElicitationDraft {
     request: ElicitationRequest,
     values: Vec<FieldValue>,
@@ -938,7 +953,17 @@ fn render_elicitation_at(
             theme::title(focused),
             true,
         );
-        let block = theme::panel(focused).title(title_line);
+        let mut block = theme::panel(focused).title(title_line);
+        // Compact panes reserve their content rows for the labeled control
+        // and actions; keep validation failures visible in the bottom border.
+        if area.height < 6
+            && let Some(error) = dialog.error.as_deref()
+        {
+            block = block.title_bottom(Line::styled(
+                error,
+                Style::default().fg(theme::palette().error),
+            ));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
         inner
@@ -971,7 +996,9 @@ fn render_elicitation_body(
     )
     .unwrap_or(u16::MAX)
     .max(1);
-    let footer_height = inner.height.min(1);
+    // Keep a field's title, control, and action row before spending a row on
+    // keyboard hints. A five-row bordered pane has only three content rows.
+    let footer_height = u16::from(inner.height >= 4);
     // In a compact question pane one button row is enough: the second row is
     // more valuable to the message and focused control, which can each scroll
     // their content independently.

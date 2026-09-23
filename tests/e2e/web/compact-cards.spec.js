@@ -69,6 +69,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     turn_review: null,
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
+    subagent_parent_id: options.subagentParentId,
     capabilities,
   };
 }
@@ -822,15 +823,21 @@ test('sub-agent workspace hides children from the normal list and closes back to
       title: 'Parent session',
       subagentSessionIds: ['child-one', 'child-two'],
     }),
-    session('child-one', 'project-parent', 'Parent project', { title: 'Grok helper' }),
-    session('child-two', 'project-parent', 'Parent project', { title: 'Muse helper' }),
+    session('child-one', 'project-parent', 'Parent project', {
+      title: 'Grok helper',
+      subagentParentId: 'parent',
+    }),
+    session('child-two', 'project-parent', 'Parent project', {
+      title: 'Muse helper',
+      subagentParentId: 'parent',
+    }),
   ]);
 
   await expect(card(page, 'parent')).toBeVisible();
   await expect(card(page, 'child-one')).toHaveCount(0);
   await card(page, 'parent').click();
   await expect(page).toHaveURL(/#conversation\/parent$/);
-  await expect(page.locator('#subagents-button')).toHaveText('Sub-agents 2');
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
   await page.locator('#subagents-button').click();
 
   await expect(page).toHaveURL(/#subagents\/parent$/);
@@ -848,6 +855,59 @@ test('sub-agent workspace hides children from the normal list and closes back to
   await expect(page).toHaveURL(/#conversation\/parent$/);
 });
 
+test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
+  const parent = session('steering', 'project', 'Project', {
+    queued: 1, capabilities: { prompt: true, interrupt_turn: true },
+  });
+  parent.targeted_turn_control_supported = true;
+  parent.active_prompt_id = 'turn-one'; parent.chat_phase = 'running';
+  const state = await mount(page, [parent]);
+  await card(page, 'steering').click();
+  const composer = page.locator('#prompt-text');
+  await composer.fill('keep this draft');
+  await composer.press('Escape');
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toEqual({ action: 'turn-control', session_id: 'steering', command: {
+    type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0' },
+  } });
+  parent.steering = { command_id: 'steer-one', active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0', status: 'pending' };
+  await refresh(page, state);
+  await expect(page.locator('#cancel-turn')).toHaveText('Steering…');
+  await composer.press('Escape');
+  expect(state.actions).toHaveLength(1);
+  await reconnect(page, state);
+  await expect(page.locator('#cancel-turn')).toBeDisabled();
+  parent.steering.status = 'failed'; parent.steering.message = 'Adapter refused steering';
+  await refresh(page, state);
+  const cancel = page.getByRole('button', { name: 'Cancel turn and apply queued prompt', exact: true });
+  await expect(cancel).toBeVisible();
+  await composer.press('Escape');
+  await expect(cancel).toHaveCount(0);
+  expect(state.actions).toHaveLength(1);
+  // A new failure offers a fresh, deliberate choice.
+  parent.steering.command_id = 'steer-two';
+  await refresh(page, state);
+  await cancel.click();
+  await expect.poll(() => state.actions.length).toBe(2);
+  expect(state.actions[1].command).toEqual({ type: 'cancel_turn_for', data: { active_prompt_id: 'turn-one' } });
+  await expect(composer).toHaveText('keep this draft');
+});
+
+test('a moved parent keeps 23 native histories without claiming any are working', async ({ page }) => {
+  const parent = session('native-parent', 'project', 'Project');
+  parent.native_subagents = Array.from({ length: 23 }, (_, i) => ({
+    session_id: `child-${i}`, name: `Helper ${i}`, state: i < 17 ? 'completed' : 'disconnected', availability: 'unknown',
+  }));
+  const state = await mount(page, [parent]);
+  await card(page, 'native-parent').click();
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  parent.profile_id = 'another-profile';
+  await reconnect(page, state);
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  await page.locator('#subagents-button').click();
+  await expect(page.getByRole('button', { name: 'View history' })).toHaveCount(23);
+  await expect(page.getByRole('heading', { name: 'History and availability unknown' })).toBeVisible();
+});
 
 test('suspension remains pending after acceptance and exposes failure after reconnect', async ({ page }) => {
   const state = await mount(page, [session('suspend-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
@@ -905,3 +965,24 @@ test('destroying retained history offers explicit branch deletion', async ({ pag
   expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'retained', delete_branch: true });
   await expect(page.getByRole('button', { name: 'Destroy session…', exact: true })).toBeDisabled();
 });
+
+for (const queued of [0, 1]) {
+  test(`older worker remains interruptible with ${queued} queued prompts`, async ({ page }) => {
+    const parent = session('old-worker', 'project', 'Project', {
+      queued, capabilities: { prompt: true, interrupt_turn: true },
+    });
+    parent.targeted_turn_control_supported = false;
+    parent.active_prompt_id = 'old-turn';
+    parent.chat_phase = 'running';
+    const state = await mount(page, [parent]);
+    await card(page, 'old-worker').click();
+    // Opening the card hands focus to the conversation screen. Until that
+    // screen renders, the composer is not the key target and Escape would
+    // reach the page body instead of the turn control.
+    await expect(page.locator('#cancel-turn')).toBeVisible();
+    await expect(page.locator('#cancel-turn')).toHaveText('Interrupt turn');
+    await page.locator('#prompt-text').press('Escape');
+    await expect.poll(() => state.actions.length).toBe(1);
+    expect(state.actions[0]).toEqual({ action: 'interrupt-turn', session_id: 'old-worker' });
+  });
+}

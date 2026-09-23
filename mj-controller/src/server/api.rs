@@ -12,6 +12,39 @@
 //! reaches them through [`SubagentBackend`]. The daemon implements it in
 //! `server_runtime::api`; the route tests implement it with a hand-written fake,
 //! so the HTTP contract is tested without a running daemon.
+//!
+//! # The artifact routes are contract
+//!
+//! A caller that runs work somewhere other than this machine cannot read the
+//! working tree to decide whether a change is safe to publish, so four routes
+//! are part of the stable contract rather than conveniences. Changing any of
+//! their media types, response bodies, or status meanings is a change to this
+//! API:
+//!
+//! - `GET /sessions/{session_id}/diff` answers a unified diff as
+//!   `text/x-diff; charset=utf-8`, comparing from the revision the caller names
+//!   in `base` when it names one. With `json=true` it answers
+//!   `application/json` carrying `mj_checkpoint::archive::SessionDiff` instead,
+//!   a type that lives in the checkpoint crate, so changing its fields is also
+//!   a change here.
+//! - `POST /sessions/{session_id}/export` answers the work in the form the
+//!   caller asks for: `kind: "patch"` as `text/x-diff`, `kind: "branch"` as
+//!   `{"branch", "remote"}`, and `kind: "bundle"` as
+//!   `application/octet-stream` with the bundle named in an attachment
+//!   filename.
+//! - `GET` and `PUT /sessions/{session_id}/files` read one file as
+//!   `application/octet-stream` and inject one, answering `{"path", "bytes"}`.
+//!   Injection requires a live, idle session, because a write into a running
+//!   turn has no meaning.
+//! - `GET /sessions/{session_id}/transcript` answers a page of the transcript,
+//!   with `next_after_seq` as the cursor to continue from and `latest_seq` to
+//!   tell whether the page reached the end.
+//!
+//! Where a route can refuse because of the session's own state — an export with
+//! nothing to export, an injection into a session that is neither live nor idle
+//! — it answers 409 with a sentence the caller can act on. A failure that is not
+//! the caller's to fix is a 5xx. Keeping those apart is part of the contract,
+//! because one is a decision for a person and the other is not.
 
 mod events;
 
@@ -22,7 +55,7 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HeaderValue,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue,
 };
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::middleware::Next;
@@ -40,10 +73,9 @@ use mj_core::relay::{CapacityRetry, is_capacity_stop_reason};
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ActionOutcome, ApiError, COOKIE_NAME, ControllerAction, ControllerRequest, ServerState,
-    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, cookie_value,
-    create_quick_bundle, now_unix, require_session_record, session_cookie_valid, validate_action,
-    validate_prompt_text,
+    ActionOutcome, ApiError, ControllerAction, ControllerRequest, ServerState,
+    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, create_quick_bundle,
+    require_session_record, validate_action, validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client
@@ -78,6 +110,8 @@ mod routes;
 pub use routes::*;
 mod config;
 pub(crate) use config::*;
+mod options;
+use options::*;
 mod sessions;
 use sessions::*;
 mod subagents;

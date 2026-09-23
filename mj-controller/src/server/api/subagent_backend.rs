@@ -6,6 +6,19 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn native_agent_history(
+        &self,
+        owner: String,
+        child: String,
+        before: Option<(u64, String)>,
+    ) -> BoxFuture<'_, AnyResult<mj_core::native_agent::NativeAgentHistoryPage>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::native_agent_history(&owner, &child, before)
+            })
+            .await?
+        })
+    }
     fn events(
         &self,
         filter: crate::database::ApiEventFilter,
@@ -147,7 +160,11 @@ pub trait SubagentBackend: Send + Sync {
     }
 
     /// A unified diff of the session's work.
-    fn diff(&self, session_id: String) -> BoxFuture<'_, Result<String, ExportError>>;
+    fn diff(
+        &self,
+        session_id: String,
+        options: DiffOptions,
+    ) -> BoxFuture<'_, Result<String, ExportError>>;
 
     /// One file from the session's workspace.
     fn read_file(

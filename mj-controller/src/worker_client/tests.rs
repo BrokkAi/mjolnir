@@ -605,3 +605,73 @@ fn a_session_that_owns_its_profile_home_is_pushed_the_managed_skills_too() {
             .any(|entry| entry.path == "skills/review/SKILL.md")
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn negotiated_protocol_controls_interrupt_support_on_status_and_attach() {
+    for protocol in [16, 17] {
+        // Existing workers omit the new controller-supplied protocol field.
+        let state = mj_core::relay::RelaySnapshot::new(SESSION_ID.into()).operational_state();
+        let state_json = serde_json::to_string(&state).unwrap();
+        assert!(!state_json.contains("relay_protocol_version"));
+        let script = format!(
+            r#"
+import json, sys
+state = json.loads({state_json:?})
+protocol = {protocol}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {{"type": "hello", "data": {{"negotiated": protocol, "relay_version": "interrupt-fixture", "session_id": state["session_id"]}}}}
+    elif method == "status":
+        payload = {{"type": "status", "data": state}}
+    elif method == "attach":
+        payload = {{"type": "attached", "data": {{"state": state, "events": [], "through_ordinal": 0, "through_digest": state["latest_digest"]}}}}
+    elif method == "submit":
+        params = req["request"]["params"]
+        assert params["command"]["type"] == "cancel_turn"
+        payload = {{"type": "accepted", "data": {{"command_id": params["command_id"], "ordinal": 1}}}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({{"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}}), flush=True)
+"#
+        );
+        let spec =
+            CommandSpec::new("python3", ["-c", &script]).purpose("interrupt compatibility fixture");
+        let mut client =
+            RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+                .await
+                .unwrap();
+        let state = client.status().await.unwrap();
+        assert_eq!(state.relay_protocol_version, Some(protocol));
+        assert_eq!(state.supports_targeted_turn_control(), protocol >= 17);
+        let attachment = client.attach(0, RELAY_EVENT_GENESIS_DIGEST).await.unwrap();
+        assert_eq!(attachment.state.relay_protocol_version, Some(protocol));
+        assert_eq!(
+            attachment.state.supports_targeted_turn_control(),
+            protocol >= 17
+        );
+        if protocol == 16 {
+            // A targeted command must still be rejected rather than silently
+            // losing its protection against cancelling a subsequent turn.
+            let error = client
+                .submit(
+                    "targeted",
+                    RelayCommand::CancelTurnFor {
+                        active_prompt_id: "active".into(),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("IncompatibleProtocol"));
+        }
+        assert_eq!(
+            client
+                .submit("interrupt", RelayCommand::CancelTurn)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+}

@@ -1283,10 +1283,60 @@ async fn answer_to_ext_request(
     answer
 }
 
+/// Muse's form asking whether to answer its question or explain instead.
+fn muse_route_form() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "route-1",
+        "method": "elicitation/create",
+        "params": {
+            "sessionId": "scripted",
+            "mode": "form",
+            "message": "Choose how to respond to this question:\nChoose an architecture",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {"route": {"type": "string", "enum": ["Answer questions", "Explain instead"]}},
+                "required": ["route"]
+            }
+        }
+    })
+}
+
+fn architecture_form() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "ask-1",
+        "method": "elicitation/create",
+        "params": {
+            "sessionId": "scripted",
+            "toolCallId": "question-tool",
+            "mode": "form",
+            "message": "Choose an architecture",
+            "requestedSchema": {
+                "type": "object",
+                "required": ["architecture"],
+                "properties": {
+                    "architecture": {
+                        "type": "string",
+                        "title": "Architecture",
+                        "oneOf": [
+                            {"const": "thin", "title": "Thin callers"},
+                            {"const": "dynamic", "title": "Dynamic matrix"}
+                        ]
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Scripts one prompt that asks the architecture question. With `routed`,
+/// the question is preceded by Muse's route form, whose answer is published.
 async fn elicitation_bridge(
     stream: tokio::io::DuplexStream,
     initialized: oneshot::Sender<serde_json::Value>,
     answered: oneshot::Sender<serde_json::Value>,
+    mut routed: Option<oneshot::Sender<serde_json::Value>>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1297,6 +1347,16 @@ async fn elicitation_bridge(
     let mut prompt_id = None;
     while let Some(line) = lines.next_line().await.expect("read bridge input") {
         let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
+        if message.get("id").and_then(serde_json::Value::as_str) == Some("route-1") {
+            if let Some(routed) = routed.take() {
+                let _ = routed.send(message);
+            }
+            write
+                .write_all(format!("{}\n", architecture_form()).as_bytes())
+                .await
+                .expect("ask the question");
+            continue;
+        }
         if message.get("id").and_then(serde_json::Value::as_str) == Some("ask-1") {
             if let Some(answered) = answered.take() {
                 let _ = answered.send(message);
@@ -1341,31 +1401,11 @@ async fn elicitation_bridge(
             "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             "session/prompt" => {
                 prompt_id = Some(id);
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": "ask-1",
-                    "method": "elicitation/create",
-                    "params": {
-                        "sessionId": "scripted",
-                        "toolCallId": "question-tool",
-                        "mode": "form",
-                        "message": "Choose an architecture",
-                        "requestedSchema": {
-                            "type": "object",
-                            "required": ["architecture"],
-                            "properties": {
-                                "architecture": {
-                                    "type": "string",
-                                    "title": "Architecture",
-                                    "oneOf": [
-                                        {"const": "thin", "title": "Thin callers"},
-                                        {"const": "dynamic", "title": "Dynamic matrix"}
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                })
+                if routed.is_some() {
+                    muse_route_form()
+                } else {
+                    architecture_form()
+                }
             }
             _ => continue,
         };
@@ -1381,6 +1421,24 @@ async fn elicitation_bridge(
 
 #[tokio::test]
 async fn form_elicitation_is_advertised_rendered_and_answered() {
+    answer_architecture_form(HarnessKind::Claude, None).await;
+}
+
+#[tokio::test]
+async fn muse_route_form_is_answered_without_asking_the_person() {
+    let (routed_tx, routed_rx) = oneshot::channel();
+    answer_architecture_form(HarnessKind::Muse, Some(routed_tx)).await;
+    let routed = routed_rx.await.expect("bridge receives the route answer");
+    assert_eq!(routed["result"]["action"], "accept");
+    assert_eq!(routed["result"]["content"]["route"], "Answer questions");
+}
+
+/// Drives one prompt whose question the person answers. It fails if any
+/// form other than the architecture question reaches the person first.
+async fn answer_architecture_form(
+    harness: HarnessKind,
+    routed: Option<oneshot::Sender<serde_json::Value>>,
+) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (initialized_tx, initialized_rx) = oneshot::channel();
     let (answered_tx, answered_rx) = oneshot::channel();
@@ -1388,6 +1446,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         bridge_stream,
         initialized_tx,
         answered_tx,
+        routed,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
@@ -1409,7 +1468,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
-        harness: HarnessKind::Claude,
+        harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -2611,7 +2670,8 @@ async fn silent_after_prompt_bridge(
     observed: mpsc::UnboundedSender<String>,
     open_a_tool_call: bool,
 ) {
-    silent_after_prompt_bridge_with_late_reply(stream, observed, open_a_tool_call, false).await;
+    silent_after_prompt_bridge_with_late_reply(stream, observed, open_a_tool_call, false, false)
+        .await;
 }
 
 async fn silent_after_prompt_bridge_with_late_reply(
@@ -2619,13 +2679,33 @@ async fn silent_after_prompt_bridge_with_late_reply(
     observed: mpsc::UnboundedSender<String>,
     open_a_tool_call: bool,
     late_reply: bool,
+    child_traffic: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut prior_prompt = None;
-    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+    let mut traffic = tokio::time::interval(Duration::from_millis(100));
+    let mut child_started = false;
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => match line.expect("read bridge input") {
+                Some(line) => line,
+                None => break,
+            },
+            _ = traffic.tick(), if child_started => {
+                for (session, update) in [
+                    ("scripted", serde_json::json!({"sessionUpdate":"subagent_state_update", "subagentSessionId":"heap", "state":"running"})),
+                    ("heap", serde_json::json!({"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Heap analysis continues."}})),
+                    ("heap", serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"heap-tool", "title":"inspect heap", "status":"in_progress"})),
+                ] {
+                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":session, "update":update}});
+                    if write.write_all(format!("{update}\n").as_bytes()).await.is_err() { return; }
+                }
+                continue;
+            }
+        };
         let request: serde_json::Value =
             serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
         let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
@@ -2642,12 +2722,25 @@ async fn silent_after_prompt_bridge_with_late_reply(
                 "id": id,
                 "result": {"protocolVersion": 1},
             }),
+            "session/new" | "session/load" if child_traffic => serde_json::json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"sessionId":"scripted", "modes":{"currentModeId":"auto", "availableModes":[{"id":"auto", "name":"Auto"}]}},
+            }),
+            "session/set_mode" => serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{}}),
             "session/new" | "session/load" => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {"sessionId": "scripted"},
             }),
             "session/prompt" => {
+                if child_traffic && !child_started {
+                    let spawn = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"subagent_spawned", "subagentSessionId":"heap", "name":"heap", "task":"Independent heap analysis", "capabilities":{}}}});
+                    write
+                        .write_all(format!("{spawn}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    child_started = true;
+                }
                 if late_reply && let Some(prior) = prior_prompt.replace(id) {
                     let reply = serde_json::json!({"jsonrpc":"2.0", "id":prior, "result":{"stopReason":"end_turn"}});
                     if write
@@ -3030,12 +3123,14 @@ async fn steering_bridge(
     stream: tokio::io::DuplexStream,
     observed: mpsc::UnboundedSender<serde_json::Value>,
     mut complete: mpsc::Receiver<()>,
+    steering_outcome: &'static str,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut prompt_id = None;
+    let mut held_steering_id = None;
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -3079,10 +3174,14 @@ async fn steering_bridge(
                         prompt_id = Some(id);
                         continue;
                     }
+                    SESSION_STEERING_METHOD if steering_outcome == "hold" => {
+                        held_steering_id = Some(id);
+                        continue;
+                    }
                     SESSION_STEERING_METHOD => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {"outcome": "injected"},
+                        "result": {"outcome": steering_outcome},
                     }),
                     _ => continue,
                 };
@@ -3093,6 +3192,11 @@ async fn steering_bridge(
             complete = complete.recv() => {
                 if complete.is_none() {
                     break;
+                }
+                if let Some(id) = held_steering_id.take() {
+                    let response = serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"outcome":"injected"}});
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                    continue;
                 }
                 let Some(id) = prompt_id.take() else {
                     continue;
@@ -3112,17 +3216,20 @@ async fn steering_bridge(
 
 #[tokio::test]
 async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
-    exercise_image_steering(false).await;
+    exercise_image_steering(false, "injected").await;
 }
 
 #[tokio::test]
 async fn ten_large_photos_reach_acp_for_both_prompt_and_steering() {
-    tokio::time::timeout(Duration::from_secs(20), exercise_image_steering(true))
-        .await
-        .expect("large image delivery must not deadlock");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        exercise_image_steering(true, "injected"),
+    )
+    .await
+    .expect("large image delivery must not deadlock");
 }
 
-async fn exercise_image_steering(with_images: bool) {
+async fn exercise_image_steering(with_images: bool, steering_outcome: &'static str) {
     use base64::Engine as _;
     let images_root = tempfile::tempdir().unwrap();
     let store = mj_core::attachment::AttachmentStore::worker(images_root.path());
@@ -3155,7 +3262,12 @@ async fn exercise_image_steering(with_images: bool) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
-    let bridge = tokio::spawn(steering_bridge(bridge_stream, observed_tx, complete_rx));
+    let bridge = tokio::spawn(steering_bridge(
+        bridge_stream,
+        observed_tx,
+        complete_rx,
+        steering_outcome,
+    ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -3231,13 +3343,14 @@ async fn exercise_image_steering(with_images: bool) {
         }
     }
     request_tx
-        .send(CommandRequest::Cancel {
+        .send(CommandRequest::Steer {
             request_id: "cancel-1".into(),
-            steering_prompt: Some(ClaimedSteeringPrompt {
+            active_prompt_id: "prompt-1".into(),
+            steering_prompt: ClaimedSteeringPrompt {
                 attachment_root: with_images.then(|| images_root.path().to_path_buf()),
                 queued_command_id: "queued-1".into(),
                 prompt: blocks("change direction"),
-            }),
+            },
         })
         .await
         .unwrap();
@@ -3256,16 +3369,47 @@ async fn exercise_image_steering(with_images: bool) {
         steering["params"]["_meta"]["steering"]["idleBehavior"],
         "promptRequired"
     );
-    wait_for_runtime_event(&mut event_rx, |event| {
-        matches!(
-            event,
-            RuntimeEvent::SteerApplied {
-                request_id,
-                queued_command_id,
-            } if request_id == "cancel-1" && queued_command_id == "queued-1"
-        )
-    })
-    .await;
+    if steering_outcome == "hold" {
+        tokio::time::advance(Duration::from_secs(31)).await;
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::SteeringUnconfirmed { .. })
+        })
+        .await;
+        request_tx
+            .send(CommandRequest::Steer {
+                request_id: "steer-repeat".into(),
+                active_prompt_id: "prompt-1".into(),
+                steering_prompt: ClaimedSteeringPrompt {
+                    attachment_root: None,
+                    queued_command_id: "queued-1".into(),
+                    prompt: blocks("change direction"),
+                },
+            })
+            .await
+            .unwrap();
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "steer-repeat")).await;
+        assert!(
+            observed_rx.try_recv().is_err(),
+            "a repeated steer must not cancel or inject again"
+        );
+        complete_tx.send(()).await.unwrap();
+    }
+    if steering_outcome == "failed" {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "cancel-1")).await;
+    } else if steering_outcome == "startedNewTurn" {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandInterrupted { request_id, .. } if request_id == "cancel-1")).await;
+    } else {
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(
+                event,
+                RuntimeEvent::SteerApplied {
+                    request_id,
+                    queued_command_id,
+                } if request_id == "cancel-1" && queued_command_id == "queued-1"
+            )
+        })
+        .await;
+    }
     assert!(
         observed_rx.try_recv().is_err(),
         "steering must not send cancel"
@@ -3286,6 +3430,21 @@ async fn exercise_image_steering(with_images: bool) {
         .expect("runtime task does not panic")
         .expect("steering does not fail the runtime");
     bridge.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn steering_timeout_keeps_observing_and_repeated_escape_never_cancels() {
+    exercise_image_steering(false, "hold").await;
+}
+
+#[tokio::test]
+async fn failed_steering_does_not_fall_back_to_cancellation() {
+    exercise_image_steering(false, "failed").await;
+}
+
+#[tokio::test]
+async fn unexpected_steering_delivery_is_held_without_cancellation() {
+    exercise_image_steering(false, "startedNewTurn").await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -5600,6 +5759,28 @@ fn missing_native_session_spec(
 async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_error: &str) {
     let temp = tempfile::tempdir().unwrap();
     let script = missing_native_session_script(temp.path(), reload_error);
+    // An installed worker upgrades a snapshot whose original opening is
+    // already behind its saved frontier, before ACP attempts native resume.
+    let root = temp.path().join("legacy-relay");
+    let mut relay = crate::relay::DurableRelay::open(&root, "upgrade-test", "old").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "missing-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    drop(relay);
+    let state = root.join(mj_core::relay::RELAY_STATE_FILE);
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("native_session_used");
+    saved
+        .as_object_mut()
+        .unwrap()
+        .remove("native_session_opened_ordinal");
+    std::fs::write(state, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let relay = crate::relay::DurableRelay::open(&root, "upgrade-test", "new").unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     // Work the worker queued before the session opened must survive the
@@ -5612,7 +5793,12 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
         .await
         .unwrap();
     let runtime = tokio::spawn(run(
-        missing_native_session_spec(temp.path(), &script, harness, false),
+        missing_native_session_spec(
+            temp.path(),
+            &script,
+            harness,
+            relay.native_session_may_have_history(),
+        ),
         request_rx,
         event_tx,
     ));
@@ -5659,13 +5845,13 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_session() {
+async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
     assert_unused_native_session_is_replaced(HarnessKind::Codex, MISSING_CODEX_THREAD_ERROR).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_unused_claude_session_claude_cannot_find_is_replaced_in_the_same_session() {
+async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade() {
     assert_unused_native_session_is_replaced(HarnessKind::Claude, MISSING_CLAUDE_SESSION_ERROR)
         .await;
 }
@@ -5708,7 +5894,7 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
 
 /// Exercise the real session select loop and the production 60-second cadence.
 #[tokio::test(flavor = "current_thread")]
-async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_session() {
+async fn classifier_marks_silent_parent_awaiting_input_despite_continuous_native_child_traffic() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/", listener.local_addr().unwrap());
@@ -5731,8 +5917,8 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         let evidence: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(evidence["state"]["phase"], "running");
         let answer = serde_json::json!({"answers": {
-            "waiting_on":{"type":"choice","choice":"user","confidence":0.95},
-            "asked_question":{"type":"noul","noul":0.95}
+            "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
+            "needs_user_input":{"type":"noul","noul":0.95}
         }})
         .to_string();
         socket
@@ -5753,6 +5939,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         observed_tx,
         false,
         true,
+        true,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
@@ -5762,6 +5949,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         silence: None,
         tool_call: None,
     });
+    spec.harness = HarnessKind::Claude;
     spec.verdict = Some(VerdictSource::Direct {
         key: "test-key".into(),
         endpoint,
@@ -5786,26 +5974,32 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         .unwrap();
     let mut methods = Vec::new();
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
-    let (warned, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
-        let mut warned = false;
+    let (noticed, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
+        let mut noticed = false;
+        let mut child_updates = 0;
         loop {
             match event_rx.recv().await.unwrap() {
-                RuntimeEvent::Warning { message } => warned |= message.contains("waiting for you"),
+                RuntimeEvent::Notice { message } => {
+                    assert_eq!(message, "Classifier: The agent appears to be waiting for you. The harness may still be running.");
+                    noticed = true;
+                }
                 RuntimeEvent::PromptFinished {
                     stop_reason,
                     diagnostic,
                     ..
                 } => {
                     assert_eq!(stop_reason, mj_core::acp::AWAITING_INPUT_STOP_REASON);
-                    break (warned, diagnostic.unwrap());
+                    assert!(child_updates > 100, "continuous native child traffic was routed");
+                    break (noticed, diagnostic.unwrap());
                 }
+                RuntimeEvent::NativeAgent { .. } => child_updates += 1,
                 _ => {}
             }
         }
     })
     .await
     .unwrap();
-    assert!(warned, "warning precedes completion");
+    assert!(noticed, "classifier notice precedes completion");
     assert_eq!(
         diagnostic.code.as_deref(),
         Some(mj_core::acp::AWAITING_INPUT_STOP_REASON)

@@ -308,7 +308,7 @@ pub fn lane_context(job: &ReviewJob) -> String {
         ("same-user-turn; cumulative", String::new())
     };
     format!(
-        "<original_task>\n{}\n</original_task>\n\n<review_oracle>\n{REVIEW_ORACLE}\n</review_oracle>\n\n<workspace_diff scope=\"{scope}\">\n{diff}\n</workspace_diff>{prior}\n\n<trajectory projection=\"compact; tool results and edit diffs omitted\">\n{trajectory}\n</trajectory>",
+        "<original_task>\n{}\n</original_task>\n\n<review_oracle>\n{REVIEW_ORACLE}\n</review_oracle>\n\n<workspace_diff scope=\"{scope}\">\n{diff}\n</workspace_diff>{prior}\n\n<trajectory projection=\"shared transcript summary; eight latest tool calls retain details\">\n{trajectory}\n</trajectory>",
         job.task,
     )
 }
@@ -625,7 +625,7 @@ pub fn supervisor_prompt(
          <intent_brief status=\"{intent_status}\" trust=\"model-extracted evidence\">\n{intent_brief}\n</intent_brief>\n\n\
          <initial_result>\n{result}\n</initial_result>\n\n\
          {packet}\n\n\
-         <trajectory projection=\"compact; tool results and edit diffs omitted\">\n{trajectory}\n</trajectory>\n\n\
+         <trajectory projection=\"shared transcript summary; eight latest tool calls retain details\">\n{trajectory}\n</trajectory>\n\n\
          <repository_root>{root}</repository_root>",
         task = job.task,
         messages = user_messages_packet(&job.user_messages, &job.task),

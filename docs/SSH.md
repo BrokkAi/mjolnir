@@ -12,41 +12,60 @@ Two runtimes can run on it:
 
 Both shell out to the local `ssh` CLI rather than using an SSH library.
 
-## Sharing one connection per host
+## Sharing connections per host
 
 Provisioning a session runs 15 to 25 `ssh` and `scp` commands against the same
-host. On unix, Mjolnir makes them share a single authenticated connection
-instead of each paying for its own handshake: every `ssh` and `scp` it starts
-against a target carries `ControlMaster=auto`, a `ControlPath`, and
-`ControlPersist=60`. The first command authenticates and leaves a master
-connection behind; the rest open a channel on it. The master exits 60 seconds
-after its last channel closes, so one `ssh` process can outlive the daemon by
-that long.
+host, and every attached session keeps one more `ssh` process open for its
+relay. On unix, Mjolnir runs these as sessions on a small number of shared,
+already authenticated connections ("masters") instead of letting each command
+pay for its own handshake.
 
-The control sockets live in `$XDG_RUNTIME_DIR/mjolnir/` when that variable is
-set, and in `<data dir>/ssh/` otherwise. Each socket is named by `%C`, OpenSSH's
-hash of host, port, user, and local host, so a socket is shared only by
-invocations to the same destination. Mjolnir creates the directory with mode
+A stock `sshd` allows at most 10 sessions on one connection (`MaxSessions
+10`). Mjolnir therefore places at most **8 sessions on each master** and opens
+another master for the same host when all of its masters are full. Set
+`MJ_SSH_SESSIONS_PER_CONNECTION` in the daemon's environment to change the
+number; an unset or invalid value falls back to 8. The two spare sessions are
+for `mj doctor` and Tab completion, which can join a master from another
+process without being counted.
+
+Mjolnir opens each master explicitly with `ssh -f -N -o ControlMaster=yes
+-o BatchMode=yes -o ControlPersist=60` and confirms it with `ssh -O check`.
+Every other command then runs with `ControlMaster=no`, the master's
+`ControlPath`, and `ProxyCommand=false`. That combination can only use the
+master: if the master is gone, the command fails at once with exit status 255
+instead of quietly opening its own connection. Mjolnir then checks the master
+again, reopens it, and retries the command. If a master cannot be opened at
+all, the command fails with an error that names the host and quotes `ssh`'s
+own message. A master exits 60 seconds after its last session closes, so
+`ssh` processes can outlive the daemon by that long.
+
+The control sockets live in `$XDG_RUNTIME_DIR/mjolnir/<instance>/` when that
+variable is set (`default` for the default instance), and in
+`<data dir>/ssh/` otherwise. Each instance has its own directory, so two
+daemons never share a master. A socket is named `<hash>-<shard>`, where the
+hash covers the destination and your `extra_args`, and the shard number counts
+the masters for that host from 0. Mjolnir creates the directory with mode
 `0700`. If it cannot, or if the socket path would be too long for a unix socket
-address, Mjolnir silently falls back to unshared connections. Commands that
-share a master also share its fate: if the underlying connection drops, every
-channel on it fails at once, and the affected commands report that failure the
-same way they would report a lost connection of their own.
+address, every command opens its own connection instead. Commands that share
+a master also share its fate: if the underlying connection drops, every
+session on it fails at once.
 
 Two kinds of command only ever *reuse* a master and never create one: the
-target validation probes and remote Tab completion. They set a short
-`ConnectTimeout` and a one-miss keepalive so they fail fast instead of hanging
-the interface, and a master holding those settings would drop every later
-session on it — an upload, a container start, the worker bootstrap — after a
-stall of a couple of seconds. They carry `ControlMaster=no`, so they join a
-master when one is up and otherwise open their own direct connection.
+target validation probes (including the `mj doctor` connectivity probe) and
+remote Tab completion. They set a short `ConnectTimeout` and a one-miss
+keepalive so they fail fast instead of hanging the interface, and a master
+holding those settings would drop every later session on it after a stall of
+a couple of seconds. They carry `ControlMaster=no` and the path of the host's
+first master, so they join it when it is up and otherwise open their own
+direct connection.
 
-Mjolnir appends these options *after* the arguments you supply, and OpenSSH
-keeps the first value it sees for an option. So your own `ControlMaster`,
-`ControlPath`, or `ControlPersist` in the target's `extra_args` or in
-`~/.ssh/config` wins. To turn sharing off entirely, set
-`MJ_SSH_CONTROL_MASTER=0` (`off`, `false`, and `no` also work) in the daemon's
-environment. Sharing is unix-only; Windows OpenSSH does not implement it.
+If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
+`-S`, Mjolnir adds no sharing options at all for that target and leaves
+sharing to you. A `-J` jump host in `extra_args` is used when a master is
+opened. To turn sharing off entirely, set `MJ_SSH_CONTROL_MASTER=0` (`off`,
+`false`, and `no` also work) in the daemon's environment; every command then
+opens its own connection. Sharing is unix-only; Windows OpenSSH does not
+implement it.
 
 ## Limiting concurrent connections
 
@@ -67,10 +86,9 @@ first number, or raise `MaxStartups` on the host. A dropped connection exits
 recognizes those and retries the invocation rather than reporting a failure,
 because the remote command never ran.
 
-Connection sharing removes most of this pressure, because a shared connection
-authenticates once. The concurrency limit still matters: channels multiplexed
-over one master are capped by the server's `MaxSessions`, `10` by default, and
-a host that refuses sharing falls back to one connection per command.
+Connection sharing removes most of this pressure, because a master
+authenticates once for up to 8 sessions. The concurrency limit still applies
+to opening masters, and to every command when sharing is off.
 
 ## Prerequisites you set up by hand
 

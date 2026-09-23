@@ -119,7 +119,7 @@ pub fn process_executable_path(pid: u32) -> Option<PathBuf> {
     {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let process_id = sysinfo::Pid::from_u32(pid);
         let mut system = sysinfo::System::new();
@@ -133,7 +133,7 @@ pub fn process_executable_path(pid: u32) -> Option<PathBuf> {
             .and_then(|process| process.exe())
             .map(Path::to_path_buf)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = pid;
         None

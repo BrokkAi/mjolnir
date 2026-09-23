@@ -31,20 +31,21 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 41;
+const SCHEMA_VERSION: i64 = 45;
 
 mod session_move;
 pub use session_move::*;
 
+mod legacy_schema;
 mod schema;
 mod usage;
 pub use usage::*;
 mod events;
 pub use events::*;
 
-pub use schema::database_path;
 #[cfg(test)]
 use schema::forget_verified_schema;
+pub use schema::{check_read_compatibility, database_path};
 use schema::{open, open_reader};
 
 mod writer;
@@ -74,3 +75,21 @@ pub use profile_cache::*;
 
 #[cfg(test)]
 mod tests;
+
+mod quota_cache;
+pub(crate) use quota_cache::*;
+
+/// Whether a failure is SQLite reporting another writer, which a later trigger
+/// simply retries.
+pub(crate) fn is_busy_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}

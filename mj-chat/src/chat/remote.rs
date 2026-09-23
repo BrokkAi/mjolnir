@@ -67,6 +67,7 @@ pub(super) enum ChatRemoteOperation {
         command_id: String,
         intent: TurnControlIntent,
         cancel_agent: bool,
+        command: Option<RelayCommand>,
         shell_command_ids: Vec<String>,
     },
     RespondElicitation {
@@ -96,7 +97,6 @@ impl ChatRemoteOperation {
                 match intent {
                     TurnControlIntent::Cancel => "Interrupting turn…",
                     TurnControlIntent::Steer => "Steering turn…",
-                    TurnControlIntent::ApplyQueued => "Applying queued prompt…",
                 }
                 .into(),
             )),
@@ -828,6 +828,7 @@ async fn enqueue_chat_remote_operation(
             command_id,
             intent,
             cancel_agent,
+            command,
             shell_command_ids,
         } => {
             let session = session.clone();
@@ -837,7 +838,10 @@ async fn enqueue_chat_remote_operation(
                 let mut failures = Vec::new();
                 if cancel_agent
                     && let Err(error) = session
-                        .submit(command_id.clone(), RelayCommand::Cancel)
+                        .submit(
+                            command_id.clone(),
+                            command.unwrap_or(RelayCommand::CancelTurn),
+                        )
                         .await
                 {
                     failures.push(format!("agent: {error:#}"));
@@ -975,7 +979,9 @@ pub(super) fn restore_unsent_prompt(chat: &mut ChatState, text: String, images: 
 }
 
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
-    if let Some(key) = result.feedback_key() {
+    if let Some(key) = result.feedback_key()
+        && !matches!(result, ChatRemoteResult::Cancel { result: Ok(()), .. })
+    {
         chat.operation_feedback.remove(&key);
     }
     // Keep diagnostics in the process log as well as in recoverable rows.
@@ -1104,10 +1110,23 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             }
             chat.conversation_notice(format!("Plan command was not completed: {error}"));
         }
-        ChatRemoteResult::Cancel { intent, result } => match result {
-            Ok(()) => {}
-            Err(error) => chat.conversation_notice(intent.failure_notice(&error)),
-        },
+        ChatRemoteResult::Cancel { intent, result } => {
+            chat.turn_control_submitting = false;
+            if result.is_err() {
+                chat.turn_control_awaiting_state = None;
+            }
+            if chat.turn_control_awaiting_state.is_none()
+                && chat.cancelling_prompt_id.is_none()
+                && !chat.steering.as_ref().is_some_and(|s| s.holds_queue())
+            {
+                chat.operation_feedback.remove("turn-control");
+            }
+            if let Err(error) = result {
+                chat.turn_control_error = Some(intent.failure_notice(&error));
+                chat.turn_control_dialog_open = intent != TurnControlIntent::Cancel;
+                chat.conversation_notice(intent.failure_notice(&error));
+            }
+        }
         ChatRemoteResult::RespondElicitation {
             request,
             desired_plan_active,
@@ -1283,9 +1302,14 @@ pub(super) fn queue_chat_remote_operation(
                 chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
                 chat.restore_elicitation(request)
             }
-            ChatRemoteOperation::Sync
-            | ChatRemoteOperation::Cancel { .. }
-            | ChatRemoteOperation::RecordNotice { .. } => {}
+            ChatRemoteOperation::Cancel { intent, .. } => {
+                chat.turn_control_submitting = false;
+                chat.turn_control_awaiting_state = None;
+                chat.turn_control_error =
+                    Some(intent.failure_notice("session command queue is full"));
+                chat.turn_control_dialog_open = intent == TurnControlIntent::Steer;
+            }
+            ChatRemoteOperation::Sync | ChatRemoteOperation::RecordNotice { .. } => {}
         }
         chat.set_notice("The session command queue is full; the command was not sent");
     }

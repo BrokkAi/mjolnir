@@ -4,6 +4,8 @@ use super::*;
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
 pub(super) struct PhoneSessionViews<'a> {
+    pub(super) native_agents:
+        &'a std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
     pub(super) conversations:
         &'a std::collections::BTreeMap<String, crate::server::BrowserTranscript>,
     pub(super) queued_prompts:
@@ -203,7 +205,13 @@ pub(super) fn session_capabilities(
         interrupt_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| {
-                state.active_prompt.is_some() || state.capacity_retry.is_some()
+                state.active_prompt.is_some()
+                    || state.capacity_retry.is_some()
+                    || state
+                        .continuation
+                        .quota_recovery
+                        .as_ref()
+                        .is_some_and(|r| !r.submitted)
             }),
         cancel_operation: operation.is_some_and(|operation| operation.cancellable),
         // Stopping a session that is already stopping asks for something that
@@ -419,6 +427,7 @@ pub(super) fn viewer_snapshot(
     revision: u64,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
+        native_agents,
         conversations,
         reviews,
         queued_prompts,
@@ -543,6 +552,13 @@ pub(super) fn viewer_snapshot(
             session.transitioning = true;
         }
         let live = operational.get(&session.id);
+        session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
+        session.targeted_turn_control_supported =
+            live.is_some_and(|state| state.supports_targeted_turn_control());
+        session.steering = live.and_then(|s| s.steering.clone());
+        session.active_prompt_id =
+            live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));
+        session.cancelling_prompt_id = live.and_then(|s| s.cancelling_prompt_id.clone());
         // One answer for every session, whether or not the daemon can see its
         // worker. A worker the daemon has lost is reported as what was last
         // known about it, never as idle: a turn that outlives a daemon
@@ -609,6 +625,11 @@ pub(super) fn viewer_snapshot(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
+            session.quota_recovery = state
+                .continuation
+                .quota_recovery
+                .clone()
+                .filter(|r| !r.submitted);
             let activity = mj_client::usage_format::SessionActivity::of(state);
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
@@ -682,7 +703,8 @@ pub(super) fn viewer_activity_details(
             mj_client::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
             mj_client::usage_format::SessionActivityKind::Lifecycle
             | mj_client::usage_format::SessionActivityKind::Goal
-            | mj_client::usage_format::SessionActivityKind::Expecting => {
+            | mj_client::usage_format::SessionActivityKind::Expecting
+            | mj_client::usage_format::SessionActivityKind::CheckingContinuation => {
                 ViewerActivityKind::Lifecycle
             }
         },
@@ -738,4 +760,24 @@ pub(super) async fn load_materialized_activity(
     })
     .await
     .context("materialized activity startup task failed")?
+}
+
+/// Load retained native identities off the control loop, including stopped owners.
+pub(super) async fn load_native_agents(
+    owners: Vec<String>,
+) -> Result<std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>> {
+    tokio::task::spawn_blocking(move || {
+        owners
+            .into_iter()
+            .map(|owner| {
+                let agents = crate::database::load_native_agent_summaries(&owner)?
+                    .into_iter()
+                    .map(|summary| summary.agent)
+                    .collect();
+                Ok((owner, agents))
+            })
+            .collect()
+    })
+    .await
+    .context("load native subagent identities")?
 }

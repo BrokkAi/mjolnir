@@ -1074,7 +1074,11 @@ async fn supervised_checkpoint(
     exports: Arc<dyn ExportRuntime>,
     session_id: String,
 ) -> Result<mj_core::state::CheckpointMetadata> {
-    let checkpoint = tokio::spawn(async move { exports.checkpoint_now(session_id).await });
+    let upgrade_work = crate::upgrade::activity("API checkpoint")?;
+    let checkpoint = tokio::spawn(async move {
+        let _upgrade_work = upgrade_work;
+        exports.checkpoint_now(session_id).await
+    });
     tokio::spawn(async move {
         let result = match checkpoint.await {
             Ok(result) => result,
@@ -1560,6 +1564,7 @@ impl SubagentBackend for ApiBackend {
                     },
                 );
             let followup_id = session_id.clone();
+            let upgrade_work = crate::upgrade::activity("API startup followup")?;
             let work = tokio::spawn(async move {
                 tokio::select! {
                     result = apply_followup(sessions, states, exports, followup_id, followup) => result,
@@ -1570,6 +1575,7 @@ impl SubagentBackend for ApiBackend {
             // becomes a failure the caller's wait reports, rather than an
             // entry that stays Pending for as long as the daemon runs.
             let task = tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
                 let status = match work.await {
                     Ok(Ok(Some(turn_id))) => Some(StartStatus::Submitted { turn_id }),
                     // Configuration applied and nothing to submit: there is no
@@ -1652,13 +1658,19 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn diff(&self, session_id: String) -> BoxFuture<'_, std::result::Result<String, ExportError>> {
+    fn diff(
+        &self,
+        session_id: String,
+        options: crate::server::api::DiffOptions,
+    ) -> BoxFuture<'_, std::result::Result<String, ExportError>> {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
             let repository = agent_working_directory(&layout)?;
             let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
-            if let Some(worktree) = &layout.managed_worktree {
+            if let Some(base) = options.base {
+                arguments.push(format!("--base={base}"));
+            } else if let Some(worktree) = &layout.managed_worktree {
                 match &worktree.base_commit {
                     Some(base) => {
                         arguments.push("--base".to_owned());
@@ -1671,6 +1683,9 @@ impl SubagentBackend for ApiBackend {
                         arguments.push(worktree.branch.clone());
                     }
                 }
+            }
+            if options.json {
+                arguments.push("--json".to_owned());
             }
             let stdout = worker_command(layout, session_id, arguments, "session diff").await?;
             String::from_utf8(stdout).map_err(|error| {

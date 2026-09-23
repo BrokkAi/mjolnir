@@ -217,6 +217,7 @@ impl RuntimeState {
         &self,
         session_id: &str,
     ) -> Result<mj_core::state::CheckpointMetadata> {
+        let _upgrade_work = crate::upgrade::activity("requested checkpoint")?;
         if let Some(busy) = self.session_lifecycle_busy(session_id) {
             return Err(anyhow::Error::new(busy));
         }

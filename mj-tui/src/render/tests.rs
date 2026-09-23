@@ -2058,6 +2058,7 @@ fn background_work_reaches_both_session_row_forms() {
     let started_at_ms = i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
     let activity = mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -3946,7 +3947,16 @@ fn quota_reset_countdown_always_shows_hours() {
     );
     assert_eq!(
         quota_reset_countdown(now, (now + 2 * HOUR + 5 * MINUTE) as i64),
-        "2h"
+        "2h 5m"
+    );
+    assert_eq!(quota_reset_countdown(now, (now + 9 * HOUR) as i64), "9h");
+    assert_eq!(
+        quota_reset_countdown(now, (now + 9 * HOUR + 5 * MINUTE) as i64),
+        "9h 5m"
+    );
+    assert_eq!(
+        quota_reset_countdown(now, (now + 10 * HOUR + 5 * MINUTE) as i64),
+        "10h"
     );
     assert_eq!(
         quota_reset_countdown(now, (now + HOUR + 5 * MINUTE) as i64),

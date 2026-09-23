@@ -1,5 +1,36 @@
 use super::launch::*;
 use super::*;
+
+#[cfg(unix)]
+#[test]
+fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir(&worker_root).unwrap();
+    let installed = worker_root.join("hel");
+    let source = directory.path().join("new-worker");
+    std::fs::write(&installed, b"running-worker").unwrap();
+    std::fs::write(&source, b"replacement-worker").unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.to_string_lossy().into_owned(),
+    };
+    let executor = targets::ProcessExecutor;
+    assert!(
+        stage_worker_binary_for_upgrade(
+            &executor,
+            &locator,
+            session_id,
+            &directory.path().join("missing")
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
+    stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
+    install_staged_worker_binary(&executor, &locator, session_id).unwrap();
+    assert_eq!(std::fs::read(&installed).unwrap(), b"replacement-worker");
+}
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 use mj_core::targets::ProcessExecutor;
@@ -1367,7 +1398,7 @@ fn default_bridges_pin_command_capable_adapter_versions() {
     );
     assert_eq!(claude_command, "sh");
     assert_eq!(claude_arguments[0], "-c");
-    assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.79.0"));
+    assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.81.0"));
 }
 
 #[test]
@@ -3109,7 +3140,7 @@ fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
         installed_line: format!("{}  /root/hel\n", "0".repeat(64)),
         commands: RefCell::new(Vec::new()),
     };
-    let replaced = replace_remote_worker_binary_if_stale(
+    let replaced = replace_target_worker_binary_if_stale(
         &executor,
         &ssh_bare_locator("session-remote"),
         "session-remote",
@@ -3134,7 +3165,7 @@ fn a_remote_worker_already_current_is_restarted_without_recopying() {
         installed_line: format!("{current}  /root/hel\n"),
         commands: RefCell::new(Vec::new()),
     };
-    let replaced = replace_remote_worker_binary_if_stale(
+    let replaced = replace_target_worker_binary_if_stale(
         &executor,
         &ssh_bare_locator("session-remote"),
         "session-remote",
@@ -3157,7 +3188,7 @@ fn a_remote_recovery_plan_defers_binary_refresh_to_the_recovery_task() {
         .unwrap()
         .expect("a remote target now gets a binary refresh");
     match refresh {
-        WorkerBinaryRefresh::Remote(remote) => {
+        WorkerBinaryRefresh::Deferred(remote) => {
             assert_eq!(remote.session_id, "session-remote");
             assert_eq!(remote.locator, locator);
         }
@@ -3165,6 +3196,126 @@ fn a_remote_recovery_plan_defers_binary_refresh_to_the_recovery_task() {
             panic!("a remote target must defer, not prepare, its binary refresh")
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available() {
+    const CHILD: &str = "MJ_RECOVERY_BINARY_PAIR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "recovery_preserves_launch_config_until_a_matching_worker_source_is_available",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", directory.path().join("not-built-yet"))
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let root = directory.path().join(session_id);
+    std::fs::create_dir(&root).unwrap();
+    let binary = root.join("hel");
+    let launch = root.join("launch.json");
+    let restarted = root.join("restarted");
+    std::fs::write(&binary, b"old worker").unwrap();
+    std::fs::write(&launch, b"old launch schema").unwrap();
+    let next_launch = directory.path().join("next-launch.json");
+    std::fs::write(&next_launch, b"new launch schema").unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root.to_string_lossy().into_owned(),
+    };
+    let plan = WorkerRecoveryPlan {
+        source_target: mj_core::state::TargetLocator::LocalBare { worker_root: root },
+        target: None,
+        workspace: None,
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]),
+        binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
+        launch_refresh: Some(WorkerLaunchRefreshPlan {
+            expected_sha256: lower_hex(Sha256::digest(b"new launch schema")),
+            installed_digest: installed_file_digest_command(
+                &locator,
+                &launch.to_string_lossy(),
+                "identify test launch config",
+            ),
+            replace: CommandPlan {
+                description: "install new launch schema".into(),
+                commands: vec![CommandSpec::new(
+                    "cp",
+                    [
+                        next_launch.to_string_lossy().into_owned(),
+                        launch.to_string_lossy().into_owned(),
+                    ],
+                )],
+            },
+        }),
+        restart: CommandPlan {
+            description: "restart test worker".into(),
+            commands: vec![CommandSpec::new(
+                "touch",
+                [restarted.to_string_lossy().into_owned()],
+            )],
+        },
+    };
+    let error = crate::session_manager::recover_worker_controlled(
+        plan.clone(),
+        false,
+        None,
+        &ProcessExecutor,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("MJ_WORKER_BINARY is not a file"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old worker");
+    assert_eq!(std::fs::read(&launch).unwrap(), b"old launch schema");
+    assert!(!restarted.exists());
+
+    // The same recovery plan retries after the matching worker is installed;
+    // no controller restart or replanning is needed.
+    std::fs::write(std::env::var_os("MJ_WORKER_BINARY").unwrap(), b"new worker").unwrap();
+    crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor).unwrap();
+    assert_eq!(std::fs::read(binary).unwrap(), b"new worker");
+    assert_eq!(std::fs::read(launch).unwrap(), b"new launch schema");
+    assert!(restarted.exists());
+}
+
+#[test]
+fn local_container_recovery_selects_a_worker_for_the_container_architecture() {
+    struct ForeignContainer(String);
+    impl CommandExecutor for ForeignContainer {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "docker");
+            assert!(command.args.ends_with(&["uname".into(), "-m".into()]));
+            assert!(command.args.contains(&self.0));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"riscv64\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let session_id = "architecture-test";
+    let container_id = targets::resource_name(session_id).unwrap();
+    let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+    };
+    let refresh = worker_binary_refresh_plan(&locator, session_id)
+        .unwrap()
+        .unwrap();
+    let WorkerBinaryRefresh::Deferred(refresh) = refresh else {
+        panic!("container worker resolution must use its running target");
+    };
+    let error = refresh_target_worker_binary_if_stale(&ForeignContainer(container_id), &refresh)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("unsupported target architecture \"riscv64\""),
+        "{error:#}"
+    );
 }
 
 /// A daemon pins its worker sources once, at startup. A pin that no longer

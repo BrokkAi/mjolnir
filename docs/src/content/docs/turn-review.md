@@ -108,3 +108,5 @@ Suspending a session while a reviewer conversation is open preserves its result 
 If Mjolnir restarts during a review, it clears the interrupted in-flight marker, releases the prompt hold, and leaves the reviewed boundary unchanged. The next review therefore covers the same changes instead of silently skipping them.
 
 Review traffic is charged through the selected reviewer profile. A different profile ID may still share account-level limits with the primary profile, so check the Quota pane before selecting an extended review for a large turn. See [configuration](/configuration/#automatic-review-review) for schema details.
+
+When [automatic continuation](/sessions/#automatic-continuation) is enabled, automatic review waits for its check and any continuation turns to settle. The reviewer then considers the completed chain against your original request; generated continuation prompts do not become new user requirements.

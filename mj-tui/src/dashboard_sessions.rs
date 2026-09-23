@@ -102,6 +102,12 @@ pub(crate) fn attention_level(
     let Some(detail) = detail else {
         return AttentionLevel::Idle;
     };
+    if matches!(
+        detail.activity.state().last_known(),
+        mj_core::activity::ActivityState::CheckingContinuation
+    ) {
+        return AttentionLevel::Working;
+    }
     if detail.awaiting_input && detail.current_turn_started_at.is_none() {
         AttentionLevel::Waiting
     } else if matches!(
@@ -118,11 +124,26 @@ pub(crate) fn attention_level(
 }
 
 impl DashboardState {
+    pub(crate) fn command_session_id(&self) -> Option<&str> {
+        self.command_session_override.as_deref().or_else(|| {
+            if self.focus == Focus::Prompt {
+                self.current_session_id()
+            } else {
+                self.selected_session_id()
+            }
+        })
+    }
+
+    pub(crate) fn command_session(&self) -> Option<&SessionRecord> {
+        self.state.sessions.get(self.command_session_id()?)
+    }
+
     pub(crate) fn selected_session(&self) -> Option<&SessionRecord> {
-        let selected = self.selected_session_id.as_deref()?;
-        self.ordered_sessions()
-            .into_iter()
-            .find(|session| session.id == selected)
+        self.state.sessions.get(
+            self.command_session_override
+                .as_deref()
+                .or(self.selected_session_id())?,
+        )
     }
 
     /// The live sessions the Sessions pane is showing, as indices into
@@ -376,8 +397,7 @@ impl DashboardState {
         workspace_id: &str,
     ) -> bool {
         session.workspace_id == workspace_id
-            && !self.state.subagents.contains_key(&session.id)
-            && !self.native_agents.contains_key(&session.id)
+            && !self.state.is_subagent_session(&session.id)
             && (session.state.is_active()
                 || self.transition_kind(&session.id).is_some()
                 || (self.config.advanced.show_stopped_sessions
@@ -399,7 +419,29 @@ impl DashboardState {
                     .filter(|(_, pane)| pane.agent.parent_view_id() == parent_id)
                     .filter_map(|(id, _)| self.state.sessions.get(id)),
             );
-            children.sort_by_cached_key(|session| session.creation_order_key());
+            children.sort_by_cached_key(|session| {
+                let group = if let Some(pane) = self.native_agents.get(&session.id) {
+                    if pane.agent.state == mj_core::native_agent::NativeAgentState::Running {
+                        0
+                    } else if pane.agent.availability
+                        == mj_core::native_agent::NativeAgentAvailability::Available
+                    {
+                        1
+                    } else {
+                        2
+                    }
+                } else if self.session_details.get(&session.id).is_some_and(|d| {
+                    d.activity
+                        .is_working(d.current_turn_started_at, d.awaiting_input)
+                }) {
+                    0
+                } else if session.state == SessionState::Running {
+                    1
+                } else {
+                    2
+                };
+                (group, session.creation_order_key())
+            });
             return children;
         }
         let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {
@@ -712,6 +754,7 @@ impl DashboardState {
                 });
             view.selected_session_id = Some(session_id.to_owned());
             view.focus = Focus::Prompt;
+            self.navigation_session = Some(session_id.to_owned());
             return DashboardAction::SelectWorkspace {
                 workspace_id: workspace_id.to_owned(),
             };
@@ -899,7 +942,7 @@ impl DashboardState {
 
     /// The selected session, if its target template creates a container.
     pub(crate) fn selected_container_session(&self) -> Option<&SessionRecord> {
-        let session = self.selected_session()?;
+        let session = self.command_session()?;
         matches!(
             self.config.targets.get(&session.target_template_id)?,
             HelTargetTemplate::LocalPodman { .. }

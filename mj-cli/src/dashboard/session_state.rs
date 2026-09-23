@@ -115,43 +115,60 @@ impl DashboardContext {
     /// rather than another attempt on every render or background completion.
     pub(crate) fn follow_selected_session(&mut self) {
         // Until the startup pick has run, the highlighted row is only where
-        // the clamp left it, not a choice anyone made. Following it would open
-        // that conversation in the focused pane and, when a restored
-        // arrangement shows it somewhere else, move the keyboard out of the
-        // pane the arrangement named. Any user input cancels the pick, so this
-        // only holds back the automatic follow.
+        // the clamp left it, not a choice anyone made. Restore the saved
+        // arrangement before processing deliberate browsing requests.
+        // Any user input cancels the startup pick.
         if self.startup.pick_pending() {
             return;
         }
-        let Some(selected) = self.dashboard.selected_session_id().map(str::to_owned) else {
-            return;
-        };
-        if self.dashboard.transition_kind(&selected).is_some()
-            || self.dashboard.transition_failure_kind(&selected).is_some()
-            || self.dashboard.session_failed(&selected)
-        {
-            self.defer_chat_open();
-            return;
+        if let Some(selected) = self.dashboard.take_browse_request() {
+            let target = self
+                .dashboard
+                .pane_for_session(&selected)
+                .unwrap_or(self.dashboard.browse_pane());
+            self.dashboard.reveal_pane(target);
+            if target == self.dashboard.browse_pane() {
+                self.open_chat_session_into(target, &selected);
+            }
         }
-        let pane = self.dashboard.focused_pane();
-        if self.attachments.entry(pane).or_default().select(&selected) {
-            self.open_chat_session(&selected);
+        // A transition finishing may make an assigned conversation attachable.
+        // Selection changes from refresh never assign a different session.
+        for (pane, session) in self.dashboard.pane_sessions() {
+            if self.dashboard.transition_kind(&session).is_none()
+                && self.dashboard.transition_failure_kind(&session).is_none()
+                && !self.dashboard.session_failed(&session)
+                && self.attachments.entry(pane).or_default().select(&session)
+            {
+                self.open_chat_session_into(pane, &session);
+            }
         }
+        let stale: Vec<_> = self
+            .opening_chat_sessions
+            .iter()
+            .filter(|(pane, session)| self.dashboard.pane_session(**pane) != Some(session.as_str()))
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in stale {
+            self.cancel_chat_open_in(pane);
+        }
+        self.retire_chats_outside_the_layout();
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays
     /// observed, so it is not retried on every background wakeup.
     pub(crate) fn cancel_chat_open(&mut self) {
-        let pane = self.dashboard.focused_pane();
+        self.cancel_chat_open_in(self.dashboard.focused_pane());
+    }
+
+    pub(crate) fn cancel_chat_open_in(&mut self, pane: PaneId) {
         self.attachments.entry(pane).or_default().cancel();
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
     }
 
-    /// Gives up the focused pane's attach in a way that allows one fresh
+    /// Gives up this pane's attach in a way that allows one fresh
     /// attempt when whatever owns the session has finished with it.
-    pub(crate) fn defer_chat_open(&mut self) {
-        let pane = self.dashboard.focused_pane();
+    pub(crate) fn defer_chat_open_in(&mut self, pane: PaneId) {
         self.attachments.entry(pane).or_default().defer();
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
@@ -182,7 +199,6 @@ impl DashboardContext {
                 // session cannot land in the old one.
                 !dashboard.launch_standby_capturing()
                     && chat_is_visible(opening, chat.session_id())
-                    && dashboard.selected_session_id() == Some(chat.session_id())
                     && dashboard.transition_kind(chat.session_id()).is_none()
                     && dashboard
                         .transition_failure_kind(chat.session_id())
@@ -368,13 +384,12 @@ impl DashboardContext {
             let focused = self.dashboard.focused_pane();
             self.dashboard.focus_prompt();
             for (pane, session_id) in restored {
-                self.dashboard.focus_pane(pane);
                 if self.dashboard.session_failed(&session_id) {
                     // The band says the session failed; attaching would
                     // wait on a worker that is gone.
                     continue;
                 }
-                self.open_chat_session(&session_id);
+                self.open_chat_session_into(pane, &session_id);
             }
             self.dashboard.focus_pane(focused);
             if let Some(session_id) = self.dashboard.pane_session(focused).map(str::to_owned) {

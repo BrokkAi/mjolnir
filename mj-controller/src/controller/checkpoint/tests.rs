@@ -266,6 +266,11 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            continuation: Default::default(),
+            relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+            native_agents: Vec::new(),
+            steering: None,
+            cancelling_prompt_id: None,
             clear_context: false,
             clear_context_started_at_ms: None,
             native_agent_count: 0,
@@ -999,6 +1004,7 @@ fn latch_relay_child_serves_stdio() {
         mj_worker::relay::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
     }
     .expect("open the test relay journal");
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
     if relay.operational_state().native_session_id.is_none() {
         relay
             .record_observation(mj_core::relay::RelayObservation::SessionOpened {
@@ -1269,6 +1275,159 @@ async fn latch_a_live_checkpoint(
     );
     let cursor = barrier.operational.checkpoint_ready.clone().unwrap();
     (channels, handle, relay, barrier_command_id, cursor)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connection() {
+    if std::env::var_os(LATCH_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connection",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .env(LATCH_TEST_CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let starts = root.path().join("starts");
+    crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            root.path(),
+            Some(&starts),
+            ReleaseSupport::Supported,
+            true,
+        )])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(
+        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    handle
+        .submit(
+            "steering-input".into(),
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("change direction")],
+            },
+        )
+        .await
+        .unwrap();
+    handle
+        .submit(
+            "steer-running".into(),
+            RelayCommand::Steer {
+                active_prompt_id: "seed-running-prompt".into(),
+                queued_prompt_id: "steering-input".into(),
+            },
+        )
+        .await
+        .unwrap();
+    handle.sync_now().await.unwrap();
+    let snapshot = handle.view().snapshot.unwrap();
+    assert!(snapshot.operational.checkpoint_barrier.is_none());
+    assert_eq!(
+        snapshot.operational.steering.as_ref().unwrap().command_id,
+        "steer-running"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&starts).unwrap().lines().count(),
+        1,
+        "busy deferral must return without detaching or restarting the connection"
+    );
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_upgrade_reservation_releases_after_abandonment() {
+    if std::env::var_os(LATCH_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::worker_upgrade_reservation_releases_after_abandonment",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .env(LATCH_TEST_CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            root.path(),
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
+        .await
+        .unwrap()
+        .expect("idle worker");
+    assert!(lease.verify_for_upgrade().await.unwrap());
+    drop(lease);
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
+        .await
+        .unwrap()
+        .expect("abandoned barrier recovered");
+    assert!(lease.verify_for_upgrade().await.unwrap());
+    let first = handle
+        .enqueue_submit(
+            "first-after-upgrade".into(),
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("first queued turn")],
+            },
+        )
+        .await
+        .unwrap();
+    let second = handle
+        .enqueue_submit(
+            "second-after-upgrade".into(),
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("second queued turn")],
+            },
+        )
+        .await
+        .unwrap();
+    lease.release().await.unwrap();
+    let first_ordinal = first.wait().await.unwrap();
+    let second_ordinal = second.wait().await.unwrap();
+    assert!(
+        first_ordinal < second_ordinal,
+        "queued prompts retain their identity and order"
+    );
+    channels.shutdown.shutdown().await.unwrap();
 }
 
 /// A close checkpoint cancels an active prompt and waits for the prompt's

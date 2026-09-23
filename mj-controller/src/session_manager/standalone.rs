@@ -56,6 +56,10 @@ impl StandaloneSession {
         self.client.protocol_version()
     }
 
+    pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
+        self.client.reserve_idle(command_id).await
+    }
+
     pub(super) async fn detach(self) -> Result<()> {
         self.client.detach().await
     }

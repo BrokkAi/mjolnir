@@ -115,20 +115,32 @@ pub(super) fn edited_directory(path: &Path) -> PathBuf {
     }
 }
 
-pub(super) fn git_root_for_path(path: &Path) -> Result<Option<PathBuf>> {
+/// Finds the worktree containing a path, or its nearest existing ancestor.
+pub fn git_root_for_path(path: &Path) -> Result<Option<PathBuf>> {
     let mut probe = edited_directory(path);
     while !probe.is_dir() {
         if !probe.pop() {
             return Ok(None);
         }
     }
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&probe)
-        .output()
-        .with_context(|| format!("start git in {}", probe.display()))?;
+    let output = mj_core::subprocess::run_with_input(
+        Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .env("LC_ALL", "C")
+            .current_dir(&probe),
+        &[],
+    )
+    .with_context(|| format!("start git in {}", probe.display()))?;
     if !output.status.success() {
-        return Ok(None);
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.contains("not a git repository") {
+            return Ok(None);
+        }
+        bail!(
+            "inspect Git repository in {}: {}",
+            probe.display(),
+            error.trim()
+        );
     }
     let root = String::from_utf8(output.stdout).context("decode Git repository root")?;
     let root = PathBuf::from(root.trim());

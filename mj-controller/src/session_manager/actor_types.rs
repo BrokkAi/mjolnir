@@ -42,6 +42,7 @@ pub(super) enum ActorCommand {
     /// that must decide whether to restart the worker needs the typed cause,
     /// which formatting the error to a string would destroy.
     Lease {
+        idle_harness: Option<mj_core::config::HarnessKind>,
         reply: oneshot::Sender<Result<(u64, StandaloneSession)>>,
     },
 }
@@ -115,7 +116,7 @@ impl ActorCommand {
                     );
                 }
             }
-            Self::Lease { reply } => {
+            Self::Lease { reply, .. } => {
                 if reply
                     .send(Err(anyhow::anyhow!(message.to_owned())))
                     .is_err()

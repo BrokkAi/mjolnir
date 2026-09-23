@@ -48,7 +48,12 @@ impl DashboardState {
 
     /// Whether a form owns this pointer event, ahead of selectable body text.
     pub fn component_handles_mouse(&self, mouse: MouseEvent) -> bool {
-        if self.dialog_confirmation_open() || matches!(self.mode, Mode::Palette(_)) {
+        if self.pane_menu.is_some()
+            || mouse.kind
+                == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right)
+            || self.dialog_confirmation_open()
+            || matches!(self.mode, Mode::Palette(_))
+        {
             return true;
         }
         if matches!(self.mode, Mode::Dashboard) {

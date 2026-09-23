@@ -319,7 +319,7 @@ impl BuildCacheConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 12;
+pub const CONFIG_VERSION: u32 = 13;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -353,6 +353,7 @@ pub struct Config {
     pub theme: UiTheme,
     pub phone: PhoneConfig,
     pub review: ReviewConfig,
+    pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub build_cache: BuildCacheConfig,
@@ -387,6 +388,11 @@ struct StoredConfig {
     phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     review: ReviewConfig,
+    #[serde(
+        default = "crate::continuation::ContinuationConfig::enabled",
+        skip_serializing_if = "crate::continuation::ContinuationConfig::is_default"
+    )]
+    continuation: crate::continuation::ContinuationConfig,
     #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
     sessionwiki: SessionWikiConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
@@ -500,6 +506,7 @@ impl TryFrom<StoredConfig> for Config {
             theme,
             phone,
             review,
+            continuation,
             sessionwiki,
             subagents,
             build_cache,
@@ -532,10 +539,10 @@ impl TryFrom<StoredConfig> for Config {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 11 acquire this build's defaults in memory
+            // Versions 1 through 12 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
-            // machines from runtimes.
-            version: if matches!(version, 1..=11) {
+            // machines from runtimes; version 13 adds automatic continuation.
+            version: if matches!(version, 1..=12) {
                 CONFIG_VERSION
             } else {
                 version
@@ -544,6 +551,7 @@ impl TryFrom<StoredConfig> for Config {
             theme,
             phone,
             review,
+            continuation,
             sessionwiki,
             subagents,
             build_cache,
@@ -580,6 +588,7 @@ impl From<Config> for StoredConfig {
             theme: config.theme,
             phone: config.phone,
             review: config.review,
+            continuation: config.continuation,
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
             build_cache: config.build_cache,
@@ -605,6 +614,7 @@ impl Default for Config {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             build_cache: BuildCacheConfig::default(),
@@ -790,7 +800,8 @@ impl Config {
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
         // SessionWiki section; version 11 adds the key bindings; version 12
-        // splits machines from runtimes. Earlier configs acquire defaults in
+        // splits machines from runtimes; version 13 adds automatic continuation.
+        // Earlier configs acquire defaults in
         // memory, and their fused target kinds become machines plus runtimes,
         // on the next ordinary save. The version bump itself happens in
         // `TryFrom<StoredConfig>`, which is also what decides whether an old

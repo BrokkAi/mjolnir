@@ -45,6 +45,7 @@ pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
 ) -> Result<()> {
+    let startup_work = crate::upgrade::activity("daemon startup recovery")?;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
     tokio::task::spawn_blocking(crate::controller::pin_worker_binary_sources)
@@ -83,7 +84,7 @@ pub(super) async fn run_daemon_runtime(
     let manager = spawn_session_manager()?;
     let manager_targets = manager.targets;
     manager_targets.send_replace(dashboard_worker_targets(&controller));
-    let mut manager_updates = manager.updates;
+    let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(manager_control.clone());
@@ -115,6 +116,9 @@ pub(super) async fn run_daemon_runtime(
     let move_owned = state.recover_moves(move_operations)?;
     state.resume_retained_cleanups();
     let cancellation = crate::termination::Coordinator::install().token();
+    let (mut manager_updates, continuation_task) =
+        continuation::spawn(state.clone(), manager_updates, cancellation.clone());
+
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -168,7 +172,9 @@ pub(super) async fn run_daemon_runtime(
         let recovery_state = state.clone();
         let recovery_shutdown = cancellation.clone();
         let updates = interrupted_close_tx.clone();
+        let upgrade_work = startup_work.clone();
         let interrupted_close_task = tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
             let result = tokio::select! {
                 result = recovery_state.suspend_session(session_id.clone()) => result,
                 () = recovery_shutdown.cancelled() => return,
@@ -200,7 +206,9 @@ pub(super) async fn run_daemon_runtime(
         );
         (!unowned.is_empty()).then(|| {
             let state = state.clone();
+            let upgrade_work = startup_work.clone();
             tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
                 let reconciled = tokio::task::spawn_blocking(move || {
                     let mut controller = Controller::load()?;
                     let mut reconciled = 0usize;
@@ -243,7 +251,9 @@ pub(super) async fn run_daemon_runtime(
         let tombstones = tombstone_session_ids(&controller);
         (!tombstones.is_empty()).then(|| {
             let state = state.clone();
+            let upgrade_work = startup_work.clone();
             tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
                 for session_id in tombstones {
                     state.discard_lost_session(session_id).await;
                 }
@@ -286,6 +296,7 @@ pub(super) async fn run_daemon_runtime(
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
+        drop(startup_work);
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
@@ -401,7 +412,7 @@ pub(super) async fn run_daemon_runtime(
                     // Every session's view passes here whether or not anything is
                     // attached, which is exactly what an automatic review needs to
                     // see: the turn that just finished.
-                    state.review_host().observe(&update.session_id, &update.view);
+                    // The continuation completion gate has already notified review.
                     state.publish_session(update.session_id, update.view).await?;
                 }
             }
@@ -415,6 +426,11 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    match continuation_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),
+        Err(error) => tracing::error!(%error, "continuation service task failed"),
+    }
     drop(interrupted_close_tx);
     record_daemon_cleanup(
         &mut outcome,

@@ -70,6 +70,9 @@ impl ChatState {
             return ChatAction::None;
         }
 
+        if self.turn_control_dialog_open {
+            return self.handle_turn_control_dialog(Event::Key(key));
+        }
         if self.task_dialog_open {
             let result =
                 self.task_dialog_form
@@ -175,11 +178,32 @@ impl ChatState {
         }
 
         if code == KeyCode::Esc {
+            if key.kind == KeyEventKind::Repeat
+                || (self.turn_control_submitting || self.turn_control_awaiting_state.is_some())
+                || self.cancelling_prompt_id.is_some()
+            {
+                return ChatAction::None;
+            }
+            if self.steering.as_ref().is_some_and(|s| s.holds_queue()) {
+                if self
+                    .steering
+                    .as_ref()
+                    .is_some_and(|s| s.status == mj_core::relay::SteeringStatus::Unconfirmed)
+                {
+                    self.turn_control_dialog_open = true;
+                }
+                return ChatAction::None;
+            }
             // Only a prompt of ours can be cancelled. A turn the harness
             // started on its own also reads as Running, and the relay refuses
             // to cancel it, so Esc must not claim to.
             return if self.prompt_in_flight
-                || self.session_activity.capacity_retry.is_some()
+                || matches!(
+                    self.session_activity.state().last_known(),
+                    mj_core::activity::ActivityState::CheckingContinuation
+                )
+                || (self.session_activity.capacity_retry.is_some()
+                    || self.session_activity.quota_recovery.is_some())
                 || !self.active_user_shells.is_empty()
             {
                 ChatAction::Cancel

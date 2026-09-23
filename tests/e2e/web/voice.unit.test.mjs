@@ -129,6 +129,7 @@ test('the AudioWorklet downmixes and resamples each rate continuously', () => {
 
 test('a transcription request timeout becomes a visible timeout instead of a stuck state', async () => {
   const source = sourceBetween(viewerSource, 'async function transcribeVoice(', '\nfunction appendVoiceText(');
+  const fetchSource = sourceBetween(viewerSource, 'async function upgradeAwareFetch(', '\nasync function request(');
   let timeoutCallback;
   const context = vm.createContext({
     AbortController,
@@ -149,7 +150,7 @@ test('a transcription request timeout becomes a visible timeout instead of a stu
       });
     },
   });
-  vm.runInContext(`${source}\nglobalThis.run = transcribeVoice;`, context);
+  vm.runInContext(`${fetchSource}\n${source}\nglobalThis.run = transcribeVoice;`, context);
   const operation = { sessionId: 'session', controller: new AbortController() };
   context.operation = operation;
   const pending = vm.runInContext('run(operation, new ArrayBuffer(44))', context, { filename: 'voice-timeout.js' });

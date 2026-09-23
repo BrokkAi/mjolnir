@@ -161,7 +161,7 @@ pub(super) async fn run_remote_session_actor(
                 ));
                 continue;
             }
-            ActorCommand::Lease { reply } => {
+            ActorCommand::Lease { reply, .. } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "relay connection leases are available only inside the controller daemon"
                 )));

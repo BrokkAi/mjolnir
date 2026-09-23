@@ -216,6 +216,9 @@ mod tests {
 
     fn view(child: &str, generation: u64, ordinal: u64) -> NativeAgentView {
         let agent = NativeAgent {
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
             owner_session_id: "owner".into(),
             session_id: child.into(),
             parent_session_id: None,

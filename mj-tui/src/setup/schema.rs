@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -19,6 +19,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
+        "continuation" => json!({"enabled":true}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
         }
@@ -153,6 +154,7 @@ pub(super) fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
+        "continuation" => "Automatically continue unfinished requests and quota-blocked sessions",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
@@ -326,6 +328,13 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
                     Some(profile) => format!("{tier} · {profile}"),
                     None => format!("{tier} · no reviewer"),
                 }
+            }
+        }
+        "continuation" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else {
+                "On · 3 continuations plus quota recovery".to_owned()
             }
         }
         "subagents" => {
@@ -546,6 +555,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "review" => {
             "Shared by turn review and plan second opinion. Auto prefers another provider with quota; a named profile allows main model and effort overrides."
+        }
+        "continuation" => {
+            "Automatically continue unfinished requests up to three times between user messages, and resume quota-blocked sessions one minute after the exhausted quota windows reset. Quota retries do not count toward the three continuations."
         }
         "sessionwiki" => {
             "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."
