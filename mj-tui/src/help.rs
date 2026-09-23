@@ -517,7 +517,7 @@ fn entry_lines(entry: &HelpEntry, width: usize, related: bool) -> Vec<Line<'stat
 
 /// Availability reasons are written as fragments for other surfaces; in
 /// help each one stands as its own capitalised sentence.
-fn sentence(reason: &str) -> String {
+pub(crate) fn sentence(reason: &str) -> String {
     let mut chars = reason.chars();
     let mut text: String = chars
         .next()

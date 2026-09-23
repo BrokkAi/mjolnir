@@ -730,8 +730,12 @@ pub(crate) fn render_palette(
                 let entry = &palette.entries[*index];
                 let spec = spec(entry.id);
                 let keys = dashboard.key_labels(entry.id).join(" / ");
+                // The same form help uses: its own sentence after a dash,
+                // dimmed, not a lowercase fragment in brackets.
                 let reason = match entry.availability {
-                    Availability::Blocked(reason) => format!("  ({reason})"),
+                    Availability::Blocked(reason) => {
+                        format!(" — {}", crate::help::sentence(reason))
+                    }
                     Availability::Ready | Availability::Hidden => String::new(),
                 };
                 let selected = *index == palette.selected;
@@ -758,6 +762,12 @@ pub(crate) fn render_palette(
                     Style::default().fg(theme::palette().text)
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
+                let split = if text.starts_with(label) {
+                    label.len()
+                } else {
+                    text.len()
+                };
+                let (label_text, reason_text) = text.split_at(split);
                 Line::from(vec![
                     Span::styled(
                         if selected {
@@ -767,7 +777,8 @@ pub(crate) fn render_palette(
                         },
                         theme::title(true),
                     ),
-                    Span::styled(text, style),
+                    Span::styled(label_text.to_owned(), style),
+                    Span::styled(reason_text.to_owned(), style.add_modifier(Modifier::DIM)),
                     Span::raw(" ".repeat(padding)),
                     Span::styled(
                         keys,
@@ -913,6 +924,23 @@ mod tests {
         assert_ne!(paged, selected, "ctrl+d must page an empty palette");
         dashboard.handle_key(ctrl('u'));
         assert_eq!(query(&dashboard), ("".to_owned(), selected));
+    }
+
+    /// A-3, palette half: a blocked row gives its reason as a dimmed,
+    /// capitalised sentence after " — ", as help does, not as a lowercase
+    /// fragment in brackets.
+    #[test]
+    fn palette_rows_set_unavailability_reasons_apart_like_help() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_palette();
+        type_query(&mut dashboard, "unpin");
+        let joined = drawn(&mut dashboard, 120, 30).join("\n");
+        assert!(
+            joined.contains("Unpin session — This session is not pinned."),
+            "{joined}"
+        );
+        assert!(!joined.contains("(this session"), "{joined}");
     }
 
     #[test]
@@ -1393,7 +1421,7 @@ mod tests {
         type_query(&mut dashboard, "rename");
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(
-            lines.contains("a session transition is in progress"),
+            lines.contains("Rename session — A session transition is in progress."),
             "{lines}"
         );
 
