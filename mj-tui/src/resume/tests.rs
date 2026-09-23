@@ -846,6 +846,31 @@ fn an_empty_filtered_live_list_names_the_filter() {
     assert!(!rendered.contains("No running sessions"), "{rendered}");
 }
 
+/// C-13: the archived briefing's UTC date is shown in local time, like every
+/// other time on screen.
+#[test]
+fn the_briefing_date_is_shown_in_local_time() {
+    let central = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+    assert_eq!(
+        localize_brief_date(
+            "- Tool: mjolnir | Project: /tmp/project | Date: 2026-09-23 18:46",
+            &central
+        ),
+        "- Tool: mjolnir | Project: /tmp/project | Date: 2026-09-23 13:46"
+    );
+    let with_source = "- Tool: codex | Project: p | Date: 2026-09-24 02:00\n";
+    assert_eq!(
+        localize_brief_date(with_source.trim_end(), &central),
+        "- Tool: codex | Project: p | Date: 2026-09-23 21:00"
+    );
+    for untouched in [
+        "- Tool: codex | Project: p | Date: -",
+        "Date: 2026-09-23 18:46",
+    ] {
+        assert_eq!(localize_brief_date(untouched, &central), untouched);
+    }
+}
+
 /// C-6: Enter in the search box does what Enter on the list does. On the Live
 /// tab that jumps to the matched session and closes the dialog.
 #[test]

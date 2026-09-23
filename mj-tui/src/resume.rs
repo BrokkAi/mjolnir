@@ -455,7 +455,7 @@ impl ResumeDialog {
                 brief
                     .lines()
                     .skip(1)
-                    .map(|line| Line::raw(line.to_owned()))
+                    .map(|line| Line::raw(localize_brief_date(line, &chrono::Local)))
                     .collect(),
                 Vec::new(),
             ));
@@ -480,6 +480,31 @@ impl ResumeDialog {
             })
             .collect()
     }
+}
+
+/// The briefing's metadata line with its date moved to `zone`. SessionWiki
+/// writes `- Tool: … | Date: YYYY-MM-DD HH:MM` in UTC, while every other time
+/// on screen is local. Any other line comes back unchanged.
+fn localize_brief_date<Tz: chrono::TimeZone>(line: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    const MARKER: &str = " | Date: ";
+    const FORMAT: &str = "%Y-%m-%d %H:%M";
+    if !line.starts_with("- Tool: ") {
+        return line.to_owned();
+    }
+    let Some(start) = line.rfind(MARKER).map(|at| at + MARKER.len()) else {
+        return line.to_owned();
+    };
+    let Some(stamp) = line.get(start..start + 16) else {
+        return line.to_owned();
+    };
+    let Ok(utc) = chrono::NaiveDateTime::parse_from_str(stamp, FORMAT) else {
+        return line.to_owned();
+    };
+    let local = utc.and_utc().with_timezone(zone).format(FORMAT);
+    format!("{}{local}{}", &line[..start], &line[start + 16..])
 }
 
 /// The row the dialog points at, clamped to the list it actually has. A state
