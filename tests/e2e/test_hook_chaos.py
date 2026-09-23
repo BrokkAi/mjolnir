@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+import tomllib
 
 from reliability_lab import Lab, ScenarioFailure, TIMEOUT
 
@@ -136,7 +137,6 @@ def start_daemon_lifecycle_session(lab: Lab, title: str) -> str:
                 "project_directory": str(lab.project),
                 "target_template_id": "localhost",
                 "additional_mounts": [],
-                "allow_dirty_local": False,
                 "resource_allocation": None,
                 "title": title,
                 "session_title_override": title,
@@ -224,8 +224,20 @@ def run_hook(lab: Lab, hook: str) -> None:
             raise ScenarioFailure("rename request did not unblock after daemon crash")
         snapshot = lab.snapshot()
         target_ids = {item["id"] for item in snapshot.get("targets", [])}
-        if "local-renamed" not in target_ids or "localhost" in target_ids:
-            raise ScenarioFailure(f"config rename did not recover: {sorted(target_ids)}")
+        # `localhost` is a standard local target the daemon always offers, so
+        # the snapshot lists it again once the configured entry is renamed
+        # away. The config file is what says the rename itself finished.
+        with (lab.config / "config.toml").open("rb") as config_file:
+            configured = set(tomllib.load(config_file).get("targets", {}))
+        if (
+            "local-renamed" not in target_ids
+            or "local-renamed" not in configured
+            or "localhost" in configured
+        ):
+            raise ScenarioFailure(
+                f"config rename did not recover: served={sorted(target_ids)} "
+                f"configured={sorted(configured)}"
+            )
         lab.record_action("restart-validated", hook=hook)
         return
 
@@ -252,7 +264,7 @@ def run_hook(lab: Lab, hook: str) -> None:
                 (item for item in snapshot.get("sessions", []) if item.get("title") == title),
                 None,
             )
-            if session is None or session.get("state") in {"running", "error", "stopped"}:
+            if session is None or session.get("state") in {"running", "error", "suspended"}:
                 break
             time.sleep(0.1)
         else:
@@ -279,7 +291,7 @@ def run_hook(lab: Lab, hook: str) -> None:
         if status != 202:
             raise ScenarioFailure(f"prompt action returned {status}")
         crash_and_restart_daemon(lab, hook, port, 1)
-        wait_session(lab, title, {"running", "stopped"})
+        wait_session(lab, title, {"running", "suspended"})
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
             status, transcript = lab.request("GET", f"/api/conversations/{session_id}")
@@ -303,7 +315,7 @@ def run_hook(lab: Lab, hook: str) -> None:
 def finish(lab: Lab) -> None:
     snapshot = lab.snapshot()
     for session in snapshot.get("sessions", []):
-        if session.get("state") == "stopped":
+        if session.get("state") == "suspended":
             continue
         session_id = str(session["id"])
         status, _ = lab.request(
@@ -313,7 +325,7 @@ def finish(lab: Lab) -> None:
             raise ScenarioFailure(f"close action for {session_id} returned {status}")
         lab.wait_snapshot(
             lambda value, selected=session_id: any(
-                item.get("id") == selected and item.get("state") == "stopped"
+                item.get("id") == selected and item.get("state") == "suspended"
                 for item in value.get("sessions", [])
             ),
             f"stopped session {session_id}",

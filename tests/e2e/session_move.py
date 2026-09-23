@@ -144,7 +144,7 @@ def run(lab):
     unchanged = json.loads(lab.command("move", "--session", session_id, "--profile", "destination", "--yes", "--json").stdout)
     assert unchanged["outcome"] == "unchanged", unchanged
     assert lab.request("POST", "/api/actions", {"action": "suspend", "session_id": session_id})[0] == 202
-    lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("state") == "stopped", "final cleanup")
+    lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("state") == "suspended", "final cleanup")
     client.quit()
     lab.stop_daemon()
     lab.integrity()
