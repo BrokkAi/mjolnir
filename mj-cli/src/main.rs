@@ -1458,14 +1458,20 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     if mj_controller::doctor::all_ready(&checks) {
         Ok(())
     } else {
-        Err(doctor_failure())
+        Err(doctor_failure(args.json))
     }
 }
 
-fn doctor_failure() -> anyhow::Error {
-    anyhow::anyhow!(
-        "Mjolnir has fixable prerequisites; run `mj doctor --json` and follow its remediations."
-    )
+fn doctor_failure(json: bool) -> anyhow::Error {
+    if json {
+        anyhow::anyhow!(
+            "Mjolnir has fixable prerequisites; follow the `remediation` of each `fixable` check."
+        )
+    } else {
+        anyhow::anyhow!(
+            "Mjolnir has fixable prerequisites; follow the remediation lines under each `fixable` check above."
+        )
+    }
 }
 
 /// The prefix every message uses when it names a session, so notices stay
@@ -1792,10 +1798,21 @@ mod tests {
 
     #[test]
     fn doctor_failure_uses_mjolnir_product_wording() {
-        let message = doctor_failure().to_string();
-        assert!(message.contains("Mjolnir"));
-        assert!(!message.contains("Hel"));
-        assert!(message.contains("mj doctor --json"));
+        for json in [false, true] {
+            let message = doctor_failure(json).to_string();
+            assert!(message.contains("Mjolnir"));
+            assert!(!message.contains("Hel"));
+        }
+    }
+
+    /// The human report already prints every fix, so its closing line must
+    /// point at them rather than send the user to `--json` for the same text.
+    #[test]
+    fn human_doctor_failure_points_at_the_printed_fixes() {
+        let human = doctor_failure(false).to_string();
+        assert!(!human.contains("--json"), "{human}");
+        assert!(human.contains("remediation"), "{human}");
+        assert!(doctor_failure(true).to_string().contains("remediation"));
     }
 
     #[test]
