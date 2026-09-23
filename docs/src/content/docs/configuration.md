@@ -11,7 +11,7 @@ Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
 palette (**prefix+:**) also provides **Manage agent profiles**, **Manage
 machines**, and **Manage runtimes**. No setup command or file editing is
-required. **Detect machine** on the **Agent Profiles** page can import existing
+required. **Detect profiles** on the **Agent Profiles** page can import existing
 agent accounts for review.
 
 Standard local targets are supplied automatically: localhost, Podman, Docker,
@@ -30,7 +30,7 @@ If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
 and press Enter for repair details, its retained transcript, or Settings.
 The web session menu also provides repair guidance. Restore the named entry in
-Settings and retry. Detect machine can rediscover installations, but cannot
+Settings and retry. **Detect profiles** can rediscover installations, but cannot
 reconstruct an arbitrary deleted bundle or custom target. Other
 sessions remain accessible, and configuration diagnostics do not change the
 affected session's stored lifecycle state.
@@ -57,14 +57,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 12
+version = 13
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `12`. |
+| `version` | integer | yes | none | Configuration schema version; use `13`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -87,7 +87,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 12 configuration. Older
+A missing or empty file is treated as an empty version 13 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -202,7 +202,14 @@ The default bindings:
 | `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
 | `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
 | `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
-| `suspend_session` | unbound | Stop the selected session |
+| `resize_mode` | `prefix+r` | Enter resize mode: arrow keys or `h`/`j`/`k`/`l` move the pane border until Esc |
+| `swap_pane_left` | `prefix+shift+h` | Swap the pane you are in with the pane on the left |
+| `swap_pane_down` | `prefix+shift+j` | Swap the pane you are in with the pane below |
+| `swap_pane_up` | `prefix+shift+k` | Swap the pane you are in with the pane above |
+| `swap_pane_right` | `prefix+shift+l` | Swap the pane you are in with the pane on the right |
+| `rename_workspace` | `prefix+shift+w` | Rename the current workspace in the workspace dialog |
+| `close_workspace` | `prefix+shift+d` | Close the current workspace from the workspace dialog |
+| `suspend_session` | `prefix+shift+x` | Suspend the selected session (asks first) |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |
 | `destroy_session` | unbound | Delete the selected session |
@@ -733,8 +740,8 @@ with kinds named `local-bare`, `local-podman`, `local-docker`,
 `apple-container`, `ssh-bare`, `ssh-podman`, `ssh-docker`, and `aws-ec2`.
 Mjolnir still reads such a file when its `version` is 11 or lower: it derives
 the machines, moves each container's `build_cache` onto the machine that owns
-it, and writes the new shape on the next save. A file that already says
-`version = 12` must use the new kinds; an old one is refused with the spelling
+it, and writes the new shape on the next save. A file that says
+`version = 12` or later must use the new kinds; an old one is refused with the spelling
 to write instead.
 
 ## Complete compact example
@@ -744,7 +751,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 12
+version = 13
 
 [phone]
 enabled = true
