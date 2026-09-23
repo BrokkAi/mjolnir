@@ -129,7 +129,8 @@ fn spawn_user_shell(
     cancelled: oneshot::Receiver<()>,
     events: mpsc::Sender<RuntimeEvent>,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let mut command = tokio::process::Command::new("bash");
+    let shell = user_shell_program(&spec.environment)?;
+    let mut command = tokio::process::Command::new(&shell);
     command
         .arg("-c")
         .arg(crate::worker_runtime::github_cli_login_shell_command(
@@ -148,7 +149,7 @@ fn spawn_user_shell(
     command.process_group(0);
     let mut child = command
         .spawn()
-        .with_context(|| format!("spawn user shell: {}", spec.command))?;
+        .with_context(|| format!("start shell {}", shell.display()))?;
     let pid = child.id().and_then(|pid| i32::try_from(pid).ok());
     let stdout = child
         .stdout
@@ -389,6 +390,30 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// The shell that runs a `!` command: the session's `$SHELL` when it names a
+/// POSIX-compatible shell by absolute path, otherwise `/bin/sh`. The path is
+/// absolute so the child's own `PATH` (which a profile may point anywhere) is
+/// never searched for it.
+fn user_shell_program(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    const POSIX_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
+    let fallback = PathBuf::from("/bin/sh");
+    let shell = environment
+        .get("SHELL")
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.is_absolute()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| POSIX_SHELLS.contains(&name))
+        })
+        .unwrap_or(fallback);
+    if !shell.is_file() {
+        anyhow::bail!("shell {} not found", shell.display());
+    }
+    Ok(shell)
+}
+
 #[cfg(unix)]
 fn status_parts(status: std::process::ExitStatus) -> (Option<i32>, Option<String>, Option<String>) {
     use std::os::unix::process::ExitStatusExt;
@@ -451,6 +476,48 @@ mod tests {
             result.stdout,
             format!("{}\nunset|unset\n", wrapper.display())
         );
+    }
+
+    async fn finished(received: &mut mpsc::Receiver<RuntimeEvent>) -> UserShellResult {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(RuntimeEvent::UserShellFinished { result, .. }) = received.recv().await
+                {
+                    break result;
+                }
+            }
+        })
+        .await
+        .expect("user shell did not finish")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_shell_runs_command_text_through_sh_when_path_lacks_bash() {
+        let cwd = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/bin/sh", bin.path().join("sh")).unwrap();
+        std::os::unix::fs::symlink("/bin/ls", bin.path().join("ls")).unwrap();
+        std::fs::write(cwd.path().join("marker-file"), "").unwrap();
+        let environment = BTreeMap::from([(
+            "PATH".into(),
+            bin.path().to_string_lossy().into_owned(),
+        )]);
+        let (events, mut received) = mpsc::channel(16);
+        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), environment, events);
+        shells.start("shell-ls".into(), "ls -a".into()).unwrap();
+        let result = finished(&mut received).await;
+        assert_eq!(result.status, UserShellStatus::Exited, "{result:?}");
+        assert!(result.stdout.contains("marker-file"), "{result:?}");
+    }
+
+    #[test]
+    fn missing_login_shell_is_named_instead_of_the_command() {
+        let environment = BTreeMap::from([("SHELL".into(), "/nonexistent/bin/bash".into())]);
+        let error = user_shell_program(&environment).unwrap_err().to_string();
+        assert_eq!(error, "shell /nonexistent/bin/bash not found");
+        let fish = BTreeMap::from([("SHELL".into(), "/usr/bin/fish".into())]);
+        assert_eq!(user_shell_program(&fish).unwrap(), PathBuf::from("/bin/sh"));
     }
 
     #[test]
