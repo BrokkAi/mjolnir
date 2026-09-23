@@ -280,7 +280,10 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
     Some(match key {
         "interface" => format!(
             "{} · sidebar {}",
-            choice_label(&["theme".to_owned()], &draft["theme"], draft),
+            theme_report(
+                &choice_label(&["theme".to_owned()], &draft["theme"], draft),
+                mj_chat::theme::no_color_requested()
+            ),
             choice_label(
                 &["sessions_side".to_owned()],
                 &draft["sessions_side"],
@@ -373,6 +376,19 @@ fn named_entries(value: &Value) -> String {
         return names.join(", ");
     }
     format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
+}
+
+/// The theme as Setup reports it. `NO_COLOR` is an override, not a theme:
+/// [`theme::effective_theme`] draws in monochrome whatever is configured, and
+/// the configured choice is kept and comes back once `NO_COLOR` is unset. So
+/// the report says what is on screen and why, and names the configured theme
+/// that is waiting.
+pub(super) fn theme_report(configured_label: &str, no_color: bool) -> String {
+    if no_color {
+        format!("Monochrome (NO_COLOR; configured: {configured_label})")
+    } else {
+        configured_label.to_owned()
+    }
 }
 
 pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {

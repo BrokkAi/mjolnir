@@ -2553,3 +2553,21 @@ fn a_setting_row_truncates_its_label_before_its_value() {
     assert!(text.chars().count() <= 30, "{text}");
     assert!(text.starts_with("  Name x"), "{text}");
 }
+
+/// A-14: with `NO_COLOR` set the screen is monochrome whatever theme is
+/// configured, so Setup says so instead of naming a theme it is not drawing.
+/// The configured theme is still named, because it returns once `NO_COLOR`
+/// is unset.
+#[test]
+fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
+    assert_eq!(
+        schema::theme_report("Midnight", true),
+        "Monochrome (NO_COLOR; configured: Midnight)"
+    );
+    assert_eq!(schema::theme_report("Midnight", false), "Midnight");
+    // The override is the one the renderer applies.
+    assert_eq!(
+        theme::theme_for(theme::UiTheme::Midnight, true),
+        theme::UiTheme::Mono
+    );
+}
