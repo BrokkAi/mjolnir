@@ -38,7 +38,8 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - A-4/E-9 dictation chord gives no feedback without a microphone.
 - D-14 narrow pinned pane not following new replies after restart (may be covered by `bf09b3d6`; re-verify).
 - B-11 Enter half of the workspace dialog issue still reproduces (R1 capture 015).
-- Flaky under full parallel load (pass alone): `worker_environment.rs` re-exec test, controller `web_viewer::tests::retry_uses_the_original_port_after_its_owner_releases_it`, `mj-cli/tests/store_divergence.rs`.
+- Flaky under full parallel load (pass alone): `worker_environment.rs` re-exec test, controller `web_viewer::tests::retry_uses_the_original_port_after_its_owner_releases_it`, `mj-cli/tests/store_divergence.rs`, and (seen 09-24 after merging `69e2f7a6`) controller `move_session::tests::terminal_move_recovery_finishes_interrupted_close_before_phase_retry` and `in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped`.
+- Since origin's `51dccacd` (#1138) the controller refuses a worker whose `version+commit` stamp differs from its own. Every `bin-fixed/` rebuild must build `mj`, `mj-worker` and the musl worker from the same commit in one go, and the old-release labs (Track H) are unaffected because they use their own workers.
 
 ## Useful mechanics
 
