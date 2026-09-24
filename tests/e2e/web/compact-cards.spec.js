@@ -70,6 +70,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
     subagent_parent_id: options.subagentParentId,
+    managed_checkout_kind: options.managedCheckoutKind ?? null,
     capabilities,
   };
 }
@@ -920,7 +921,7 @@ test('suspension remains pending after acceptance and exposes failure after reco
   page.once('dialog', dialog => dialog.accept());
   await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true });
+  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true, acknowledge_unpublished_work: true });
   await expect(current.locator('.session-activity')).toHaveText('Suspending…');
   await current.locator('button[aria-label^="Actions for"]').click();
   await expect(current.getByRole('menuitem', { name: 'Suspend session…' })).toBeDisabled();
@@ -934,7 +935,7 @@ test('suspension remains pending after acceptance and exposes failure after reco
 });
 
 test('destroy is separately confirmed and defaults to keeping the branch', async ({ page }) => {
-  const state = await mount(page, [session('destroy-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
+  const state = await mount(page, [session('destroy-me', 'project', 'Project', { managedCheckoutKind: 'worktree', capabilities: { suspend: true, destroy: true } })]);
   const current = card(page, 'destroy-me');
   await current.locator('button[aria-label^="Actions for"]').click();
   await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
@@ -955,7 +956,7 @@ test('destroy is separately confirmed and defaults to keeping the branch', async
 });
 
 test('destroying retained history offers explicit branch deletion', async ({ page }) => {
-  const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
+  const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', managedCheckoutKind: 'worktree', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
   await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}/resume/retained`);
   await page.getByRole('button', { name: 'Destroy session…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Destroy session' });

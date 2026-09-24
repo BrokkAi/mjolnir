@@ -1033,8 +1033,10 @@ mod tests {
         let error = probe_api(&http_client(None).unwrap(), &url)
             .await
             .unwrap_err();
+        // The platform verifier words the rejection per OS (webpki reports
+        // `CaUsedAsEndEntity`, macOS reports an untrusted certificate).
         assert!(
-            format!("{error:#}").contains("CaUsedAsEndEntity"),
+            format!("{error:#}").contains("invalid peer certificate"),
             "unexpected error: {error:#}"
         );
         probe_api(&http_client(Some(&pin)).unwrap(), &url)

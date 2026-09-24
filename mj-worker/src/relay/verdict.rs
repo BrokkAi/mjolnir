@@ -127,6 +127,7 @@ impl DurableRelay {
         Some((generation, evidence, assessment))
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn resolve_retry_assessment(
         &mut self,
         identity: Option<(String, u64)>,
@@ -159,6 +160,7 @@ impl DurableRelay {
         Ok(retryable)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn retry_assessment_identity(&self) -> Option<(String, u64)> {
         self.snapshot
             .retry_assessment
