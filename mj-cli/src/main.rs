@@ -1042,7 +1042,12 @@ async fn run_workspace_dashboard(
                 candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
             })
             .map(|candidate| candidate.workspace.id.clone())
-            .with_context(|| format!("unknown workspace {requested:?}"))?
+            .ok_or_else(|| {
+                unknown_workspace(
+                    requested,
+                    workspaces.iter().map(|candidate| &candidate.workspace),
+                )
+            })?
     } else if let Some(workspace) = workspaces.first() {
         // The database orders workspaces by most recent opening.
         workspace.workspace.id.clone()
@@ -1104,7 +1109,12 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
                 candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
             })
             .map(|candidate| candidate.workspace.id.clone())
-            .with_context(|| format!("unknown workspace {requested:?}"));
+            .ok_or_else(|| {
+                unknown_workspace(
+                    requested,
+                    workspaces.iter().map(|candidate| &candidate.workspace),
+                )
+            });
     }
     match workspaces.as_slice() {
         [workspace] => Ok(workspace.workspace.id.clone()),
@@ -1148,6 +1158,38 @@ pub(crate) async fn workspace_required(command: &str, start_daemon: bool) -> any
 fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {
     let mut message =
         format!("{command} needs --workspace NAME: every session lives in a workspace");
+    push_workspace_list(&mut message, workspaces);
+    message
+}
+
+/// The refusal for a `--workspace` name no workspace carries: the daemon's
+/// workspaces and how to make one, as [`workspace_required_message`] gives
+/// them (launch finding R2-5).
+pub(crate) fn unknown_workspace_message(
+    name: &str,
+    workspaces: Option<&[(String, u64)]>,
+) -> String {
+    let mut message = format!("unknown workspace {name:?}");
+    push_workspace_list(&mut message, workspaces);
+    message
+}
+
+/// The same refusal from a daemon's workspace listing.
+pub(crate) fn unknown_workspace<'a>(
+    name: &str,
+    workspaces: impl IntoIterator<Item = &'a mj_core::workspace::WorkspaceRecord>,
+) -> anyhow::Error {
+    let listed = workspaces
+        .into_iter()
+        .map(|workspace| (workspace.name.clone(), workspace.session_count))
+        .collect::<Vec<_>>();
+    anyhow::anyhow!(unknown_workspace_message(name, Some(&listed)))
+}
+
+/// Append the listed workspaces with their session counts, or say there are
+/// none, and end with how to make one. `None` means the list could not be
+/// read, so only the hint is added.
+fn push_workspace_list(message: &mut String, workspaces: Option<&[(String, u64)]>) {
     match workspaces {
         Some([]) => message.push_str("; this instance has none yet"),
         Some(workspaces) => {
@@ -1164,7 +1206,6 @@ fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]
         None => {}
     }
     message.push_str("\nCreate one with `mj workspaces create NAME`.");
-    message
 }
 
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
@@ -1841,6 +1882,27 @@ mod tests {
 
         let message = workspace_required_message("mj acp", None);
         assert!(message.contains("mj workspaces create NAME"), "{message}");
+    }
+
+    /// R2-5: `mj new --workspace nosuch` said only `unknown workspace
+    /// "nosuch"`. It now lists what exists and how to make one, in the shape
+    /// the missing-flag refusal uses.
+    #[test]
+    fn an_unknown_workspace_is_refused_with_the_workspaces_and_how_to_make_one() {
+        let listed = [("beta".to_owned(), 0), ("alpha".to_owned(), 1)];
+        let message = unknown_workspace_message("nosuch", Some(&listed));
+        assert_eq!(
+            message,
+            "unknown workspace \"nosuch\". Workspaces:\n  beta  (0 sessions)\n  alpha  (1 session)\n\
+             Create one with `mj workspaces create NAME`."
+        );
+
+        let message = unknown_workspace_message("nosuch", Some(&[]));
+        assert_eq!(
+            message,
+            "unknown workspace \"nosuch\"; this instance has none yet\n\
+             Create one with `mj workspaces create NAME`."
+        );
     }
 
     /// F-16: `--workspace` was global, so every command's help offered it.

@@ -521,15 +521,16 @@ impl Adapter {
 /// reads it: a name is unique regardless of case.
 async fn resolve_workspace(client: &ApiClient, name: &str) -> Result<String> {
     let wanted = name.trim().to_lowercase();
-    client
+    let workspaces = client
         .workspaces()
         .await
         .context("list the workspaces")?
-        .workspaces
-        .into_iter()
+        .workspaces;
+    workspaces
+        .iter()
         .find(|workspace| workspace.name.to_lowercase() == wanted)
-        .map(|workspace| workspace.id)
-        .with_context(|| format!("unknown workspace {name:?}"))
+        .map(|workspace| workspace.id.clone())
+        .ok_or_else(|| crate::unknown_workspace(name, &workspaces))
 }
 
 /// Ask the daemon to stop one session's turn.
