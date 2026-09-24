@@ -11,7 +11,7 @@ Mjolnir supports Podman **4.3.0 or newer**. 4.3.0 is the minimum because Mjolnir
 maps each session container's image user onto your host user with
 `--userns=keep-id:uid=<uid>,gid=<gid>`, which that release added, and because the local
 target relies on the mature rootless user-namespace behavior and CLI interfaces
-that Mjolnir probes (`podman info` and `podman unshare`). Podman 3.x and Podman
+that Mjolnir probes (`podman unshare`). Podman 3.x and Podman
 4.0 through 4.2 are not supported Mjolnir runtimes.
 
 ## How Mjolnir uses Podman
@@ -31,9 +31,11 @@ these fast runtime checks:
 
 ```console
 podman --version
-podman info --format '{{.Host.Security.Rootless}}'
 podman unshare cat /proc/self/uid_map
 ```
+
+`podman unshare` runs only for local rootless Podman, so the second check also
+shows that Podman is not rootful and not using a remote connection.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
@@ -116,7 +118,7 @@ Podman user because they may retain objects from private repositories. You can
 remove `~/.cache/mjolnir/git/mirrors` while no launch is updating it; do not remove
 the `sessions` directory while managed containers are running.
 
-`mj doctor --json` runs those three checks only when a local Podman runtime
+`mj doctor --json` runs those two checks only when a local Podman runtime
 exists, and then checks `podman image exists` for each configured image. `mj doctor --json --smoke` replaces that presence check
 with the full disposable run/exec/remove test, so it automates
 Verification sections 3 and 4 for every configured image.
@@ -124,7 +126,11 @@ Verification sections 3 and 4 for every configured image.
 A Podman runtime on an SSH machine gets the same probes and the same smoke test, each
 wrapped in a noninteractive `ssh` call to the configured host. Every
 remediation below then applies on that remote host, as the user that SSH logs
-in as.
+in as. The probes run in `mj setup`, in `mj doctor`, and when you test the
+target in the dashboard's Targets pane. Before each session on an SSH machine,
+Mjolnir checks only that the host answers over SSH and assumes Podman there is
+still as those checks found it, so rerun `mj doctor` after changing Podman on
+that host.
 
 Such a runtime also gets a second check, `Host limits for target
 <id>`, for the two host limits that cause failures when many sessions start
@@ -231,7 +237,6 @@ Expected: the reported version is 4.3.0 or newer. For example,
 ### 2. Rootless mode and subordinate mappings work
 
 ```console
-podman info --format '{{.Host.Security.Rootless}}'
 grep -E "^$(id -un):" /etc/subuid
 grep -E "^$(id -un):" /etc/subgid
 podman unshare cat /proc/self/uid_map
@@ -240,7 +245,6 @@ podman unshare cat /proc/self/gid_map
 
 Expected:
 
-- The first command prints exactly `true`.
 - Both `grep` commands print an entry for the current user.
 - Both map commands succeed. Their output must map container ID `0` and at
   least one additional ID (normally a first line mapping ID `0` followed by a
@@ -253,7 +257,10 @@ Expected:
 
 Mjolnir runs the UID-map command itself before every local-Podman session. It also
 checks that container IDs `0` and `1` are mapped, which catches a login with no
-usable subordinate range.
+usable subordinate range. If the map commands fail with `please use unshare
+with rootless` or `cannot use command "podman unshare" with the remote podman
+client`, see "`podman unshare` refuses to run" under "Common failures and
+exact remediations" below.
 
 ### 3. The configured runtime image is available
 
@@ -338,14 +345,17 @@ podman system migrate
 If the example range is already assigned, the administrator must choose an
 unused range instead. Do not edit mappings for another account.
 
-### Rootless check prints `false`
+### `podman unshare` refuses to run
 
-Mjolnir must run as an unprivileged user. Start a normal shell, do not invoke Mjolnir
-through `sudo`, and remove a remote/rootful Podman override before retrying:
+`podman unshare` fails with `please use unshare with rootless` when Podman
+runs as root, and with `cannot use command "podman unshare" with the remote
+podman client` when a remote Podman connection is selected. Mjolnir must run as
+an unprivileged user. Start a normal shell, do not invoke Mjolnir through
+`sudo`, and remove a remote Podman override before retrying:
 
 ```console
-unset CONTAINER_HOST
-podman info --format '{{.Host.Security.Rootless}}'
+unset CONTAINER_HOST CONTAINER_CONNECTION
+podman unshare cat /proc/self/uid_map
 ```
 
 If a named Podman connection is selected, switch back to the local rootless

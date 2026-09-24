@@ -163,7 +163,6 @@ fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOu
 fn podman_preflight_requires_supported_rootless_uid_mapped_runtime() {
     let executor = PodmanPreflightExecutor::with_outputs([
         podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
         podman_output(b"         0       1000          1\n         1     100000      65536\n"),
     ]);
 
@@ -175,28 +174,44 @@ fn podman_preflight_requires_supported_rootless_uid_mapped_runtime() {
         }
     );
     let seen = executor.seen.borrow();
-    assert_eq!(seen.len(), 3);
+    assert_eq!(seen.len(), 2);
     assert_eq!(seen[0].args, ["--version"]);
-    assert_eq!(
-        seen[1].args,
-        ["info", "--format", "{{.Host.Security.Rootless}}"]
-    );
-    assert_eq!(seen[2].args, ["unshare", "cat", "/proc/self/uid_map"]);
+    assert_eq!(seen[1].args, ["unshare", "cat", "/proc/self/uid_map"]);
 }
 
+/// `podman unshare` refuses to run for rootful or remote Podman, so its
+/// refusal is reported with the rootless fix rather than the UID-map one.
 #[test]
-fn podman_preflight_guidance_names_mjolnir() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"false\n"),
-    ]);
+fn podman_preflight_reports_an_unshare_refusal_as_not_rootless() {
+    for refusal in [
+        "Error: please use unshare with rootless",
+        "Error: cannot use command \"podman unshare\" with the remote podman client",
+    ] {
+        let executor = PodmanPreflightExecutor::with_outputs([
+            podman_output(b"podman version 5.4.2\n"),
+            CommandOutput {
+                status: 125,
+                stdout: vec![],
+                stderr: refusal.as_bytes().to_vec(),
+            },
+        ]);
 
-    let error = verify_local_podman(&executor).unwrap_err().to_string();
-    assert!(
-        error.contains("Run Mjolnir as the ordinary user"),
-        "{error}"
-    );
-    assert!(!error.contains("Run Hel"), "{error}");
+        let error = verify_local_podman(&executor).unwrap_err();
+
+        assert_eq!(
+            failed_podman_postcondition(&error),
+            Some(PodmanPostcondition::Rootless)
+        );
+        let error = error.to_string();
+        assert!(error.contains("Podman is local and rootless"), "{error}");
+        assert!(error.contains(refusal), "{error}");
+        assert!(
+            error.contains("Run Mjolnir as the ordinary user"),
+            "{error}"
+        );
+        assert!(!error.contains("Run Hel"), "{error}");
+        assert!(!error.contains("Install UID-map helpers"), "{error}");
+    }
 }
 
 #[test]
@@ -260,7 +275,6 @@ fn podman_preflight_rejects_a_four_series_release_older_than_the_keep_id_mapping
     // 4.3.0 itself passes the version probe and moves on to the next one.
     let executor = PodmanPreflightExecutor::with_outputs([
         podman_output(b"podman version 4.3.0\n"),
-        podman_output(b"true\n"),
         podman_output(b"         0       1000          1\n         1     100000      65536\n"),
     ]);
     assert_eq!(verify_local_podman(&executor).unwrap().version, "4.3.0");
@@ -270,7 +284,6 @@ fn podman_preflight_rejects_a_four_series_release_older_than_the_keep_id_mapping
 fn podman_preflight_reports_uidmap_helper_remediation() {
     let executor = PodmanPreflightExecutor::with_outputs([
         podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
         CommandOutput {
             status: 1,
             stdout: vec![],
@@ -288,7 +301,6 @@ fn podman_preflight_reports_uidmap_helper_remediation() {
 fn podman_preflight_rejects_a_uid_map_without_subordinate_ids() {
     let executor = PodmanPreflightExecutor::with_outputs([
         podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
         podman_output(b"         0       1000          1\n"),
     ]);
 
@@ -311,7 +323,6 @@ fn batched_ssh_probes(probes: &[(&str, i32, &str, &str)]) -> CommandOutput {
 fn passing_ssh_probes(linger: (i32, &'static str, &'static str)) -> CommandOutput {
     batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "true\n", ""),
         (
             "uid_map",
             0,
@@ -453,18 +464,22 @@ fn ssh_podman_preflight_reports_each_failing_batched_probe() {
 
     let rooted = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "false\n", ""),
+        (
+            "uid_map",
+            125,
+            "",
+            "Error: please use unshare with rootless",
+        ),
     ])]);
     let error = verify_ssh_podman(&ssh(), &rooted).unwrap_err().to_string();
     assert!(
-        error.contains("prints `true` returned \"false\""),
+        error.contains("Podman is local and rootless (`podman unshare` is allowed) failed"),
         "{error}"
     );
     assert!(error.contains("On dev@example.test: Run Mjolnir as the ordinary user"));
 
     let uid_map = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "true\n", ""),
         ("uid_map", 0, "         0       1000          1\n", ""),
     ])]);
     let error = verify_ssh_podman(&ssh(), &uid_map).unwrap_err().to_string();
@@ -476,7 +491,6 @@ fn ssh_podman_preflight_reports_each_failing_batched_probe() {
 
     let uid_map_failed = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "true\n", ""),
         ("uid_map", 1, "", "cannot find newuidmap executable"),
     ])]);
     let error = verify_ssh_podman(&ssh(), &uid_map_failed)
@@ -552,7 +566,6 @@ fn ssh_podman_preflight_warns_when_the_linger_value_is_unrecognized() {
     // Output that ends after the Podman probes still yields a usable target.
     let missing = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "true\n", ""),
         (
             "uid_map",
             0,
@@ -578,11 +591,7 @@ fn batched_preflight_script_frames_output_the_parser_expects() {
             "script is missing {marker}"
         );
     }
-    for probe in [
-        PodmanProbe::Version,
-        PodmanProbe::Rootless,
-        PodmanProbe::UidMap,
-    ] {
+    for probe in [PodmanProbe::Version, PodmanProbe::UidMap] {
         assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {} ", probe.key())));
     }
     assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {LINGER_PROBE_KEY} ")));

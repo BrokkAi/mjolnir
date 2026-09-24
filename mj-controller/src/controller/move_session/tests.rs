@@ -1133,8 +1133,6 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
         assert_eq!(command.program, "podman", "unexpected {}", command.program);
         let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
             b"podman version 5.4.2\n"
-        } else if command.args.iter().any(|argument| argument == "info") {
-            b"true\n"
         } else {
             b"         0       1000          1\n         1     100000      65536\n"
         };

@@ -637,7 +637,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             .contains_key(&session_id)
     );
 
-    let executor = RecordingExecutor::failing("check Docker daemon");
+    let executor = RecordingExecutor::failing("verify SSH connectivity");
     let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
         &session_id,
         &executor,
@@ -647,14 +647,15 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
     .unwrap_err();
     let reported = format!("{error:#}");
     assert!(
-        reported.contains("remote Docker preflight failed"),
+        reported.contains("SSH connectivity test failed"),
         "{reported}"
     );
     assert!(
-        executor.commands().iter().any(|argv| {
-            let command = argv.join(" ");
-            command.contains("'docker' 'version'")
-        }),
+        executor
+            .commands()
+            .iter()
+            .any(|argv| argv.first().is_some_and(|program| program == "ssh")
+                && argv.last().is_some_and(|remote| remote == "'true'")),
         "the fake preflight did not run: {:?}",
         executor.commands()
     );

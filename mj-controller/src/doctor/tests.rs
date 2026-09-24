@@ -72,7 +72,6 @@ fn reachable_then(
 fn ssh_podman_probes(linger: (i32, &str, &str)) -> Vec<Result<CommandOutput>> {
     vec![Ok(output(crate::targets::ssh_podman_probe_fixture(&[
         ("version", 0, "podman version 5.4.2\n", ""),
-        ("rootless", 0, "true\n", ""),
         (
             "uid_map",
             0,
@@ -90,7 +89,6 @@ fn passing_ssh_podman_probes() -> Vec<Result<CommandOutput>> {
 fn passing_podman_probes() -> Vec<Result<CommandOutput>> {
     vec![
         Ok(output(b"podman version 5.4.2\n")),
-        Ok(output(b"true\n")),
         Ok(output(
             b"         0       1000          1\n         1     100000      65536\n",
         )),
@@ -432,7 +430,7 @@ fn podman_check_probes_the_host_when_a_local_podman_target_exists() {
 
     assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("Podman 5.4.2"));
-    assert_eq!(executor.commands.borrow().len(), 3);
+    assert_eq!(executor.commands.borrow().len(), 2);
 }
 
 #[test]
