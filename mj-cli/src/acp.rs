@@ -394,21 +394,27 @@ impl Adapter {
             .lock()
             .expect("adapter active set")
             .remove(session_id);
-        // A cancellation is the consumer's decision, and the specification
-        // requires `Cancelled` even when the work underneath fails while the
-        // cancellation is being applied. The failure is still worth recording.
-        if self
+        let cancel_requested = self
             .cancelling
             .lock()
             .expect("adapter cancel set")
-            .remove(session_id)
-        {
-            if let Err(error) = &result {
-                tracing::debug!(%error, %session_id, "a cancelled turn also failed");
+            .remove(session_id);
+        match result {
+            // A turn that finished before the cancel could stop it delivered
+            // its reply. Calling it cancelled would tell the consumer to
+            // discard work that was done (R2-1).
+            Ok(StopReason::EndTurn) => Ok(StopReason::EndTurn),
+            // The specification requires `Cancelled` for a cancelled turn
+            // even when the work underneath fails while it stops. The failure
+            // is still worth recording.
+            result if cancel_requested => {
+                if let Err(error) = &result {
+                    tracing::debug!(%error, %session_id, "a cancelled turn also failed");
+                }
+                Ok(StopReason::Cancelled)
             }
-            return Ok(StopReason::Cancelled);
+            result => result,
         }
-        result
     }
 
     /// Remember that the consumer asked to cancel, then ask the daemon to stop.
@@ -783,25 +789,22 @@ async fn run_turn(
         .prompt(session_id, prompt.to_owned())
         .await
         .context("submit the prompt")?;
-    // A cancel that arrived while the prompt was being submitted found no turn
-    // to stop. Now there is one.
-    if cancelled() {
-        interrupt(client, session_id).await;
-    }
-    let waited = client
-        .wait(
-            session_id,
-            &WaitRequest {
-                // Ask to be told about a structured input request rather than
-                // waiting for an answer that will never come: the consumer is a
-                // program, and this adapter has no one to ask.
-                return_on_input: true,
-                turn_id: Some(accepted.turn_id),
-                timeout_secs: None,
-            },
-        )
-        .await
-        .context("wait for the turn")?;
+    let wait_request = WaitRequest {
+        // Ask to be told about a structured input request rather than waiting
+        // for an answer that will never come: the consumer is a program, and
+        // this adapter has no one to ask.
+        return_on_input: true,
+        turn_id: Some(accepted.turn_id),
+        timeout_secs: None,
+    };
+    let waited = interrupt_once_cancelled(
+        client,
+        session_id,
+        client.wait(session_id, &wait_request),
+        &cancelled,
+    )
+    .await
+    .context("wait for the turn")?;
     if let Some(pending) = pending_input(&waited) {
         // End the turn instead of leaving the session waiting for a person. The
         // reason travels as an error rather than a stop reason because the
@@ -831,6 +834,52 @@ async fn run_turn(
         | WaitOutcome::Timeout
         | WaitOutcome::Stopped => StopReason::Refusal,
     })
+}
+
+/// How often a cancelled turn's interrupt is sent again while the daemon
+/// refuses it.
+const INTERRUPT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Wait for a turn, stopping it once the consumer has cancelled it.
+///
+/// A cancel can reach the daemon before there is a turn to stop: while the
+/// daemon still holds the prompt for a session that is starting, or before the
+/// turn the prompt became is visible. The daemon refuses that interrupt, so it
+/// is sent again until the daemon takes one or the turn ends on its own (R2-1).
+async fn interrupt_once_cancelled<T>(
+    client: &ApiClient,
+    session_id: &str,
+    wait: impl std::future::Future<Output = Result<T>>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<T> {
+    // A cancel that arrived while the prompt was being submitted is sent
+    // before the wait starts.
+    let mut taken = cancelled() && interrupt_taken(client, session_id).await;
+    tokio::pin!(wait);
+    let mut retry = tokio::time::interval_at(
+        tokio::time::Instant::now() + INTERRUPT_RETRY_INTERVAL,
+        INTERRUPT_RETRY_INTERVAL,
+    );
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            waited = &mut wait => return waited,
+            _ = retry.tick(), if !taken => {
+                taken = cancelled() && interrupt_taken(client, session_id).await;
+            }
+        }
+    }
+}
+
+/// Ask the daemon to stop a turn, answering whether it took the request.
+async fn interrupt_taken(client: &ApiClient, session_id: &str) -> bool {
+    match client.interrupt_turn(session_id).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(%error, %session_id, "the daemon did not take the interrupt; asking again");
+            false
+        }
+    }
 }
 
 /// What a turn is waiting to be asked, when it is waiting for input.
@@ -921,6 +970,15 @@ mod tests {
         refuses: &'static [&'static str],
         /// How long creating a session takes to answer.
         start_delay: Duration,
+        /// How long the daemon holds a prompt before it becomes a turn, the
+        /// way it does while a new session's worker attaches.
+        prompt_delay: Duration,
+        /// Whether a held prompt is withdrawn by an interrupt, the way the
+        /// daemon answers an interrupt that arrives during the hold.
+        prompt_withdrawn_on_interrupt: bool,
+        /// How many interrupts are refused because there is no turn to stop
+        /// yet, before one is taken.
+        interrupts_refused: usize,
     }
     /// One answer to looking a session up.
     #[derive(Clone)]
@@ -1177,9 +1235,20 @@ mod tests {
         State(daemon): State<Arc<FakeDaemon>>,
         Path(session_id): Path<String>,
         Json(body): Json<Value>,
-    ) -> ([(&'static str, &'static str); 1], Json<Value>) {
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
         daemon.prompt.lock().unwrap().push((session_id, body));
-        (version(), Json(json!({"turn_id": 7})))
+        if daemon.turn.prompt_withdrawn_on_interrupt {
+            daemon.interrupted.notified().await;
+            return (
+                axum::http::StatusCode::CONFLICT,
+                version(),
+                Json(json!({"error": "this prompt was withdrawn: its turn was interrupted before the session could take it"})),
+            )
+                .into_response();
+        }
+        tokio::time::sleep(daemon.turn.prompt_delay).await;
+        (version(), Json(json!({"turn_id": 7}))).into_response()
     }
 
     async fn record_wait(
@@ -1221,7 +1290,14 @@ mod tests {
             .lock()
             .unwrap()
             .push(format!("interrupt {session_id}"));
-        daemon.interrupts.lock().unwrap().push(session_id);
+        let refused = {
+            let mut interrupts = daemon.interrupts.lock().unwrap();
+            interrupts.push(session_id);
+            interrupts.len() <= daemon.turn.interrupts_refused
+        };
+        if refused {
+            return (version(), axum::http::StatusCode::CONFLICT);
+        }
         daemon.interrupted.notify_one();
         let status = if daemon.turn.interrupt_fails {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -1303,6 +1379,17 @@ mod tests {
         }
     }
 
+    /// Wait until the fake has the prompt, which it may still be holding.
+    async fn until_prompted(daemon: &FakeDaemon) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while daemon.prompt.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the prompt reaches the daemon");
+    }
+
     /// Wait until the fake has seen the turn's wait, so the turn is running.
     async fn until_waiting(daemon: &FakeDaemon) {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1338,6 +1425,65 @@ mod tests {
 
         assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
         assert_eq!(daemon.interrupts.lock().unwrap().as_slice(), ["session-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_sent_while_the_prompt_is_held_withdraws_it_and_answers_cancelled() {
+        // R2-1: a new session's prompt is held until its worker attaches. A
+        // cancel in that window withdraws the prompt, so no turn ever runs.
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            prompt_withdrawn_on_interrupt: true,
+            ..FakeTurn::default()
+        })
+        .await;
+        let mut consumer = Consumer::connect(Arc::new(Adapter::new(
+            AcpArgs::default(),
+            None,
+            Some(client),
+        )));
+        consumer.open_session().await;
+        consumer.prompt(3);
+        until_prompted(&daemon).await;
+
+        consumer.send(json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-1"}}));
+        let answer = consumer.response(3).await;
+
+        assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+        assert!(
+            daemon.wait.lock().unwrap().is_empty(),
+            "a withdrawn prompt has no turn to wait for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_arrives_before_its_turn_exists_is_retried_until_it_stops_the_turn() {
+        // R2-1: the cancel sent during the hold, and the one sent as the prompt
+        // became a turn, both found no turn to stop. The turn then ran to the
+        // end, its reply was stored, and the consumer was told `cancelled`.
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            runs_until_interrupted: true,
+            prompt_delay: Duration::from_millis(300),
+            interrupts_refused: 2,
+            ..FakeTurn::default()
+        })
+        .await;
+        let mut consumer = Consumer::connect(Arc::new(Adapter::new(
+            AcpArgs::default(),
+            None,
+            Some(client),
+        )));
+        consumer.open_session().await;
+        consumer.prompt(3);
+        until_prompted(&daemon).await;
+
+        consumer.send(json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "session-1"}}));
+        let answer = consumer.response(3).await;
+
+        assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+        assert!(
+            daemon.interrupts.lock().unwrap().len() > 2,
+            "the interrupt is sent again until the daemon takes one"
+        );
     }
 
     #[tokio::test]
@@ -1840,16 +1986,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancel_is_answered_cancelled_even_when_the_interrupt_fails() {
-        // The specification requires `Cancelled` when the client sends
-        // `session/cancel`, even if cancellation raises underneath. Here the
-        // turn finishes normally and the interrupt fails, which is the worst
-        // case: a consumer would otherwise read a successful end of turn for
-        // work it asked to stop.
+    async fn a_turn_that_finishes_before_a_cancel_can_stop_it_reports_end_turn() {
+        // R2-1: the adapter answered `cancelled` for a turn whose reply had
+        // been streamed and stored. A consumer that believes it would discard
+        // work that was in fact done. Here the turn finishes normally and every
+        // interrupt fails, so nothing stopped it.
         let (client, daemon) = FakeDaemon::start(FakeTurn {
             outcome: "finished",
             final_message: Some("the work finished anyway"),
             interrupt_fails: true,
+            ..FakeTurn::default()
+        })
+        .await;
+        let adapter = adapter_owning("session-1", client);
+        let mut sent: Vec<String> = Vec::new();
+        let mut notify = |_session_id: &str, message: &str| -> Result<()> {
+            sent.push(message.to_owned());
+            Ok(())
+        };
+
+        adapter.cancel("session-1").await;
+        let stop = adapter
+            .turn("session-1", "hello", &mut notify)
+            .await
+            .expect("the turn runs");
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(sent, ["the work finished anyway"]);
+        assert!(
+            daemon.interrupts.lock().unwrap().len() >= 2,
+            "the daemon was asked to stop, and asked again once the prompt became a turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_that_fails_is_still_answered_cancelled() {
+        // The specification requires `Cancelled` for a turn the consumer
+        // cancelled even when the work underneath fails as it stops.
+        let (client, _daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "error",
+            final_message: Some("the harness stopped mid-call"),
             ..FakeTurn::default()
         })
         .await;
@@ -1863,11 +2039,6 @@ mod tests {
             .expect("the turn runs");
 
         assert_eq!(stop, StopReason::Cancelled);
-        assert_eq!(
-            daemon.interrupts.lock().unwrap().as_slice(),
-            ["session-1", "session-1"],
-            "the daemon was asked to stop, and asked again once the prompt became a turn"
-        );
     }
 
     #[tokio::test]

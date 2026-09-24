@@ -3455,6 +3455,17 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "cancel-1")).await;
     } else if steering_outcome == "startedNewTurn" {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandInterrupted { request_id, .. } if request_id == "cancel-1")).await;
+    } else if steering_outcome == "promptRequired" {
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(
+                event,
+                RuntimeEvent::SteerReturned {
+                    request_id,
+                    queued_command_id,
+                } if request_id == "cancel-1" && queued_command_id == "queued-1"
+            )
+        })
+        .await;
     } else {
         wait_for_runtime_event(&mut event_rx, |event| {
             matches!(
@@ -3502,6 +3513,37 @@ async fn failed_steering_does_not_fall_back_to_cancellation() {
 #[tokio::test]
 async fn unexpected_steering_delivery_is_held_without_cancellation() {
     exercise_image_steering(false, "startedNewTurn").await;
+}
+
+#[test]
+fn only_bridges_that_return_idle_steers_are_steered_automatically() {
+    let meta = |value: serde_json::Value| -> agent_client_protocol::schema::v1::Meta {
+        serde_json::from_value(value).unwrap()
+    };
+    let advertised = meta(serde_json::json!({
+        "steering": {"supported": true, "idleBehaviors": ["promptRequired"]}
+    }));
+    let plain = meta(serde_json::json!({"steering": {"supported": true}}));
+    assert!(steering_returns_idle_input(
+        Some(&advertised),
+        HarnessKind::Codex
+    ));
+    // Codex bridges before 1.13.2 start a turn of their own instead.
+    assert!(!steering_returns_idle_input(
+        Some(&plain),
+        HarnessKind::Codex
+    ));
+    // The pinned Claude bridge returns the steer without advertising it.
+    assert!(steering_returns_idle_input(
+        Some(&plain),
+        HarnessKind::Claude
+    ));
+    assert!(!steering_returns_idle_input(None, HarnessKind::Muse));
+}
+
+#[tokio::test]
+async fn returned_steering_leaves_the_prompt_to_mj_without_cancellation() {
+    exercise_image_steering(false, "promptRequired").await;
 }
 
 #[tokio::test(start_paused = true)]

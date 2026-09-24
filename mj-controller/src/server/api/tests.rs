@@ -1236,6 +1236,57 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
     assert_eq!(json_body(response).await["turn_id"], 3);
 }
 
+#[tokio::test]
+async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
+    // R2-1: an ACP cancel sent while the prompt was held reached
+    // interrupt-turn, which refused it because there was no turn yet. The
+    // held prompt then became a turn that ran to completion.
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
+    let held = tokio::spawn(
+        app.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"first words"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let interrupted = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        interrupted.status(),
+        StatusCode::ACCEPTED,
+        "withdrawing a held prompt is what interrupting a starting session does"
+    );
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), held)
+        .await
+        .expect("the held prompt answers once it is withdrawn")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("interrupted"),
+        "the refusal says why: {body}"
+    );
+
+    // The session coming up later must not revive the withdrawn prompt.
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wait() {
     let backend = Arc::new(FakeBackend::default());
@@ -1807,6 +1858,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
                     accepted_ordinal: Some(5),
                     turn_start_position: 6,
                     started_at_ms: 10,
+                    steered_into: None,
                 }),
                 last_turn_outcome: None,
             }),
@@ -1920,6 +1972,7 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
                 accepted_ordinal: Some(5),
                 turn_start_position: 6,
                 started_at_ms: 10,
+                steered_into: None,
             }),
             last_turn_outcome: None,
         })]),
@@ -2051,6 +2104,7 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
             accepted_ordinal: Some(7),
             turn_start_position: 8,
             started_at_ms: 1,
+            steered_into: None,
         }),
         ..WaitObservation::default()
     };
@@ -2300,6 +2354,7 @@ fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
             accepted_ordinal: Some(12),
             turn_start_position: 13,
             started_at_ms: 1,
+            steered_into: None,
         }),
         ..idle(Some(completed(10, "end_turn")))
     };

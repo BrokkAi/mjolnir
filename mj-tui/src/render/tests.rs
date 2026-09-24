@@ -3028,21 +3028,23 @@ fn read_idle_session_stays_blue_in_expanded_and_collapsed_rows() {
     }
 }
 
+/// A session the harness has not named and nobody renamed is listed by the
+/// title it was created with ("project via fake"), not its id, which the row
+/// would otherwise repeat (launch finding R2-8).
 #[test]
-fn session_name_prefers_override_then_acp_title_then_hel_uuid() {
+fn session_name_prefers_override_then_acp_title_then_created_title() {
     let mut session = stopped_session();
     assert_eq!(session_name(&session), "ACP pretty name");
 
     session.acp_session_title = None;
-    assert_eq!(session_name(&session), "session-1");
+    assert_eq!(session_name(&session), session.title);
 
     session.session_title_override = Some("My name".into());
     assert_eq!(session_name(&session), "My name");
 
     session.session_title_override = None;
-    session.native_session_id = None;
+    session.title = " ".into();
     assert_eq!(session_name(&session), "session-1");
-    assert_ne!(session_name(&session), session.title);
 }
 
 /// The standard local container targets exist whether or not an engine is

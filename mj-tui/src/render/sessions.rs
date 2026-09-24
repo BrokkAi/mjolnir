@@ -1477,7 +1477,7 @@ pub(crate) fn session_updated_at_epoch_seconds(session: &SessionRecord) -> Optio
 }
 
 pub(crate) fn session_name(session: &SessionRecord) -> &str {
-    session.display_title()
+    session.listed_title()
 }
 
 /// Maps the controller's review projection to the short overlay that fits in

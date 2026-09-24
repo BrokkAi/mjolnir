@@ -2475,6 +2475,7 @@ fn typed_acp_observations_are_journaled() {
             capabilities: Some(Box::new(AgentCapabilities::default())),
             agent_info: Some(Implementation::new("test-agent", "1")),
             steering_supported: Some(true),
+            steering_returns_idle_input: false,
         },
     )
     .unwrap();

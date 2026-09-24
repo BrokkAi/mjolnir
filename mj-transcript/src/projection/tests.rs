@@ -135,6 +135,136 @@ fn a_completed_prompt_records_its_stop_reason_and_clears_the_running_turn() {
     );
 }
 
+/// Starts `prompt-1`, queues `prompt-2` behind it, and admits a steer of
+/// `prompt-2` into the running turn. Returns the two acceptance ordinals.
+fn start_prompt_and_queue_a_steer(session: &mut MaterializedSession) -> (u64, u64) {
+    let queue = |session: &mut MaterializedSession, id: &str| {
+        apply_observation(
+            session,
+            RelayObservation::CommandQueued {
+                command_id: id.into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from(id)],
+                },
+                created_at_ms: 10,
+            },
+        );
+        session.applied_event_ordinal
+    };
+    let first = queue(session, "prompt-1");
+    apply_observation(
+        session,
+        RelayObservation::CommandStarted {
+            command_id: "prompt-1".into(),
+            started_at_ms: 20,
+        },
+    );
+    let second = queue(session, "prompt-2");
+    apply_observation(
+        session,
+        RelayObservation::CommandQueued {
+            command_id: "steer-1".into(),
+            command: RelayCommand::Steer {
+                active_prompt_id: "prompt-1".into(),
+                queued_prompt_id: "prompt-2".into(),
+            },
+            created_at_ms: 30,
+        },
+    );
+    (first, second)
+}
+
+fn steer_prompt_2(session: &mut MaterializedSession) {
+    apply_observation(
+        session,
+        RelayObservation::CommandCompleted {
+            command_id: "steer-1".into(),
+            outcome: RelayCommandOutcome::Steered {
+                queued_command_id: "prompt-2".into(),
+            },
+        },
+    );
+}
+
+#[test]
+fn a_steered_prompt_finishes_with_the_turn_it_joined() {
+    let mut session = MaterializedSession::empty("session");
+    let (first, second) = start_prompt_and_queue_a_steer(&mut session);
+    steer_prompt_2(&mut session);
+    let turn = session.active_turn.clone().expect("the running turn");
+    assert_eq!(turn.command_id, "prompt-2");
+    assert_eq!(turn.steered_into.as_deref(), Some("prompt-1"));
+
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            command_id: "prompt-1".into(),
+            outcome: RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "EndTurn".into(),
+                usage: None,
+            },
+        },
+    );
+    assert!(session.active_turn.is_none());
+    let outcome = session.last_turn_outcome.clone().expect("an outcome");
+    assert_eq!(outcome.command_id, "prompt-1");
+    // `mj wait --turn` finishes once an outcome's acceptance ordinal reaches
+    // its target, so a waiter for either prompt now finishes.
+    assert_eq!(outcome.accepted_ordinal, Some(second));
+    assert!(second > first);
+    assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
+}
+
+#[test]
+fn an_interrupted_steered_turn_clears_the_running_turn() {
+    let mut session = MaterializedSession::empty("session");
+    let (_, second) = start_prompt_and_queue_a_steer(&mut session);
+    steer_prompt_2(&mut session);
+
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandInterrupted {
+            command_id: "prompt-1".into(),
+            command: RelayCommandKind::Prompt,
+            message: "stopped".into(),
+        },
+    );
+    assert!(session.active_turn.is_none());
+    let outcome = session.last_turn_outcome.clone().expect("an outcome");
+    assert_eq!(outcome.accepted_ordinal, Some(second));
+    assert_eq!(
+        outcome.outcome,
+        TurnOutcomeKind::Interrupted {
+            message: "stopped".into()
+        }
+    );
+}
+
+#[test]
+fn a_returned_steer_leaves_the_prompt_queued_and_the_turn_running() {
+    let mut session = MaterializedSession::empty("session");
+    start_prompt_and_queue_a_steer(&mut session);
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandCompleted {
+            command_id: "steer-1".into(),
+            outcome: RelayCommandOutcome::SteeringReturned {
+                queued_command_id: "prompt-2".into(),
+            },
+        },
+    );
+    assert_eq!(
+        session
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.command_id.as_str()),
+        Some("prompt-1")
+    );
+    assert_eq!(session.queued_prompts.len(), 1);
+    assert_eq!(session.queued_prompts[0].command_id, "prompt-2");
+}
+
 #[test]
 fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start() {
     let mut session = MaterializedSession::empty("session");

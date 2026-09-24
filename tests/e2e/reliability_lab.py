@@ -32,7 +32,7 @@ import urllib.request
 
 TIMEOUT = 20.0
 # Match the Codex spec in mj-core/src/harness_runtime.rs when updating that pin.
-MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.11.5_codex-0.155.1"
+MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.13.2_codex-0.156.1"
 
 
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
@@ -492,7 +492,7 @@ session_id = "reliability-native"
 prompts = 0
 
 if sys.argv[1:] == ["--version"]:
-    print("@brokkai/codex-acp 1.11.5")
+    print("@brokkai/codex-acp 1.13.2")
     raise SystemExit(0)
 
 log_path = os.environ["MJ_FAKE_ACP_LOG"]

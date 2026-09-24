@@ -397,8 +397,14 @@ fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<Elicitat
     let claude_custom = meta
         .and_then(|meta| meta.get("_askUserQuestionCustomAnswer"))
         .and_then(Value::as_object);
+    // Codex bridges before 1.13 mark the free-text answer `isOtherAnswer`;
+    // later ones give it `role: "user_note"`. Either way it answers the named
+    // question in place of a listed choice.
     let custom_answer_for = codex
-        .filter(|meta| meta.get("isOtherAnswer").and_then(Value::as_bool) == Some(true))
+        .filter(|meta| {
+            meta.get("isOtherAnswer").and_then(Value::as_bool) == Some(true)
+                || meta.get("role").and_then(Value::as_str) == Some("user_note")
+        })
         .and_then(|meta| meta.get("questionId"))
         .and_then(Value::as_str)
         .or_else(|| {
@@ -737,6 +743,63 @@ mod tests {
         assert_eq!(
             request.fields[0].custom_answer_for.as_deref(),
             Some("token")
+        );
+    }
+
+    #[test]
+    fn pairs_codex_user_note_with_its_question() {
+        // The form shape @brokkai/codex-acp 1.13 sends for a question that
+        // accepts an answer outside its listed options.
+        let request = ElicitationRequest::from_acp_params(
+            "elicit-note",
+            json!({
+                "sessionId": "session-1",
+                "mode": "form",
+                "message": "Input requested",
+                "requestedSchema": {
+                    "type": "object",
+                    "required": ["scope"],
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "title": "Which scope?",
+                            "description": "Scope",
+                            "oneOf": [
+                                {"const": "Narrow", "title": "Narrow"},
+                                {"const": "None of the above", "title": "None of the above"}
+                            ],
+                            "_meta": {"codex": {"isOther": true, "isSecret": false}}
+                        },
+                        "scope_note": {
+                            "type": "string",
+                            "title": "Additional answer or note",
+                            "_meta": {"codex": {
+                                "questionId": "scope",
+                                "role": "user_note",
+                                "isSecret": false
+                            }}
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let note = request
+            .fields
+            .iter()
+            .find(|field| field.id == "scope_note")
+            .unwrap();
+        assert_eq!(note.custom_answer_for.as_deref(), Some("scope"));
+        assert_eq!(note.custom_answer_option, None);
+        let mut content = BTreeMap::new();
+        content.insert(
+            "scope_note".to_owned(),
+            ElicitationValue::String("Only the parser".into()),
+        );
+        // The note answers the required question on its own.
+        assert_eq!(
+            request.validate_response(&ElicitationResponse::Accept { content }),
+            Ok(())
         );
     }
 

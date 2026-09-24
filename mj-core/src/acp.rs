@@ -403,6 +403,24 @@ pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
     matches!(context_command(prompt), Some((ContextCommand::Compact, _)))
 }
 
+/// Whether the prompt is a harness slash command such as `/review` rather
+/// than a message. The command name is one word of letters, digits, `_`, `-`
+/// or `:`, so a prompt that opens with a path like `/home/me/file` is a
+/// message.
+pub fn prompt_is_slash_command(prompt: &[ContentBlock]) -> bool {
+    let Some(ContentBlock::Text(first)) = prompt.first() else {
+        return false;
+    };
+    let Some(rest) = first.text.trim_start().strip_prefix('/') else {
+        return false;
+    };
+    let name = rest.split(char::is_whitespace).next().unwrap_or_default();
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
+}
+
 /// Whether this update is the agent doing the work a prompt asked for.
 ///
 /// This is how Mjolnir tells "the harness answered" from "the harness ended
@@ -517,6 +535,11 @@ pub enum RuntimeEvent {
         agent_info: Option<Implementation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steering_supported: Option<bool>,
+        /// The bridge hands a steer back when no turn can take it, instead of
+        /// starting a turn of its own, so queued prompts may be steered
+        /// without the user asking.
+        #[serde(default)]
+        steering_returns_idle_input: bool,
     },
     ContextClearing {
         request_id: String,
@@ -659,6 +682,11 @@ pub enum RuntimeEvent {
         message: String,
     },
     SteerApplied {
+        request_id: String,
+        queued_command_id: String,
+    },
+    /// The bridge had no running turn for the steer and returned its prompt.
+    SteerReturned {
         request_id: String,
         queued_command_id: String,
     },

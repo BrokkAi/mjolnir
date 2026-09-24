@@ -1026,6 +1026,7 @@ fn inferred_input_request_clears_when_a_later_prompt_starts() {
         accepted_ordinal: Some(4),
         turn_start_position: 5,
         started_at_ms: 2000,
+        steered_into: None,
     });
     assert!(!prepare(materialized).awaiting_input);
 }

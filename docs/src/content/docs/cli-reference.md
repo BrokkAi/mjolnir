@@ -9,11 +9,12 @@ Running `mj` without a subcommand starts the per-user daemon when necessary and 
 mj [--instance <name>] [--workspace <name>] [command]
 ```
 
-`--workspace` is global and selects a named workspace for workspace-scoped commands. `--instance` (`-i`, or `MJ_INSTANCE`) is also global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
+`mj --workspace <name>` with no command opens the dashboard in that workspace. Given before a command that works in a workspace, it applies to that command. It is not a global option: the commands that work in a workspace (`mj new`, `mj acp`, `mj sessions`, `mj events`, `mj resume`, and `mj import`) take `--workspace <name>` after the command name too, and the other commands refuse it there. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it and need it when the instance has more than one workspace.
 
-`mj acp` is the one hidden command with a public purpose: it is the ACP agent a
-program starts instead of a coding harness. It is documented in
-[ACP agent](/acp-agent/).
+`--instance` (`-i`, or `MJ_INSTANCE`) is global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
+
+`mj acp` is listed in `mj --help`. It is the ACP agent a program starts instead
+of a coding harness, and is documented in [ACP agent](/acp-agent/).
 
 ## Open a surface
 
@@ -89,11 +90,13 @@ mj import <harness> (--session <uuid> | --latest) [options]
 | --- | --- |
 | `--session <uuid>` | Import one native session by its harness ID. Mutually exclusive with `--latest`. |
 | `--latest` | Import the most recently modified native session. |
+| `--profile <id>` | Profile whose home holds the session. Needed only when several enabled profiles run this harness. |
 | `--bundle <id>` | Associate an existing configured repository bundle. |
 | `--title <text>` | Set the title displayed in the dashboard. |
 | `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
+| `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
 
@@ -172,7 +175,7 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 ```text
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
-mj new --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
+mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
        [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
        [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -183,21 +186,21 @@ mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--role <role
 mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
-mj sessions [--session <id>] [--json]
+mj sessions [--session <id>] [--workspace <name>] [--json]
 mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
-          [--profile <id>] [--target <id>] [--workspace-id <id>]
+          [--profile <id>] [--target <id>] [--workspace-id <id>] [--workspace <name>]
           [--queue start|discard] [--json]
 mj interrupt-turn --session <id> [--json]
 mj api-info [--json]
-mj events [--session <id>] [--workspace-id <id>] [--after-seq <seq>]
+mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
 mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
 mj models --profile <id> [--model <name>] [--json]
-mj set-config --session <id> --key <key> --value <value> [--json]
+mj set-config --session <id> [--key <key> --value <value>] [--json]
 ```
 
 `mj new --branch <name>` selects the branch checked out in a new isolated clone;
@@ -222,6 +225,8 @@ with a session that runs directly in the selected directory.
   `--overwrite`.
 - `mj models` lists the models and efforts a profile offers.
 - `mj set-config` applies one session setting, such as the model or effort.
+  Without `--key` and `--value` it lists the settings the session's agent
+  offers, with their choices.
 
 `mj diff` compares against the recorded launch base by default. Use `--base`
 to compare against an explicit Git commit or revision, for example after

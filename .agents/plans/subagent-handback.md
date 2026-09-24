@@ -14,7 +14,7 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
 
 - [x] (2026-09-24) Compared Claude Code's subagent tools (extracted from 1,071 local transcripts) with `mj-agents`; agreed the scope with the user.
 - [x] (2026-09-24) Core contract in `mj-core/src/subagent.rs`: `SubagentToolAction::Handback`, `SubagentRecord::handback_tool`, `SubagentMcpRole`, `SubagentReport`, and the shared `report_state` rule with tests.
-- [x] (2026-09-24) Store: migration 48 adds `subagent_handbacks` (breaking, because older readers refuse the new record field) and helpers in `mj-controller/src/database/sessions.rs`.
+- [x] (2026-09-24) Store: migration 49 adds `subagent_handbacks` (breaking, because older readers refuse the new record field) and helpers in `mj-controller/src/database/sessions.rs`.
 - [x] (2026-09-24) Registration decides the tool; launch passes it; the worker serves the child role; Claude staging names the role.
 - [x] (2026-09-24) Daemon: the `Handback` action, the report rule in sub-agent `wait` and `list_agents`, the reminder in the child turn-end hook, and the session wait.
 - [x] (2026-09-24) `request_key` removed from the model and HTTP surfaces; `TaskStop`/`TaskOutput` unhidden.
@@ -29,6 +29,9 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
   Evidence: `mj-controller/src/database/state_io.rs`, the `subagent_sessions` upsert loop. Reports live in their own table for that reason.
 - Observation: the store's copy of a child's turns can lag the live snapshot the turn-end hook sees. Deciding the reminder from the store could see the previous turn, skip the reminder, and leave a `wait` pending until its timeout.
   Evidence: the run loop enqueues materialized projections asynchronously (`conversation_projections.enqueue`). The hook decides from the live snapshot's turn and in-flight commands and reads only the recorded report from the store.
+
+- Observation: upstream took migration 48 (returned steering) while this work was in progress.
+  Evidence: merge of `origin/master` on 2026-09-24 conflicted in `migrate_schema`; the handback table became migration 49.
 
 ## Decision Log
 
@@ -62,13 +65,13 @@ Implemented as described in the Progress list. The remaining step is the live va
 
 ## Validation and Acceptance
 
-Automated: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile. New tests cover every row of `report_state`, the child role's tools and refusals, the handback action (one report per turn, refusals), the reminder (sent once, not sent when work is queued), both waits, migration 48, and the staged Claude role.
+Automated: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile. New tests cover every row of `report_state`, the child role's tools and refusals, the handback action (one report per turn, refusals), the reminder (sent once, not sent when work is queued), both waits, migration 49, and the staged Claude role.
 
 Live, on an isolated instance with `morannon-podman`: a Claude Opus parent with Codex luna children, a Claude Opus parent with DeepSeek flash children, and a Codex sol 6 parent with DeepSeek flash children each solve a real ticket; the parents' `wait` answers carry `report_source: "handback"`; the TUI's Sub-agents view shows the children and their work.
 
 ## Idempotence and Recovery
 
-Migration 48 creates its table only when absent and raises the compatibility floor in the same transaction. A reminder is recorded after it is sent; a failed send is recorded so no wait keeps waiting for it. A replayed spawn is still deduplicated by the per-call request id.
+Migration 49 creates its table only when absent and raises the compatibility floor in the same transaction. A reminder is recorded after it is sent; a failed send is recorded so no wait keeps waiting for it. A replayed spawn is still deduplicated by the per-call request id.
 
 ## Interfaces and Dependencies
 

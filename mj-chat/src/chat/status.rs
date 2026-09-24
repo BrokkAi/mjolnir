@@ -206,6 +206,8 @@ impl ChatState {
         self.turn_control_submitting
             || self.turn_control_awaiting_state.is_some()
             || self.cancelling_prompt_id.is_some()
+            // Another surface, or the worker itself, may be steering.
+            || self.steering.as_ref().is_some_and(|s| s.holds_queue())
     }
 
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {

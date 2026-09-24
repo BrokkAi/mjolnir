@@ -1357,6 +1357,7 @@ async fn a_child_hands_back_one_report_per_turn() {
             accepted_ordinal: Some(3),
             turn_start_position: 3,
             started_at_ms: 1,
+            steered_into: None,
         });
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(FakeControl(FakeSession {

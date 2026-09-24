@@ -167,6 +167,17 @@ pub struct MaterializedTurn {
     /// position of the turn's first item.
     pub turn_start_position: u64,
     pub started_at_ms: i64,
+    /// The relay prompt still executing this turn after a steer moved the
+    /// turn to a queued prompt. That prompt's completion ends this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steered_into: Option<String>,
+}
+
+impl MaterializedTurn {
+    /// Whether the ending of relay prompt `command_id` ends this turn.
+    pub fn belongs_to(&self, command_id: &str) -> bool {
+        self.command_id == command_id || self.steered_into.as_deref() == Some(command_id)
+    }
 }
 
 /// How a prompt ended.
@@ -1457,6 +1468,18 @@ impl SessionRecord {
             .unwrap_or(&self.id)
     }
 
+    /// The name a listing shows: the display title, except that a session
+    /// the harness has not named yet and nobody renamed would otherwise be
+    /// named by its id, which every listing already prints beside it. The
+    /// title it was created with says more (launch findings F-12 and R2-8).
+    pub fn listed_title(&self) -> &str {
+        let named = self.session_title_override.is_some() || self.acp_session_title.is_some();
+        if !named && !self.title.trim().is_empty() {
+            return &self.title;
+        }
+        self.display_title()
+    }
+
     /// Project this session works in, as the session list and the chat header
     /// both name it: the source repository of a managed worktree, else the
     /// project directory, else the bundle's primary repository, else the
@@ -2024,6 +2047,22 @@ pub fn harness_session_title(events: &[SequencedEvent]) -> Option<String> {
         }?;
         normalize_session_title(title)
     })
+}
+
+/// The title a new session gets when whoever starts it gives none: the name
+/// of its project directory (or its bundle id) and the profile, such as
+/// "project via fake". The dashboard, the HTTP API, and `mj new` all use it,
+/// so a session reads the same way whichever surface started it.
+pub fn default_session_title(
+    project_directory: Option<&Path>,
+    bundle_id: &str,
+    profile_id: &str,
+) -> String {
+    let project = project_directory.and_then(Path::file_name).map_or_else(
+        || bundle_id.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    format!("{project} via {profile_id}")
 }
 
 pub fn normalize_session_title(title: &str) -> Option<String> {
