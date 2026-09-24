@@ -282,7 +282,7 @@ class PtyClient:
 
 
 class Lab:
-    def __init__(self, hel: pathlib.Path, scenario: str, seed: int):
+    def __init__(self, hel: pathlib.Path, scenario: str, seed: int, *, watchdog: bool = True):
         self.hel = hel.resolve()
         self.scenario = scenario
         self.seed = seed
@@ -301,11 +301,7 @@ class Lab:
         self.root = artifact_parent / stamp
         self.root.mkdir(mode=0o700)
         self.runtime_root = pathlib.Path(tempfile.mkdtemp(prefix=f"hel-r-{os.getpid()}-"))
-        self.config = self.runtime_root / "config"
-        self.data = self.runtime_root / "data"
-        self.profile = self.runtime_root / "profile"
-        self.project = self.runtime_root / "project"
-        self.hooks = self.runtime_root / "hooks"
+        self.set_runtime_paths()
         for directory in [self.config, self.data, self.profile, self.project, self.hooks]:
             directory.mkdir()
         self.hook_name: str | None = None
@@ -338,6 +334,63 @@ class Lab:
         self.http = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         self.base_url = ""
         self.write_trace()
+        (self.root / "lab.json").write_text(
+            json.dumps({"hel": str(self.hel), "runtime_root": str(self.runtime_root)}, indent=2) + "\n"
+        )
+        if watchdog:
+            self.arm_watchdog()
+
+    @classmethod
+    def reopen(cls, root: pathlib.Path) -> Lab:
+        """The lab whose artifacts are at `root`, as another process left it.
+
+        Nothing is created: this is for cleaning up a lab that a different
+        process prepared, such as a manual Luna lab or a driver that died.
+        """
+        saved = json.loads((root / "lab.json").read_text())
+        lab = cls.__new__(cls)
+        lab.hel = pathlib.Path(saved["hel"])
+        lab.repo_root = pathlib.Path(__file__).resolve().parents[2]
+        lab.root = root
+        lab.runtime_root = pathlib.Path(saved["runtime_root"])
+        lab.set_runtime_paths()
+        lab.hook_name = None
+        lab.trace_path = root / "trace.json"
+        lab.trace = json.loads(lab.trace_path.read_text())
+        lab.clients = []
+        lab.daemon_pid = None
+        return lab
+
+    def set_runtime_paths(self) -> None:
+        self.config = self.runtime_root / "config"
+        self.data = self.runtime_root / "data"
+        self.profile = self.runtime_root / "profile"
+        self.project = self.runtime_root / "project"
+        self.hooks = self.runtime_root / "hooks"
+
+    def arm_watchdog(self) -> None:
+        """Clean up this lab if the driver exits without doing it.
+
+        Daemons and workers detach by design, so they outlive a driver that a
+        timeout, a closed terminal, or SIGKILL stops before its own cleanup
+        runs. The watchdog holds the read end of a pipe whose only writer is
+        this process, so it reads EOF when this process exits for any reason.
+        It starts its own session and detaches like the processes it guards,
+        so signalling the driver's process group or tree does not reach it.
+        Its command line names the artifact root, never the runtime root, so
+        it is not one of the lab's owned processes.
+        """
+        read_end, self.watchdog_pipe = os.pipe()
+        with open(self.root / "watchdog.log", "ab") as log:
+            launcher = subprocess.Popen(
+                [sys.executable, "-c", WATCHDOG, str(pathlib.Path(__file__).resolve().parent), str(self.root)],
+                stdin=read_end,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+        os.close(read_end)
+        launcher.wait()
 
     @staticmethod
     def timestamp() -> str:
@@ -980,19 +1033,27 @@ pull_policy = "never"
         raise ScenarioFailure(f"daemon {self.daemon_pid} did not stop within five seconds")
 
     def cleanup_owned(self) -> None:
+        """Stop every process this run owns.
+
+        One pass is not enough: a daemon or worker that is starting or
+        shutting down can fork a detached process after the pass lists what to
+        stop. Scan again until a scan finds nothing. Give up after `TIMEOUT` and
+        leave any survivor for `leak_report` to name.
+        """
         for client in self.clients:
             client.terminate()
-        pids = self.owned_pids()
-        for pid in pids:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGTERM)
-        deadline = time.monotonic() + 2
-        while pids and time.monotonic() < deadline:
-            pids = [pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()]
-            time.sleep(0.05)
-        for pid in pids:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + TIMEOUT
+        while (pids := self.owned_pids()) and time.monotonic() < deadline:
+            for pid in pids:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGTERM)
+            grace = time.monotonic() + 2
+            while pids and time.monotonic() < grace:
+                pids = [pid for pid in pids if pathlib.Path(f"/proc/{pid}").exists()]
+                time.sleep(0.05)
+            for pid in pids:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
 
     def run(self) -> None:
         port = self.prepare()
@@ -1381,6 +1442,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--hel", required=True, type=pathlib.Path)
     return parser.parse_args()
+
+
+# Run by `Lab.arm_watchdog` as `python3 -c WATCHDOG <this directory> <artifact root>`.
+# The fork leaves the watchdog without a parent in the driver's process tree.
+WATCHDOG = """
+import os, sys
+if os.fork():
+    os._exit(0)
+sys.path.insert(0, sys.argv[1])
+import reliability_lab
+reliability_lab.watch(sys.argv[2])
+"""
+
+
+def watch(root: str) -> None:
+    """Wait for the driver to exit, then stop whatever its lab left running.
+
+    A driver that cleaned up leaves nothing owned, and the watchdog exits
+    without touching anything. Otherwise it stops the lab's processes and
+    records them in the trace. When the driver died before recording an
+    outcome, it also saves the runtime evidence and removes the runtime, as a
+    failed run does.
+    """
+    while sys.stdin.buffer.read(65536):
+        pass
+    lab = Lab.reopen(pathlib.Path(root))
+    stopped = lab.owned_processes()
+    if not stopped:
+        return
+    lab.cleanup_owned()
+    remaining = lab.leak_report()
+    abandoned = lab.trace.get("outcome") == "running"
+    if abandoned:
+        lab.trace["outcome"] = "abandoned"
+        lab.trace["failure"] = "the driver exited without cleaning up its lab"
+        lab.trace["finished_at"] = lab.timestamp()
+    lab.trace["watchdog"] = {
+        "at": lab.timestamp(),
+        "stopped": [f"{pid} ({description})" for pid, description in stopped],
+        "remaining": remaining,
+    }
+    lab.write_trace()
+    print(f"watchdog: stopped {len(stopped)} processes left by the driver", flush=True)
+    if remaining:
+        print(f"watchdog: {remaining}", flush=True)
+    elif abandoned:
+        lab.preserve_runtime()
+        lab.remove_runtime()
 
 
 def main() -> int:

@@ -20,7 +20,9 @@ def main() -> int:
     if args.fake_delay_ms < 0:
         parser.error("--fake-delay-ms must be non-negative")
 
-    lab = Lab(args.hel, "luna-manual", args.seed)
+    # The lab outlives this script by design, so it gets no watchdog;
+    # finish-luna-lab.py cleans it up when the campaign ends.
+    lab = Lab(args.hel, "luna-manual", args.seed, watchdog=False)
     port = lab.prepare(fake_acp_delay_ms=args.fake_delay_ms)
     values = {
         "MJ_CONFIG_DIR": str(lab.config),
@@ -43,6 +45,8 @@ def main() -> int:
     print(f"artifacts={lab.root}")
     print(f"runtime={lab.runtime_root}")
     print(f"source {shlex.quote(str(environment_file))}")
+    finish = pathlib.Path(__file__).resolve().parent / "finish-luna-lab.py"
+    print(f"finish: python3 {shlex.quote(str(finish))} {shlex.quote(str(lab.root))}")
     return 0
 
 
