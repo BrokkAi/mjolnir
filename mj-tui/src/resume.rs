@@ -371,11 +371,10 @@ impl ResumeDialog {
         }
     }
 
-    /// Whether the search box accepts typing. On the history tabs search is the
-    /// index's answer, so there is nothing to type into until the index can
-    /// answer. The Live tab matches names itself and can answer at once.
+    /// Searches can use already indexed sessions while a build is running.
+    /// Only an incompatible index prevents searching the history tabs.
     pub(crate) fn search_enabled(&self) -> bool {
-        self.tab == ResumeTab::Live || self.wiki_status.state == WikiIndexState::Ready
+        self.tab == ResumeTab::Live || self.wiki_status.state != WikiIndexState::VersionMismatch
     }
 
     /// What stands in the search box while it cannot be typed into.
@@ -384,8 +383,7 @@ impl ResumeDialog {
             return None;
         }
         match self.wiki_status.state {
-            WikiIndexState::Ready => None,
-            WikiIndexState::Indexing => Some("Indexing…"),
+            WikiIndexState::Ready | WikiIndexState::Indexing => None,
             WikiIndexState::VersionMismatch => Some("SessionWiki index is at a different version"),
         }
     }
@@ -1101,7 +1099,7 @@ impl DashboardState {
         // answer to a query the person has typed past leaves it running.
         dialog.wiki_pending = false;
         // The status moves even when the rows do not: a build that finished
-        // between two identical answers is what re-enables the search box.
+        // between two identical answers still updates the progress notice.
         dialog.wiki_status = page.status;
         if *dialog.wiki == page.rows {
             self.rebuild_resume_rows();
@@ -1151,8 +1149,7 @@ impl DashboardState {
     /// the index is still changing. `None` when the answer was final.
     ///
     /// Two reasons to ask again. The first build has not finished, so the
-    /// whole answer will change: poll every five seconds until it is ready,
-    /// which also re-enables the search box without reopening the dialog. Or a
+    /// answer may gain rows: poll every five seconds until it is ready. Or a
     /// top-up sync is running, so this query may gain rows: repeat it on the
     /// [`WIKI_TOP_UP_BACKOFF`] schedule for as long as the sync runs, so a long
     /// sync is followed to its end instead of leaving the pane promising rows
@@ -1916,9 +1913,7 @@ pub(crate) fn render_resume_dialog(
         search_area.width - label_width,
         search_area.height,
     );
-    // Search is the index's answer. While the index cannot answer, the box
-    // says why instead of taking text nothing would act on; the tabs and the
-    // list keep working.
+    // An incompatible index cannot answer history searches.
     if let Some(placeholder) = dialog.search_placeholder() {
         form.register(
             ResumeFocus::Search,
