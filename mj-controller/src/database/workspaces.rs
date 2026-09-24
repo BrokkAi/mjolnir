@@ -28,8 +28,7 @@ fn refuse_legacy_default_name(connection: &Connection, name_key: &str) -> Result
     )?;
     ensure!(
         !hidden,
-        "the workspace name {name_key:?} is reserved for sessions made before a workspace \
-         was required; choose another name"
+        "the workspace name {name_key:?} is reserved; choose another name"
     );
     Ok(())
 }

@@ -894,6 +894,30 @@ fn api_app_with_preferences(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    // Every local engine answers, so a test's availability does not depend on
+    // the engines the machine running it has.
+    api_app_with_engines(
+        backend,
+        adjust,
+        preferences_path,
+        Arc::new(|kind| {
+            matches!(kind, "local-podman" | "local-docker" | "apple-container")
+                .then_some(crate::controller::LocalEngineReadiness::Ready)
+        }),
+    )
+}
+
+fn api_app_with_engines(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    engine_probe: super::EngineProbe,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -928,6 +952,7 @@ fn api_app_with_preferences(
     options.shutdown = backend.shutdown.clone();
     options.set_subagent_backend(backend);
     options.set_preferences_path(preferences_path);
+    options.set_engine_probe(engine_probe);
     (router(options), action_rx, snapshot_tx, bundle_rx)
 }
 
@@ -1414,6 +1439,36 @@ async fn workspaces_are_created_by_name_idempotently_and_listed() {
     let response = app.clone().oneshot(create("   ")).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(backend.workspaces.0.lock().unwrap().len(), 1);
+}
+
+/// Launch finding R2-4: `mj workspaces create default` answered `500
+/// Internal Server Error` with a sentence about sessions made before a
+/// workspace was required. The name is the caller's mistake, so it is refused
+/// as other unusable names are, in words a new user can act on.
+#[tokio::test]
+async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/workspaces"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":" Default "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(
+        body.contains("the workspace name \\\"default\\\" is reserved; choose another name"),
+        "{body}"
+    );
+    assert!(backend.workspaces.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3316,6 +3371,68 @@ async fn options_explain_a_failed_host_without_repeating_its_probe() {
 
     assert_eq!(body["hosts"][0]["label"], "builder");
     assert_eq!(body["hosts"][0]["has_error"].as_bool(), Some(true));
+}
+
+/// F-7: on a host with no Docker engine, `mj doctor` and the dashboard's
+/// Targets pane said the built-in `docker` target was unavailable while this
+/// route said `ready`, because the local host's capacity reading answered.
+/// The route now asks the same engine check, and says the engine is missing.
+#[tokio::test]
+async fn options_mark_a_local_target_without_its_engine_unavailable() {
+    use crate::controller::LocalEngineReadiness;
+
+    let (app, _, _, _) = api_app_with_engines(
+        Arc::new(FakeBackend::default()),
+        |snapshot| {
+            snapshot.targets.push(crate::server::ViewerTarget {
+                id: "docker".into(),
+                kind: "local-docker".into(),
+                requires_project_directory: false,
+                recent_project_directories: Vec::new(),
+            });
+            snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+                id: "local".into(),
+                label: "local".into(),
+                target_ids: vec!["docker".into(), "podman".into(), "raw".into()],
+                cpu_percent: Some(20),
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                logical_cores: None,
+                disk_total_bytes: None,
+                virtual_machines: None,
+                sampled_at_epoch_seconds: Some(1),
+                refreshing: false,
+                stale: false,
+                has_error: false,
+            }];
+        },
+        absent_preferences_path(),
+        Arc::new(|kind| match kind {
+            "local-docker" => Some(LocalEngineReadiness::NotInstalled),
+            "local-podman" => Some(LocalEngineReadiness::Ready),
+            _ => None,
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    let targets = body["targets"].as_array().unwrap();
+    let target = |id: &str| targets.iter().find(|target| target["id"] == id).unwrap();
+
+    assert_eq!(target("docker")["availability"], "unavailable");
+    assert_eq!(
+        target("docker")["unavailable_reason"],
+        "Docker is not installed on this host"
+    );
+    assert_eq!(target("podman")["availability"], "ready");
+    assert_eq!(target("raw")["availability"], "ready");
 }
 
 #[tokio::test]

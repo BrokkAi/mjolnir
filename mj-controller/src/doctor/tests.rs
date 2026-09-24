@@ -1919,3 +1919,63 @@ fn a_repository_with_no_leftovers_reports_none() {
     assert!(residue.refs.is_empty());
     assert!(residue.scratch_indexes.is_empty());
 }
+
+/// R2-6: every running session's own managed clone holds
+/// `refs/hel/review-baseline`, and doctor reported each one as left in a
+/// repository Mjolnir does not own. A managed checkout is Mjolnir's working
+/// state, and a repository a live session works in has its refs in use.
+#[test]
+fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
+    use crate::controller::test_support::checkpoint_test_session;
+    use mj_core::state::{
+        ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget, SessionState,
+    };
+    use std::path::PathBuf;
+
+    let project = PathBuf::from("/srv/project");
+    let managed = |id: &str, kind: ManagedCheckoutKind, state: SessionState| {
+        let directory = match kind {
+            ManagedCheckoutKind::Clone => "clones",
+            ManagedCheckoutKind::Worktree => "worktrees",
+        };
+        let root = project.join(".mj").join(directory).join(id);
+        let mut session = checkpoint_test_session(id);
+        session.state = state;
+        session.project_directory = Some(root.clone());
+        session.managed_worktree = Some(ManagedWorktree {
+            kind,
+            source_project_directory: project.clone(),
+            source_repository: project.clone(),
+            worktree_root: root,
+            branch: format!("mj/{id}"),
+            target: ManagedWorktreeTarget::Local,
+            base_commit: None,
+        });
+        session
+    };
+    let running_clone = managed("a1", ManagedCheckoutKind::Clone, SessionState::Running);
+    let stopped_clone = managed("b2", ManagedCheckoutKind::Clone, SessionState::Stopped);
+    let mut live_bare = checkpoint_test_session("c3");
+    live_bare.project_directory = Some(PathBuf::from("/home/me/live"));
+    let mut stopped_bare = checkpoint_test_session("d4");
+    stopped_bare.state = SessionState::Stopped;
+    stopped_bare.project_directory = Some(PathBuf::from("/home/me/stopped"));
+
+    let sessions = [&running_clone, &stopped_clone, &live_bare, &stopped_bare];
+    let repositories = crate::doctor::review_residue_repositories(
+        [project.clone(), PathBuf::from("/srv/other/.mj/clones/e5/")],
+        &sessions,
+    );
+    assert_eq!(
+        repositories,
+        [PathBuf::from("/home/me/stopped"), project.clone()],
+        "only repositories a person works in by hand, and not while a live session uses them"
+    );
+
+    // A linked worktree shares its refs with the repository it came from, so
+    // a live worktree session keeps that repository out of the report.
+    let running_worktree = managed("f6", ManagedCheckoutKind::Worktree, SessionState::Running);
+    let repositories =
+        crate::doctor::review_residue_repositories([project.clone()], &[&running_worktree]);
+    assert!(repositories.is_empty(), "{repositories:?}");
+}

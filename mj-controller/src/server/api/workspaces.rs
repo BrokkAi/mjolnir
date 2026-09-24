@@ -26,12 +26,31 @@ pub(super) async fn create_workspace(
     State(state): State<ServerState>,
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<CreateWorkspaceResponse>, ApiFailure> {
-    let (name, _) = mj_core::workspace::normalize_workspace_name(&request.name)
+    let (name, name_key) = mj_core::workspace::normalize_workspace_name(&request.name)
         .map_err(|error| ApiFailure::bad_request(format!("{error:#}")))?;
+    let backend = backend(&state)?;
+    // The store keeps `default` for sessions made before a workspace was
+    // required, and refuses the name while that workspace is not listed. The
+    // name is the caller's mistake, so it is refused here like any other
+    // unusable name rather than surfacing as the store's failure (launch
+    // finding R2-4). A listed `default` holds sessions and is returned as usual.
+    if name_key == mj_core::workspace::DEFAULT_WORKSPACE_ID
+        && !backend
+            .list_workspaces()
+            .await?
+            .iter()
+            .any(|workspace| workspace.name.to_lowercase() == name_key)
+    {
+        return Err(ApiFailure::bad_request(RESERVED_WORKSPACE_NAME));
+    }
     Ok(Json(CreateWorkspaceResponse {
-        workspace: backend(&state)?.create_workspace(name).await?,
+        workspace: backend.create_workspace(name).await?,
     }))
 }
+
+/// Why the name `default` cannot be used for a new workspace.
+const RESERVED_WORKSPACE_NAME: &str =
+    "the workspace name \"default\" is reserved; choose another name";
 
 /// The workspace a new session belongs to.
 ///

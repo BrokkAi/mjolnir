@@ -590,7 +590,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
         (Some(workspace_id), _) => Some(workspace_id.clone()),
         (None, Some(name)) => Some(crate::resolve_store_workspace(Some(name)).await?),
-        (None, None) => return Err(crate::workspace_required("mj new", true).await),
+        (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
         mjolnir_subagents: None,
@@ -629,6 +629,20 @@ pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
     let named = message
         .replace("profile_id", "--profile")
         .replace("target_id", "--target");
+    if named == message {
+        return error;
+    }
+    anyhow::anyhow!(named)
+}
+
+/// Name the `mj suspend` flag where a refusal names the API field, as
+/// [`name_launch_flags`] does for `mj new` (launch finding R2-3).
+pub(crate) fn name_suspend_flags(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    let named = message.replace(
+        "acknowledge_unpublished_work=true",
+        "--acknowledge-unpublished-work",
+    );
     if named == message {
         return error;
     }
@@ -986,7 +1000,8 @@ pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     ApiClient::connect()
         .await?
         .suspend(session, args.acknowledge_unpublished_work)
-        .await?;
+        .await
+        .map_err(name_suspend_flags)?;
     if args.json {
         print_json(
             &serde_json::json!({"session_id": session, "accepted": true, "operation": "suspend"}),
@@ -1567,6 +1582,25 @@ mod tests {
             error.to_string(),
             "the Mjolnir API answered 400 Bad Request: name a --profile; this instance has no saved default to fall back on"
         );
+    }
+
+    /// R2-3: the `mj suspend` refusal told the user to "retry with
+    /// acknowledge_unpublished_work=true", the API field. The CLI's flag is
+    /// `--acknowledge-unpublished-work`.
+    #[test]
+    fn a_refused_suspend_names_the_flag_the_user_types() {
+        for (api, cli) in [
+            (
+                "the Mjolnir API answered 409 Conflict: publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
+                "the Mjolnir API answered 409 Conflict: publication status is unverified for this live clone; retry with --acknowledge-unpublished-work to suspend it",
+            ),
+            (
+                "the Mjolnir API answered 409 Conflict: the checkout has unpublished or unverified work; confirm suspension with acknowledge_unpublished_work=true",
+                "the Mjolnir API answered 409 Conflict: the checkout has unpublished or unverified work; confirm suspension with --acknowledge-unpublished-work",
+            ),
+        ] {
+            assert_eq!(name_suspend_flags(anyhow::anyhow!(api)).to_string(), cli);
+        }
     }
 
     /// F-11: a destroyed session that never took a prompt was offered

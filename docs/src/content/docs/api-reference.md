@@ -272,8 +272,10 @@ without reading `config.toml`. It never fails.
   existing Git directory (`project_directory` on create) instead of a bundle.
 - `targets[].availability` is `ready` (the last check passed), `stale` (the
   reading is old), `unavailable` (the last check failed), or `unknown` (no
-  check yet, normal just after startup). An `unavailable` target may carry
-  `unavailable_reason`, a sentence for a person.
+  check yet, normal just after startup). A local Podman, Docker, or Apple
+  container target is also `unavailable` when its engine is missing or does
+  not answer, as `mj doctor` and the dashboard report it. An `unavailable`
+  target may carry `unavailable_reason`, a sentence for a person.
 - `bundles[].repositories[].github` appears only for a repository with a
   GitHub source.
 - `hosts` has one entry per host that has reported capacity. It is omitted

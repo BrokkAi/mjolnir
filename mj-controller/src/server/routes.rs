@@ -27,6 +27,8 @@ pub(super) struct ServerState {
     /// Where the remembered fast-start preferences live, so a handler can
     /// report the saved default without reading the process environment.
     pub(super) preferences_path: PathBuf,
+    /// Local container engine checks for the launch options route.
+    pub(super) engine_checks: Arc<api::LocalEngineChecks>,
 }
 
 /// Online-guessing defence for the deliberately small viewer code.
@@ -105,6 +107,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         api_token: options.api_token.into(),
         subagent: options.subagent,
         preferences_path: options.preferences_path,
+        engine_checks: options.engine_checks,
     };
     let protected = Router::new()
         .route("/api/snapshot", get(snapshot))

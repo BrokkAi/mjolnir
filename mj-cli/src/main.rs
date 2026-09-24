@@ -556,7 +556,7 @@ async fn run_command(
             .map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
-                return Err(workspace_required("mj acp", false).await);
+                return Err(workspace_required("mj acp").await);
             };
             let workspace = Some(workspace);
             acp::serve(args, workspace)
@@ -1042,7 +1042,12 @@ async fn run_workspace_dashboard(
                 candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
             })
             .map(|candidate| candidate.workspace.id.clone())
-            .with_context(|| format!("unknown workspace {requested:?}"))?
+            .ok_or_else(|| {
+                unknown_workspace(
+                    requested,
+                    workspaces.iter().map(|candidate| &candidate.workspace),
+                )
+            })?
     } else if let Some(workspace) = workspaces.first() {
         // The database orders workspaces by most recent opening.
         workspace.workspace.id.clone()
@@ -1104,7 +1109,12 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
                 candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
             })
             .map(|candidate| candidate.workspace.id.clone())
-            .with_context(|| format!("unknown workspace {requested:?}"));
+            .ok_or_else(|| {
+                unknown_workspace(
+                    requested,
+                    workspaces.iter().map(|candidate| &candidate.workspace),
+                )
+            });
     }
     match workspaces.as_slice() {
         [workspace] => Ok(workspace.workspace.id.clone()),
@@ -1117,37 +1127,97 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
 ///
 /// There is no hidden workspace to fall back on: every session lives in one
 /// the dashboard and the viewer list, so the command has to name it (launch
-/// finding H-3). The refusal lists what exists, from the daemon, and how to
-/// make one. A daemon that cannot be reached leaves the list out rather than
-/// hiding the reason. `start_daemon` is false for `mj acp`, which must never
-/// start a daemon before a client has asked it for a session.
-pub(crate) async fn workspace_required(command: &str, start_daemon: bool) -> anyhow::Error {
-    let connected = if start_daemon {
-        daemon::connect_or_start().await
-    } else {
-        daemon::connect_existing().await
-    };
-    let workspaces = match connected {
-        Ok(mut daemon) => daemon.list_workspaces().await.map_err(|error| {
-            tracing::warn!(%error, "could not list workspaces for the refusal");
-        }),
+/// finding H-3). The refusal lists what exists and how to make one.
+///
+/// It never starts a daemon: starting one only to refuse cost `mj new` more
+/// than a second (launch finding R2-14), and `mj acp` must not start one
+/// before a client has asked it for a session. A running daemon supplies the
+/// list; without one the list is read from the store, and a store that does
+/// not exist yet has none. A list that cannot be read is left out rather than
+/// hiding the reason.
+pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
+    let workspaces = match daemon::connect_existing().await {
+        Ok(mut daemon) => daemon
+            .list_workspaces()
+            .await
+            .map(|workspaces| {
+                workspaces
+                    .into_iter()
+                    .map(|listing| listing.workspace)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| {
+                tracing::warn!(%error, "could not list workspaces for the refusal");
+            })
+            .ok(),
+        Err(error) if daemon::daemon_not_running(&error).is_some() => {
+            tokio::task::spawn_blocking(stored_workspaces)
+                .await
+                .ok()
+                .flatten()
+        }
         Err(error) => {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
-            Err(())
+            None
         }
     };
-    let workspaces = workspaces.ok().map(|workspaces| {
+    let workspaces = workspaces.map(|workspaces| {
         workspaces
             .into_iter()
-            .map(|listing| (listing.workspace.name, listing.workspace.session_count))
+            .map(|workspace| (workspace.name, workspace.session_count))
             .collect::<Vec<_>>()
     });
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
+/// The workspaces in the store, read without a daemon. A store that does not
+/// exist yet has none; one that cannot be read answers `None`.
+fn stored_workspaces() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    if !mj_controller::database::database_path().exists() {
+        return Some(Vec::new());
+    }
+    mj_controller::database::list_workspaces()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the workspaces from the store");
+        })
+        .ok()
+}
+
 fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {
     let mut message =
         format!("{command} needs --workspace NAME: every session lives in a workspace");
+    push_workspace_list(&mut message, workspaces);
+    message
+}
+
+/// The refusal for a `--workspace` name no workspace carries: the daemon's
+/// workspaces and how to make one, as [`workspace_required_message`] gives
+/// them (launch finding R2-5).
+pub(crate) fn unknown_workspace_message(
+    name: &str,
+    workspaces: Option<&[(String, u64)]>,
+) -> String {
+    let mut message = format!("unknown workspace {name:?}");
+    push_workspace_list(&mut message, workspaces);
+    message
+}
+
+/// The same refusal from a daemon's workspace listing.
+pub(crate) fn unknown_workspace<'a>(
+    name: &str,
+    workspaces: impl IntoIterator<Item = &'a mj_core::workspace::WorkspaceRecord>,
+) -> anyhow::Error {
+    let listed = workspaces
+        .into_iter()
+        .map(|workspace| (workspace.name.clone(), workspace.session_count))
+        .collect::<Vec<_>>();
+    anyhow::anyhow!(unknown_workspace_message(name, Some(&listed)))
+}
+
+/// Append the listed workspaces with their session counts, or say there are
+/// none, and end with how to make one. `None` means the list could not be
+/// read, so only the hint is added.
+fn push_workspace_list(message: &mut String, workspaces: Option<&[(String, u64)]>) {
     match workspaces {
         Some([]) => message.push_str("; this instance has none yet"),
         Some(workspaces) => {
@@ -1164,7 +1234,6 @@ fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]
         None => {}
     }
     message.push_str("\nCreate one with `mj workspaces create NAME`.");
-    message
 }
 
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
@@ -1841,6 +1910,27 @@ mod tests {
 
         let message = workspace_required_message("mj acp", None);
         assert!(message.contains("mj workspaces create NAME"), "{message}");
+    }
+
+    /// R2-5: `mj new --workspace nosuch` said only `unknown workspace
+    /// "nosuch"`. It now lists what exists and how to make one, in the shape
+    /// the missing-flag refusal uses.
+    #[test]
+    fn an_unknown_workspace_is_refused_with_the_workspaces_and_how_to_make_one() {
+        let listed = [("beta".to_owned(), 0), ("alpha".to_owned(), 1)];
+        let message = unknown_workspace_message("nosuch", Some(&listed));
+        assert_eq!(
+            message,
+            "unknown workspace \"nosuch\". Workspaces:\n  beta  (0 sessions)\n  alpha  (1 session)\n\
+             Create one with `mj workspaces create NAME`."
+        );
+
+        let message = unknown_workspace_message("nosuch", Some(&[]));
+        assert_eq!(
+            message,
+            "unknown workspace \"nosuch\"; this instance has none yet\n\
+             Create one with `mj workspaces create NAME`."
+        );
     }
 
     /// F-16: `--workspace` was global, so every command's help offered it.

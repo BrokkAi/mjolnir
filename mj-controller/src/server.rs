@@ -199,6 +199,10 @@ pub struct ServerOptions {
     /// documented API answers from its own state and tests never read the
     /// developer's real configuration.
     preferences_path: PathBuf,
+    /// Checks the engine behind each local container target for the launch
+    /// options route. Tests replace it so the answer does not depend on the
+    /// engines the test host has.
+    engine_checks: Arc<api::LocalEngineChecks>,
 }
 
 /// Typed request channels served by the authenticated HTTP surface.
@@ -245,6 +249,7 @@ impl ServerOptions {
             api_token: String::new(),
             subagent: None,
             preferences_path: mj_core::go::GoPreferences::path(),
+            engine_checks: Arc::new(api::LocalEngineChecks::on_this_host()),
         })
     }
 
@@ -313,6 +318,12 @@ impl ServerOptions {
     /// of the user's own. Tests point this at a temporary path.
     pub fn set_preferences_path(&mut self, path: PathBuf) {
         self.preferences_path = path;
+    }
+
+    /// Answer local engine checks with `probe` instead of this host's engines.
+    #[cfg(test)]
+    fn set_engine_probe(&mut self, probe: api::EngineProbe) {
+        self.engine_checks = Arc::new(api::LocalEngineChecks::new(probe));
     }
 
     #[cfg(test)]

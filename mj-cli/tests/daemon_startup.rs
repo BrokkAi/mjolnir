@@ -584,3 +584,34 @@ image = "ubuntu:24.04"
     assert!(!data.join("daemon.json").exists());
     drop(storage);
 }
+
+/// Launch finding R2-14: `mj new` without `--workspace` started the daemon
+/// (1.6 s) only to refuse, while `mj acp` refused without starting one. With
+/// no daemon running it now refuses at once, still says the instance has no
+/// workspace yet, and leaves no daemon behind.
+#[test]
+fn new_without_a_workspace_refuses_without_starting_a_daemon() {
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let project = storage.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    let output = common::own_test_daemons(&mut command)
+        .args(["new", "--profile", "fake", "--project-directory"])
+        .arg(&project)
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", storage.path().join("config"))
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("mj new needs --workspace NAME"), "{stderr}");
+    assert!(stderr.contains("this instance has none yet"), "{stderr}");
+    assert!(stderr.contains("mj workspaces create NAME"), "{stderr}");
+    assert!(
+        !data.join("daemon.json").exists(),
+        "refusing must not start the daemon"
+    );
+}

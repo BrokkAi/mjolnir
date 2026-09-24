@@ -111,6 +111,9 @@ pub use routes::*;
 mod config;
 pub(crate) use config::*;
 mod options;
+#[cfg(test)]
+pub(crate) use options::EngineProbe;
+pub(crate) use options::LocalEngineChecks;
 use options::*;
 mod sessions;
 use sessions::*;

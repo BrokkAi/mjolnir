@@ -431,6 +431,58 @@ pub(super) fn preflight_target(
     }
 }
 
+/// Whether a local container engine can run sessions, as the launch
+/// preflight and the dashboard's Targets pane judge it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalEngineReadiness {
+    Ready,
+    /// The engine's command is not on this host.
+    NotInstalled,
+    /// The command is there, but the engine did not answer its check.
+    NotReady,
+}
+
+/// Run the launch preflight's engine check for a local container target
+/// kind (`local-podman`, `local-docker`, or `apple-container`).
+///
+/// Answers `None` for any other kind: their readiness is not a local engine's.
+pub(crate) fn local_engine_readiness(
+    kind: &str,
+    executor: &impl CommandExecutor,
+) -> Option<LocalEngineReadiness> {
+    let result = match kind {
+        "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
+        "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
+        // The same command `verify_target` runs, without its sentence, which
+        // flattens the cause this needs to tell a missing command apart.
+        "apple-container" => executor
+            .execute(
+                &CommandSpec::new("container", ["system", "status"])
+                    .purpose("preflight Apple container runtime")
+                    .stage(ProvisionStage::Provisioning),
+            )
+            .and_then(|output| {
+                ensure!(output.status == 0, "container system status failed");
+                Ok(())
+            }),
+        _ => return None,
+    };
+    Some(match result {
+        Ok(()) => LocalEngineReadiness::Ready,
+        Err(error) if is_missing_command(&error) => LocalEngineReadiness::NotInstalled,
+        Err(_) => LocalEngineReadiness::NotReady,
+    })
+}
+
+/// Whether a command failed because its program is not installed.
+fn is_missing_command(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// Check that a target's host and runtime can run sessions.
 pub(super) fn verify_target(
     template: &TargetTemplate,
