@@ -6,6 +6,7 @@
 //! so the dialog can jump straight to one.
 
 use super::{pointer, row_label, row_summary, schema, visible_keys};
+use crate::widgets::counted;
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -85,9 +86,9 @@ fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String>
     }
     let count = visible_keys(path, value).len();
     Some(if value.is_array() {
-        format!("{count} entries  \u{203a}")
+        format!("{}  \u{203a}", counted(count, "entry", "entries"))
     } else {
-        format!("{count} settings  \u{203a}")
+        format!("{}  \u{203a}", counted(count, "setting", "settings"))
     })
 }
 

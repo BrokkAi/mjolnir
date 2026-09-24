@@ -456,7 +456,14 @@ pub(crate) fn render_new_wizard(
                 .into_iter()
                 .map(|id| {
                     let bundle = &dashboard.config.bundles[id];
-                    PickerChoice::text(format!("{id}  {} repositories", bundle.repositories.len()))
+                    PickerChoice::text(format!(
+                        "{id}  {}",
+                        crate::widgets::counted(
+                            bundle.repositories.len(),
+                            "repository",
+                            "repositories"
+                        )
+                    ))
                 })
                 .collect(),
             wizard.bundle,
@@ -918,9 +925,9 @@ pub(crate) fn render_review_wizard(
             frame,
             queue_area,
             &format!(
-                "{} {count} queued command{} {}",
+                "{} {} {}",
                 if discard { "Discard" } else { "Start" },
-                if count == 1 { "" } else { "s" },
+                crate::widgets::counted(count, "queued command", "queued commands"),
                 if moving { "after move" } else { "on resume" },
             ),
             discard,

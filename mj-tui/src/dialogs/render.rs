@@ -582,9 +582,8 @@ pub(crate) fn render_changed_files(
                 Span::styled(branch, theme::title(true)),
                 Span::styled(
                     format!(
-                        "   {} file{} · +{added} −{removed}",
-                        status.changed.len(),
-                        if status.changed.len() == 1 { "" } else { "s" }
+                        "   {} · +{added} −{removed}",
+                        crate::widgets::counted(status.changed.len(), "file", "files")
                     ),
                     theme::muted(),
                 ),

@@ -655,7 +655,10 @@ pub(crate) fn render_palette(
     if !palette.session_only {
         outer = outer.title(
             Line::styled(
-                format!(" {} commands ", palette.entries.len()),
+                format!(
+                    " {} ",
+                    crate::widgets::counted(palette.entries.len(), "command", "commands")
+                ),
                 theme::muted(),
             )
             .right_aligned(),

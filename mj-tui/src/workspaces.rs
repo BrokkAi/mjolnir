@@ -1370,22 +1370,14 @@ fn render_manager_list(
                 } else {
                     ""
                 };
-            let sessions = format!(
-                "{} session{}",
-                entry.workspace.session_count,
-                if entry.workspace.session_count == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            );
+            let sessions =
+                crate::widgets::counted(entry.workspace.session_count, "session", "sessions");
             let drafts = if entry.drafts.is_empty() {
                 String::new()
             } else {
                 format!(
-                    "  {} draft{}",
-                    entry.drafts.len(),
-                    if entry.drafts.len() == 1 { "" } else { "s" }
+                    "  {}",
+                    crate::widgets::counted(entry.drafts.len(), "draft", "drafts")
                 )
             };
             Line::from(format!(
@@ -1477,9 +1469,9 @@ fn render_manager_delete(
         .split(body_area);
     let explanation = if destructive {
         format!(
-            "Deleting {workspace_name:?} destroys {session_count} session{} and discards {draft_count} draft{}.",
-            if session_count == 1 { "" } else { "s" },
-            if draft_count == 1 { "" } else { "s" },
+            "Deleting {workspace_name:?} destroys {} and discards {}.",
+            crate::widgets::counted(session_count, "session", "sessions"),
+            crate::widgets::counted(draft_count, "draft", "drafts"),
         )
     } else {
         format!("Delete empty workspace {workspace_name:?}?")

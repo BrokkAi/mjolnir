@@ -2,6 +2,7 @@
 mod schema;
 mod search;
 
+use crate::widgets::counted;
 use crate::{
     DashboardAction, DashboardState, Mode,
     modal_surface::ModalSurface,
@@ -588,8 +589,10 @@ fn value_summary(
             let selected = entries.values().filter(|value| **value == true).count();
             format!("{selected} of {} selected  ›", entries.len())
         }
-        Value::Object(entries) => format!("{} settings  ›", entries.len()),
-        Value::Array(entries) => format!("{} entries  ›", entries.len()),
+        Value::Object(entries) => {
+            format!("{}  ›", counted(entries.len(), "setting", "settings"))
+        }
+        Value::Array(entries) => format!("{}  ›", counted(entries.len(), "entry", "entries")),
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.
@@ -2787,7 +2790,7 @@ fn render_search(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDial
     frame.render_widget(
         theme::modal().title(title).title(
             Line::styled(
-                format!(" {} settings ", search.matches.len()),
+                format!(" {} ", counted(search.matches.len(), "setting", "settings")),
                 theme::muted(),
             )
             .right_aligned(),

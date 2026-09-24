@@ -592,8 +592,10 @@ where
 }
 
 fn relative_time(value: i64, unit: &str) -> String {
-    let plural = if value == 1 { "" } else { "s" };
-    format!("{value} {unit}{plural} ago")
+    format!(
+        "{} ago",
+        crate::widgets::counted(value, unit, &format!("{unit}s"))
+    )
 }
 
 /// Merge Hel's non-live records with the scanned native sessions into one list,
@@ -2339,7 +2341,7 @@ fn resume_list_title(
 
 /// How many rows the query matched, counted in the reader's own grammar.
 fn match_count(rows: usize) -> String {
-    format!("{rows} match{}", if rows == 1 { "" } else { "es" })
+    crate::widgets::counted(rows, "match", "matches")
 }
 
 /// What an empty list says while a query is running: where the query's hits
@@ -2379,8 +2381,10 @@ fn hit_role_label(role: &str) -> Option<(&'static str, Color)> {
 }
 
 fn omitted_marker(messages: usize) -> String {
-    let plural = if messages == 1 { "message" } else { "messages" };
-    format!("*[… {messages} {plural} omitted …]*")
+    format!(
+        "*[… {} omitted …]*",
+        crate::widgets::counted(messages, "message", "messages")
+    )
 }
 
 /// One matching message as lines of spans, with the matched ranges styled and

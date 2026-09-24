@@ -448,7 +448,7 @@ fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
         .unwrap();
     let lines = buffer_lines(terminal.backend().buffer());
     let list = lines.join("\n");
-    assert!(list.contains("hel  1 repositories"), "{list}");
+    assert!(list.contains("hel  1 repository"), "{list}");
     let action_row = lines
         .iter()
         .find(|line| line.contains("New bundle…"))
@@ -3506,6 +3506,28 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(text.contains("unavailable: service is stopped"), "{text}");
+    // Launch finding C-10: a reason too long for the row ends in an ellipsis
+    // rather than stopping mid-word at the border.
+    dashboard.apply_target_readiness(
+        generation,
+        "podman".into(),
+        Err(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?"
+                .into(),
+        ),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let row = lines
+        .iter()
+        .find(|line| line.contains("unavailable: Cannot"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(row.contains('…'), "{row}");
+    assert!(!row.contains("daemon running?"), "{row}");
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
     chord(&mut dashboard, crate::CommandId::Refresh);
