@@ -9,7 +9,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use super::io::{DashboardIoUpdate, report};
 
-const DEBOUNCE: Duration = Duration::from_millis(400);
+const DEBOUNCE: Duration = Duration::from_millis(200);
 const DEADLINE: Duration = Duration::from_secs(10);
 const HOSTED: &str = "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/help-search";
 const DIRECT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -148,7 +148,7 @@ mod tests {
             Ok(HelpSearchResponse { scores: vec![] })
         });
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(399)).await;
+        tokio::time::advance(Duration::from_millis(199)).await;
         assert!(rx.try_recv().is_err());
         drop(task);
         tokio::time::advance(Duration::from_secs(1)).await;
