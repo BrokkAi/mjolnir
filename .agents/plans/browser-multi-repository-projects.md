@@ -15,7 +15,7 @@ The browser must offer the terminal's optional ability to open several repositor
 - [x] (2026-09-24) Implemented ordered multi-source requests through the existing supervised controller jobs; all four endpoint tests passed.
 - [x] (2026-09-24) Implemented the optional repository list, removal, primary labeling, duplicate feedback, and draft preservation; updated documentation. All 26 focused browser scenarios passed.
 - [x] (2026-09-24) Reviewed the diff; formatting and whitespace checks passed. Full browser suite passed (45 unit tests, 98 interaction tests, 3 existing skips). The user requested a PR and delegated final full Rust tests and Clippy to CI.
-- [ ] Commit task changes and publish the requested PR, leaving CI running.
+- [x] (2026-09-24) Committed browser support as `efda8a7f` and published PR #1145: https://github.com/BrokkAi/mjolnir/pull/1145. CI owns the remaining validation; no merge was requested.
 
 ## Surprises & Discoveries
 
@@ -89,3 +89,5 @@ Keep POST `/api/bundles` accepting `{source: string}` and also accept `{sources:
 Revision 2026-09-24: Created this plan for the user's request to make browser multi-repository creation available.
 
 Revision 2026-09-24: Recorded completed implementation and validation. The user requested immediate PR publication and delegated remaining checks to CI.
+
+Revision 2026-09-24: Recorded publication of PR #1145 and completed the implementation handoff to CI.
