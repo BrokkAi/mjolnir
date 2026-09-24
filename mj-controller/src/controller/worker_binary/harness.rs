@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -54,6 +55,10 @@ pub(in crate::controller) fn bridge_readiness_stage(profile: &HarnessProfile) ->
     ProvisionStage::Installing(profile.kind)
 }
 
+/// The Kimi and Grok fallbacks install the pinned release before starting
+/// the ACP server. The installer writes progress on stdout, which is the ACP
+/// stream, so its stdout goes to stderr, where the worker keeps the bridge's
+/// diagnostics (#1136).
 pub(in crate::controller) fn bridge_launch(
     harness: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
@@ -64,21 +69,29 @@ pub(in crate::controller) fn bridge_launch(
             "sh".into(),
             vec![
                 "-c".into(),
-                format!("if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y {CODEX_ACP_PACKAGE}@{CODEX_ACP_VERSION}", ensure_node_script()),
+                format!(
+                    "if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y {CODEX_ACP_PACKAGE}@{CODEX_ACP_VERSION}",
+                    ensure_node_script()
+                ),
             ],
         ),
         mj_core::config::HarnessKind::Claude => (
             "sh".into(),
             vec![
                 "-c".into(),
-                format!("if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {}; exec npx -y @agentclientprotocol/claude-agent-acp@{CLAUDE_ACP_VERSION}", ensure_node_script()),
+                format!(
+                    "if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {}; exec npx -y @agentclientprotocol/claude-agent-acp@{CLAUDE_ACP_VERSION}",
+                    ensure_node_script()
+                ),
             ],
         ),
         mj_core::config::HarnessKind::Kimi => (
             "sh".into(),
             vec![
                 "-c".into(),
-                "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; add the tool to PATH' >&2; exit 127; fi".into(),
+                format!(
+                    "if command -v kimi >/dev/null 2>&1; then exec kimi acp; elif [ -x \"$HOME/.kimi-code/bin/kimi\" ]; then exec \"$HOME/.kimi-code/bin/kimi\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://code.kimi.com/kimi-code/install.sh | KIMI_VERSION={KIMI_VERSION} bash >&2 && exec \"$HOME/.kimi-code/bin/kimi\" acp; else echo 'Mjolnir needs compatible Kimi Code or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
+                ),
             ],
         ),
         mj_core::config::HarnessKind::Grok => {
@@ -90,7 +103,7 @@ pub(in crate::controller) fn bridge_launch(
                 vec![
                     "-c".into(),
                     format!(
-                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
+                        "if command -v grok >/dev/null 2>&1; then exec grok {acp}; elif [ -x \"$GROK_HOME/bin/grok\" ]; then exec \"$GROK_HOME/bin/grok\" {acp}; elif [ -x \"$HOME/.grok/bin/grok\" ]; then exec \"$HOME/.grok/bin/grok\" {acp}; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://x.ai/cli/install.sh | bash -s {GROK_VERSION} >&2 && exec \"$HOME/.grok/bin/grok\" {acp}; else echo 'Mjolnir needs compatible Grok Build or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
                     ),
                 ],
             )

@@ -1543,10 +1543,95 @@ fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
     );
     assert_eq!(command, "sh");
     assert_eq!(arguments[0], "-c");
-    assert!(arguments[1].contains("install.sh | bash &&"));
+    assert!(arguments[1].contains(&format!(
+        "install.sh | KIMI_VERSION={} bash >&2 &&",
+        mj_core::harness_runtime::KIMI_VERSION
+    )));
     assert!(arguments[1].contains("$HOME/.kimi-code/bin/kimi"));
     assert!(arguments[1].contains("Mjolnir needs compatible Kimi Code"));
     assert!(!arguments[1].contains("Hel"));
+}
+
+/// Runs a default bridge script with no harness installed, a fake `curl`
+/// that serves `installer`, and nothing else from the host's harnesses on
+/// PATH. Returns the script's stdout and stderr.
+#[cfg(unix)]
+fn run_default_bridge_install(
+    harness: mj_core::config::HarnessKind,
+    installer: &str,
+) -> (String, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let curl = bin.join("curl");
+    std::fs::write(
+        &curl,
+        format!("#!/bin/sh\ncat <<'INSTALLER'\n{installer}\nINSTALLER\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (command, arguments) = bridge_launch(harness, ExecutionPolicy::ConfiguredApprovals);
+    let mut process = std::process::Command::new(command);
+    process
+        .args(arguments)
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    let output = mj_core::subprocess::run_with_input(&mut process, &[]).unwrap();
+    assert!(output.status.success(), "bridge script failed: {output:?}");
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// A Kimi launcher's installer lines on stdout reached the ACP transport and
+/// broke initialize (#1136). The installer's output goes to stderr, which the
+/// worker keeps, and the ACP server starts with a clean stdout.
+#[cfg(unix)]
+#[test]
+fn kimi_default_bridge_sends_installer_output_to_stderr() {
+    let (stdout, stderr) = run_default_bridge_install(
+        mj_core::config::HarnessKind::Kimi,
+        r#"echo "==> Detected target: linux-x64"
+echo "==> Installing $KIMI_VERSION"
+mkdir -p "$HOME/.kimi-code/bin"
+printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.kimi-code/bin/kimi"
+chmod +x "$HOME/.kimi-code/bin/kimi""#,
+    );
+    assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"acp\"}\n");
+    assert!(
+        stderr.contains("==> Detected target: linux-x64"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "==> Installing {}",
+            mj_core::harness_runtime::KIMI_VERSION
+        )),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn grok_default_bridge_sends_installer_output_to_stderr() {
+    let (stdout, stderr) = run_default_bridge_install(
+        mj_core::config::HarnessKind::Grok,
+        r#"echo "==> Installing $1"
+mkdir -p "$HOME/.grok/bin"
+printf '#!/bin/sh\necho "{\\"jsonrpc\\":\\"2.0\\",\\"args\\":\\"$*\\"}"\n' > "$HOME/.grok/bin/grok"
+chmod +x "$HOME/.grok/bin/grok""#,
+    );
+    assert_eq!(stdout, "{\"jsonrpc\":\"2.0\",\"args\":\"agent stdio\"}\n");
+    assert!(
+        stderr.contains(&format!(
+            "==> Installing {}",
+            mj_core::harness_runtime::GROK_VERSION
+        )),
+        "{stderr}"
+    );
 }
 #[test]
 fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
@@ -1557,7 +1642,10 @@ fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
     assert_eq!(command, "sh");
     assert_eq!(arguments[0], "-c");
     let script = &arguments[1];
-    assert!(script.contains("https://x.ai/cli/install.sh | bash &&"));
+    assert!(script.contains(&format!(
+        "https://x.ai/cli/install.sh | bash -s {} >&2 &&",
+        mj_core::harness_runtime::GROK_VERSION
+    )));
     assert!(script.contains("command -v grok"));
     assert!(script.contains("[ -x \"$GROK_HOME/bin/grok\" ]"));
     assert!(script.contains("[ -x \"$HOME/.grok/bin/grok\" ]"));
