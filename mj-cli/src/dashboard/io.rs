@@ -93,6 +93,12 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<PreparedMaterializedSessionSummary, String>,
     },
+    /// The stored tail of a stopped sub-agent's conversation, which is read
+    /// rather than attached to.
+    StoppedSubagentTranscript {
+        session_id: String,
+        result: std::result::Result<Option<MaterializedSession>, String>,
+    },
     ProjectSource {
         session_id: String,
         result: std::result::Result<ProjectSourceIdentity, String>,
@@ -662,6 +668,10 @@ impl DashboardContext {
                     .get(&materialized.session_id)
                     .map_or(0, |session| session.viewed_through_event_ordinal);
                 self.request_materialized_projection(*materialized, viewed_through_event_ordinal);
+            }
+            DashboardIoUpdate::StoppedSubagentTranscript { session_id, result } => {
+                self.dashboard
+                    .set_stopped_subagent_transcript(&session_id, result);
             }
             DashboardIoUpdate::StoredSessionSummary { session_id, result } => {
                 match result {

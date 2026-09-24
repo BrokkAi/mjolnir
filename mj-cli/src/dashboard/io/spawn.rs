@@ -822,6 +822,30 @@ pub(crate) fn spawn_materialized_session_projection(
     });
 }
 
+/// Load the stored tail of a stopped sub-agent's conversation: as much as a
+/// live chat keeps, off the event loop.
+pub(crate) fn spawn_stopped_subagent_transcript(
+    session_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    let reported_session_id = session_id.clone();
+    spawn_io(
+        "load a stopped sub-agent's transcript",
+        updates,
+        move || {
+            Ok(mj_controller::database::load_materialized_projection_tail(
+                &session_id,
+                mj_chat::chat::TAIL_SEED_ITEMS,
+            )?
+            .map(|(session, _)| session))
+        },
+        move |result| DashboardIoUpdate::StoppedSubagentTranscript {
+            session_id: reported_session_id,
+            result,
+        },
+    );
+}
+
 pub(crate) fn spawn_stored_session_summary(
     session_id: String,
     viewed_through_event_ordinal: u64,

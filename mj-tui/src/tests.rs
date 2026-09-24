@@ -1650,6 +1650,98 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
 }
 
+/// A stopped Mjolnir sub-agent has no worker to attach to. Found live: its
+/// conversation sat on "Bringing your conversation into focus" until the
+/// attach timed out, and the work it did could not be read. It opens as a
+/// read-only view of its stored transcript instead.
+#[test]
+fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
+    let mut parent = stopped_session();
+    parent.id = "parent-session".into();
+    parent.state = SessionState::Running;
+    let mut child = stopped_session();
+    child.id = "child-session".into();
+    child.session_title_override = Some("Inspect parser".into());
+    child.state = SessionState::Stopped;
+    let relation = mj_core::subagent::SubagentRecord {
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        initial_prompt: "Inspect the parser".into(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        handback_tool: true,
+    };
+    let mut dashboard = DashboardState::new(
+        config(),
+        State {
+            subagents: BTreeMap::from([(child.id.clone(), relation)]),
+            version: STATE_VERSION,
+            sessions: BTreeMap::from([
+                (parent.id.clone(), parent.clone()),
+                (child.id.clone(), child.clone()),
+            ]),
+            mount_history: BTreeMap::new(),
+            container_sizes: BTreeMap::new(),
+        },
+        BTreeMap::new(),
+    );
+    assert!(dashboard.is_stopped_subagent(&child.id));
+    assert!(!dashboard.is_stopped_subagent(&parent.id));
+
+    dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(
+        dashboard.open_selected_session(),
+        DashboardAction::Open {
+            session_id: child.id.clone()
+        },
+        "Enter reads a stopped child rather than offering to resume it"
+    );
+    assert!(
+        dashboard.begin_stopped_subagent(&child.id),
+        "first open loads it"
+    );
+    assert!(
+        !dashboard.begin_stopped_subagent(&child.id),
+        "a second open does not load it again"
+    );
+
+    let draw = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let transcript = ratatui::layout::Rect::new(0, 0, area.width, 12);
+                let prompt = ratatui::layout::Rect::new(0, 12, area.width, 4);
+                dashboard.render_stopped_subagent(frame, "child-session", transcript, prompt);
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    };
+    assert!(draw(&mut dashboard).contains("Loading this sub-agent"));
+
+    let mut stored = mj_core::state::MaterializedSession::empty(child.id.clone());
+    stored.transcript = vec![crate::test_support::agent_message(
+        3,
+        "Handed back: the parser drops trailing commas.",
+    )];
+    dashboard.set_stopped_subagent_transcript(&child.id, Ok(Some(stored)));
+    let screen = draw(&mut dashboard);
+    assert!(screen.contains("Inspect parser · stopped"), "{screen}");
+    assert!(screen.contains("parser drops trailing commas"), "{screen}");
+    assert!(screen.contains("read-only"), "{screen}");
+
+    // A failed read says why and loads again on the next open.
+    dashboard.set_stopped_subagent_transcript(&child.id, Err("store is busy".into()));
+    assert!(draw(&mut dashboard).contains("store is busy"));
+    assert!(dashboard.begin_stopped_subagent(&child.id));
+}
+
 /// A daemon-created child that arrives through a later runtime snapshot,
 /// rather than through a full `Controller::load()`, must still hide from
 /// the parent's real workspace. This is the contract the dashboard's

@@ -136,6 +136,20 @@ impl DashboardContext {
             self.dashboard.set_pane_session(pane, Some(session_id));
             return;
         }
+        // A stopped sub-agent has no worker to attach to, and an attach would
+        // wait out its timeout and leave the pane empty. Its conversation is
+        // stored, so read that instead.
+        if self.dashboard.is_stopped_subagent(session_id) {
+            self.cancel_chat_open_in(pane);
+            self.dashboard.set_pane_session(pane, Some(session_id));
+            if self.dashboard.begin_stopped_subagent(session_id) {
+                spawn_stopped_subagent_transcript(
+                    session_id.to_owned(),
+                    self.dashboard_io_tx.clone(),
+                );
+            }
+            return;
+        }
         self.capture_composer_draft(session_id);
         self.attachments.entry(pane).or_default().select(session_id);
         self.save_question_draft(session_id);
