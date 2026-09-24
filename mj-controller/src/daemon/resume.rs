@@ -432,6 +432,9 @@ impl RuntimeState {
         branch: BranchDisposition,
         checkout: CheckoutDisposition,
     ) -> Result<Option<PathBuf>> {
+        // This indexes the sub-agents too, so they are destroyed below
+        // without indexing each one again.
+        self.index_before_destroy(&session_id).await;
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -445,7 +448,7 @@ impl RuntimeState {
         for child_id in children {
             // A sub-agent borrows its parent's worker and never owns a managed
             // worktree, so it has no branch of its own to keep.
-            Box::pin(self.force_destroy_session(child_id.clone(), BranchDisposition::Keep))
+            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
                 .await
                 .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
@@ -489,6 +492,39 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         Ok(kept)
+    }
+
+    /// Put a session about to be destroyed, and its sub-agents, into
+    /// SessionWiki while their records and stored conversations still exist,
+    /// so `mj sessions --session <id>` still finds them afterwards (R2-11).
+    ///
+    /// Waits at most [`crate::sessionwiki::DESTROY_SYNC_WAIT`] for a sync
+    /// pass, then indexes the sessions on their own. A destroy is never
+    /// refused for this: when the index cannot take the sessions, the log
+    /// says why and the destroy goes ahead.
+    async fn index_before_destroy(self: &Arc<Self>, session_id: &str) {
+        use crate::sessionwiki::IndexedBeforeDestroy;
+        let outcome = self
+            .wiki()
+            .index_before_destroy(session_id, crate::sessionwiki::DESTROY_SYNC_WAIT)
+            .await;
+        match outcome {
+            IndexedBeforeDestroy::Unavailable(reason) => tracing::info!(
+                %session_id,
+                reason,
+                "destroying a session without indexing it in SessionWiki"
+            ),
+            IndexedBeforeDestroy::Failed(reason) => tracing::warn!(
+                %session_id,
+                %reason,
+                "could not index a session in SessionWiki before destroying it"
+            ),
+            outcome => tracing::debug!(
+                %session_id,
+                ?outcome,
+                "indexed a session in SessionWiki before destroying it"
+            ),
+        }
     }
 
     /// Cancel any in-flight lifecycle for `session_id` and wait for it to
@@ -549,6 +585,17 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
+        self.index_before_destroy(&session_id).await;
+        self.force_destroy_indexed_session(session_id, branch).await
+    }
+
+    /// [`Self::force_destroy_session`] once the session and its sub-agents
+    /// have been indexed.
+    async fn force_destroy_indexed_session(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+    ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -561,7 +608,7 @@ impl RuntimeState {
         .await?;
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.force_destroy_session(child_id.clone(), BranchDisposition::Keep))
+            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
                 .await
                 .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }

@@ -2847,6 +2847,109 @@ async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout
     );
 }
 
+const DESTROY_INDEX_TEST_CHILD: &str = "MJ_TEST_DESTROY_INDEX_CHILD";
+
+/// R2-11: a session that was created and destroyed between two SessionWiki
+/// passes was never findable, because destroy deleted its record and stored
+/// conversation and no pass had indexed them. `mj sessions --session <id>`
+/// then said the id "names neither a Mjolnir session nor an indexed one".
+/// Destroy now indexes the session first.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_destroyed_session_is_still_found_by_its_id() {
+    const TEST: &str = "a_destroyed_session_is_still_found_by_its_id";
+    if std::env::var_os(DESTROY_INDEX_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // The sync walks every harness store under the home directory, so the
+        // child gets an empty one of its own, and an index of its own.
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(DESTROY_INDEX_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    // Create: a running session.
+    let mut session = runtime_test_session(
+        session_id,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    session.title = "destroyed before any sync".into();
+    crate::database::save_session(&session).unwrap();
+    // Prompt: its stored conversation holds a prompt and a reply.
+    let mut conversation = mj_core::state::MaterializedSession::empty(session_id);
+    conversation.applied_event_ordinal = 2;
+    conversation.applied_event_digest = format!("{:064x}", 2);
+    conversation.last_activity_at_ms = Some(1_700_000_000_002);
+    for (position, body) in [
+        mj_core::transcript::TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "find me after destroy"})],
+        },
+        mj_core::transcript::TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "noted"}})],
+            streaming: false,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let position = position as u64 + 1;
+        let streamed = matches!(body, mj_core::transcript::TranscriptBody::Agent { .. });
+        conversation
+            .transcript
+            .push(Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: format!("item-{position}"),
+                position,
+                latest_content_event_ordinal: streamed.then_some(position),
+                created_at_ms: 1_700_000_000_000 + position as i64,
+                last_changed_at_ms: 1_700_000_000_000 + position as i64,
+                body,
+            }));
+    }
+    crate::database::save_materialized_session(&conversation).unwrap();
+    // The index exists but has not seen this session: the state between two
+    // sync passes.
+    sessionwiki::index::open().unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    state
+        .force_destroy_session(session_id.to_owned(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(session_id),
+        "destroy removes the record"
+    );
+    let found = state
+        .wiki_session(session_id.to_owned())
+        .await
+        .unwrap()
+        .expect("the destroyed session is found by its id");
+    assert_eq!(found.status, mj_client::daemon::WikiSessionStatus::Archived);
+    assert_eq!(found.mjolnir_session_id.as_deref(), Some(session_id));
+    assert!(
+        !found.nothing_to_restore,
+        "the indexed conversation keeps the prompt a restore starts from"
+    );
+}
+
 /// A runtime whose controller comes from the real store, for the tests that
 /// exercise a daemon operation end to end in an isolated data directory.
 #[cfg(unix)]
