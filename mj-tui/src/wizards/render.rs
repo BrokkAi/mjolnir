@@ -1105,9 +1105,10 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
     id: K,
 ) {
     let selected = combo.selection(id, access_index(choices, access));
+    // `ComboBox::render` adds the dropdown glyph itself.
     let value = choices
         .get(selected)
-        .map(|choice| ComboBox::display_value(access_description(*choice)))
+        .map(|choice| access_description(*choice))
         .unwrap_or_default();
     let options = choices
         .iter()
@@ -1117,7 +1118,7 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
         frame,
         bounds,
         field,
-        &value,
+        value,
         &options,
         selected,
         expanded,

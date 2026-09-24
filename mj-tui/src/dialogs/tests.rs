@@ -453,6 +453,29 @@ fn the_container_editor_says_when_a_session_has_no_build_cache() {
     );
 }
 
+/// Launch finding R3-11 (with J-24): the container editor named the session
+/// by its 32-hex id where the row and every other dialog use its title, and
+/// drew its access choice with two dropdown glyphs ("ro · read-only ▾ ▾").
+#[test]
+fn the_container_editor_names_the_session_and_draws_one_dropdown_glyph() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open_container_editor(&mut dashboard);
+    let shown = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(shown.contains("Session: ACP pretty name"), "{shown}");
+    assert!(!shown.contains("Session: session-1"), "{shown}");
+    let access = shown
+        .lines()
+        .find(|line| line.contains("Access:"))
+        .unwrap_or_else(|| panic!("no access row:\n{shown}"));
+    assert_eq!(
+        access
+            .matches(mj_chat::components::ComboBox::glyph())
+            .count(),
+        1,
+        "{access}"
+    );
+}
+
 fn dashboard_with_container_session() -> DashboardState {
     let mut session = running_session();
     session.additional_mounts = vec![AdditionalMount {
