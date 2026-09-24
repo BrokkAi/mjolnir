@@ -926,30 +926,40 @@ pub fn query_rows(
         fill_session_tags(&connection, &mut rows)?;
         return Ok(rows);
     }
-    let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
-        sessionwiki::index::search_like(&connection, query, limit, None, None)
+    // The library search ranks sub-agents too. Ask for enough candidates to
+    // fill the caller's result limit after those unresumable rows are removed.
+    let search_limit = if include_subagents {
+        limit
     } else {
-        sessionwiki::index::search(&connection, query, limit, None, None)
+        MAX_WIKI_LIMIT
+    };
+    let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
+        sessionwiki::index::search_like(&connection, query, search_limit, None, None)
+    } else {
+        sessionwiki::index::search(&connection, query, search_limit, None, None)
     }
     .context("search the SessionWiki index")?;
     // SessionWiki's full-text search has no sub-agent filter of its own.
     let mut rows: Vec<WikiRow> = hits
         .into_iter()
         .filter(|hit| include_subagents || is_main_session(&hit.row))
+        .take(limit)
         .map(|hit| wiki_row(hit.row, Some(hit.snippet), live))
         .collect();
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
-    let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    for row in named_like(&connection, query, include_subagents)? {
-        if rows.len() >= limit {
-            break;
+    if rows.len() < limit {
+        let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+        for row in named_like(&connection, query, include_subagents)? {
+            if rows.len() >= limit {
+                break;
+            }
+            if found.contains(&row.session_id) {
+                continue;
+            }
+            rows.push(wiki_row(row, None, live));
         }
-        if found.contains(&row.session_id) {
-            continue;
-        }
-        rows.push(wiki_row(row, None, live));
     }
     fill_session_tags(&connection, &mut rows)?;
     Ok(rows)
@@ -980,7 +990,9 @@ fn fill_session_tags(connection: &rusqlite::Connection, rows: &mut [WikiRow]) ->
 
 /// How far back a title or project match looks. Those columns have no index of
 /// their own, so this is a scan of the most recent sessions rather than of the
-/// whole corpus.
+/// whole corpus. Fetch only metadata here: the regular recent-session query
+/// also loads a preview, summary and tags for every row, none of which title
+/// matching needs.
 const NAME_SCAN_LIMIT: usize = 2_000;
 
 /// Indexed sessions whose title or project contains the query, ignoring case.
@@ -990,15 +1002,40 @@ fn named_like(
     include_subagents: bool,
 ) -> Result<Vec<sessionwiki::index::SessionRow>> {
     let needle = query.to_lowercase();
-    let rows = sessionwiki::index::recent(
-        connection,
-        NAME_SCAN_LIMIT,
-        None,
-        None,
-        None,
-        include_subagents,
-    )
-    .context("list recent SessionWiki sessions")?;
+    let sql = format!(
+        "SELECT session_id, tool, path, project, title, started, msg_count, kind,
+                archived_at IS NOT NULL
+         FROM files WHERE {} ORDER BY started DESC LIMIT {NAME_SCAN_LIMIT}",
+        if include_subagents {
+            "1=1"
+        } else {
+            "kind = 'main'"
+        }
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .context("prepare recent SessionWiki metadata scan")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(sessionwiki::index::SessionRow {
+                session_id: row.get(0)?,
+                tool: row.get(1)?,
+                path: row.get(2)?,
+                project: row.get(3)?,
+                title: row.get(4)?,
+                started: row.get(5)?,
+                msg_count: row.get(6)?,
+                kind: row.get(7)?,
+                preview: None,
+                summary: None,
+                tags: None,
+                archived: row.get(8)?,
+                account: None,
+            })
+        })
+        .context("list recent SessionWiki metadata")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read recent SessionWiki metadata")?;
     Ok(rows
         .into_iter()
         .filter(|row| {
@@ -2695,5 +2732,41 @@ mod tests {
                 "query {query:?}"
             );
         }
+    }
+
+    #[test]
+    fn full_text_search_fills_its_result_limit_after_skipping_sub_agents() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        for (id, kind, text) in [
+            ("sub", "sub", "restic restic restic restic"),
+            ("main", "main", "restic cleanup"),
+        ] {
+            tags::testing::index_row(&connection, id, "codex");
+            connection
+                .execute(
+                    "UPDATE files SET kind = ?2 WHERE session_id = ?1",
+                    rusqlite::params![id, kind],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, 'user', ?2)",
+                    rusqlite::params![id, text],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                    rusqlite::params![connection.last_insert_rowid(), text],
+                )
+                .unwrap();
+        }
+
+        let rows = query_rows("restic", 1, &BTreeSet::new(), false).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["main"]
+        );
     }
 }

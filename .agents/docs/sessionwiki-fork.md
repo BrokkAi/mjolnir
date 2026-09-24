@@ -116,3 +116,15 @@ the same hits.
 `brokk-sessionwiki` 0.30.1 (tag `brokk-v0.30.1`) restores the default SIGPIPE
 disposition at startup so `sessionwiki grep -l ... | head` exits quietly
 instead of panicking on the closed pipe. Mjolnir links 0.30.1.
+
+The fork's `publish` branch now has commit `effa77d`, which prepares 0.30.2.
+It scopes the stock Codex and Claude adapters to their actual roots, so a
+standalone sync cannot mark other profile homes deleted. An unchanged source
+file that was previously marked archived is made live again without reparsing
+its transcript; a changed source is reparsed. Tests, clippy, and
+`cargo publish --dry-run` pass. The crate has not been published yet, so
+Mjolnir still links 0.30.1. After publication, update the root `Cargo.toml`,
+`Cargo.lock`, and the install command in `docs/src/content/docs/sessions.md`
+in one commit, then install the matching standalone binary. Run a Mjolnir full
+sync to repair rows in additional profile homes; a standalone sync only scans
+the stock homes.

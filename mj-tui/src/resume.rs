@@ -15,7 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use mj_chat::chat::wrap_styled_line;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
 use mj_chat::theme;
@@ -36,11 +38,13 @@ use mj_chat::text_input::TextInput;
 
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
+use crate::render::sessions::session_scrollbar_geometry;
 use crate::widgets::{
     Truncate, centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes,
     truncate_to_cells,
 };
 use crate::{DashboardAction, DashboardState, Mode, SessionStateFilter};
+use mj_chat::components::{ScrollbarDrag, ScrollbarPointer};
 
 /// Origin shown for a native session that has never run under Hel.
 pub(crate) const LOCAL_ORIGIN: &str = "local";
@@ -67,6 +71,8 @@ pub(crate) enum ResumeFocus {
     Tabs,
     Search,
     Sessions,
+    PreviousHit,
+    NextHit,
     Cancel,
     Destroy,
     CopyId,
@@ -286,6 +292,8 @@ pub(crate) struct ResumeDialog {
     pub(crate) hits_pending: Option<PreviewKey>,
     /// First wrapped row the preview pane shows.
     pub(crate) preview_scroll: usize,
+    /// Pointer gesture state for the preview's shared vertical scrollbar.
+    pub(crate) preview_scrollbar: RefCell<ScrollbarDrag>,
     /// Which hit of the shown transcript the pane is sitting on, so `n` and
     /// `N` move from where the reader is.
     pub(crate) preview_hit: usize,
@@ -328,6 +336,17 @@ impl ResumeDialog {
                 selected: self.row_index,
             },
             !rows.is_empty(),
+        );
+        let hit_count = self.preview_body(rows).map_or(0, |(_, hits)| hits.len());
+        form.declare_with_enabled(
+            PreviousHit,
+            ControlKind::Button,
+            self.preview_hit > 0 && hit_count > 0,
+        );
+        form.declare_with_enabled(
+            NextHit,
+            ControlKind::Button,
+            self.preview_hit + 1 < hit_count,
         );
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
         if self.tab == ResumeTab::Hel {
@@ -910,17 +929,18 @@ impl DashboardState {
             self.resume_hit_counts = [0; ResumeTab::COUNT];
             return;
         };
-        // The Live tab answers its own search, so the index has nothing to
-        // count for it and its entry stays zero.
-        let (rows, hits) = if dialog.tab == ResumeTab::Live {
-            (self.live_resume_rows(dialog), [0; ResumeTab::COUNT])
+        // The Live list answers immediately from state, but the other tabs'
+        // hit counts still come from the index while Live is selected.
+        let (history_rows, hits) = build_resume_rows(
+            &self.config,
+            &self.state,
+            dialog,
+            &self.checkpoint_archive_sizes,
+        );
+        let rows = if dialog.tab == ResumeTab::Live {
+            self.live_resume_rows(dialog)
         } else {
-            build_resume_rows(
-                &self.config,
-                &self.state,
-                dialog,
-                &self.checkpoint_archive_sizes,
-            )
+            history_rows
         };
         self.resume_rows = rows;
         self.resume_hit_counts = hits;
@@ -1024,6 +1044,7 @@ impl DashboardState {
             hits: Arc::new(BTreeMap::new()),
             hits_pending: None,
             preview_scroll: 0,
+            preview_scrollbar: RefCell::new(ScrollbarDrag::default()),
             preview_hit: 0,
             preview_key: None,
         });
@@ -1328,18 +1349,12 @@ impl DashboardState {
     /// Moves the dialog to one tab, and answers with what the new tab needs
     /// fetched: the arrow keys and a click on the strip both come through here.
     ///
-    /// Normally that is the preview for the row the selection lands on. Leaving
-    /// the Live tab with text in the box is the exception: the Live tab matched
-    /// that text itself, so the index has never been asked for it, and without
-    /// a query here the history tab would show no matches until the next
-    /// keystroke. The query outranks the preview, which is asked for again when
-    /// the answer rebuilds the rows.
+    /// The Live tab answers its own list immediately, while its search also
+    /// updates the index results for the other tabs in the background.
     fn switch_resume_tab(&mut self, tab: ResumeTab) -> DashboardAction {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let leaving_live_query =
-            dialog.tab == ResumeTab::Live && tab != ResumeTab::Live && !dialog.search.is_empty();
         if dialog.tab != tab {
             dialog.tab = tab;
             dialog.selected = None;
@@ -1347,9 +1362,6 @@ impl DashboardState {
             self.rebuild_resume_rows();
             self.resync_resume_selection();
             self.settle_resume_focus();
-        }
-        if leaving_live_query {
-            return self.wiki_search_action();
         }
         self.next_wiki_preview()
     }
@@ -1400,12 +1412,8 @@ impl DashboardState {
             return DashboardAction::None;
         };
         dialog.search.clear();
-        let live = dialog.tab == ResumeTab::Live;
         self.rebuild_resume_rows();
         self.select_resume_row(0);
-        if live {
-            return DashboardAction::None;
-        }
         self.wiki_search_action()
     }
 
@@ -1496,12 +1504,50 @@ impl DashboardState {
         true
     }
 
+    pub(crate) fn resume_scrollbar_handles_mouse(&self, mouse: MouseEvent) -> bool {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return false;
+        };
+        let pointer = *dialog.preview_scrollbar.borrow();
+        if pointer.is_dragging() {
+            return true;
+        }
+        mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && pointer.geometry().is_some_and(|geometry| {
+                geometry.max_scroll > 0
+                    && mouse.column == geometry.track.x
+                    && mouse.row >= geometry.track.y
+                    && mouse.row < geometry.track.bottom()
+            })
+    }
+
+    fn handle_resume_scrollbar_mouse(&mut self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return false;
+        };
+        let outcome = dialog.preview_scrollbar.borrow_mut().handle_mouse(*mouse);
+        match outcome {
+            ScrollbarPointer::Ignored => false,
+            ScrollbarPointer::Consumed => true,
+            ScrollbarPointer::ScrollTo(offset) => {
+                dialog.preview_scroll = offset;
+                true
+            }
+        }
+    }
+
     pub(crate) fn handle_resume_dialog_event(&mut self, event: Event) -> DashboardAction {
         use ResumeFocus::*;
         let Mode::ResumeDialog(dialog) = &self.mode else {
             return DashboardAction::None;
         };
         let focused = dialog.focused();
+        if self.handle_resume_scrollbar_mouse(&event) {
+            return DashboardAction::None;
+        }
         if self.scroll_resume_preview(&event, focused) {
             return DashboardAction::None;
         }
@@ -1602,18 +1648,26 @@ impl DashboardState {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(Search, edit)) => {
                 TextField::apply(&mut dialog.search, edit);
-                let live = dialog.tab == ResumeTab::Live;
                 self.rebuild_resume_rows();
                 self.select_resume_row(0);
-                // The Live tab matched the name itself. Asking the index as well
-                // would spend a daemon search on an answer this tab discards.
-                if live {
-                    return DashboardAction::None;
-                }
                 return self.wiki_search_action();
             }
             Some(Interaction::Select(Tabs, index)) => {
                 return self.switch_resume_tab(ResumeTab::from_index(index));
+            }
+            Some(Interaction::Activate(PreviousHit)) => {
+                self.step_preview_hit(-1);
+                if let Mode::ResumeDialog(dialog) = &mut self.mode {
+                    dialog.form.get_mut().focus(ResumeFocus::Sessions);
+                }
+                return DashboardAction::None;
+            }
+            Some(Interaction::Activate(NextHit)) => {
+                self.step_preview_hit(1);
+                if let Mode::ResumeDialog(dialog) = &mut self.mode {
+                    dialog.form.get_mut().focus(ResumeFocus::Sessions);
+                }
+                return DashboardAction::None;
             }
             Some(Interaction::Select(Sessions, index)) => {
                 self.select_resume_row(index);
@@ -1975,6 +2029,28 @@ pub(crate) fn render_resume_dialog(
         let block = theme::panel(false).title(title);
         let body = block.inner(preview_band);
         frame.render_widget(block, preview_band);
+        if !hit_lines.is_empty() && preview_band.width >= 30 {
+            for (id, label, from_right, enabled) in [
+                (ResumeFocus::PreviousHit, "↑", 8, dialog.preview_hit > 0),
+                (
+                    ResumeFocus::NextHit,
+                    "↓",
+                    4,
+                    dialog.preview_hit + 1 < hit_lines.len(),
+                ),
+            ] {
+                let area = Rect::new(preview_band.right() - from_right, preview_band.y, 3, 1);
+                form.register(id, ControlKind::Button, area, enabled);
+                frame.render_widget(
+                    Paragraph::new(format!("[{label}]")).style(Style::default().fg(if enabled {
+                        theme::palette().accent
+                    } else {
+                        theme::palette().muted
+                    })),
+                    area,
+                );
+            }
+        }
         // Wrapped here rather than by the paragraph, so the scroll offset, the
         // clamp and the scrollbar all count the same rows.
         let wrapped = wrap_preview_lines(&preview, usize::from(body.width));
@@ -1992,6 +2068,17 @@ pub(crate) fn render_resume_dialog(
             body,
         );
         render_session_scrollbar(frame, preview_band, length, offset, viewport.max(1));
+        dialog
+            .preview_scrollbar
+            .borrow_mut()
+            .set_geometry(session_scrollbar_geometry(
+                preview_band,
+                length,
+                offset,
+                viewport.max(1),
+            ));
+    } else {
+        dialog.preview_scrollbar.borrow_mut().clear();
     }
     let selected = selected_index(dialog, list_rows.len()).and_then(|index| list_rows.get(index));
     let mut footer = Vec::new();

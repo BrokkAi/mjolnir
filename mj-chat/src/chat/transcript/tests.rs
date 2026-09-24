@@ -3529,7 +3529,7 @@ fn scrollbar_mouse(chat: &mut ChatState, kind: MouseEventKind, column: u16, row:
 fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
     use crossterm::event::MouseButton::Left;
     let mut chat = scrollbar_chat();
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(geometry.max_scroll > 0);
     scrollbar_mouse(
         &mut chat,
@@ -3557,7 +3557,7 @@ fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
 fn scrollbar_track_click_seeks_and_does_not_select_text() {
     use crossterm::event::MouseButton::Left;
     let mut chat = scrollbar_chat();
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(
         chat.frame_surfaces()
             .surface_at(geometry.track.x, geometry.track.y)
@@ -3592,7 +3592,7 @@ fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
     chat.invalidate_render_cache();
     chat.anchor = TranscriptAnchor::Bottom;
     drawn_transcript(&mut chat, 60, 24);
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(geometry.thumb.height > 1);
     let grab_row = geometry.thumb.bottom() - 1;
     scrollbar_mouse(
@@ -3610,7 +3610,7 @@ fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
     );
     assert!(matches!(chat.anchor, TranscriptAnchor::Row { .. }));
     assert_eq!(
-        chat.transcript_scrollbar.grab_offset,
+        chat.transcript_scrollbar.pointer.grab_offset(),
         geometry.thumb.height - 1
     );
 }
@@ -3631,7 +3631,7 @@ fn scrollbar_keeps_unseen_history_lazy_and_cancels_drag_on_resize() {
             .count()
             < 30
     );
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     scrollbar_mouse(
         &mut chat,
         MouseEventKind::Down(Left),
@@ -3666,7 +3666,7 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
         .map(|i| ChatEntry::plain(i, ChatRole::User, "long message\n".repeat(20)))
         .collect();
     drawn_transcript(&mut chat, 60, 24);
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     scrollbar_mouse(
         &mut chat,
         MouseEventKind::Down(Left),
