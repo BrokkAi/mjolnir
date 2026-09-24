@@ -43,3 +43,63 @@ async fn the_acp_command_answers_initialize_without_starting_a_daemon() {
         "answering a handshake must not start the daemon"
     );
 }
+
+/// A consumer that stops its agent with a signal rather than closing the pipe
+/// still gets its exit policy, and an adapter that created nothing has nothing
+/// to retire, so it leaves promptly and successfully without reaching for a
+/// daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminated_adapter_applies_its_exit_policy_and_exits_cleanly() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let storage = tempfile::tempdir().unwrap();
+    let data = storage.path().join("data");
+    let config = storage.path().join("config");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mj"))
+        .args(["acp", "--on-exit", "destroy"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the adapter");
+    // One small request and one line of answer: the handshake proves the
+    // adapter is serving, and so is already listening for the signal.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}\n",
+        )
+        .await
+        .unwrap();
+    let mut answer = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut answer),
+    )
+    .await
+    .expect("the adapter answers the handshake")
+    .unwrap();
+    assert!(answer.contains("\"id\":1"), "{answer}");
+
+    let pid = i32::try_from(child.id().expect("the adapter is running")).unwrap();
+    // SAFETY: `kill` only sends a signal to the child this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
+        .await
+        .expect("the adapter leaves after the signal")
+        .unwrap();
+
+    assert!(
+        status.success(),
+        "the signal ends the adapter through its exit path, not by killing it: {status:?}"
+    );
+    assert!(
+        !data.join("daemon.json").exists(),
+        "an adapter with no sessions has nothing to retire and no daemon to reach"
+    );
+    drop(stdin);
+}
