@@ -6,7 +6,7 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 A Mjolnir session can start child sessions, called sub-agents, through tools that Mjolnir gives the session's model: `list_profiles` lists the profiles a child may run on and the models each offers, and `spawn` starts a child. A profile is one configured harness account (a `[profiles.<id>]` table in `~/.config/mjolnir/config.toml`), for example one ChatGPT login for Codex. Each subscription profile has quota windows, a 5-hour one and a weekly one, and the daemon (the long-running background process that owns sessions) refreshes how much of each is left.
 
-A user saw a parent ask for a child on the GPT 6 Luna model and get a profile with almost no quota left, although other profiles offering that model had plenty. After this change, `spawn` must name a model (or the word `current`, meaning the parent's own model), and unless the parent pins a profile, Mjolnir runs the child on the eligible profile that offers that model and has the most quota left, where "quota left" is the lower of the 5-hour and weekly remaining percentages. `list_profiles` no longer hides a profile's models behind another profile of the same harness. And `mj doctor` now says, for every profile, what kind it is, where its quota comes from and whether sub-agents may use it, prints the sub-agent policy, and warns about an eligible-profile entry that names no profile.
+A user saw a parent ask for a child on the GPT 6 Luna model and get a profile with almost no quota left, although other profiles offering that model had plenty. After this change, `spawn` must name a model (or the word `current`, meaning the parent's own model), and unless the parent pins a profile, Mjolnir runs the child on the eligible profile that offers that model and has the most quota left, where "quota left" is the lower of the 5-hour and weekly remaining percentages. `list_profiles` no longer hides a profile's models behind another profile of the same harness. And `mj doctor` now says, for every profile, what kind it is, where its quota comes from and whether sub-agents may use it, and prints the sub-agent policy.
 
 To see it working: in an isolated instance with two Codex profiles offering the same model and different quota, a parent's `spawn` with `model: "current"` starts the child on the profile with more quota left; `mj --instance <name> doctor` prints the new lines.
 
@@ -15,14 +15,16 @@ To see it working: in an isolated instance with two Codex profiles offering the 
 - [x] (2026-09-24 20:19Z) User's live config: `[subagents.eligible_profiles]` set to codex, codex2, codex3, codex4, deepseek (backup `~/.config/mjolnir/config.toml.bak-20260924T201850`); installed `mj doctor --json` reports the file valid.
 - [x] (2026-09-24 21:05Z) Milestone 1: shared selection for `spawn` (HTTP route and MCP tool), `list_profiles` merge, tool text. `ProfileCatalog::published` and `SubagentBackend::published_profile_config` removed (no callers left). `cargo test -p brokk-mj-controller --lib -- server_runtime::api server::api profile_catalog`: 132 passed; worker `subagent_mcp`: 17 passed.
 - [x] (2026-09-24 21:30Z) Milestone 2: `mj doctor` profile summary, sub-agent policy line, unknown eligible id warning. `cargo test -p brokk-mj-controller --lib -- doctor`: 82 passed; `-- setup`: 49 passed.
-- [ ] Milestone 3: documentation, full test and clippy run, isolated-instance check, push.
+- [x] (2026-09-24 21:50Z) Milestone 3: `[subagents]` documented in `docs/src/content/docs/configuration.md`. Full `cargo test`: 42 suites, 4702 passed, 0 failed, 28 ignored. `cargo clippy --all-targets -- -D warnings`: clean. `mj --instance subagent-select doctor` shows the new lines (transcript in Artifacts and Notes).
+- [x] (2026-09-24 22:00Z) Removed the unknown-eligible-id warning added in Milestone 2: it could never run (see Surprises & Discoveries).
+- [ ] Live spawn in an isolated instance (costs real quota; left for the user to approve).
 
 ## Surprises & Discoveries
 
 - Observation: `list_profiles` ranked profiles by quota and kept only one per harness before it looked at models, so a pay-per-use Codex profile (which ranks as 100% left because it has no quota windows) hid every ChatGPT Codex profile and the models they offer.
   Evidence: `select_profile_per_harness` in `mj-controller/src/server_runtime/api.rs` sorted by harness and `profile_remaining_percent`, then `dedup_by` harness; `profile_remaining_percent` returns 100 for `is_usage_priced()`.
-- Observation: `mj doctor` silently skipped an `eligible_profiles` entry naming no profile.
-  Evidence: `subagent_eligibility_checks` in `mj-controller/src/doctor.rs` used `config.profiles.get(id)?` inside `filter_map`.
+- Observation: an `eligible_profiles` entry naming no profile never reaches `subagent_eligibility_checks`; `SubagentConfig::validate` in `mj-core/src/config.rs` makes the whole file fail to load, and doctor's `config` check reports it. The planned "unknown id" warning was therefore unreachable and was removed; a test now pins the real behavior (`an_eligible_id_that_names_no_profile_fails_the_configuration_check`).
+  Evidence: `mj --instance subagent-select doctor` with `codx = true` printed "fixable Mjolnir configuration: … is invalid: [subagents] eligible profile \"codx\" is not defined in this config".
 
 - Observation: a Codex profile's quota is read through its custom provider only when the provider's `env_key` names a variable set in the profile's `[profiles.<id>.environment]`. A provider whose key is inline (`experimental_bearer_token`) or missing falls through to the ChatGPT quota query, which fails, so the profile has no usable report and ranks last for sub-agents.
   Evidence: `provider_credential` in `mj-controller/src/quota.rs` returns `None` without `env_key` and a matching environment entry; `refresh_profile` then takes the `HarnessKind::Codex` ChatGPT arm. `mj doctor` now says "no quota report, because custom provider … has no API key in this profile's environment" for that case, reusing `provider_credential` so the two cannot disagree.
@@ -53,7 +55,7 @@ To see it working: in an isolated instance with two Codex profiles offering the 
 
 ## Outcomes & Retrospective
 
-(To be written at completion.)
+A `spawn` now names a model and lands on the eligible profile that offers it with the most quota left; both spawn paths share one resolver, and `list_profiles` shows every distinct set of models. `mj doctor` shows each profile's quota source and delegation, and the sub-agent policy. The one planned item that did not survive was the unknown-id warning, because configuration loading already rejects that case. Not yet shown end to end: a live spawn choosing between two real ChatGPT logins, which needs real quota. A possible further cause of the original report is unverified: `codex_usage::parse_report` reads only the `codex` bucket of `rateLimitsByLimitId`, so a model-specific limit bucket would not affect ranking.
 
 ## Context and Orientation
 
@@ -95,7 +97,11 @@ The code steps are ordinary edits. The live config edit was backed up to `config
 
 ## Artifacts and Notes
 
-(Filled in as work proceeds.)
+    $ target/debug/mj --instance subagent-select doctor   (excerpt)
+    ready Harness profile claude3: Claude Code; Claude subscription quota; only its own sessions' sub-agents may use it. /home/jonathan/.claude3 is present and authentication is available
+    ready Harness profile codex2: Codex; ChatGPT subscription quota; any session's sub-agents may use it. /home/jonathan/.codex2 is present and authentication is available
+    ready Harness profile deepseek: Codex; pay-per-use through api.deepseek.com, counted as 100% left when choosing a sub-agent's profile; any session's sub-agents may use it. /home/jonathan/.codex-deepseek is present and authentication is available
+    ready Sub-agent policy: On for Claude and Codex sessions, up to 6 sub-agents at once per session. A session's sub-agents may use its own profile and: codex, codex2, codex3, codex4, deepseek.
 
 ## Interfaces and Dependencies
 
@@ -113,3 +119,5 @@ In `mj-controller/src/server/api/subagent_backend.rs`, on `SubagentBackend`:
 In `mj-core/src/subagent.rs`:
 
     pub const CURRENT_MODEL: &str = "current";
+
+Revision note (2026-09-24): Milestone 2's unknown-id warning was removed after the isolated-instance run showed configuration loading already rejects that case; Purpose, Progress, Surprises, and Outcomes were updated to match.

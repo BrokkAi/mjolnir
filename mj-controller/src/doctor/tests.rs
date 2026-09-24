@@ -2043,23 +2043,37 @@ fn the_subagent_policy_names_how_many_children_and_which_profiles() {
     );
 }
 
+/// An eligible id that names no profile is a configuration error, not a
+/// warning: the file fails to load, and doctor's configuration check says so.
 #[test]
-fn an_eligible_id_that_names_no_profile_is_a_warning() {
-    let config = subagent_config(&["codex", "codx"], &["codex"]);
-    let checks = subagent_eligibility_checks(Ok(&config));
-    let typo = checks
-        .iter()
-        .find(|check| check.id == "subagents.codx")
-        .expect("the unknown id is reported");
-    assert_eq!(typo.status, CheckStatus::Warning);
-    assert!(
-        typo.detail.contains("no profile has that id"),
-        "{}",
-        typo.detail
+fn an_eligible_id_that_names_no_profile_fails_the_configuration_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n\n[subagents.eligible_profiles]\ncodx = true\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+
+    let checks = run_with_config_path(
+        &path,
+        &AlwaysFailingExecutor,
+        ApplePlatform::Linux,
+        DoctorOptions { smoke: false },
     );
+
+    let config = checks
+        .iter()
+        .find(|check| check.id == "config")
+        .expect("the configuration is checked");
+    assert_eq!(config.status, CheckStatus::Fixable);
     assert!(
-        !checks.iter().any(|check| check.id == "subagents.codex"),
-        "a configured, enabled profile needs no warning"
+        config.detail.contains("\"codx\" is not defined"),
+        "{}",
+        config.detail
     );
 }
 

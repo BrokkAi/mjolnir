@@ -724,14 +724,15 @@ fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Opti
     (profile.home != default_home).then_some(default_home)
 }
 
-/// The sub-agent policy in one line, then a warning for each
-/// `[subagents.eligible_profiles]` entry that cannot take effect.
+/// The sub-agent policy in one line, then a warning for each profile that is
+/// both listed for sub-agent use and disabled.
 ///
-/// The daemon keeps running with such an entry and simply does not offer the
-/// profile to a parent: the delegation candidates and the spawn gate both
-/// require an enabled, configured profile. A disabled profile or an id that
-/// names no profile (a typo, or a profile since renamed) would otherwise leave
-/// a profile the user meant to delegate to silently unavailable.
+/// The daemon keeps running with such a profile and simply does not offer it
+/// to a parent, because the delegation candidates and the spawn gate both
+/// require an enabled profile. This surfaces the contradiction so the eligible
+/// list and the profile's `enabled` flag can be reconciled. An eligible id
+/// that names no profile never reaches here: the configuration fails to load,
+/// and the configuration check reports it.
 fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
@@ -744,16 +745,6 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             .iter()
             .filter(|(_, eligible)| **eligible)
             .filter_map(|(id, _)| match config.profiles.get(id) {
-                None => Some(DoctorCheck::warning(
-                    format!("subagents.{id}"),
-                    format!("Sub-agent profile {id}"),
-                    format!(
-                        "Profile {id:?} is listed in [subagents.eligible_profiles] but no profile has that id, so it is ignored."
-                    ),
-                    format!(
-                        "Correct the id, or remove {id:?} from [subagents.eligible_profiles]."
-                    ),
-                )),
                 Some(profile) if !profile.enabled => Some(DoctorCheck::warning(
                     format!("subagents.{id}"),
                     format!("Sub-agent profile {id}"),
@@ -764,7 +755,7 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                         "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
                     ),
                 )),
-                Some(_) => None,
+                _ => None,
             }),
     );
     checks

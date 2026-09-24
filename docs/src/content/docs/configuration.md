@@ -438,7 +438,7 @@ codex2 = true
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | When `false`, sessions get no sub-agent tools. |
 | `max_concurrent` | integer | no | `6` | Most sub-agents one session may have running at once; between `1` and `64`. |
-| `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled or unknown profile id is ignored, and `mj doctor` warns about it. |
+| `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled profile is ignored, and `mj doctor` warns about it. An id that names no profile stops the configuration from loading. |
 
 A `spawn` call must name a model, or `current` for the parent session's own
 model. Unless the call also names a profile, Mjolnir runs the child on the
