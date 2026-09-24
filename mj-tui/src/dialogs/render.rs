@@ -546,7 +546,7 @@ pub(crate) fn render_changed_files(
         .state
         .sessions
         .get(&dialog.session_id)
-        .map(|session| session.display_title().to_owned())
+        .map(|session| session.listed_title().to_owned())
         .unwrap_or_else(|| dialog.session_id.clone());
     let title = dismissible_modal_title(
         &mut form,

@@ -137,7 +137,7 @@ impl DashboardState {
             };
             due.push(Notification {
                 session_id: id.clone(),
-                session_title: session.display_title().to_owned(),
+                session_title: session.listed_title().to_owned(),
                 level,
                 body: self.notification_body(&id, level),
             });
@@ -268,7 +268,7 @@ impl DashboardState {
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
         self.state.sessions.get(session_id).map_or_else(
             || format!("Session {}", &session_id[..session_id.len().min(8)]),
-            |session| format!("Session {}", session.display_title()),
+            |session| format!("Session {}", session.listed_title()),
         )
     }
 

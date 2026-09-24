@@ -165,7 +165,7 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
         return if dashboard.go.is_some() {
             dashboard.go_conversation_title(&session.id)
         } else {
-            session.display_title().to_owned()
+            session.listed_title().to_owned()
         };
     }
     scope.heading().to_owned()
@@ -348,7 +348,7 @@ impl DashboardState {
             if self.go.is_some() {
                 self.go_conversation_title(&session.id)
             } else {
-                session.display_title().to_owned()
+                session.listed_title().to_owned()
             }
         });
         let entries = session_menu_entries(self);

@@ -5142,12 +5142,44 @@ fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
     assert!(!rename.contains("Session: session-1"), "{rename}");
 }
 
-/// Without a title the dialogs fall back to the id, which is the only name
-/// the session has.
+/// R4-12: a session nobody has named yet keeps the title it was created with
+/// ("project via claude"), and the session list shows that title (R2-8). The
+/// palette heading, the Suspend confirmation and the Rename dialog named it
+/// by its id instead.
+#[test]
+fn dialogs_name_an_unnamed_session_by_the_title_it_was_created_with() {
+    let mut session = running_session();
+    session.acp_session_title = None;
+    session.title = "project via claude".into();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+
+    dashboard.begin_session_palette();
+    let palette = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(palette.contains("project via claude"), "{palette}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: project via claude"), "{suspend}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::RenameSession);
+    let rename = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rename.contains("Session: project via claude"), "{rename}");
+    assert!(!rename.contains("Session: session-1"), "{rename}");
+}
+
+/// A session with no name at all falls back to its id, the only name it has.
 #[test]
 fn suspend_confirmation_falls_back_to_the_id_for_an_untitled_session() {
     let mut session = running_session();
     session.acp_session_title = None;
+    session.title = String::new();
     let mut dashboard = dashboard_with_session(session);
     dashboard
         .session_details

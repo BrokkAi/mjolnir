@@ -1582,7 +1582,7 @@ impl DashboardState {
                             interrupting,
                             unverified_clone,
                         })
-                        .naming_session(session.display_title()),
+                        .naming_session(session.listed_title()),
                     );
                 }
                 DashboardAction::None
@@ -1596,7 +1596,7 @@ impl DashboardState {
             CommandId::RestartSession => {
                 let Some((session_id, name)) = self
                     .selected_session()
-                    .map(|s| (s.id.clone(), s.display_title().to_owned()))
+                    .map(|s| (s.id.clone(), s.listed_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
@@ -1673,7 +1673,7 @@ impl DashboardState {
             CommandId::DestroySession => {
                 let Some((session_id, name)) = self
                     .selected_session()
-                    .map(|session| (session.id.clone(), session.display_title().to_owned()))
+                    .map(|session| (session.id.clone(), session.listed_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
