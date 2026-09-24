@@ -197,6 +197,14 @@ actually show up; toy-sized fixtures prove nothing about this class of bug.
 
 Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` holds the PTY termination test, and `tests/e2e/` holds the shell/expect harness.
 
+## macOS CI
+
+On check-ins, the macOS runner starts only for macOS-sensitive changes. The
+maintained list is `.github/macos-ci-paths.txt`; files with a macOS cfg gate,
+such as `target_os = "macos"`, match automatically (the list's header names
+every gate). When you add a macOS wrapper or macOS-specific module without
+such a gate, add its path in the same change.
+
 ## Harness pins
 
 Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you

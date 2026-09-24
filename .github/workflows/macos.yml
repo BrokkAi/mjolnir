@@ -1,0 +1,66 @@
+name: macOS
+
+# The one macOS job definition. ci.yml calls it for macOS-sensitive changes
+# (listed in .github/macos-ci-paths.txt), and macos-nightly.yml calls it every
+# night and on manual dispatch. Do not add workflow-level concurrency here: in
+# a called workflow, github.workflow is the caller's name, so the group would
+# collide with the caller's own.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS (aarch64-apple-darwin)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_TARGET: aarch64-apple-darwin
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: clippy
+        targets: aarch64-apple-darwin
+
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: cli-tests-aarch64-apple-darwin
+        build-paths: |
+          target/debug
+          target/release
+          target/aarch64-apple-darwin/debug
+          target/aarch64-apple-darwin/release
+
+    - name: Run Clippy lints
+      run: cargo clippy --all-targets -- -D warnings
+
+    # The runtime suite exercises Unix target paths, directory fsync, and Git
+    # worktree byte preservation. This lane executes it on macOS.
+    - name: Run tests
+      run: cargo test
+
+    - name: Build Mjolnir release
+      run: cargo build --release
+
+    - name: Run desktop Clippy lints
+      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
+
+    - name: Build desktop application
+      run: cargo build --release --locked -p brokk-mj-desktop
+
+    - name: Run desktop tests
+      run: cargo test --locked -p brokk-mj-desktop
+
+    # The voice worker is outside the default members and ships in the macOS
+    # release, so this is its only macOS build before release.
+    - name: Run voice worker Clippy lints
+      run: cargo clippy --locked -p brokk-mj-voice-worker --all-targets -- -D warnings
+
+    - name: Run voice worker tests
+      run: cargo test --locked -p brokk-mj-voice-worker

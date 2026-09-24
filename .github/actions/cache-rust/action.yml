@@ -16,7 +16,7 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ${{ inputs.build-paths }}
-        key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-${{ github.sha }}
+        key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/workflows/macos.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-${{ github.sha }}
         restore-keys: |
-          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-
-          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-
+          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/workflows/macos.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}-
+          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.lane }}-${{ hashFiles('.github/workflows/ci.yml', '.github/workflows/macos.yml', '.github/actions/cache-rust/action.yml', 'rust-toolchain*', '.cargo/config*', 'scripts/setup-linux-cli-toolchain.sh') }}-

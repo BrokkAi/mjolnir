@@ -1,0 +1,44 @@
+name: macOS nightly
+
+# Nightly and manual runs of the shared macOS lane. A failure opens or reopens
+# one tracking issue titled "Nightly macOS CI is failing", and the next passing
+# run closes it. Only the report job can write issues.
+
+on:
+  schedule:
+  - cron: '41 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS
+    uses: ./.github/workflows/macos.yml
+
+  report:
+    name: Update the macOS tracking issue
+    needs: macos
+    # Scheduled runs test the default branch. A manual dispatch updates the
+    # issue only when it tests master, so a branch dispatch cannot open or
+    # close it. The script takes its decision from the macOS job result and
+    # ignores cancelled or skipped runs.
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+    - uses: actions/checkout@v6
+    - name: Open, update, or close the tracking issue
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MACOS_RESULT: ${{ needs.macos.result }}
+      run: bash scripts/macos-nightly-issue.sh
