@@ -323,8 +323,10 @@ pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
 /// shows it.
 pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your report has not been delivered. Call the mj-agents handback tool now with your full report, then stop.";
 
-/// The sentence added to a child's first prompt when it has the tool.
-pub const HANDBACK_PROMPT_NOTE: &str = "When you finish, call the mj-agents handback tool with your full report. The session that started you reads that report, not the rest of this conversation.";
+/// What a child's first prompt opens with when it has the tool. It leads the
+/// prompt rather than trailing a parent's long instructions, where live runs
+/// showed children skipping it.
+pub const HANDBACK_PROMPT_NOTE: &str = "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your full report: the session that started you reads only that report, not the rest of this conversation.";
 
 /// How long a sent reminder may be neither queued, running nor finished before
 /// the child's report stops waiting for it. Someone removed it from the queue,
@@ -368,6 +370,63 @@ pub struct SubagentReport {
     pub reminder: Option<HandbackReminder>,
     /// The turn whose reminder could not be sent.
     pub reminder_failed_for: Option<String>,
+    /// Acceptance ordinal of the newest prompt the parent gave this child.
+    /// The child has not answered it until a finished turn reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaited_ordinal: Option<u64>,
+}
+
+/// Whether the parent's newest prompt has yet to be answered: no finished
+/// turn has reached its acceptance ordinal. The store learns of a new turn a
+/// moment after the prompt is accepted, and in that gap an idle child would
+/// otherwise read as finished with the previous turn's report, or none.
+#[must_use]
+pub fn awaiting_prompt(
+    awaited_ordinal: Option<u64>,
+    last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+) -> bool {
+    awaited_ordinal.is_some_and(|awaited| {
+        last_turn
+            .and_then(|turn| turn.accepted_ordinal)
+            .is_none_or(|answered| answered < awaited)
+    })
+}
+
+/// How a child's last finished turn failed, if it did: `interrupted` for a
+/// cancelled or interrupted turn, `failed` for an error, a refusal or a quota
+/// stop, with the most specific reason recorded. A turn that finished or
+/// stopped to ask for input did not fail.
+#[must_use]
+pub fn failed_turn(
+    turn: &crate::state::MaterializedTurnOutcome,
+    last_message: Option<&str>,
+) -> Option<(&'static str, String)> {
+    use crate::state::{PromptCompletion, TurnOutcomeKind, classify_prompt_completion};
+    let (state, fallback) = match &turn.outcome {
+        TurnOutcomeKind::Completed { stop_reason } => match classify_prompt_completion(stop_reason)
+        {
+            PromptCompletion::Finished | PromptCompletion::InputRequired => return None,
+            PromptCompletion::Cancelled => ("interrupted", "the turn was cancelled".to_owned()),
+            PromptCompletion::QuotaLimit | PromptCompletion::Error => (
+                "failed",
+                format!("the turn ended with stop reason {stop_reason:?}"),
+            ),
+        },
+        TurnOutcomeKind::Interrupted { message } => ("interrupted", message.clone()),
+        TurnOutcomeKind::Rejected { message } => ("failed", message.clone()),
+    };
+    let reason = turn
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.message.clone())
+        .filter(|message| !message.trim().is_empty())
+        .or_else(|| {
+            last_message
+                .filter(|message| !message.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or(fallback);
+    Some((state, reason))
 }
 
 /// Where a child's report stands after its last finished turn.
@@ -586,6 +645,50 @@ mod tests {
         assert_eq!(
             report_state(true, &failed, Some(&task), &[], 0),
             ReportState::Fallback
+        );
+    }
+
+    #[test]
+    fn a_child_is_not_done_until_a_finished_turn_reaches_the_newest_prompt() {
+        let mut turn = finished("task", "end_turn");
+        turn.accepted_ordinal = Some(20);
+        assert!(!awaiting_prompt(None, Some(&turn)));
+        assert!(awaiting_prompt(Some(45), None), "no turn has finished yet");
+        assert!(
+            awaiting_prompt(Some(45), Some(&turn)),
+            "the finished turn is older"
+        );
+        // A prompt steered into the running turn is answered by that turn,
+        // which then carries the steered prompt's ordinal.
+        turn.accepted_ordinal = Some(45);
+        assert!(!awaiting_prompt(Some(45), Some(&turn)));
+    }
+
+    #[test]
+    fn a_failed_turn_says_why_and_a_finished_one_did_not_fail() {
+        assert_eq!(failed_turn(&finished("t", "end_turn"), Some("done")), None);
+        assert_eq!(
+            failed_turn(&finished("t", "awaiting_input"), Some("?")),
+            None
+        );
+        let mut error = finished("t", "error");
+        assert_eq!(
+            failed_turn(&error, Some("You've hit your usage limit.")),
+            Some(("failed", "You've hit your usage limit.".to_owned()))
+        );
+        error.diagnostic = Some(crate::diagnostic::TurnDiagnostic {
+            message: "usageLimitExceeded".into(),
+            code: None,
+            http_status: None,
+            reset_at: None,
+        });
+        assert_eq!(
+            failed_turn(&error, Some("You've hit your usage limit.")),
+            Some(("failed", "usageLimitExceeded".to_owned()))
+        );
+        assert_eq!(
+            failed_turn(&finished("t", "cancelled"), None),
+            Some(("interrupted", "the turn was cancelled".to_owned()))
         );
     }
 

@@ -171,8 +171,8 @@ impl Controller {
         let initial_prompt = if handback_tool {
             format!(
                 "{}\n\n{}",
-                request.initial_prompt,
-                mj_core::subagent::HANDBACK_PROMPT_NOTE
+                mj_core::subagent::HANDBACK_PROMPT_NOTE,
+                request.initial_prompt
             )
         } else {
             request.initial_prompt

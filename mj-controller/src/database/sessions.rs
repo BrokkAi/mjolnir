@@ -119,7 +119,7 @@ pub(super) fn load_subagent_report_from(
         .query_row(
             "SELECT handback_command_id, handback_message, handback_recorded_at_ms,
                     reminder_command_id, reminder_for_command_id, reminder_sent_at_ms,
-                    reminder_failed_for_command_id
+                    reminder_failed_for_command_id, awaited_ordinal
              FROM subagent_handbacks WHERE child_session_id = ?1",
             [child_session_id],
             |row| {
@@ -131,6 +131,7 @@ pub(super) fn load_subagent_report_from(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
                 ))
             },
         )
@@ -143,6 +144,7 @@ pub(super) fn load_subagent_report_from(
         reminder_for,
         reminder_at,
         reminder_failed_for,
+        awaited_ordinal,
     )) = row
     else {
         return Ok(mj_core::subagent::SubagentReport::default());
@@ -169,7 +171,35 @@ pub(super) fn load_subagent_report_from(
             _ => None,
         },
         reminder_failed_for,
+        awaited_ordinal: awaited_ordinal.and_then(|ordinal| u64::try_from(ordinal).ok()),
     })
+}
+
+/// Record that the parent gave a child a prompt, accepted at `ordinal`. It is
+/// recorded only for a sub-agent child, and never moves backwards.
+pub fn record_subagent_prompt(child_session_id: &str, ordinal: u64) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    submit_database_write("record_subagent_prompt", move |_| {
+        record_subagent_prompt_to(&database_path(), &child_session_id, ordinal)
+    })
+}
+
+pub(super) fn record_subagent_prompt_to(
+    path: &Path,
+    child_session_id: &str,
+    ordinal: u64,
+) -> Result<()> {
+    let ordinal = i64::try_from(ordinal).context("prompt ordinal exceeds the store's range")?;
+    open(path)?.execute(
+        "INSERT INTO subagent_handbacks(child_session_id, awaited_ordinal)
+         SELECT ?1, ?2 WHERE EXISTS (
+             SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
+         )
+         ON CONFLICT(child_session_id) DO UPDATE SET
+             awaited_ordinal = max(coalesce(awaited_ordinal, 0), excluded.awaited_ordinal)",
+        params![child_session_id, ordinal],
+    )?;
+    Ok(())
 }
 
 /// Record a child's report for the turn it names, unless a report for that

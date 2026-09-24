@@ -87,7 +87,7 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
             Some(&status),
             None,
             false,
-            &ReportState::Fallback
+            &ChildProgress::settled(ReportState::Fallback)
         ),
         ("error".into(), Some("model is unavailable".into()), true)
     );
@@ -124,7 +124,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
             None,
             None,
             false,
-            &ReportState::Fallback
+            &ChildProgress::settled(ReportState::Fallback)
         ),
         ("completed".into(), Some("the child's report".into()), true),
         "an idle child nobody is closing is finished"
@@ -136,7 +136,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
         None,
         None,
         true,
-        &ReportState::Fallback,
+        &ChildProgress::settled(ReportState::Fallback),
     );
     assert_eq!(state, "stopping");
     assert_eq!(output, None);
@@ -158,7 +158,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
             Some(&failed),
             None,
             true,
-            &ReportState::Fallback
+            &ChildProgress::settled(ReportState::Fallback)
         )
         .2,
         "a failed child is still being torn down while its close runs"
@@ -174,7 +174,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
             None,
             None,
             true,
-            &ReportState::Fallback
+            &ChildProgress::settled(ReportState::Fallback)
         ),
         ("stopped".into(), None, true),
         "a record that already settled to stopped ends the wait"
@@ -204,7 +204,7 @@ fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
         Some(&status),
         None,
         false,
-        &ReportState::Fallback,
+        &ChildProgress::settled(ReportState::Fallback),
     );
 
     assert_eq!(state, "error");
@@ -1178,7 +1178,7 @@ fn a_childs_report_decides_whether_an_idle_child_is_finished() {
             None,
             Some("Done."),
             false,
-            report,
+            &ChildProgress::settled(report.clone()),
         )
     };
 
@@ -1424,4 +1424,69 @@ async fn a_child_hands_back_one_report_per_turn() {
         "{}",
         stranger.message
     );
+}
+
+/// Found in a live run: a parent waited right after spawning, the store had
+/// not seen the child's first turn yet, and the idle child read as completed
+/// with no output. A child is not done until a finished turn reaches the
+/// parent's newest prompt, and a turn that failed says so and why.
+#[test]
+fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_failed() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 4,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: None,
+        last_user_message: None,
+        last_agent_message_follows_last_user: false,
+        agent_message_latest_content_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
+    };
+    let progress =
+        |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
+            ChildProgress {
+                report: ReportState::Fallback,
+                awaited_ordinal: awaited,
+                answered_ordinal: answered,
+                failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
+            }
+        };
+    let status = |start: Option<&StartStatus>, progress: &ChildProgress| {
+        subagent_status(Some(&record), Some(&summary), start, None, false, progress)
+    };
+
+    // The first prompt was accepted as turn 20; no turn has finished yet.
+    let submitted = StartStatus::Submitted { turn_id: 20 };
+    assert_eq!(
+        status(Some(&submitted), &progress(None, None, None)),
+        ("running".into(), None, false)
+    );
+    // The same, known from the store after the start follow-up is forgotten.
+    assert_eq!(
+        status(None, &progress(Some(20), None, None)),
+        ("running".into(), None, false)
+    );
+    // A follow-up prompt the finished turn is older than.
+    assert!(!status(None, &progress(Some(45), Some(20), None)).2);
+    // Answered, and the turn hit a usage limit.
+    assert_eq!(
+        status(
+            None,
+            &progress(
+                Some(20),
+                Some(20),
+                Some(("failed", "You've hit your usage limit."))
+            )
+        ),
+        (
+            "failed".into(),
+            Some("You've hit your usage limit.".into()),
+            true
+        )
+    );
+    assert_eq!(report_source("failed", &ReportState::Fallback), None);
 }

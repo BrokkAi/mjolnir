@@ -33,6 +33,11 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
 - Observation: upstream took migration 48 (returned steering) while this work was in progress.
   Evidence: merge of `origin/master` on 2026-09-24 conflicted in `migrate_schema`; the handback table became migration 49.
 
+- Observation (live run, 2026-09-24): a parent's `wait` right after `spawn` answered `completed` with no output for a child whose first turn had started 45 ms earlier. The same happened to a child whose turn failed on a Codex usage limit: its reason never reached the parent.
+  Evidence: child `9931f98d` events show `turn_started` for its first prompt at 959384 ms and the parent's wait answering at 959429 ms; the turn ran for another three minutes. Child `ea722d76` ended with "You've hit your usage limit" and the wait reported `state: completed, output: null`. The sub-agent wait read the store, which lags the live session, and treated any idle child as finished.
+- Observation (live run): three of four children skipped `handback` in their task turn and handed back only after the reminder.
+  Evidence: `subagent_handbacks.handback_command_id` starts with `handback-reminder-` for three children. The instruction trailed long parent prompts; it now leads them.
+
 ## Decision Log
 
 - Decision: every Claude or Codex child gets `handback`, whichever spawn path created it, and `mj wait` learns the same rule.
@@ -44,6 +49,9 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
 - Decision: no child-to-parent messages during a turn.
   Rationale: in the transcripts children sent 355 handbacks and at most 5 mid-run messages. A child that needs a decision hands back a question; the parent answers with `send_input`.
   Date/Author: 2026-09-24 / user.
+- Decision: record the acceptance ordinal of every parent prompt to a child (the first prompt and each `send_input`) in migration 50, and treat an idle child as unfinished until a finished turn reaches it. Report a failed or interrupted turn as `failed` or `interrupted` with its reason instead of `completed`.
+  Rationale: the store lags the live session, and the parent needs to know a child failed and why, so it can re-prompt or pick another profile.
+  Date/Author: 2026-09-24 / Claude, from the live run.
 - Decision: resuming a stopped child stays out of scope.
   Rationale: no resume path handles a child that borrows its parent's container, and child startup always creates a fresh native session.
   Date/Author: 2026-09-24 / user.

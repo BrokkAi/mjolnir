@@ -471,8 +471,8 @@ impl ApiBackend {
                         .into_iter()
                         .map(|id| {
                             let summary = crate::database::load_materialized_session_summary(&id)?;
-                            let report = load_report_state(&id)?;
-                            Ok((id, (summary, report)))
+                            let progress = load_child_progress(&id)?;
+                            Ok((id, (summary, progress)))
                         })
                         .collect::<Result<std::collections::BTreeMap<_, _>>>()
                 })
@@ -491,10 +491,16 @@ impl ApiBackend {
                         let record = self.exports.session_record(&relation.child_session_id);
                         // This listing reports state only; a child's report is
                         // collected through wait.
-                        let (summary, report) = summaries
+                        let unknown = ChildProgress {
+                            report: ReportState::Fallback,
+                            awaited_ordinal: None,
+                            answered_ordinal: None,
+                            failed_turn: None,
+                        };
+                        let (summary, progress) = summaries
                             .get(&relation.child_session_id)
-                            .map_or((None, &ReportState::Fallback), |(summary, report)| {
-                                (summary.as_ref(), report)
+                            .map_or((None, &unknown), |(summary, progress)| {
+                                (summary.as_ref(), progress)
                             });
                         let (state, _, _) = subagent_status(
                             record.as_ref(),
@@ -502,7 +508,7 @@ impl ApiBackend {
                             starts.get(&relation.child_session_id),
                             None,
                             self.exports.close_is_requested(&relation.child_session_id),
-                            report,
+                            progress,
                         );
                         serde_json::json!({
                             "child_session_id":relation.child_session_id,
@@ -529,6 +535,13 @@ impl ApiBackend {
                 let turn_id = self
                     .prompt(child_session_id.clone(), message.clone())
                     .await?;
+                // Until a finished turn reaches this prompt, a wait on the
+                // child keeps waiting instead of reading the previous turn.
+                blocking("record sub-agent prompt", {
+                    let child_id = child_session_id.clone();
+                    move || crate::database::record_subagent_prompt(&child_id, turn_id)
+                })
+                .await?;
                 Ok(serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id}))
             }
             SubagentToolAction::WaitAgents {
@@ -565,8 +578,8 @@ impl ApiBackend {
                             .map(|id| {
                                 let summary =
                                     crate::database::load_materialized_session_summary(&id)?;
-                                let report = load_report_state(&id)?;
-                                Ok((id, summary, report))
+                                let progress = load_child_progress(&id)?;
+                                Ok((id, summary, progress))
                             })
                             .collect::<Result<Vec<_>>>()
                     })
@@ -577,7 +590,7 @@ impl ApiBackend {
                             starts.insert(id.clone(), status);
                         }
                     }
-                    let complete = summaries.iter().all(|(id, summary, report)| {
+                    let complete = summaries.iter().all(|(id, summary, progress)| {
                         let record = self.exports.session_record(id);
                         subagent_status(
                             record.as_ref(),
@@ -585,7 +598,7 @@ impl ApiBackend {
                             starts.get(id),
                             None,
                             self.exports.close_is_requested(id),
-                            report,
+                            progress,
                         )
                         .2
                     });
@@ -605,7 +618,7 @@ impl ApiBackend {
                         .await??;
                         let agents = summaries
                             .into_iter()
-                            .map(|(id, summary, report)| {
+                            .map(|(id, summary, progress)| {
                                 let record = self.exports.session_record(&id);
                                 let (state, output, finished) = subagent_status(
                                     record.as_ref(),
@@ -613,11 +626,11 @@ impl ApiBackend {
                                     starts.get(&id),
                                     reports.get(&id).and_then(Option::as_deref),
                                     self.exports.close_is_requested(&id),
-                                    &report,
+                                    &progress,
                                 );
                                 serde_json::json!({
                                     "child_session_id":id,
-                                    "report_source":report_source(&state, &report),
+                                    "report_source":report_source(&state, &progress.report),
                                     "state":state,
                                     "finished":finished,
                                     "output":output,
@@ -995,7 +1008,7 @@ fn subagent_status(
     start: Option<&StartStatus>,
     finished_turn_message: Option<&str>,
     closing: bool,
-    report: &ReportState,
+    progress: &ChildProgress,
 ) -> (String, Option<String>, bool) {
     // A close the daemon admitted owns this child until it finishes, the same
     // rule `resolve_wait` applies to a session-level wait: a close ends
@@ -1036,40 +1049,85 @@ fn subagent_status(
         }
         _ if start_pending => ("running".into(), None, false),
         _ => match summary {
-            // An idle child that still owes its report is not done: Mjolnir
-            // is about to remind it, or already has.
+            // An idle child is not done while the parent's newest prompt is
+            // unanswered, which is how it looks until the store catches up
+            // with a prompt just given, or while it still owes its report and
+            // Mjolnir is reminding it.
             Some(summary)
                 if matches!(summary.execution, MaterializedExecutionState::Idle)
-                    && matches!(report, ReportState::Pending { .. }) =>
+                    && (progress.awaiting_prompt(match start {
+                        Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
+                        _ => None,
+                    }) || matches!(progress.report, ReportState::Pending { .. })) =>
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
-            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => (
-                "completed".into(),
-                match report {
-                    ReportState::Delivered(message) => Some(message.clone()),
-                    _ => finished_turn_message
-                        .map(str::to_owned)
-                        .or_else(|| summary.last_agent_message.clone()),
-                },
-                true,
-            ),
+            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => {
+                match (&progress.report, &progress.failed_turn) {
+                    (ReportState::Delivered(message), _) => {
+                        ("completed".into(), Some(message.clone()), true)
+                    }
+                    // A turn that failed says so, with its reason: it is not a
+                    // report, and the child can be given another prompt.
+                    (_, Some((state, reason))) => ((*state).to_owned(), Some(reason.clone()), true),
+                    _ => (
+                        "completed".into(),
+                        finished_turn_message
+                            .map(str::to_owned)
+                            .or_else(|| summary.last_agent_message.clone()),
+                        true,
+                    ),
+                }
+            }
             Some(summary) => ("running".into(), summary.last_agent_message.clone(), false),
             None => ("preparing".into(), None, false),
         },
     }
 }
 
-/// Where a child's report stands, read from the store. The sub-agent `wait`,
-/// `list_agents`, the session wait and the reminder all apply this one rule.
-pub(crate) fn load_report_state(child_id: &str) -> Result<ReportState> {
-    let Some(record) = crate::database::load_subagent(child_id)? else {
-        return Ok(ReportState::Fallback);
-    };
-    if !record.handback_tool {
-        return Ok(ReportState::Fallback);
+/// What the store says about a child's answer to its parent's newest prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildProgress {
+    /// Where the child's report stands after its last finished turn.
+    pub report: ReportState,
+    /// The newest prompt the parent gave the child, by acceptance ordinal.
+    pub awaited_ordinal: Option<u64>,
+    /// Acceptance ordinal of the child's last finished turn.
+    pub answered_ordinal: Option<u64>,
+    /// How that turn failed, when it did: `failed` or `interrupted`, and why.
+    pub failed_turn: Option<(&'static str, String)>,
+}
+
+impl ChildProgress {
+    /// A child whose last turn answered everything asked and ended normally,
+    /// with this report.
+    #[cfg(test)]
+    pub(crate) fn settled(report: ReportState) -> Self {
+        Self {
+            report,
+            awaited_ordinal: None,
+            answered_ordinal: None,
+            failed_turn: None,
+        }
     }
-    let report = crate::database::load_subagent_report(child_id)?;
+
+    /// Whether the parent's newest prompt is still unanswered. `submitted` is
+    /// the first prompt's ordinal while its start follow-up remembers it.
+    fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
+        self.awaited_ordinal.max(submitted).is_some_and(|awaited| {
+            self.answered_ordinal
+                .is_none_or(|answered| answered < awaited)
+        })
+    }
+}
+
+/// Read a child's progress from the store. The sub-agent `wait` and
+/// `list_agents` apply this one rule; the session wait and the reminder apply
+/// the same report rule to the turn they saw.
+pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
+    let handback_tool =
+        crate::database::load_subagent(child_id)?.is_some_and(|record| record.handback_tool);
+    let recorded = crate::database::load_subagent_report(child_id)?;
     let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
         .map(|(_, active, last)| (active, last))
         .unwrap_or_default();
@@ -1077,18 +1135,32 @@ pub(crate) fn load_report_state(child_id: &str) -> Result<ReportState> {
         .iter()
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
-    Ok(mj_core::subagent::report_state(
-        true,
-        &report,
+    let report = mj_core::subagent::report_state(
+        handback_tool,
+        &recorded,
         last.as_ref(),
         &in_flight,
         mj_core::clock::epoch_millis(),
-    ))
+    );
+    let failed_turn = match last.as_ref() {
+        // Only a failed turn pays for reading its last message.
+        Some(turn) if mj_core::subagent::failed_turn(turn, None).is_some() => {
+            let message = crate::database::load_materialized_finished_turn_message(child_id)?;
+            mj_core::subagent::failed_turn(turn, message.as_deref())
+        }
+        _ => None,
+    };
+    Ok(ChildProgress {
+        report,
+        awaited_ordinal: recorded.awaited_ordinal,
+        answered_ordinal: last.as_ref().and_then(|turn| turn.accepted_ordinal),
+        failed_turn,
+    })
 }
 
 /// Where a finished child's `output` came from: its handback, or the last
 /// message of its turn when it handed nothing back. Unfinished and failed
-/// children have no report yet.
+/// children have no report.
 fn report_source(state: &str, report: &ReportState) -> Option<&'static str> {
     (state == "completed").then_some(match report {
         ReportState::Delivered(_) => "handback",
@@ -1808,7 +1880,26 @@ impl SubagentBackend for ApiBackend {
             let task = tokio::spawn(async move {
                 let _upgrade_work = upgrade_work;
                 let status = match work.await {
-                    Ok(Ok(Some(turn_id))) => Some(StartStatus::Submitted { turn_id }),
+                    Ok(Ok(Some(turn_id))) => {
+                        // A sub-agent child's wait must not read it as done
+                        // before a finished turn reaches its first prompt. A
+                        // session that is not a child records nothing.
+                        let child_id = id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            crate::database::record_subagent_prompt(&child_id, turn_id)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "record a sub-agent's first prompt")
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "sub-agent prompt recorder task failed")
+                            }
+                        }
+                        Some(StartStatus::Submitted { turn_id })
+                    }
                     // Configuration applied and nothing to submit: there is no
                     // turn to report, so the session is an ordinary one again.
                     Ok(Ok(None)) => None,

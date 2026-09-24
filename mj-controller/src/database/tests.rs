@@ -5268,3 +5268,27 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
         "the report leaves with its child"
     );
 }
+
+/// The ordinal of the parent's newest prompt is recorded only for a sub-agent
+/// child, and a late write for an older prompt never moves it back.
+#[test]
+fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, child) = subagent_pair(&path);
+    record_subagent_prompt_to(&path, &child.id, 20).unwrap();
+    record_subagent_prompt_to(&path, &child.id, 45).unwrap();
+    record_subagent_prompt_to(&path, &child.id, 30).unwrap();
+    assert_eq!(
+        load_subagent_report_from(&path, &child.id)
+            .unwrap()
+            .awaited_ordinal,
+        Some(45)
+    );
+    record_subagent_prompt_to(&path, &parent.id, 7).unwrap();
+    assert_eq!(
+        load_subagent_report_from(&path, &parent.id).unwrap(),
+        mj_core::subagent::SubagentReport::default(),
+        "a session that is not a child records nothing"
+    );
+}
