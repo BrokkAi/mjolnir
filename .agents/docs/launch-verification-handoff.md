@@ -17,7 +17,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - `bin-fixed/` rebuilt from `d501dcf9`: `mj` `dc00467d`, `mj-worker` `2463f5c0`, musl worker `328b7498` (`bin-fixed/SHA256SUMS-d501dcf9.txt`).
 - #1136 closed by its commit; `agent-in-progress` removed.
 - R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A landed in full (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7; `c69618f4..aa89c000`), validated (controller, cli, core, tui tests; clippy; fmt), pushed; master = origin = `526ab788`. `bin-fixed/` rebuilt from `526ab788` (`SHA256SUMS-526ab788.txt`; both workers stamped `2.20.0+526ab788…`).
-- Fix wave R2-B (R2-2, R2-1, R2-11 investigation) is running as the one subagent in an isolated worktree; mission text `evidence/fix-wave-r2b-mission.md`. Its lab daemon runs from `/tmp/hel-r-1278541-…`; do not kill it.
+- Fix wave R2-B landed (R2-2 `5f732831`, R2-1 `5dafd135`), validated, pushed; master = origin = `dd9e55ce`. R2-11 cause confirmed, fix deferred (see the runbook's R2 fix waves paragraph and the open list). Its worktree `agent-ab36fc8a205e13311` is still locked by the agent; remove it when unlocked. #1144 filed for the suspend handler's `Controller::load()` and the test that reads the real store.
 - Stale agent worktrees and branches from the 09-23 fix waves were pruned on 09-24 at the user's request. The J-25 work in progress from the Track J worktree is saved as `evidence/track-j/j25-codex-quota-error-wip.patch`. Branch `worktree-agent-aa0dbae3ef12d579e` (pre-campaign "WIP: partial ACP 2.0 upgrade") was left for the user.
 - R3 and R4 mission texts are ready at `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
@@ -37,7 +37,9 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - I2-10 review "Preparing reviewer…" before discovering no files changed (capture-first refactor breaks six host tests' order).
 - I2-14 Muse question delayed ~3 min (needs logs for the window).
 - J-24 container mount source not validated; J-25 Codex quota error shown raw (partial work: `evidence/track-j/j25-codex-quota-error-wip.patch`). J-22 docs done (`5bf82223`).
+- R2-11: destroy does not index the session first, so one created and destroyed between sync passes is never findable. Proposed `wiki().sync_now(false)` before the destroy lifecycle; needs a decision on bounding the wait behind a running first index build.
 - R2-12 (open 2.19 `mj wait` fails with 503 during an upgrade; accepted trade-off of the H-2 fix), R2-13 (viewer `/api/snapshot` bursts; harm unknown).
+- Resume's rollback (`controller/resume.rs`) has the same cleanup-before-save order R2-2 fixed in provisioning; `mj resume` on a failed never-prompted launch is accepted then fails in the background with "session has no checkpoint".
 - A-4/E-9 dictation chord gives no feedback without a microphone.
 - D-14 narrow pinned pane not following new replies after restart (may be covered by `bf09b3d6`; re-verify).
 - B-11 Enter half of the workspace dialog issue still reproduces (R1 capture 015).
