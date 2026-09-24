@@ -1056,17 +1056,22 @@ for line in sys.stdin:
 /// A harness shaped like claude-agent-acp 0.81.0: it advertises short model
 /// values with display names, and resolves a full model id sent to
 /// `session/set_config_option` to the advertised value that runs it, the way
-/// the bridge's `resolveModelPreference` does. Anything else is refused with
-/// the bridge's own error text.
+/// the bridge's `resolveModelPreference` does. Its fuzzy last resort places
+/// text it cannot resolve on the catch-all `default` entry, as R4 saw for
+/// `not-a-model` (the title became "default · high"). Anything else is
+/// refused with the bridge's own error text. Every requested value is
+/// appended to `claude_alias.log`.
 fn claude_alias_harness(root: &std::path::Path) -> PathBuf {
     let script = root.join("claude_alias.py");
     std::fs::write(
         &script,
         r#"
-import json, sys
+import json, os, sys
+log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'claude_alias.log')
 model = 'default'
 choices = [('default','Default (recommended)'),('opus[1m]','Opus 5.5 (1M context)'),('sonnet','Sonnet 5')]
-resolved = {'claude-opus-5-5':'opus[1m]','claude-opus-5-5[1m]':'opus[1m]','claude-sonnet-5':'sonnet'}
+resolved = {'claude-opus-5-5':'opus[1m]','claude-opus-5-5[1m]':'opus[1m]','claude-sonnet-5':'sonnet',
+            'not-a-model':'default'}
 def options():
     return [{'id':'model','name':'Model','category':'model','type':'select',
        'currentValue':model,'options':[{'value':v,'name':n} for v,n in choices]}]
@@ -1083,6 +1088,8 @@ for line in sys.stdin:
                       {'id':'default','name':'Default'},{'id':'auto','name':'Auto'}]}}
     elif method == 'session/set_config_option':
         value = params['value']
+        with open(log, 'a') as output:
+            output.write(value + '\n')
         value = resolved.get(value, value)
         if value in [v for v,_ in choices]:
             model = value
@@ -1169,6 +1176,64 @@ async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_
             && refusal.contains("\"sonnet\""),
         "the refusal lists the accepted values: {refusal}"
     );
+
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+/// R4-1: `/model not-a-model` answered "model set to not-a-model" and the
+/// session silently ran the default model, because the bridge places text it
+/// cannot resolve on `default`. The value is refused as before bc7495e4 and
+/// the model the session had stays selected; full ids still resolve.
+#[tokio::test]
+async fn a_claude_model_the_bridge_cannot_place_is_refused_and_the_model_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let mut spec = launch(
+        root.path(),
+        claude_alias_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    spec.harness = HarnessKind::Claude;
+    let accepted = spec.accepted_config.clone();
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    let (value, _) = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
+        .await
+        .expect("the bridge resolves a full model id");
+    assert_eq!(value, "opus[1m]");
+
+    let refusal = set_model_outcome(&commands, &mut events, "not-a-model")
+        .await
+        .expect_err("a value the bridge can only place on its default is refused");
+    assert!(
+        refusal.contains("\"not-a-model\" is not an available model value")
+            && refusal.contains("\"opus[1m]\""),
+        "{refusal}"
+    );
+    assert_eq!(
+        accepted.lock().unwrap().model.as_deref(),
+        Some("opus[1m]"),
+        "restarts keep replaying the model the session had"
+    );
+    let requested = std::fs::read_to_string(root.path().join("claude_alias.log")).unwrap();
+    assert_eq!(
+        requested.lines().collect::<Vec<_>>(),
+        ["claude-opus-5-5", "not-a-model", "opus[1m]"],
+        "the previous model is selected again on the bridge"
+    );
+
+    // Asking for the default by name is still a model change.
+    let (value, _) = set_model_outcome(&commands, &mut events, "default")
+        .await
+        .expect("the default is a listed value");
+    assert_eq!(value, "default");
 
     drop(commands);
     tokio::time::timeout(Duration::from_secs(10), runtime)

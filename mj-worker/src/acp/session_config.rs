@@ -347,6 +347,38 @@ pub(super) async fn set_session_config(
     if !response.config_options.is_empty() {
         *options = response.config_options;
     }
+    if resolved.is_none() && lands_on_the_default_model(options, &option_id, &sent) {
+        // claude-agent-acp resolves full model ids, but its fuzzy last resort
+        // places text it cannot resolve on the catch-all `default` entry, so
+        // the bridge "accepts" a value it never recognized (R4-1). Select the
+        // previous model again and refuse the value as before bc7495e4. A
+        // full id that genuinely runs the default model is refused too; the
+        // listed `default` value selects it.
+        if let Some(previous) = previous
+            .as_deref()
+            .filter(|previous| !previous.trim().is_empty() && *previous != DEFAULT_MODEL_VALUE)
+        {
+            let restored = connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    option_id.clone(),
+                    SessionConfigValueId::new(previous.to_owned()),
+                ))
+                .block_task()
+                .await
+                .with_context(|| {
+                    format!("select {key} {previous} again after the bridge placed {value:?} on its default")
+                })?;
+            if !restored.config_options.is_empty() {
+                *options = restored.config_options;
+            }
+            adopt_requested_value(options, &option_id, Some(DEFAULT_MODEL_VALUE), previous);
+        }
+        bail!(
+            "{value:?} is not an available {key} value; {}",
+            accepted_values_sentence(options, key)
+        );
+    }
     adopt_requested_value(options, &option_id, previous.as_deref(), &sent);
     // A value the harness resolved itself is recorded as the one it now
     // reports, so a restart replays an advertised value and not the alias.
@@ -359,6 +391,25 @@ pub(super) async fn set_session_config(
             .filter(|current| !current.trim().is_empty())
             .unwrap_or(sent),
     })
+}
+
+/// The value claude-agent-acp advertises for "Default (recommended)".
+const DEFAULT_MODEL_VALUE: &str = "default";
+
+/// Whether the harness reports the default model after it was asked for
+/// `sent`, a value that is not the default. Only an unlisted Claude model
+/// reaches this check: it is the one kind of value left to the bridge.
+fn lands_on_the_default_model(
+    options: &[SessionConfigOption],
+    option_id: &agent_client_protocol::schema::v1::SessionConfigId,
+    sent: &str,
+) -> bool {
+    !sent.trim().eq_ignore_ascii_case(DEFAULT_MODEL_VALUE)
+        && options
+            .iter()
+            .find(|option| &option.id == option_id)
+            .and_then(|option| selector_current_value(&option.kind))
+            .is_some_and(|current| current == DEFAULT_MODEL_VALUE)
 }
 
 fn selector_current_value(kind: &SessionConfigKind) -> Option<String> {
