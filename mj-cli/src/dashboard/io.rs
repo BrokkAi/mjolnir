@@ -1694,6 +1694,32 @@ mod tests {
         );
     }
 
+    /// Launch finding R3-3: saving only the Jev checkbox wrote the built-in
+    /// `[targets.docker]` and `[targets.podman]` blocks into config.toml. The
+    /// dialog edits the effective config, which includes them; the file must
+    /// keep only what the user set.
+    #[test]
+    fn setup_save_does_not_write_built_in_targets_the_user_never_configured() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        Config::default().save_to(&path).unwrap();
+        let original = Config::default().with_local_targets();
+        let mut edited = original.clone();
+        edited.jev.enabled = false;
+        let saved = save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&edited).unwrap(),
+            &State::default(),
+        )
+        .unwrap();
+        assert!(!saved.jev.enabled);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[jev]"), "{text}");
+        assert!(!text.contains("[targets."), "{text}");
+        assert!(Config::load_from(&path).unwrap().targets.is_empty());
+    }
+
     #[test]
     fn settings_can_override_an_implicit_local_target_without_a_setup_file() {
         let directory = tempfile::tempdir().unwrap();

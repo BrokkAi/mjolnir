@@ -827,6 +827,17 @@ impl Config {
         self
     }
 
+    /// Whether the user configured target `id`: the file names it and the
+    /// entry differs from the standard local target of the same name that
+    /// [`Self::with_local_targets`] supplies. An entry that repeats a
+    /// standard target word for word adds nothing the user chose, so callers
+    /// that treat built-in targets gently treat it as built-in too.
+    pub fn configures_target(&self, id: &str) -> bool {
+        self.targets.get(id).is_some_and(|target| {
+            Self::default().with_local_targets().targets.get(id) != Some(target)
+        })
+    }
+
     /// Read the config from `path`, returning [`Config::default`] when the
     /// file is missing or empty and an error when it is malformed or was
     /// written by a newer Mjolnir.

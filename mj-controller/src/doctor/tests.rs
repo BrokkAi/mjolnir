@@ -668,6 +668,54 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     );
 }
 
+/// Launch finding R3-3: a Setup save once wrote the built-in `[targets.docker]`
+/// and `[targets.podman]` blocks into config.toml, and doctor then reported a
+/// missing engine as a fault to fix. A block identical to the built-in target
+/// is still the built-in target.
+#[test]
+fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
+    let written = config_with([
+        (
+            "docker",
+            TargetTemplate::LocalDocker {
+                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            },
+        ),
+        (
+            "podman",
+            TargetTemplate::LocalPodman {
+                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            },
+        ),
+    ]);
+    let docker = docker_checks(Ok(&written), &AlwaysFailingExecutor, false);
+    assert_eq!(docker.len(), 1);
+    assert_eq!(
+        docker[0].status,
+        CheckStatus::Unsupported,
+        "{}",
+        docker[0].detail
+    );
+    assert!(docker[0].detail.contains("built-in `docker` target"));
+    let podman = podman_checks(Ok(&written), &AlwaysFailingExecutor, false);
+    assert_eq!(podman.len(), 1);
+    assert_eq!(
+        podman[0].status,
+        CheckStatus::Unsupported,
+        "{}",
+        podman[0].detail
+    );
+
+    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let checks = docker_checks(Ok(&written), &missing_image, false);
+    assert_eq!(
+        checks[1].status,
+        CheckStatus::Warning,
+        "{}",
+        checks[1].detail
+    );
+}
+
 #[test]
 fn podman_checks_cover_the_built_in_podman_target() {
     let checks = podman_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);

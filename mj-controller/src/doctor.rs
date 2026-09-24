@@ -726,7 +726,11 @@ fn podman_checks(
 ) -> Vec<DoctorCheck> {
     let effective = config.map(|config| config.clone().with_local_targets());
     let effective = effective.as_ref().map_err(|gap| *gap);
-    let explicit = config.is_ok_and(|config| !local_podman_targets(config).is_empty());
+    let explicit = config.is_ok_and(|config| {
+        local_podman_targets(config)
+            .iter()
+            .any(|(id, _)| config.configures_target(id))
+    });
     let preflight = builtin_target_availability(
         podman_check(effective, executor),
         explicit,
@@ -753,7 +757,7 @@ fn builtin_image_check(
     target_id: &str,
     check: DoctorCheck,
 ) -> DoctorCheck {
-    let explicit = config.is_ok_and(|config| config.targets.contains_key(target_id));
+    let explicit = config.is_ok_and(|config| config.configures_target(target_id));
     if explicit || check.status != CheckStatus::Fixable {
         return check;
     }
@@ -773,7 +777,9 @@ fn builtin_image_check(
 /// supplies whether or not their engine is installed. A standard target whose
 /// engine is missing or not running is reported as unavailable, as the
 /// dashboard's Targets pane marks it, rather than as a fault to fix: nobody
-/// asked for it. A target the user configured keeps the fixable result.
+/// asked for it. A target the user configured keeps the fixable result; a
+/// block that only repeats a standard target does not count as configured
+/// ([`Config::configures_target`]).
 fn builtin_target_availability(
     check: DoctorCheck,
     explicit: bool,
@@ -952,7 +958,9 @@ fn docker_checks(
             )];
         }
     };
-    let explicit = !local_docker_targets(config).is_empty();
+    let explicit = local_docker_targets(config)
+        .iter()
+        .any(|(id, _)| config.configures_target(id));
     let effective = config.clone().with_local_targets();
     let targets = local_docker_targets(&effective);
     if targets.is_empty() {
