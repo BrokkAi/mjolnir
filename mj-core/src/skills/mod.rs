@@ -137,18 +137,42 @@ impl SkillsArchive {
     }
 }
 
-/// Snapshot the synced skills trees of a controller-side profile home. A home
-/// without any synced directory collects as an empty archive, which compares
-/// equal to a session in the same state. Symlinks are skipped, matching the
-/// provisioning allowlist copy.
+/// How a collection treats a symbolic link inside a skills tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Links {
+    /// Leave it out. A session's own home holds only the regular files
+    /// staging and installs wrote, and its worker never reads outside them.
+    Skip,
+    /// Read through it, as launch staging copies a profile home.
+    Follow,
+}
+
+/// Snapshot the synced skills trees of one home. A home without any synced
+/// directory collects as an empty archive, which compares equal to a session
+/// in the same state. Symlinks inside the tree are skipped: this is how a
+/// worker reads its session's home, and how the sync reads a home a session
+/// runs out of directly. [`collect_profile_skills`] reads a home that launch
+/// staging copies instead.
 pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
+    collect(kind, home, Links::Skip)
+}
+
+/// Snapshot a profile home's synced skills trees the way launch staging copies
+/// them: through symbolic links, skipping a link whose target is missing and a
+/// directory that links back into itself. A session whose home was staged
+/// from this profile then fingerprints the same as this archive.
+pub fn collect_profile_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
+    collect(kind, home, Links::Follow)
+}
+
+fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive> {
     let mut entries = Vec::new();
     for dir in kind.synced_skill_dirs() {
         let root = home.join(dir);
         if !root.exists() {
             continue;
         }
-        collect_tree(&root, dir, &mut entries)
+        collect_tree(&root, dir, &mut entries, links, &[])
             .with_context(|| format!("collect skills from {}", root.display()))?;
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -172,7 +196,7 @@ pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
 /// credential-sync push both compute the tree this way; if they disagreed, the
 /// first reconciliation after launch would wipe whatever the other installed.
 pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
-    let collected = collect_skills(kind, home)?;
+    let collected = collect_profile_skills(kind, home)?;
     let mut entries = collected.entries;
     for entry in managed_skills(kind) {
         match entries.binary_search_by(|existing| existing.path.cmp(&entry.path)) {
@@ -202,7 +226,24 @@ pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
     Ok(archive)
 }
 
-fn collect_tree(root: &Path, prefix: &str, entries: &mut Vec<SkillsEntry>) -> Result<()> {
+/// `entered` holds the resolved directories already entered on this branch of
+/// the walk, which stops a followed link that points back at an ancestor.
+fn collect_tree(
+    root: &Path,
+    prefix: &str,
+    entries: &mut Vec<SkillsEntry>,
+    links: Links,
+    entered: &[std::path::PathBuf],
+) -> Result<()> {
+    let mut entered = entered.to_vec();
+    if links == Links::Follow {
+        let resolved = std::fs::canonicalize(root)
+            .with_context(|| format!("resolve skills directory {}", root.display()))?;
+        if entered.contains(&resolved) {
+            return Ok(());
+        }
+        entered.push(resolved);
+    }
     let mut children = std::fs::read_dir(root)?.collect::<std::io::Result<Vec<_>>>()?;
     children.sort_by_key(|child| child.file_name());
     for child in children {
@@ -215,30 +256,85 @@ fn collect_tree(root: &Path, prefix: &str, entries: &mut Vec<SkillsEntry>) -> Re
             bail!("skills file name {} is not valid UTF-8", path.display());
         };
         let relative = format!("{prefix}/{name}");
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let mut metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
-            continue;
+            if links == Links::Skip {
+                continue;
+            }
+            metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                // Staging skips a link whose target is gone, so the
+                // canonical tree leaves it out as well.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("read skills link {}", path.display()));
+                }
+            };
         }
         if metadata.is_dir() {
-            collect_tree(&path, &relative, entries)?;
+            collect_tree(&path, &relative, entries, links, &entered)?;
             continue;
         }
         if !metadata.is_file() {
             continue;
         }
+        // One file that cannot travel must not stop the rest of the tree from
+        // syncing. Both sides of the sync skip it the same way, so their
+        // fingerprints still agree. A session keeps the copy staging gave it
+        // until a later push rebuilds the tree from the archive without it.
         if metadata.len() > MAX_SKILLS_FILE_BYTES {
-            bail!(
-                "skills file {} is {} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit",
-                path.display(),
-                metadata.len()
+            skip_skill_file(
+                &path,
+                &format!(
+                    "is {} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit",
+                    metadata.len()
+                ),
             );
+            continue;
         }
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                skip_skill_file(&path, &format!("could not be read: {error}"));
+                continue;
+            }
+        };
         entries.push(SkillsEntry {
             path: relative,
-            bytes: std::fs::read(&path)?,
+            bytes,
         });
     }
     Ok(())
+}
+
+/// Leaves one skill file out of a collection, saying so the first time.
+fn skip_skill_file(path: &Path, problem: &str) {
+    if first_report_of_skipped_skill(path) {
+        tracing::warn!(
+            path = %path.display(),
+            "skills file {problem}; leaving it out of skills sync"
+        );
+    } else {
+        tracing::debug!(
+            path = %path.display(),
+            "skills file {problem}; leaving it out of skills sync"
+        );
+    }
+}
+
+/// Whether this process has not yet reported skipping `path`. Collection runs
+/// on every sync poll, so a file that stays too large would otherwise be
+/// reported once a minute for the life of the worker.
+fn first_report_of_skipped_skill(path: &Path) -> bool {
+    static REPORTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_path_buf())
 }
 
 /// Replace a session home's synced skills trees with an archive's contents.
@@ -628,6 +724,90 @@ mod tests {
     fn decode_rejects_oversized_archives() {
         let oversized = vec![b'x'; MAX_SKILLS_ARCHIVE_BYTES + 1];
         assert!(SkillsArchive::decode(&oversized).is_err());
+    }
+
+    /// Launch finding R4-8: one 2.2 MB demo file under a skill made every
+    /// worker fail `skills_state` once a minute. The file is skipped and the
+    /// rest of the tree still collects.
+    #[test]
+    fn an_oversized_skill_file_is_skipped_rather_than_failing_the_tree() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/viz/SKILL.md", b"viz");
+        write(
+            home.path(),
+            "skills/viz/demos/large.html",
+            &vec![b'x'; usize::try_from(MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+        );
+
+        let archive = collect_skills(HarnessKind::Claude, home.path()).unwrap();
+
+        let paths = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["skills/viz/SKILL.md"]);
+        // The next poll collects the same tree, so the fingerprint is stable.
+        assert_eq!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .fingerprint(),
+            archive.fingerprint()
+        );
+    }
+
+    #[test]
+    fn a_skipped_skill_file_is_reported_once() {
+        let path = Path::new("/nonexistent/skills-report-once/large.html");
+        assert!(first_report_of_skipped_skill(path));
+        assert!(!first_report_of_skipped_skill(path));
+        assert!(first_report_of_skipped_skill(Path::new(
+            "/nonexistent/skills-report-once/other.html"
+        )));
+    }
+
+    /// A profile home that links a skill from elsewhere is staged with the
+    /// link's contents, so the canonical tree the sync compares against has to
+    /// read through the link too. Otherwise the first successful sync removes
+    /// the linked skill from every session.
+    #[cfg(unix)]
+    #[test]
+    fn profile_collection_follows_links_as_staging_does() {
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "viz/SKILL.md", b"linked viz");
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/own/SKILL.md", b"own");
+        std::os::unix::fs::symlink(outside.path().join("viz"), home.path().join("skills/viz"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("missing"),
+            home.path().join("skills/gone"),
+        )
+        .unwrap();
+        // A link back to an ancestor is entered once, not forever.
+        std::os::unix::fs::symlink(
+            home.path().join("skills"),
+            home.path().join("skills/own/loop"),
+        )
+        .unwrap();
+
+        let archive = collect_profile_skills(HarnessKind::Claude, home.path()).unwrap();
+
+        let paths = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["skills/own/SKILL.md", "skills/viz/SKILL.md"]);
+        // The session side still ignores links: a worker never reads outside
+        // the tree it was given.
+        assert_eq!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries()
+                .len(),
+            1
+        );
     }
 
     #[test]

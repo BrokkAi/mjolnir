@@ -2804,6 +2804,60 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     );
 }
 
+/// Launch finding R4-8: a profile home linked `skills/tufte-viz` from
+/// elsewhere, and the linked skill held a 2.2 MB demo. Staging copied both
+/// through the link; the session's worker then failed every skills poll on the
+/// large file, and the sync's own copy of the home did not read through the
+/// link at all. Stage and sync now agree, so the first sync neither fails nor
+/// removes the linked skill.
+#[cfg(unix)]
+#[test]
+fn staging_and_sync_agree_on_linked_and_oversized_skills() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("viz/demos")).unwrap();
+    std::fs::write(outside.path().join("viz/SKILL.md"), "viz skill\n").unwrap();
+    std::fs::write(
+        outside.path().join("viz/demos/large.html"),
+        vec![b'x'; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
+    std::fs::write(home.path().join("skills/review/SKILL.md"), "review skill\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("viz"), home.path().join("skills/viz")).unwrap();
+
+    let staged = tempfile::tempdir().unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+    assert_eq!(installed, expected);
+    assert!(
+        expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/SKILL.md"),
+        "the linked skill is part of the canonical tree"
+    );
+    assert!(
+        !expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/demos/large.html"),
+        "the oversized file is left out of both sides"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
