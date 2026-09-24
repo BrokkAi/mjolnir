@@ -935,6 +935,35 @@ fn smoke_test_announces_the_image_download_before_it_starts() {
     );
 }
 
+/// Launch finding R3-10: after "nothing more is printed until it finishes"
+/// the next line was "Running `mj doctor` checks...", with no word on how the
+/// smoke test went. It ends with one line that gives the outcome and the time
+/// it took.
+#[test]
+fn smoke_test_prints_its_outcome_and_how_long_it_took() {
+    let last_line = |executor: &FakeExecutor| {
+        let mut output = Vec::new();
+        let result = run_smoke_test(
+            &mut output,
+            &smoke_target(RuntimeKind::Podman, "ubuntu:24.04"),
+            executor,
+        );
+        let output = String::from_utf8(output).unwrap();
+        (result, output.lines().last().unwrap_or_default().to_owned())
+    };
+    let (result, line) = last_line(&FakeExecutor::succeeds());
+    assert!(result.is_ok());
+    assert!(line.starts_with("Smoke test passed in "), "{line}");
+    assert!(line.contains("second(s)"), "{line}");
+
+    let (result, line) = last_line(&FakeExecutor {
+        commands: RefCell::new(vec![]),
+        statuses: vec![0, 1, 0],
+    });
+    assert!(result.is_err());
+    assert!(line.starts_with("Smoke test failed after "), "{line}");
+}
+
 #[test]
 fn smoke_test_removes_the_container_after_a_failed_command() {
     let executor = FakeExecutor {

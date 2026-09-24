@@ -1472,7 +1472,21 @@ fn run_smoke_test(
     if let Some(announcement) = smoke_download_announcement(target) {
         writeln!(output, "{announcement}")?;
     }
-    run_setup_smoke_test(target, &smoke_id, executor)
+    // Nothing is printed while the test runs, so close the wait with its
+    // outcome and how long it took (launch finding R3-10).
+    let started = std::time::Instant::now();
+    let result = run_setup_smoke_test(target, &smoke_id, executor);
+    let took = mj_core::activity::describe_duration(
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
+    match &result {
+        Ok(()) => writeln!(output, "Smoke test passed in {took}.")?,
+        Err(_) => writeln!(
+            output,
+            "Smoke test failed after {took}; the checks below say what to fix."
+        )?,
+    }
+    result
 }
 
 /// Download size of [`mj_core::config::DEFAULT_CONTAINER_IMAGE`], as the
