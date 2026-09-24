@@ -2500,6 +2500,138 @@ fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_en
     );
 }
 
+/// What the Claude adapter (claude-agent-acp 0.81.0, `dist/session-mode.js`,
+/// `publishFallbackWarning`) sends as agent text while it answers a switch to
+/// a model without Auto mode. Recorded in launch re-verification R4 (session
+/// 7214842e…, transcript item 30) after `/model haiku` on a session with no
+/// prompt yet.
+const CLAUDE_AUTO_MODE_FALLBACK_TEXT: &str = "**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.";
+
+/// R4-2: the adapter's answer to a model change is not a model cycle, so no
+/// result ever follows it. A turn opened for that text stayed Running for
+/// minutes and nothing could stop it.
+#[test]
+fn text_that_answers_a_model_change_opens_no_harness_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    submit_relay(&mut relay, "model-haiku", set_config("model", "haiku"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "model-haiku");
+
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(
+        state.harness_turn.is_none(),
+        "the answer to a configuration request is not a turn"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert!(
+        observations(&relay).iter().any(|observation| matches!(
+            observation,
+            RelayObservation::SessionUpdate { update }
+                if agent_chunk_text(update) == Some(CLAUDE_AUTO_MODE_FALLBACK_TEXT)
+        )),
+        "the notice still reaches the conversation"
+    );
+
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "haiku".into(),
+        })
+        .unwrap();
+    relay
+        .record_command_completed("model-haiku", RelayCommandOutcome::Configured)
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // Text with no request in flight is still Claude Code working on its own.
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+}
+
+/// R4-2: a stop of a turn Claude Code never ran is answered by nothing, so
+/// the relay ends that turn itself once the stop has had time to be answered.
+/// A real cycle's result still ends the turn first.
+#[test]
+fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
+    for command in [RelayCommand::Cancel, RelayCommand::CancelTurn] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay
+            .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+            .unwrap();
+        let turn = relay
+            .operational_state()
+            .harness_turn
+            .expect("text at idle opens a turn");
+        assert!(relay.unanswered_harness_turn_stop().is_none());
+
+        submit_relay(&mut relay, "stop-phantom", command.clone());
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        relay
+            .record_command_completed("stop-phantom", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        let first_ordinal = relay
+            .unanswered_harness_turn_stop()
+            .expect("the applied stop waits for the harness to answer it");
+        assert_eq!(
+            relay.operational_state().harness_turn,
+            Some(turn),
+            "the turn stays open while the harness may still answer"
+        );
+
+        assert!(
+            relay
+                .end_unanswered_harness_turn_stop(first_ordinal)
+                .unwrap(),
+            "{command:?}"
+        );
+        let state = relay.operational_state();
+        assert!(state.harness_turn.is_none());
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(matches!(
+            observations(&relay).last(),
+            Some(RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            })
+        ));
+        assert!(relay.unanswered_harness_turn_stop().is_none());
+    }
+
+    // The interrupted cycle's result arrives in time: nothing is left to end.
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-real", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-real", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    let first_ordinal = relay.unanswered_harness_turn_stop().unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(relay.unanswered_harness_turn_stop().is_none());
+    let before = relay.operational_state().latest_ordinal;
+    assert!(
+        !relay
+            .end_unanswered_harness_turn_stop(first_ordinal)
+            .unwrap()
+    );
+    assert_eq!(relay.operational_state().latest_ordinal, before);
+}
+
 #[test]
 fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let temp = tempfile::tempdir().unwrap();

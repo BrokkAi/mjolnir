@@ -61,6 +61,9 @@ async fn run_relay_coordinator_with_verdict(
     // A monotonic deadline keeps unrelated events and wall-clock changes from
     // restarting the wait. Only the persisted wall deadline crosses restarts.
     let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
+    // A stop applied to a turn Claude Code started on its own, keyed by that
+    // turn's first ordinal, and when to end the turn if nothing answers it.
+    let mut stop_timer: Option<(u64, tokio::time::Instant)> = None;
     loop {
         let invalidated_generation = verdict_generation.filter(|generation| {
             !relay
@@ -124,6 +127,19 @@ async fn run_relay_coordinator_with_verdict(
             });
         }
         let wake_at = capacity_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
+        let unanswered_stop = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .unanswered_harness_turn_stop();
+        if stop_timer.map(|(turn, _)| turn) != unanswered_stop {
+            stop_timer = unanswered_stop.map(|turn| {
+                (
+                    turn,
+                    tokio::time::Instant::now() + crate::relay::HARNESS_TURN_STOP_GRACE,
+                )
+            });
+        }
+        let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         tokio::select! {
             biased;
             wake = dispatch_wakes.recv(), if wakes_open => {
@@ -195,6 +211,15 @@ async fn run_relay_coordinator_with_verdict(
                     capacity_timer = capacity_deadline.map(|deadline| (deadline,
                         tokio::time::Instant::now() + std::time::Duration::from_secs(1)));
                 }
+                dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+            }
+            _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() => {
+                let (turn, _) = stop_timer.take().expect("guarded stop timer");
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .end_unanswered_harness_turn_stop(turn)?;
+                // A checkpoint barrier may have been waiting for this turn.
                 dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
             }
             _ = kimi_poll.tick(), if kimi_tasks.is_some() => {

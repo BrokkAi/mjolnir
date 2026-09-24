@@ -60,6 +60,11 @@ pub enum HarnessTurnPolicy {
     CodexAdapter,
 }
 
+/// How long a stop sent during a turn Claude Code started on its own waits
+/// for the result that ends an interrupted cycle before the relay ends the
+/// turn itself.
+pub const HARNESS_TURN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Where this relay learns about commands the agent left running.
 ///
 /// Claude reports its own background tasks. Kimi uses Hel's terminals for
@@ -155,6 +160,11 @@ pub struct DurableRelay {
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
     claude_pending_stops: BTreeSet<String>,
+    /// The first ordinal of the Claude harness turn a stop was applied to,
+    /// while that turn is still open. Claude Code answers a stop of a running
+    /// cycle with the cycle's result; a turn it never ran gets no answer, so
+    /// the coordinator ends it after [`HARNESS_TURN_STOP_GRACE`].
+    harness_turn_stop: Option<u64>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -389,6 +399,7 @@ impl DurableRelay {
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeSet::new(),
+            harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -928,6 +939,57 @@ impl DurableRelay {
         ))
     }
 
+    /// Remember a stop applied during a Claude harness turn, so the turn can
+    /// be ended if Claude Code never answers it.
+    fn note_harness_turn_stop(&mut self) {
+        if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && self.snapshot.active_prompt.is_none()
+            && let Some(turn) = self.snapshot.harness_turn
+        {
+            self.harness_turn_stop = Some(turn.first_ordinal);
+        }
+    }
+
+    /// The first ordinal of the open Claude harness turn a stop was applied
+    /// to, while nothing has answered that stop yet.
+    pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
+        let turn = self.snapshot.harness_turn?;
+        (self.harness_turn_stop == Some(turn.first_ordinal)).then_some(turn.first_ordinal)
+    }
+
+    /// End the harness turn a stop was applied to, if it is still open. A
+    /// cycle Claude Code was running would have sent its result by now; a
+    /// turn that is still open was opened for output no cycle produced, and
+    /// nothing else would ever end it. Returns whether a turn was ended.
+    pub fn end_unanswered_harness_turn_stop(&mut self, first_ordinal: u64) -> Result<bool> {
+        if self.unanswered_harness_turn_stop() != Some(first_ordinal) {
+            return Ok(false);
+        }
+        self.harness_turn_stop = None;
+        tracing::warn!(
+            session_id = %self.snapshot.session_id,
+            first_ordinal,
+            "Claude Code did not answer a stop of the turn it started on its own; ending the turn"
+        );
+        self.settle_harness_turn(Some("stop_unanswered".to_owned()))?;
+        Ok(true)
+    }
+
+    /// Whether a request that configures the session, rather than a prompt,
+    /// is waiting for the harness's answer. The Claude adapter publishes some
+    /// notices as agent text while it answers such a request: a switch to a
+    /// model without Auto mode sends "Auto mode unavailable". No model cycle
+    /// runs for it, so no result would ever end a turn opened for that text.
+    fn configuration_request_in_flight(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            dispatch.state == RelayDispatchState::InFlight
+                && matches!(
+                    dispatch.command,
+                    RelayCommand::SetConfig { .. } | RelayCommand::SetSessionMode { .. }
+                )
+        })
+    }
+
     fn settle_harness_turn(&mut self, origin: Option<String>) -> Result<()> {
         self.append_relay_event(
             None,
@@ -953,11 +1015,14 @@ impl DurableRelay {
     }
 
     /// Whether this update reveals the harness working with nothing of Hel's
-    /// in flight, which is what opens a harness-initiated turn.
+    /// in flight, which is what opens a harness-initiated turn. Output that
+    /// arrives while a configuration request waits for its answer belongs to
+    /// that request.
     fn opens_harness_turn(&self, update: &SessionUpdate) -> bool {
         is_agent_output(update)
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
+            && !self.configuration_request_in_flight()
             && !matches!(
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed

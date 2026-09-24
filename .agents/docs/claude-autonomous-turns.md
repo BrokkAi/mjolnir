@@ -103,7 +103,11 @@ observations:
   already open, so the turn covers that output. Session bookkeeping —
   `usage_update`, `user_message_chunk`, `available_commands_update`,
   `current_mode_update`, `config_option_update`, `session_info_update` — never
-  opens a turn.
+  opens a turn. Neither does output that arrives while a `SetConfig` or
+  `SetSessionMode` request is waiting for its answer: the adapter publishes
+  some notices as agent text while it answers one (a switch to a model without
+  Auto mode sends `**Auto mode unavailable:** …`), and no model cycle, so no
+  result, follows them (launch finding R4-2).
 - `harness_turn_settled { origin }`, appended by
   `DurableRelay::claude_turn_result` when a result that the prompt loop was not
   asked to take arrives while a turn is open. Any result settles the turn,
@@ -122,7 +126,13 @@ A harness turn ends on any of:
    prompt being rejected or interrupted — because a prompt result means the SDK
    reached a turn boundary;
 3. `SessionRestarted`, because the control plane behind the cycle is gone;
-4. `Closing` or `Closed`.
+4. `Closing` or `Closed`;
+5. a stop (`Cancel` or `CancelTurn`) that Claude Code has not answered with a
+   result within `HARNESS_TURN_STOP_GRACE` (5 s). A running cycle answers its
+   interrupt with a result at once; a turn still open after that was opened
+   for output no cycle produced, and nothing else would end it. The relay
+   coordinator runs this timer and records `harness_turn_settled` with origin
+   `stop_unanswered`.
 
 Clearing a turn returns execution to `Idle` when no prompt is active.
 `SessionRestarted` became a state-changing observation for this reason, so it
@@ -158,8 +168,9 @@ session was running.
 - Stop works during a Claude harness turn. The chat's Esc, the phone's
   interrupt, `CancelTurn`, and the older `Cancel` all reach the adapter as
   `session/cancel`, which interrupts the running cycle; that cycle's result
-  then settles the turn. A Codex turn of this kind is a native goal and keeps
-  its own controls, so the relay still refuses `Cancel` for it.
+  then settles the turn, or clearing rule 5 does when no result comes. A
+  Codex turn of this kind is a native goal and keeps its own controls, so the
+  relay still refuses `Cancel` for it.
 
 ## Background work the agent leaves running
 

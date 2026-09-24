@@ -3221,6 +3221,121 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
     coordinator.await.unwrap().unwrap();
 }
 
+/// R4-2, replayed from the recorded session: `/model haiku` before any
+/// prompt made the Claude adapter answer with agent text, the worker opened a
+/// turn for it that nothing ever ended, and every stop was "completed" while
+/// the session stayed Running.
+#[tokio::test(start_paused = true)]
+async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "model-haiku",
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "haiku".into(),
+        },
+    );
+    wake_tx.try_send(()).unwrap();
+    let CommandRequest::SetConfig { request_id, .. } = next_command(&mut command_rx).await else {
+        panic!("the model change must reach the prompt loop");
+    };
+    // The adapter publishes its notice before it answers the request.
+    event_tx
+        .send(agent_output(
+            "**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.",
+            "auto-mode-notice",
+        ))
+        .unwrap();
+    event_tx
+        .send(RuntimeEvent::ConfigApplied {
+            request_id,
+            key: "model".into(),
+            value: "haiku".into(),
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| {
+        state.config.get("model").map(String::as_str) == Some("haiku")
+    })
+    .await;
+    let state = relay.lock().unwrap().operational_state();
+    assert!(
+        state.harness_turn.is_none(),
+        "the answer to a model change opened a turn"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // Any turn Claude Code does not know about must still be stoppable.
+    event_tx
+        .send(agent_output("Text no cycle will ever settle", "orphan-1"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output at idle did not open a turn",
+    )
+    .await;
+    submit(
+        &mut relay.lock().unwrap(),
+        "interrupt-turn",
+        RelayCommand::CancelTurn,
+    );
+    wake_tx.try_send(()).unwrap();
+    let CommandRequest::Cancel { request_id, .. } = next_command(&mut command_rx).await else {
+        panic!("the interrupt must reach the prompt loop as a cancel");
+    };
+    event_tx
+        .send(RuntimeEvent::CancelApplied { request_id })
+        .unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .unanswered_harness_turn_stop()
+                .is_some()
+        },
+        "the applied stop was not recorded",
+    )
+    .await;
+    assert!(
+        harness_turn_open(&relay),
+        "the harness may still answer the stop with its result"
+    );
+    tokio::time::sleep(crate::relay::HARNESS_TURN_STOP_GRACE).await;
+    wait_until(
+        || !harness_turn_open(&relay),
+        "a stop the harness never answered left the turn running",
+    )
+    .await;
+    assert_eq!(
+        relay.lock().unwrap().operational_state().execution,
+        RelayExecutionState::Idle
+    );
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let temp = tempfile::tempdir().unwrap();
