@@ -156,8 +156,11 @@ enum Command {
 /// it did nothing (F-16).
 #[derive(Debug, Clone, Default, Args)]
 pub(crate) struct WorkspaceName {
-    /// Workspace to work in, by name. `mj new` and `mj acp` always need it;
-    /// other commands need it when the instance has more than one.
+    /// Workspace to work in, by name. `mj new` and `mj acp` require it.
+    /// `mj sessions` and `mj events` show only that workspace when it is
+    /// given, and every workspace when it is not. `mj import`, and `mj resume
+    /// --wiki` when it imports another tool's session, put the session in it,
+    /// and need it when the instance has more than one workspace.
     #[arg(long = "workspace", id = "workspace_name", value_name = "NAME")]
     pub(crate) name: Option<String>,
 }
@@ -1960,6 +1963,31 @@ mod tests {
             panic!("expected the sessions command");
         };
         assert_eq!(args.workspace.or(None).as_deref(), Some("w"));
+    }
+
+    /// R2-10: the help said commands other than `mj new` and `mj acp` "need
+    /// it when the instance has more than one", but with two workspaces
+    /// `mj sessions` without it lists every session.
+    #[test]
+    fn workspace_help_says_which_commands_require_it_and_which_filter() {
+        let command = <Cli as clap::CommandFactory>::command();
+        let argument = command
+            .find_subcommand("sessions")
+            .expect("the sessions command")
+            .get_arguments()
+            .find(|argument| argument.get_id() == "workspace_name")
+            .expect("the --workspace option");
+        let help = argument
+            .get_long_help()
+            .or(argument.get_help())
+            .expect("the --workspace help")
+            .to_string();
+        assert!(!help.contains("other commands need it"), "{help}");
+        assert!(help.contains("`mj new` and `mj acp` require it"), "{help}");
+        assert!(
+            help.contains("`mj sessions` and `mj events` show only that workspace"),
+            "{help}"
+        );
     }
 
     /// F-16: `mj acp` is documented, so `mj --help` lists it.
