@@ -344,8 +344,11 @@ POST /api/v1/sessions/{session_id}/prompt
 ```
 
 The reply is `202`: the prompt was accepted, not finished. `turn_id` is the
-relay acceptance ordinal, and it is what `wait` takes. A session that cannot
-take a prompt right now answers `409`.
+relay acceptance ordinal, and it is what `wait` takes. A session that is still
+starting holds the prompt for up to 60 seconds and accepts it once its worker
+attaches. An `interrupt-turn` sent during that hold withdraws the prompt: it
+answers `409` and never becomes a turn. Any other session that cannot take a
+prompt right now answers `409`.
 
 ### Wait for a turn
 
@@ -516,6 +519,7 @@ New managed clones have no source branch to delete. Once destruction completes,
 `GET /sessions/{id}` returns `404`.
 
 Interrupt turn keeps the environment and session available for further prompts.
+For a session that is still starting, it withdraws the prompts held for it.
 There is no `/close` endpoint or `force` parameter. Destruction is available only
 through its dedicated authenticated endpoint, not the generic viewer actions.
 

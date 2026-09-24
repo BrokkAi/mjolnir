@@ -83,6 +83,9 @@ pub(super) async fn prompt(
     let mut snapshot_rx = state.snapshot_rx.clone();
     let deadline = tokio::time::Instant::now() + PROMPT_READINESS_WAIT;
     let mut waiting = false;
+    // While the prompt is held it has no turn, so an interrupt withdraws it
+    // instead; see `interrupt_turn`.
+    let mut hold: Option<HeldPrompt<'_>> = None;
     loop {
         {
             let snapshot = snapshot_rx.borrow_and_update();
@@ -106,21 +109,144 @@ pub(super) async fn prompt(
                 ));
             }
         }
-        match tokio::time::timeout_at(deadline, snapshot_rx.changed()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                return Err(ApiFailure::unavailable("the daemon is shutting down"));
-            }
-            Err(_) => {
-                return Err(ApiFailure::conflict(format!(
-                    "this session is still starting after {} seconds; try the prompt again once `mj sessions` shows it running",
-                    PROMPT_READINESS_WAIT.as_secs()
-                )));
-            }
+        let held = hold.get_or_insert_with(|| state.held_prompts.hold(&session_id));
+        tokio::select! {
+            changed = tokio::time::timeout_at(deadline, snapshot_rx.changed()) => match changed {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    return Err(ApiFailure::unavailable("the daemon is shutting down"));
+                }
+                Err(_) => {
+                    return Err(ApiFailure::conflict(format!(
+                        "this session is still starting after {} seconds; try the prompt again once `mj sessions` shows it running",
+                        PROMPT_READINESS_WAIT.as_secs()
+                    )));
+                }
+            },
+            () = held.withdrawn() => return Err(withdrawn_prompt()),
         }
+    }
+    // Taking the hold back and an interrupt withdrawing it are one decision,
+    // so a prompt is either submitted or withdrawn, never both.
+    if hold.is_some_and(|held| !held.release()) {
+        return Err(withdrawn_prompt());
     }
     let turn_id = backend.prompt(session_id, request.text).await?;
     Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
+}
+
+fn withdrawn_prompt() -> ApiFailure {
+    ApiFailure::conflict(
+        "this prompt was withdrawn: its turn was interrupted before the session could take it",
+    )
+}
+
+/// Prompts the API is holding for sessions that are still starting.
+///
+/// A held prompt has no turn yet, so interrupting its session withdraws it
+/// rather than letting it become a turn nobody wants once the worker
+/// attaches (R2-1).
+#[derive(Default)]
+pub(crate) struct HeldPrompts {
+    next_id: std::sync::atomic::AtomicU64,
+    held: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::collections::BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
+        >,
+    >,
+}
+
+impl HeldPrompts {
+    fn hold(&self, session_id: &str) -> HeldPrompt<'_> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (withdraw, withdrawn) = tokio::sync::oneshot::channel();
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(id, withdraw);
+        HeldPrompt {
+            prompts: self,
+            session_id: session_id.to_owned(),
+            id,
+            withdrawn,
+            released: false,
+        }
+    }
+
+    /// Withdraw every prompt held for one session, answering how many there
+    /// were.
+    fn withdraw(&self, session_id: &str) -> usize {
+        let withdrawn = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id)
+            .unwrap_or_default();
+        let count = withdrawn.len();
+        for withdraw in withdrawn.into_values() {
+            // The holder may have given up on its own in the meantime; then
+            // there is nobody left to tell.
+            let _ = withdraw.send(());
+        }
+        count
+    }
+
+    /// Take one hold back, answering whether it was still held.
+    fn take(&self, session_id: &str, id: u64) -> bool {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(prompts) = held.get_mut(session_id) else {
+            return false;
+        };
+        let taken = prompts.remove(&id).is_some();
+        if prompts.is_empty() {
+            held.remove(session_id);
+        }
+        taken
+    }
+}
+
+/// One prompt held for a starting session. Dropping it without releasing it,
+/// as every refusal does, gives the hold up.
+struct HeldPrompt<'a> {
+    prompts: &'a HeldPrompts,
+    session_id: String,
+    id: u64,
+    withdrawn: tokio::sync::oneshot::Receiver<()>,
+    released: bool,
+}
+
+impl HeldPrompt<'_> {
+    /// Resolves once an interrupt withdraws this prompt.
+    async fn withdrawn(&mut self) {
+        if (&mut self.withdrawn).await.is_err() {
+            // Only this hold's own release drops the sender without sending,
+            // and a released hold is never awaited again.
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Take the prompt back to submit it: `false` when an interrupt withdrew
+    /// it first.
+    fn release(mut self) -> bool {
+        self.released = true;
+        self.prompts.take(&self.session_id, self.id)
+    }
+}
+
+impl Drop for HeldPrompt<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.prompts.take(&self.session_id, self.id);
+        }
+    }
 }
 
 /// How long a prompt waits for a session that is still starting. Bounded, so
@@ -315,6 +441,20 @@ pub(super) async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
+    // A prompt still held for a starting session has no turn to stop, so
+    // interrupting the session withdraws it. Only a session that also has a
+    // turn of its own goes on to the daemon.
+    if state.held_prompts.withdraw(&session_id) > 0 {
+        let has_turn = state
+            .snapshot_rx
+            .borrow()
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id && session.capabilities.interrupt_turn);
+        if !has_turn {
+            return Ok(StatusCode::ACCEPTED);
+        }
+    }
     send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
