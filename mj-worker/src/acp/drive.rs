@@ -46,9 +46,13 @@ where
     let notification_resume_required = resume_required.clone();
     // Evidence about the thread itself, as opposed to `resume_required`'s
     // policy about reloading it: false until this thread holds something only
-    // it can replay.
+    // it can replay. Codex writes a thread's rollout, and Claude Code a
+    // session's transcript, only when a model turn runs, so the evidence is a
+    // prompt sent (`session.rs`) or a Claude Code result. Agent output alone
+    // is not: the Claude adapter publishes notices as agent text while it
+    // answers a configuration request, and no turn runs for them (R4-3).
     let native_session_used = Arc::new(AtomicBool::new(false));
-    let notification_native_session_used = native_session_used.clone();
+    let claude_sdk_native_session_used = native_session_used.clone();
     // A provider may replay the native transcript as `session/update`
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
@@ -225,14 +229,6 @@ where
                 }
                 if session_update_has_native_history(&update) {
                     notification_resume_required.store(true, Ordering::Release);
-                    // Report the transition once, so the worker can persist
-                    // that this thread must never be replaced.
-                    if !notification_native_session_used.swap(true, Ordering::AcqRel) {
-                        notification_events
-                            .send(RuntimeEvent::NativeSessionUsed)
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                    }
                 }
                 if !session_update_is_relay_visible(
                     &update,
@@ -271,6 +267,16 @@ where
                 match ClaudeTurnResult::from_sdk_message(&notification.message) {
                     Ok(Some(mut result)) => {
                         result.received = claude_sdk_result_count.stamp();
+                        // A result ends a model cycle, and Claude Code has
+                        // written that cycle to the session's transcript.
+                        // Report the transition once, so the worker can
+                        // persist that this session must never be replaced.
+                        if !claude_sdk_native_session_used.swap(true, Ordering::AcqRel) {
+                            claude_sdk_events
+                                .send(RuntimeEvent::NativeSessionUsed)
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                        }
                         claude_sdk_events
                             .send(RuntimeEvent::ClaudeTurnResult(result))
                             .await

@@ -784,9 +784,11 @@ impl DurableRelay {
     /// Claude Code a session's transcript, only at the first user message, so
     /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // Set when the agent sent conversation content, when a prompt was
-        // transmitted, when the session was resumed rather than created here,
-        // or when its identity arrived from outside this journal.
+        // Set when a prompt was transmitted, when Claude Code reported the
+        // result of a model cycle, when the session was resumed rather than
+        // created here, or when its identity arrived from outside this
+        // journal. Agent output alone does not set it: an adapter can send
+        // text with no model turn behind it (R4-3).
         if self.snapshot.native_session_used {
             return true;
         }

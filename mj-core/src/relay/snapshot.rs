@@ -1115,10 +1115,10 @@ pub struct RelaySnapshot {
     /// after the fallback still sees that continuity was lost.
     #[serde(default)]
     pub native_continuity_lost: bool,
-    /// The native thread behind `native_session_id` has been used: the agent
-    /// sent conversation content, a prompt was transmitted to it, it was
-    /// resumed rather than created here, or its identity arrived from outside
-    /// this journal. Codex writes a thread's rollout only at its first user
+    /// The native thread behind `native_session_id` has been used: a prompt
+    /// was transmitted to it, Claude Code reported a model cycle's result, it
+    /// was resumed rather than created here, or its identity arrived from
+    /// outside this journal. Codex writes a thread's rollout only at its first user
     /// message, so an unused thread can be missing on disk and safely
     /// replaced; a used one cannot. Older snapshots omit the field and read as
     /// `false`, and it is written only once true so an older worker keeps

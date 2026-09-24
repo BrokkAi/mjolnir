@@ -588,3 +588,44 @@ async fn a_local_command_ends_at_the_reply_after_its_text() {
     }
     probe.close().await;
 }
+
+/// R4-3: a session that only ever changed its model made the adapter send
+/// "Auto mode unavailable" as agent text. Claude Code wrote no transcript,
+/// because no model cycle ran, yet that text marked the session used, and
+/// the worker that replaced it refused to start a fresh session. Only a
+/// cycle's result, or a prompt, is evidence that Claude Code wrote one.
+#[tokio::test]
+async fn adapter_text_outside_any_cycle_does_not_mark_the_session_used() {
+    let mut probe = ClaudeProbe::new().await;
+    probe
+        .chunk(
+            "**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.",
+        )
+        .await;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::NativeSessionUsed => {
+                panic!("adapter text with no cycle marked the native session used")
+            }
+            RuntimeEvent::SessionUpdate { update }
+                if update["sessionUpdate"] == "agent_message_chunk" =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // A result is a cycle Claude Code ran, and wrote down.
+    probe.sdk_result(success("task-notification")).await;
+    let mut used = false;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::NativeSessionUsed => used = true,
+            RuntimeEvent::ClaudeTurnResult(_) => break,
+            _ => {}
+        }
+    }
+    assert!(used, "the result must be reported before it is relayed");
+    probe.close().await;
+}
