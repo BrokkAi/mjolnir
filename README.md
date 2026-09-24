@@ -1,197 +1,124 @@
 # Mjolnir
 
-Mjolnir (`mj`) is a a meta-harness for managing all your coding agents in one place.
+**One control plane for all your coding agents.**
 
-If you only ever use a single subscription in a single harness on a single machine, you don't need mjolnir.
-
-But if you expand beyond that, Mjolnir offers flexibility across all three:
-
-1. Move sessions between subscriptions (personal codex to work codex)
-2. Move sessions across harnesses (codex to claude code)
-3. Move sessions across machines or containers (local workstation to ec2)
-
-... while handling details like cross-harness memory sync and integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
+Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, and Muse Code
+sessions side by side, on your laptop, in containers, over SSH, or on EC2, and
+keeps them running after you close the terminal. You can move a session to
+another account, another harness, or another machine without starting over.
 
 By default Mjolnir sends recent prompt and reply text, and help-search text, to TypeSafe's hosted Jev classifier through a public proxy, and `[jev] enabled = false` in `config.toml` stops all of it ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
-
-Mjolnir is free and open source from the engineers at [Brokk AI]([url](https://brokk.ai/)). We're not trying to make money off of mj; we built it because we wanted to use it.
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
 [Releases](https://github.com/BrokkAi/mjolnir/releases)
 
-## Screenshots
-
 <table>
   <tr>
     <td align="center" valign="top">
-      <img width="400" alt="Targets and Quota minimized" src="https://github.com/user-attachments/assets/e444edcd-e9d7-4349-ba70-1ed3dc36d21e" />
-      <br>
-      <em>Targets + Quota minimized to show more Sessions details</em>
+      <img width="400" alt="Sessions view with targets and quota minimized" src="https://github.com/user-attachments/assets/e444edcd-e9d7-4349-ba70-1ed3dc36d21e" />
     </td>
     <td align="center" valign="top">
-      <img width="400" alt="Sessions minimized" src="https://github.com/user-attachments/assets/84ece206-f3c9-4489-85b6-5d7cf42a08c1" />
-      <br>
-      <em>Sessions minimized, Targets + Quota showing details</em>
+      <img width="400" alt="Targets and quota view with sessions minimized" src="https://github.com/user-attachments/assets/84ece206-f3c9-4489-85b6-5d7cf42a08c1" />
     </td>
     <td align="center" valign="top">
-      <img width="400" alt="Larger screen" src="https://github.com/user-attachments/assets/bd31352c-a961-4bfc-9874-3dc71175937e" />
-      <br>
-      <em>On a larger screen, Sessions + Quota both showing details</em>
+      <img width="400" alt="Sessions and quota on a larger screen" src="https://github.com/user-attachments/assets/bd31352c-a961-4bfc-9874-3dc71175937e" />
     </td>
   </tr>
 </table>
 
-## Alternatives
+## Why Mjolnir
 
-The comparison below covers product capabilities. **—** means no first-class
-capability; manual scripts, host setup, and filesystem access are described where
-relevant. Compared against repository snapshots inspected on **September 8, 2026**:
-[Herdr](https://github.com/herdrdev/herdr),
-[Paseo](https://github.com/getpaseo/paseo), and
-[T3 Code](https://github.com/pingdotgg/t3code).
+If you use one agent, in one terminal, on one machine, you don't need Mjolnir.
+It's for the point where that stops scaling: several subscriptions, several
+repositories, several machines, and work that should keep going when you walk
+away.
 
-### Provisioning
+- **Sessions that outlive your terminal.** Each session runs beside a worker
+  that owns its prompt queue and event journal. Detach, close the terminal, or
+  restart the daemon; the agent keeps working and you reattach where you
+  left off.
+- **Run anywhere.** Use a local worktree, a Docker, Podman, or Apple container,
+  any Linux host over SSH, or an EC2 instance provisioned from a launch
+  template. Remote hosts need no resident daemon; Mjolnir uploads a worker on
+  demand.
+- **Move work freely.** Switch a session from your personal Codex account to
+  your work account, from Codex to Claude Code, or from your workstation to
+  EC2. Checkpoints are verified before anything is torn down.
+- **See every account's quota.** Keep multiple named profiles per harness and
+  watch remaining subscription quota and target capacity in one view.
+- **Shared project memory.** Agents share synchronized project memory across
+  sessions, harnesses, and targets, so what one session learns the next one
+  knows.
+- **Adversarial review.** Turn it on and an independent reviewer, on a different
+  provider when one is available, checks each turn's work and reports
+  actionable findings.
+- **Multi-repo projects.** Bundle several repositories so they provision,
+  checkpoint, move, and restore together.
+- **Terminal, web, and desktop.** A full terminal dashboard, plus a
+  privacy-first web viewer you can reach from your phone over Tailscale, and a
+  desktop app. All three share the same live sessions.
 
-| Feature | Mjolnir | Herdr | Paseo | T3 Code |
-|---|---|---|---|---|
-| **Remote targets** | Anything reachable over SSH¹ | SSH machines with Herdr installed | Machines running a reachable Paseo daemon | SSH/WSL environments running a T3 backend |
-| **Remote execution** | Uploads an on-demand session worker; no resident per-host daemon | Requires a Herdr server on each host | Requires a Paseo daemon on each host | Requires a T3 backend in each environment |
-| **EC2** | Provisions and terminates instances from launch templates | Manual setup as a remote host | Manual setup as a remote host | Manual setup as a remote environment |
-| **Session containers** | Docker, Podman | — | — | — |
-| **Credential synchronization** | Continuously syncs whitelisted credentials into live targets | Host-local credentials | Per-daemon credentials | Per-environment credentials |
+## Install
 
-### Session continuity
-
-| Feature | Mjolnir | Herdr | Paseo | T3 Code |
-|---|---|---|---|---|
-| **Native-session adoption** | All supported harnesses | No external adoption; only restarts sessions it was already supervising | All supported providers with native list/load support | No external adoption; continues T3-owned sessions |
-| **Resume sessions across profiles and harnesses** | ✓ | Manual handoff | `/paseo-handoff` skill | Same-harness only² |
-| **Cross-host move and restore** | ✓ | — | — | — |
-| **Multi-repo projects** | Bundles provision, checkpoint, review, move, and restore member repos together³ | Filesystem access only; separate workspaces or panes | Filesystem/provider access only; one root per workspace | Filesystem access only; one workspace root per project |
-
-### Harnesses and accounts
-
-| Feature | Mjolnir | Herdr | Paseo | T3 Code |
-|---|---|---|---|---|
-| **Supported harnesses** | Claude Code, Codex, Kimi Code, Grok Build, Muse Code | Pi, OMP, Copilot, Devin, Kimi, Hermes, Qoder, Qwen, Droid, OpenCode, Kilo, MastraCode, Claude, Codex, Cursor, Amp, Grok, Antigravity, Kiro, Maki, Muse; any other CLI runs without agent-aware features | Claude, Codex, Copilot, OpenCode, Pi, OMP; catalog and custom ACP agents including Kimi, Cursor, Hermes, and Qwen | Codex, Claude, Cursor, Grok, OpenCode |
-| **Multiple profiles per harness** | First-class named profiles | Manual wrappers and environment configuration | Custom provider aliases | Provider instances; continuation compatibility varies by harness |
-| **Usage and quota view** | Live subscription quota by profile plus target capacity⁴ | — | Provider plan usage on demand | Token and API-cost analytics; not remaining subscription quota |
-
-### Assistance and control
-
-| Feature | Mjolnir | Herdr | Paseo | T3 Code |
-|---|---|---|---|---|
-| **Cross-session project memory** | Synchronized project memory shared across sessions, profiles, harnesses, and targets | — | — | — |
-| **Automatic adversarial review** | Built-in automatic or on-demand independent review | Scriptable through agent automation; no built-in review loop | Manual `/paseo-advisor` second opinion | — |
-| **Control surfaces** | TUI, web, CLI | TUI, CLI | Web, desktop, iOS, Android, CLI | Web, desktop, iOS, Android, CLI |
-| **Voice input** | TUI and web dictation | — | Dictation and conversational voice mode | — |
-
-### Extensibility
-
-| Feature | Mjolnir | Herdr | Paseo | T3 Code |
-|---|---|---|---|---|
-| **Product plugins** | — | Workflow packages with actions, event hooks, terminal panes, and link handlers | Full-stack client/server plugins: UI surfaces, RPCs, tools, providers, themes, and commands | — |
-
-“Native-session adoption” means discovering a session created outside the product
-and bringing it under management. Ordinary same-harness continuation is excluded.
-
-1. Mjolnir's SSH targets require a supported Linux host and the documented runtime
-   prerequisites. It also supports Apple's container runtime on compatible Macs.
-   See [targets](https://mjolnir.brokk.ai/targets/).
-2. T3 continuation also requires compatible provider homes: Codex can share history
-   across accounts using its shadow-home setup; separate Claude account homes
-   cannot continue the same thread.
-3. Bundles apply to managed targets. Muse Code currently accepts one workspace
-   root. Bare sessions can access neighboring repositories
-   subject to harness permissions, but do not manage them as a bundle.
-4. Quota availability depends on the harness. Muse currently cannot use the
-   project-memory tools or act as a reviewer. Cross-harness resume requires a
-   configured utility-capable profile to generate the handoff; see
-   [durability and recovery](https://mjolnir.brokk.ai/durability/).
-
-## Get started
-
-Install the release bundle on Linux or macOS (use WSL2 on Windows):
+On Linux or macOS (use WSL2 on Windows):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | bash
 ```
 
-Linux CLI releases target **glibc 2.28 or newer** on x86-64 and ARM64 with a
-standard GNU loader. The desktop application and voice helper have additional
-native system dependencies and may require a newer distribution. Alpine and
-NixOS loader environments are not currently supported by these GNU bundles.
-
-From your project directory, run:
+Or with npm:
 
 ```sh
-mj
+npm install -g @brokkai/mjolnir
 ```
 
-For a focused, remembered launch workflow, use `mj go` instead:
+Linux releases need glibc 2.28 or newer on x86-64 or ARM64. See the
+[installation guide](https://mjolnir.brokk.ai/install/) for Cargo, source
+builds, and desktop dependencies.
+
+## Quick start
+
+From a project directory:
 
 ```sh
-mj go                 # work in the current folder
-mj go ../my-project   # work in a specific folder
+mj go
 ```
 
-Choose an account and target on first use, including Docker, Podman, SSH,
-EC2, or a configured custom target. The first setup becomes the default for
-new projects; each folder remembers its own setup and reuses a workspace named
-after the directory. Returning with `mj go` opens your last conversation.
-The dashboard keeps its workspace tabs, session details, targets, and quotas.
-Switching to another directory-linked workspace also switches the folder and
-saved setup used by **New**; unlinked workspaces keep the normal launch wizard.
-Running `mj go` again selects the invoking directory's workspace regardless of
-which workspace you last visited. **New** (or **prefix+c**) starts another concurrent
-session with those choices. **Change fast-start setup** in the command palette (**prefix+:**) changes
-this project's next launch; `mj go --global-default` also changes the default
-for new projects. `mj go --setup` opens that setup directly.
+The first run asks you to pick a harness account and where the session should
+run. Each folder remembers its setup, and running `mj go` again returns you to
+your last conversation. Plain `mj` opens the full dashboard of workspaces,
+sessions, targets, and quota.
 
-The context banner identifies the source folder and the selected session's
-actual working directory, branch, account, and target. By default a local bare
-session runs in a managed Git worktree at `.mj/worktrees/<id>` inside your
-repository, on a new branch named `mj/<id>`. To let the session work in the
-folder itself instead, clear **Create managed worktree** on the wizard's review
-step; the agent then edits your checkout directly.
-Container and other isolated targets use the existing repository-clone flow:
-they start from the remote default branch, not uncommitted local changes.
-SSH bare targets ask once for the remote folder. Repository choices, remote
-paths, and attached directories are remembered per project, not copied to
-unrelated projects. Launch failures offer **Retry launch** and **Settings**
-inside the application. Plain `mj` keeps its existing dashboard workflow.
-
-On first launch, Mjolnir creates a workspace from the current directory.
-Press **Create** to choose a profile, target, and project. Local target choices
-are supplied automatically and checked before selection. Open **prefix+s Settings**
-to manage harness accounts, SSH or EC2 connections, and runtime options; no
-setup command is required. Run `mj doctor` for additional prerequisite checks.
-
-Follow the [quickstart](https://mjolnir.brokk.ai/quickstart/) for your first
-session. The [installation guide](https://mjolnir.brokk.ai/install/) covers npm,
-source builds, desktop dependencies, and portable workers.
+`mj doctor` checks prerequisites and tells you how to fix anything missing. The
+[quickstart](https://mjolnir.brokk.ai/quickstart/) walks through a first
+session end to end.
 
 ## Documentation
 
-- [Profiles and harnesses](https://mjolnir.brokk.ai/profiles/): accounts, login,
-  credentials, skills, and runtime prerequisites.
+- [What is Mjolnir?](https://mjolnir.brokk.ai/overview/): architecture, goals,
+  and supported harnesses and runtimes.
+- [Profiles and harnesses](https://mjolnir.brokk.ai/profiles/): accounts,
+  login, credentials, and skills.
 - [Targets](https://mjolnir.brokk.ai/targets/) and
-  [bundles](https://mjolnir.brokk.ai/workspaces-bundles/): local, container, SSH,
-  and EC2 environments; multi-repository projects and shared memory.
-- [Session lifecycle](https://mjolnir.brokk.ai/sessions/) and
+  [bundles](https://mjolnir.brokk.ai/workspaces-bundles/): local, container,
+  SSH, and EC2 environments, multi-repository projects, and shared memory.
+- [Sessions](https://mjolnir.brokk.ai/sessions/) and
   [durability](https://mjolnir.brokk.ai/durability/): adoption, move, resume,
   checkpoints, and recovery.
 - [Terminal](https://mjolnir.brokk.ai/terminal-surface/) and
-  [web/desktop](https://mjolnir.brokk.ai/web-viewer/): controls and remote access.
-- [Adversarial review](https://mjolnir.brokk.ai/turn-review/),
+  [web and desktop](https://mjolnir.brokk.ai/web-viewer/): controls and remote
+  access.
+- [Turn review](https://mjolnir.brokk.ai/turn-review/),
   [configuration](https://mjolnir.brokk.ai/configuration/),
   [CLI reference](https://mjolnir.brokk.ai/cli-reference/), and
-  [security boundaries](https://mjolnir.brokk.ai/security/).
+  [security](https://mjolnir.brokk.ai/security/).
 
-The website source lives in [docs/](docs/README.md). For the previous product
-generation, see [Mjolnir 1.x](https://github.com/BrokkAi/mjolnir/releases/tag/v1.17.0).
+The documentation site source lives in [docs/](docs/README.md). Looking for the
+previous generation? See [Mjolnir 1.x](https://github.com/BrokkAi/mjolnir/releases/tag/v1.17.0).
 
-## License
+## About
 
-Mjolnir is licensed under `GPL-3.0-only`.
+Mjolnir is free and open source, built by the engineers at
+[Brokk](https://brokk.ai/) because we wanted to use it. It is licensed under
+`GPL-3.0-only`.

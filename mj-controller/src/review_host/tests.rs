@@ -571,6 +571,8 @@ fn the_primary_profile_can_run_an_independent_reviewer() {
     let session = mj_core::state::SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

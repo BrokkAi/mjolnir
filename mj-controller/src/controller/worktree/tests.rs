@@ -24,6 +24,77 @@ use crate::targets::{
 use super::*;
 
 #[test]
+fn independent_clones_share_a_starting_branch_and_push_normally() {
+    let source = committed_repository();
+    let remote = tempfile::tempdir().unwrap();
+    test_git(
+        remote.path(),
+        &["init", "--bare", "--initial-branch=master"],
+    );
+    test_git(
+        source.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    test_git(source.path(), &["push", "-u", "origin", "master"]);
+    let base = test_git(source.path(), &["rev-parse", "HEAD"]);
+    let clone = |id: &str| ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: source.path().to_path_buf(),
+        source_repository: source.path().to_path_buf(),
+        worktree_root: source.path().join(".mj/clones").join(id),
+        branch: "master".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: Some(base.clone()),
+    };
+    let first = clone("first");
+    let second = clone("second");
+    for owned in [&first, &second] {
+        create_managed_worktree(
+            &ProcessExecutor,
+            owned,
+            None,
+            PrimaryCheckoutRequirement::Any,
+        )
+        .unwrap();
+        assert_eq!(
+            test_git(&owned.worktree_root, &["branch", "--show-current"]),
+            "master"
+        );
+        assert_eq!(
+            test_git(&owned.worktree_root, &["config", "user.email"]),
+            "hel@example.invalid"
+        );
+    }
+    for (owned, content) in [(&first, "first"), (&second, "second")] {
+        std::fs::write(owned.worktree_root.join("nested/file.txt"), content).unwrap();
+        test_git(&owned.worktree_root, &["commit", "-am", content]);
+    }
+    test_git(&first.worktree_root, &["push"]);
+    let rejected = Command::new("git")
+        .arg("-C")
+        .arg(&second.worktree_root)
+        .arg("push")
+        .output()
+        .unwrap();
+    assert!(
+        !rejected.status.success(),
+        "a divergent second clone must see a push conflict"
+    );
+    assert_eq!(test_git(source.path(), &["rev-parse", "master"]), base);
+    assert_ne!(
+        test_git(&second.worktree_root, &["rev-parse", "HEAD"]),
+        base
+    );
+    assert_eq!(
+        test_git(remote.path(), &["rev-parse", "master"]),
+        test_git(&first.worktree_root, &["rev-parse", "HEAD"])
+    );
+    for owned in [&first, &second] {
+        cleanup_managed_worktree(&ProcessExecutor, owned, BranchDisposition::Keep).unwrap();
+    }
+}
+
+#[test]
 fn worktree_choice_survives_reload_and_controls_creation() {
     const CHILD: &str = "MJ_TEST_WORKTREE_CHOICE_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -114,7 +185,7 @@ fn worktree_choice_survives_reload_and_controls_creation() {
     std::fs::remove_file(root.join("dirty.txt")).unwrap();
 
     // Explicit creation also works from a linked checkout and preserves its HEAD,
-    // upstream, and selected subdirectory rather than using the main checkout's HEAD.
+    // selected subdirectory rather than using the main checkout's HEAD.
     record.project_directory = Some(linked.join("nested"));
     record.create_managed_worktree = None;
     crate::database::save_session(&record).unwrap();
@@ -146,12 +217,10 @@ fn worktree_choice_survives_reload_and_controls_creation() {
         test_git(&root, &["rev-parse", "HEAD"])
     );
     assert_eq!(
-        test_git(
-            &managed.worktree_root,
-            &["rev-parse", "--abbrev-ref", "@{upstream}"]
-        ),
-        "master"
+        test_git(&managed.worktree_root, &["branch", "--show-current"]),
+        "side"
     );
+    assert_eq!(managed.kind, ManagedCheckoutKind::Clone);
     assert_eq!(
         controller.state.sessions[&record.id].project_directory,
         Some(managed.worktree_root.join("nested"))
@@ -617,6 +686,8 @@ impl CommandExecutor for CheckoutPositionExecutor {
 }
 fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
     RepositoryMetadata {
+        saved_refs: Default::default(),
+        stash_stack: Vec::new(),
         push_urls: Vec::new(),
         remote_workspace: false,
         id: "project".into(),
@@ -919,6 +990,7 @@ fn a_raw_checkout_snapshot_restores_into_a_fresh_clone_of_its_remote() {
         &source,
         Path::new("project"),
         &mj_checkpoint::archive::SystemGit,
+        false,
     )
     .unwrap();
 
@@ -1209,6 +1281,7 @@ fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
 
     let session_id = "0123456789abcdef0123456789abcdef";
     let worktree = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: inspection.source_project_directory,
         source_repository: inspection.source_repository,
         worktree_root: repository.path().join(".mj/worktrees").join(session_id),
@@ -1313,6 +1386,7 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     }
 
     let worktree = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/srv/project"),
         source_repository: PathBuf::from("/srv/project"),
         worktree_root: PathBuf::from("/srv/project/.mj/worktrees/session"),
@@ -1537,10 +1611,11 @@ fn a_session_leaving_its_target_claims_a_worktree_of_its_own_repository() {
     assert_eq!(
         conversion.worktree,
         ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
             source_project_directory: repository.path().to_path_buf(),
             source_repository: repository.path().to_path_buf(),
-            worktree_root: repository.path().join(".mj/worktrees").join(session_id),
-            branch: format!("mj/{session_id}"),
+            worktree_root: repository.path().join(".mj/clones").join(session_id),
+            branch: "master".into(),
             target: ManagedWorktreeTarget::Local,
             // The new branch starts at the repository's HEAD, which is
             // what an export of this session diffs against.
@@ -1697,6 +1772,7 @@ fn a_session_that_left_its_target_is_a_valid_raw_session() {
     record.target_template_id = "local-bare".into();
     let conversion = WorkspaceToRawConversion {
         worktree: ManagedWorktree {
+            kind: Default::default(),
             source_project_directory: repository.clone(),
             source_repository: repository.clone(),
             worktree_root: repository.join(".mj/worktrees").join(session_id),
@@ -1736,6 +1812,7 @@ fn a_failed_departure_returns_the_session_to_its_bundle() {
         &mut converted,
         &WorkspaceToRawConversion {
             worktree: ManagedWorktree {
+                kind: Default::default(),
                 source_project_directory: repository.clone(),
                 source_repository: repository.clone(),
                 worktree_root: repository.join(".mj/worktrees").join(session_id),
@@ -1796,6 +1873,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worktree = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: repository.path().to_path_buf(),
         source_repository: repository.path().to_path_buf(),
         worktree_root: repository.path().join(".mj/worktrees").join(session_id),
@@ -1850,6 +1928,7 @@ fn managed_raw_worktree_refuses_dirty_primary_and_skips_existing_worktree() {
     let inspection = inspect_raw_project(&ProcessExecutor, &target, repository.path()).unwrap();
     let session_id = "fedcba9876543210fedcba9876543210";
     let managed = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: inspection.source_project_directory,
         source_repository: inspection.source_repository,
         worktree_root: repository.path().join(".mj/worktrees").join(session_id),
@@ -1890,6 +1969,7 @@ fn managed_worktree_preflight_preserves_colliding_branch_and_directory() {
     let branch = format!("mj/{session_id}");
     test_git(repository.path(), &["branch", &branch]);
     let worktree = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: repository.path().to_path_buf(),
         source_repository: repository.path().to_path_buf(),
         worktree_root: repository.path().join(".mj/worktrees").join(session_id),

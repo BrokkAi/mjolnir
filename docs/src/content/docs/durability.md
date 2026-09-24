@@ -208,12 +208,11 @@ recovery archive and record. Destroying a live session tears down its target
 without a new checkpoint and removes every Mjolnir-owned recovery artifact; it
 is the explicit data-loss escape hatch.
 
-Destroying a session does not delete the git branch of its managed worktree.
-The checkout goes, the branch stays in the source repository, so committed
-work survives and you can check it out or recreate a worktree from it. Both
-destroy confirmations have three buttons: **Cancel**, **Destroy session**, and
-**Destroy and delete branch**. The third deletes the branch as well. That is the only way Mjolnir removes a branch you
-have worked in.
+An independent managed clone owns its own branches. Suspension verifies a
+checkpoint before deleting the clone, and Resume recreates it from the source
+and saved Git work. Destroy removes that recovery copy and can discard work
+which has not been pushed. Older linked-worktree sessions retain their branch
+in the source repository; their destroy dialog can also delete that branch.
 
 When a suspension fails, **Discard changes since checkpoint…** is narrower: it
 requires an existing verified archive, skips the fresh checkpoint, tears down

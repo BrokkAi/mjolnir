@@ -96,10 +96,12 @@ pub(crate) struct NewArgs {
     /// Directory to bundle and run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
-    /// Start the session at this Git revision instead of HEAD (worktree) or
-    /// the remote default branch (bundle) and diff against it.
+    /// Record this Git revision as the diff base, independently of the branch.
     #[arg(long, value_name = "REV")]
     base: Option<String>,
+    /// Branch to check out in the new isolated workspace.
+    #[arg(long)]
+    branch: Option<String>,
     /// Workspace id to create the session in. `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
@@ -442,6 +444,9 @@ pub(crate) struct SuspendArgs {
     /// the person guessing which option it wanted.
     #[arg(value_name = "SESSION", hide = true)]
     misplaced_session: Option<String>,
+    /// Confirm releasing a clone whose saved Git work is not verified as pushed.
+    #[arg(long)]
+    acknowledge_unpublished_work: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -591,6 +596,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         mjolnir_subagents: None,
         create_managed_worktree: None,
         launch_base: args.base.clone(),
+        launch_branch: args.branch.clone(),
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
@@ -977,7 +983,10 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
-    ApiClient::connect().await?.suspend(session).await?;
+    ApiClient::connect()
+        .await?
+        .suspend(session, args.acknowledge_unpublished_work)
+        .await?;
     if args.json {
         print_json(
             &serde_json::json!({"session_id": session, "accepted": true, "operation": "suspend"}),

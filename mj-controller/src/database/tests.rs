@@ -1,8 +1,9 @@
 use super::*;
 use mj_core::config::HarnessKind;
 use mj_core::state::{
-    HostContainerSize, ManagedWorktreeTarget, MaterializedTurn, MaterializedTurnOutcome,
-    QueuedCommandKind, TranscriptBody, TurnOutcomeKind,
+    HostContainerSize, ManagedCheckoutKind, ManagedWorktreeTarget, MaterializedTurn,
+    MaterializedTurnOutcome, PublicationAssessment, PublicationState, QueuedCommandKind,
+    TranscriptBody, TurnOutcomeKind,
 };
 
 use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
@@ -438,6 +439,8 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -602,6 +605,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     let mut record = session("session-1", "project-1");
     record.project_directory = Some(PathBuf::from("/srv/project-1/.mj/worktrees/session-1"));
     record.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/srv/project-1"),
         source_repository: PathBuf::from("/srv/project-1"),
         worktree_root: PathBuf::from("/srv/project-1/.mj/worktrees/session-1"),
@@ -646,6 +650,67 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             .optional()
             .unwrap(),
         None
+    );
+}
+
+#[test]
+fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("publication.sqlite3");
+    let mut old = session("old-session", "project-1");
+    old.launch_branch = Some("main".into());
+    save_session_to(&database, &old).unwrap();
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN publication_json;
+         ALTER TABLE sessions DROP COLUMN launch_branch;
+         DELETE FROM schema_migrations WHERE version >= 47;
+         UPDATE schema_compatibility SET minimum_compatible_version = 46;
+         PRAGMA user_version = 46;",
+        )
+        .unwrap();
+    drop(connection);
+    schema::forget_verified_schema(&database);
+    drop(schema::open_writer(&database).unwrap());
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["old-session"].title,
+        old.title
+    );
+
+    let mut clone = session("clone-session", "project-1");
+    let root = PathBuf::from("/srv/project/.mj/clones/clone-session");
+    clone.project_directory = Some(root.clone());
+    clone.target = None;
+    clone.managed_worktree = Some(ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: PathBuf::from("/srv/project"),
+        source_repository: PathBuf::from("/srv/project"),
+        worktree_root: root,
+        branch: "main".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: Some("1".repeat(40)),
+    });
+    clone.publication = Some(PublicationAssessment {
+        checkpoint_sha256: "a".repeat(64),
+        state: PublicationState::Published,
+        dirty: false,
+        stashed: false,
+        saved_commits: vec!["1".repeat(40)],
+        destinations: vec!["https://example.test/repository.git".into()],
+        checked_at: "2026-08-12T01:00:00Z".into(),
+        reason: None,
+    });
+    save_session_to(&database, &clone).unwrap();
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(
+        loaded.sessions["clone-session"].publication,
+        clone.publication
+    );
+    assert_eq!(
+        loaded.sessions["clone-session"].publication_state(),
+        Some(PublicationState::Published)
     );
 }
 

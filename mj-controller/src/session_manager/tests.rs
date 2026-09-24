@@ -1888,6 +1888,8 @@ fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

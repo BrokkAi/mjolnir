@@ -142,6 +142,9 @@ pub struct StartSessionRequest {
     /// Git revision the session starts at, as the caller typed it.
     #[serde(default)]
     pub launch_base: Option<String>,
+    /// Branch to check out in a new isolated workspace.
+    #[serde(default)]
+    pub launch_branch: Option<String>,
     /// None follows the global `[subagents] enabled` setting.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,

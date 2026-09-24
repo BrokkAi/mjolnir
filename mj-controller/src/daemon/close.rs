@@ -79,8 +79,21 @@ impl RuntimeState {
     }
 
     pub async fn suspend_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        // Internal suspension (workspace close, recovery, child teardown) has
+        // already been admitted by its parent operation. Its checkpoint is
+        // still verified before any owned checkout is released.
+        self.suspend_session_with_ack(session_id, true).await
+    }
+
+    pub async fn suspend_session_with_ack(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         self.request_close(&session_id);
-        let result = self.suspend_with_children(&session_id).await;
+        let result = self
+            .suspend_with_children(&session_id, acknowledge_unpublished_work)
+            .await;
         if let Err(error) = &result {
             let reference = new_command_id("suspension").unwrap_or_else(|_| "suspension".into());
             tracing::warn!(%session_id, %reference, error = format!("{error:#}"), "session suspension failed");
@@ -91,7 +104,11 @@ impl RuntimeState {
         result
     }
 
-    async fn suspend_with_children(self: &Arc<Self>, session_id: &str) -> Result<()> {
+    async fn suspend_with_children(
+        self: &Arc<Self>,
+        session_id: &str,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         self.prepare_suspension(session_id).await?;
         let children = blocking({
             let session_id = session_id.to_owned();
@@ -110,7 +127,8 @@ impl RuntimeState {
                 .into());
             }
         }
-        self.close_requested_session(session_id.to_owned()).await
+        self.close_requested_session_with_ack(session_id.to_owned(), acknowledge_unpublished_work)
+            .await
     }
 
     pub(super) async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {
@@ -144,9 +162,10 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(super) async fn close_requested_session(
+    async fn close_requested_session_with_ack(
         self: &Arc<Self>,
         session_id: String,
+        acknowledge_unpublished_work: bool,
     ) -> Result<()> {
         self.wait_before_close(&session_id).await?;
         let route = blocking({
@@ -213,6 +232,7 @@ impl RuntimeState {
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
+                                    acknowledge_unpublished_work,
                                 )
                                 .await?
                         }

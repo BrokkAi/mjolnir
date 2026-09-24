@@ -351,6 +351,8 @@ pub struct CreateSessionRequest {
     /// Git revision the session starts at, as the caller typed it.
     #[serde(default)]
     pub launch_base: Option<String>,
+    #[serde(default)]
+    pub launch_branch: Option<String>,
     /// None follows the global `[subagents] enabled` setting at launch time.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
@@ -610,6 +612,8 @@ pub enum DaemonAction {
     },
     SuspendSession {
         session_id: String,
+        #[serde(default)]
+        acknowledge_unpublished_work: bool,
     },
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
@@ -825,7 +829,33 @@ pub fn process_is_zombie(pid: u32) -> bool {
         .is_some_and(|state| *state == b'Z')
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+/// On macOS this asks the kernel for the one process's BSD info. `sysinfo`
+/// cannot be used: its lookups skip zombies, so it reports an exited, unreaped
+/// process as absent rather than as a zombie, and `kill(pid, 0)` then calls it
+/// alive forever. A nonzero `arg` to `PROC_PIDTBSDINFO` makes the kernel
+/// include zombies.
+#[cfg(target_os = "macos")]
+pub fn process_is_zombie(pid: u32) -> bool {
+    let Ok(raw_pid) = libc::c_int::try_from(pid) else {
+        return false;
+    };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: proc_bsdinfo is plain old data, so all-zero is a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is a writable proc_bsdinfo of exactly `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            raw_pid,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size as libc::c_int,
+        )
+    };
+    usize::try_from(written).is_ok_and(|written| written == size) && info.pbi_status == libc::SZOMB
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 pub fn process_is_zombie(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -1742,8 +1772,19 @@ impl DaemonClient {
     }
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
+        self.suspend_session_with_ack(session_id, false).await
+    }
+
+    pub async fn suspend_session_with_ack(
+        &mut self,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::SuspendSession { session_id })
+            .request(DaemonAction::SuspendSession {
+                session_id,
+                acknowledge_unpublished_work,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1988,6 +2029,40 @@ mod tests {
     use super::*;
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_unreaped_process_is_a_zombie_and_not_alive() {
+        // An upgrade waits for the old daemon to leave. If that daemon exited
+        // but is still a child nobody has reaped, `kill(pid, 0)` keeps finding
+        // it, so only the zombie check lets the wait end.
+        use std::time::{Duration, Instant};
+
+        let mut running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(process_is_alive(running.id()));
+        assert!(!process_is_zombie(running.id()));
+        running.kill().unwrap();
+        running.wait().unwrap();
+
+        let mut exited = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = exited.id();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !process_is_zombie(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "an exited, unreaped child was never reported as a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!process_is_alive(pid));
+        exited.wait().unwrap();
+    }
 
     #[test]
     fn a_missing_endpoint_file_reads_as_a_stopped_daemon() {

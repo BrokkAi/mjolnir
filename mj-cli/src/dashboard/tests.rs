@@ -144,6 +144,8 @@ fn populated_dashboard() -> DashboardState {
             mj_core::state::SessionRecord {
                 target_runtime: None,
                 launch_base: None,
+                launch_branch: None,
+                publication: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -1340,6 +1342,8 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

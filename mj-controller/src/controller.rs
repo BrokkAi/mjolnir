@@ -13,6 +13,7 @@ pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
 pub mod profile_config;
 mod provisioning;
+pub(crate) mod publication;
 mod readiness;
 pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
@@ -454,6 +455,7 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
     pub launch_base: Option<String>,
+    pub launch_branch: Option<String>,
     pub mjolnir_subagents: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -704,6 +706,7 @@ impl Controller {
         let SessionLaunchOptions {
             create_managed_worktree,
             launch_base,
+            launch_branch,
             mjolnir_subagents,
             initial_prompt,
             workspace_id,
@@ -719,6 +722,14 @@ impl Controller {
                     bail!("launch base must not be empty");
                 }
                 Some(base.to_owned())
+            }
+            None => None,
+        };
+        let launch_branch = match launch_branch {
+            Some(branch) => {
+                let branch = branch.trim();
+                ensure!(!branch.is_empty(), "launch branch must not be empty");
+                Some(branch.to_owned())
             }
             None => None,
         };
@@ -797,6 +808,8 @@ impl Controller {
             build_cache: None,
             create_managed_worktree,
             launch_base,
+            launch_branch,
+            publication: None,
             mjolnir_subagents,
             archived: false,
             container_cpus: None,

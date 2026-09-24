@@ -244,7 +244,7 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(page.locator('#new-step')).toContainText('Checking project…');
   await expect(page.locator('#new-next')).toBeDisabled();
   await expect(page.locator('#new-back')).toBeEnabled();
-  const worktree = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  const worktree = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(worktree).toBeDisabled();
   const subagents = page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' });
   await subagents.uncheck();
@@ -377,7 +377,7 @@ test('managed worktree defaults can be overridden and survive Back and live refr
   const state = await mount(page);
   await projectStep(page, 'local');
   await page.locator('#new-next').click();
-  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(checkbox).toBeChecked();
   await checkbox.uncheck();
   await expect(page.locator("#new-step")).toContainText("Use the selected directory directly.");
@@ -397,7 +397,7 @@ test('an existing linked checkout can explicitly create a managed worktree', asy
   await projectStep(page, 'local');
   await page.locator('#new-project-directory').fill('/work/linked');
   await page.locator('#new-next').click();
-  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(checkbox).not.toBeChecked();
   await expect(checkbox).toBeEnabled();
   await checkbox.focus();
@@ -436,7 +436,7 @@ test('changing the directory resets the worktree choice to its inspected default
   const state = await mount(page);
   await projectStep(page, 'local');
   await page.locator('#new-next').click();
-  const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await checkbox.uncheck();
   await page.locator('#new-back').click();
   await page.locator('#new-project-directory').fill('/work/another');
@@ -450,7 +450,7 @@ for (const target of ['container', 'local', 'remote']) {
     state.worktreeOptions = { available: false, default_create: false };
     await projectStep(page, target);
     await page.locator('#new-next').click();
-    const checkbox = page.getByRole('checkbox', { name: 'Create managed worktree' });
+    const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
     await expect(checkbox).not.toBeChecked();
     await expect(checkbox).toBeDisabled();
     await refresh(page, state);

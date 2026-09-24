@@ -437,6 +437,8 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             .iter()
             .map(|repository| CheckpointRepositoryBundle {
                 metadata: mj_checkpoint::archive::RepositoryMetadata {
+                    saved_refs: Default::default(),
+                    stash_stack: Vec::new(),
                     push_urls: Vec::new(),
                     remote_workspace: false,
                     id: repository.id.clone(),
@@ -504,6 +506,8 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     let head = "b".repeat(40);
     let archived = CheckpointRepositoryBundle {
         metadata: mj_checkpoint::archive::RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             push_urls: Vec::new(),
             remote_workspace: false,
             id: "project".into(),
@@ -980,6 +984,8 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -1407,7 +1413,8 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     let source =
         mj_core::remote_git::resolve_local_repository(checkout.path(), &ProcessExecutor).unwrap();
     let dirname = PathBuf::from(checkout.path().file_name().unwrap());
-    let snapshot = raw_checkout_snapshot(checkout.path(), &source, &dirname, &SystemGit).unwrap();
+    let snapshot =
+        raw_checkout_snapshot(checkout.path(), &source, &dirname, &SystemGit, false).unwrap();
 
     let output = directory.path().join("converted.hel.zip");
     let converted = conversion_checkpoint(&previous.archive_path, snapshot, &output).unwrap();

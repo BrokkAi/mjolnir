@@ -1237,6 +1237,7 @@ fn importing_session_renders_unknown_then_known_progress_and_ignores_navigation(
 fn idle_suspension_and_restart_run_from_the_palette() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
+    session.project_directory = Some("/srv/project".into());
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     // Neither command binds a dashboard key any more.
@@ -1251,7 +1252,8 @@ fn idle_suspension_and_restart_run_from_the_palette() {
     assert_eq!(
         dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
         DashboardAction::Suspend {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -1266,7 +1268,7 @@ fn idle_suspension_and_restart_run_from_the_palette() {
 
 #[test]
 fn deleting_a_session_keeps_its_branch_unless_asked() {
-    let mut dashboard = dashboard_with_session(running_session());
+    let mut dashboard = dashboard_with_session(legacy_managed_session(running_session()));
     dashboard.focus_sessions();
     dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
     let Mode::Confirm(dialog) = &dashboard.mode else {
@@ -1294,7 +1296,7 @@ fn deleting_a_session_keeps_its_branch_unless_asked() {
 
 #[test]
 fn deleting_a_session_takes_its_branch_from_the_last_button() {
-    let mut dashboard = dashboard_with_session(running_session());
+    let mut dashboard = dashboard_with_session(legacy_managed_session(running_session()));
     dashboard.focus_sessions();
     dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
     dashboard.handle_key(key(KeyCode::Right));
@@ -1350,7 +1352,8 @@ fn failed_suspension_without_a_checkpoint_offers_only_retry() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::Suspend {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: true,
         }
     );
 }
@@ -1360,6 +1363,7 @@ fn button_confirmations_keep_their_button_row_visible() {
     let confirmations = [
         Confirmation::DestroyStopped {
             session_id: "session-1".into(),
+            delete_branch_available: false,
             reopen: None,
         },
         Confirmation::CloseFailed {
@@ -1369,6 +1373,7 @@ fn button_confirmations_keep_their_button_row_visible() {
         },
         Confirmation::ForceDestroy {
             session_id: "session-1".into(),
+            delete_branch_available: false,
         },
     ];
     for confirmation in confirmations {
@@ -1401,7 +1406,7 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["Cancel", "Destroy session", "Destroy and delete branch"]
+        &["Cancel", "Destroy session"]
     );
     assert_eq!(
         dialog.form.borrow().focused(),

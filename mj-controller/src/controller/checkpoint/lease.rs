@@ -97,7 +97,7 @@ impl ControllerRelayLease {
     /// Completing it instead would advance the relay's recovery floor past
     /// history that no verified checkpoint covers, so reclaim the connection
     /// and drop it: the worker cancels the barrier and resumes dispatch.
-    pub(super) async fn cancel_abandoned_barrier(&mut self) -> Result<()> {
+    pub(in crate::controller) async fn cancel_abandoned_barrier(&mut self) -> Result<()> {
         let Self::Managed { handle, lease } = self else {
             // A standalone connection is dropped with this value, which the
             // worker sees as the same disconnect.

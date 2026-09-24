@@ -25,6 +25,8 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -122,6 +124,8 @@ pub(super) fn write_network_checkpoint_archive(
         event_frontier,
         vec![RepositorySnapshot {
             metadata: RepositoryMetadata {
+                saved_refs: Default::default(),
+                stash_stack: Vec::new(),
                 id: "project".into(),
                 relative_destination: "project".into(),
                 origin: "https://fetch.example.test/project.git".into(),
@@ -152,7 +156,7 @@ fn write_checkpoint_archive(
     write_checkpoint_archive_input(directory, session_id, &input)
 }
 
-fn write_checkpoint_archive_input(
+pub(crate) fn write_checkpoint_archive_input(
     directory: &Path,
     session_id: &str,
     input: &ArchiveInput,
@@ -167,7 +171,7 @@ fn write_checkpoint_archive_input(
     }
 }
 
-fn checkpoint_archive_input(
+pub(crate) fn checkpoint_archive_input(
     session_id: &str,
     event_frontier: u64,
     repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
@@ -275,6 +279,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         &worktree_root.to_string_lossy(),
     );
     session.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: repository.clone(),
         source_repository: repository,
         worktree_root,
@@ -409,6 +414,7 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
 /// A managed raw session whose worktree really exists in `repository`.
 pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
     let worktree = ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: repository.to_path_buf(),
         source_repository: repository.to_path_buf(),
         worktree_root: repository.join(".mj/worktrees").join(session_id),

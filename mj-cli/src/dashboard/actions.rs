@@ -920,7 +920,9 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         if session.state.is_active() {
-                            daemon.suspend_session(session_id.clone()).await?;
+                            daemon
+                                .suspend_session_with_ack(session_id.clone(), true)
+                                .await?;
                         }
                         anyhow::ensure!(
                             !cancelled.load(Ordering::Acquire),
@@ -1138,7 +1140,10 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::Suspend { session_id } => {
+        DashboardAction::Suspend {
+            session_id,
+            acknowledge_unpublished_work,
+        } => {
             context.dashboard.set_notice(format!(
                 "Suspending {}…",
                 context.session_notice_name(&session_id)
@@ -1153,7 +1158,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .suspend_session(session_id)
+                            .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
                             .await
                     })??;
                     Ok(LifecycleSuccess::Closed)

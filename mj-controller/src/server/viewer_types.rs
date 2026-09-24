@@ -96,6 +96,11 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     id: session.id.clone(),
+                    publication_state: session.publication_state(),
+                    managed_checkout_kind: session
+                        .managed_worktree
+                        .as_ref()
+                        .map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
                     title: public_title(session),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
@@ -292,6 +297,10 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_state: Option<mj_core::state::PublicationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_checkout_kind: Option<mj_core::state::ManagedCheckoutKind>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
     pub title: String,

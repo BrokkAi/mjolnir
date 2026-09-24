@@ -166,6 +166,8 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
     let record = SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

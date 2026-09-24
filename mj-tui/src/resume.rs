@@ -31,7 +31,7 @@ use mj_client::daemon::{
     WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
 };
 use mj_core::config::{Config, HarnessKind};
-use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
+use mj_core::state::{MoveOperation, PublicationState, SessionRecord, SessionState, State};
 
 use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use mj_chat::text_input::TextInput;
@@ -206,6 +206,7 @@ pub(crate) struct ResumeRow {
     pub(crate) details: String,
     pub(crate) last_activity_ms: i64,
     pub(crate) status: ResumeRowStatus,
+    pub(crate) publication: Option<PublicationState>,
     /// Reported by the native harness. This metadata is informational only;
     /// it does not affect visibility or dispatch a provider write.
     pub(crate) natively_archived: bool,
@@ -371,11 +372,10 @@ impl ResumeDialog {
         }
     }
 
-    /// Whether the search box accepts typing. On the history tabs search is the
-    /// index's answer, so there is nothing to type into until the index can
-    /// answer. The Live tab matches names itself and can answer at once.
+    /// Searches can use already indexed sessions while a build is running.
+    /// Only an incompatible index prevents searching the history tabs.
     pub(crate) fn search_enabled(&self) -> bool {
-        self.tab == ResumeTab::Live || self.wiki_status.state == WikiIndexState::Ready
+        self.tab == ResumeTab::Live || self.wiki_status.state != WikiIndexState::VersionMismatch
     }
 
     /// What stands in the search box while it cannot be typed into.
@@ -384,8 +384,7 @@ impl ResumeDialog {
             return None;
         }
         match self.wiki_status.state {
-            WikiIndexState::Ready => None,
-            WikiIndexState::Indexing => Some("Indexing…"),
+            WikiIndexState::Ready | WikiIndexState::Indexing => None,
             WikiIndexState::VersionMismatch => Some("SessionWiki index is at a different version"),
         }
     }
@@ -651,11 +650,18 @@ pub(crate) fn merged_resume_rows(
             .unwrap_or(0);
         let status = hel_row_status(session);
         let project = session.project_name(config);
-        let details = match (&session.checkpoint, status.explanation()) {
+        let mut details = match (&session.checkpoint, status.explanation()) {
             (_, Some(reason)) => format!("{reason} · {project}"),
             (None, None) => format!("no checkpoint · {project}"),
             (Some(_), None) => project,
         };
+        match session.publication_state() {
+            Some(PublicationState::Unpublished) => {
+                details.push_str(" · Unpublished work in recovery copy")
+            }
+            Some(PublicationState::Unknown) => details.push_str(" · Publication status unknown"),
+            _ => {}
+        }
         rows.push(ResumeRow {
             key: ResumeRowKey::Hel(session.id.clone()),
             profile_id: session.last_profile.clone(),
@@ -664,6 +670,7 @@ pub(crate) fn merged_resume_rows(
             details,
             last_activity_ms,
             status,
+            publication: session.publication_state(),
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
@@ -687,6 +694,7 @@ pub(crate) fn merged_resume_rows(
                 details: native.details.clone(),
                 last_activity_ms: native.last_activity_ms,
                 status: ResumeRowStatus::Importable,
+                publication: None,
                 natively_archived: native.natively_archived,
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
@@ -744,6 +752,7 @@ pub(crate) fn merged_resume_rows(
                 .and_then(timestamp_ms)
                 .unwrap_or_default(),
             status: ResumeRowStatus::Restorable,
+            publication: None,
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
@@ -926,7 +935,15 @@ impl DashboardState {
                     profile_id: session.last_profile.clone(),
                     title: session.display_title().to_owned(),
                     origin: workspace.to_owned(),
-                    details: session.project_name(&self.config),
+                    details: format!(
+                        "{}{}",
+                        session.project_name(&self.config),
+                        if session.publication_state().is_some() {
+                            " · Publication status unknown"
+                        } else {
+                            ""
+                        }
+                    ),
                     // The session record's `updated_at` changes only with the
                     // record, so for a running session it is often the
                     // creation time. The projection's last activity is what
@@ -937,6 +954,7 @@ impl DashboardState {
                         .or_else(|| timestamp_ms(&session.updated_at))
                         .unwrap_or_default(),
                     status: ResumeRowStatus::Running,
+                    publication: session.publication_state(),
                     natively_archived: false,
                     unavailable_reason: None,
                     move_recovery: None,
@@ -1150,7 +1168,7 @@ impl DashboardState {
         // answer to a query the person has typed past leaves it running.
         dialog.wiki_pending = false;
         // The status moves even when the rows do not: a build that finished
-        // between two identical answers is what re-enables the search box.
+        // between two identical answers still updates the progress notice.
         dialog.wiki_status = page.status;
         if *dialog.wiki == page.rows {
             self.rebuild_resume_rows();
@@ -1200,8 +1218,7 @@ impl DashboardState {
     /// the index is still changing. `None` when the answer was final.
     ///
     /// Two reasons to ask again. The first build has not finished, so the
-    /// whole answer will change: poll every five seconds until it is ready,
-    /// which also re-enables the search box without reopening the dialog. Or a
+    /// answer may gain rows: poll every five seconds until it is ready. Or a
     /// top-up sync is running, so this query may gain rows: repeat it on the
     /// [`WIKI_TOP_UP_BACKOFF`] schedule for as long as the sync runs, so a long
     /// sync is followed to its end instead of leaving the pane promising rows
@@ -1776,8 +1793,15 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
         };
+        let delete_branch_available = self
+            .state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.managed_worktree.as_ref())
+            .is_some_and(|owned| owned.kind == mj_core::state::ManagedCheckoutKind::Worktree);
         self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::DestroyStopped {
             session_id,
+            delete_branch_available,
             reopen: Some(Box::new(dialog)),
         }));
         self.rebuild_resume_rows();
@@ -1988,9 +2012,7 @@ pub(crate) fn render_resume_dialog(
         search_area.width - label_width,
         search_area.height,
     );
-    // Search is the index's answer. While the index cannot answer, the box
-    // says why instead of taking text nothing would act on; the tabs and the
-    // list keep working.
+    // An incompatible index cannot answer history searches.
     if let Some(placeholder) = dialog.search_placeholder() {
         form.register(
             ResumeFocus::Search,
@@ -2606,12 +2628,25 @@ where
         Style::default().fg(theme::palette().muted),
     ));
     spans.push(Span::raw("  "));
+    let marker = match row.publication {
+        Some(PublicationState::Unpublished) => "↑ ",
+        Some(PublicationState::Unknown) => "? ",
+        _ => "",
+    };
+    if !marker.is_empty() {
+        spans.push(Span::styled(
+            marker.to_owned(),
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     spans.push(Span::styled(
         // The marks are ASCII. The title gives up their cells so they always
         // show in full.
         truncate_to_cells(
             &row.title,
-            layout.title.saturating_sub(marks.len()),
+            layout
+                .title
+                .saturating_sub(marks.len() + marker.chars().count()),
             Truncate::SUMMARY,
         ),
         title_style,

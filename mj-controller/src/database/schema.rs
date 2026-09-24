@@ -480,6 +480,37 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: the managed checkout JSON can now describe an independent
+    // clone. Older readers reject its `kind`, and older writers cannot safely
+    // retain that clone's unpublished commits during lifecycle cleanup.
+    if version < 47 {
+        let add_branch =
+            if super::legacy_schema::table_has_column(connection, "sessions", "launch_branch")? {
+                ""
+            } else {
+                "ALTER TABLE sessions ADD COLUMN launch_branch TEXT;"
+            };
+        let add_publication = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "publication_json",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE sessions ADD COLUMN publication_json TEXT;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_branch}
+             {add_publication}
+             UPDATE schema_compatibility SET minimum_compatible_version = 47 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (47, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 47;
+             COMMIT;",
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -638,8 +669,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 46 records target access settings.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 46;
+    /// `SCHEMA_VERSION`. Migration 47 adds independent clone ownership.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 47;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -688,13 +719,13 @@ mod reader_tests {
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
-        assert_eq!(schema.revision, 46);
-        assert_eq!(schema.minimum_compatible, Some(46));
+        assert_eq!(schema.revision, 47);
+        assert_eq!(schema.minimum_compatible, Some(47));
         let error = schema.ensure_supported_by(45).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 46
+                minimum_compatible: 47
             }
         ));
         drop(upgraded);

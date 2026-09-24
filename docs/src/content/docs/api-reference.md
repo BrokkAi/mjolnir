@@ -297,6 +297,7 @@ POST /api/v1/sessions
   "target_id": "local",
   "bundle_id": "bundle-1",
   "project_directory": "/home/you/project",
+  "launch_branch": "main",
   "launch_base": "origin/main",
   "title": "add a README line",
   "model": "gpt-5",
@@ -308,9 +309,9 @@ POST /api/v1/sessions
 `profile_id` and `target_id` may be omitted; each then follows the saved
 default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. `launch_base` starts the session at that Git
-revision instead of HEAD (managed worktree) or the remote default branch
-(bundle session) and becomes the session's diff base. A bundle session resolves
+viewer's own form does it. `launch_branch` selects the branch checked out in an
+isolated clone; otherwise the remote default is used. `launch_base` records a
+separate Git revision for the session's diff base. A bundle session resolves
 it in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`.
 Everything else is optional. `idempotency_key` is no
 longer accepted: a request that still carries it is rejected as an unknown
@@ -502,13 +503,14 @@ suspension. An idle conversation alone says nothing about lifecycle completion.
 
 Suspend saves a verified recovery copy before releasing the environment. With
 active sub-agents, supply `{"acknowledge_active_subagents": true}` to suspend them
-first. A failed suspension reports its error and preserves recoverable resources;
+first. For an independent clone whose publication is unverified, also supply
+`{"acknowledge_unpublished_work": true}` after reviewing the warning. A failed suspension reports its error and preserves recoverable resources;
 it never silently switches to destruction.
 
 Destroy permanently removes the environment, recovery archive, and session
-record, including sub-agents. The optional `{"delete_branch": true}` body also
-deletes the managed branch in the source repository. Keeping that branch does
-not preserve work held only in the environment. Once destruction completes,
+record, including sub-agents. The optional `{"delete_branch": true}` body applies
+only to older linked-worktree sessions and deletes their managed source branch.
+New managed clones have no source branch to delete. Once destruction completes,
 `GET /sessions/{id}` returns `404`.
 
 Interrupt turn keeps the environment and session available for further prompts.
@@ -615,7 +617,7 @@ Preconditions, all answering `409` with the reason:
 | `diff`, `files`, `branch` | A live target. A suspended session has none; use the bundle. |
 | `branch` | An idle session — a push mid-turn would publish a tree the agent is still changing — a valid branch name, and a configured push remote. |
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
-| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
+| `bundle` | Commits beyond the session base. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this export also works after the target is gone. |
 
 ## CLI equivalents
 

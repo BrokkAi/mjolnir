@@ -1460,13 +1460,15 @@ impl Controller {
             if let Some(worktree) = previous.managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
-                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                        &archive_path,
-                        &worktree.worktree_root,
-                        &worktree.branch,
-                        &SystemGit,
-                    )
-                    .context("restore the retired checkout before moving it into a target")?;
+                    if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                        mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                            &archive_path, &worktree.worktree_root, &SystemGit,
+                        )?;
+                    } else {
+                        mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                            &archive_path, &worktree.worktree_root, &worktree.branch, &SystemGit,
+                        )?;
+                    }
                 }
             }
             // The record already names the worktree, so a failure here rolls
@@ -1490,13 +1492,18 @@ impl Controller {
                         PrimaryCheckoutRequirement::Any,
                     )?;
                 }
-                mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                    &archive_path,
-                    &conversion.worktree.worktree_root,
-                    &conversion.worktree.branch,
-                    &SystemGit,
-                )
-                .context("restore this session's checkout")?;
+                if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                    mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                        &archive_path, &conversion.worktree.worktree_root, &SystemGit,
+                    )?;
+                } else {
+                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                        &archive_path,
+                        &conversion.worktree.worktree_root,
+                        &conversion.worktree.branch,
+                        &SystemGit,
+                    )?;
+                }
             }
             // A local checkout becomes an isolated workspace by being
             // re-snapshotted into a new archive whose provenance is the
@@ -1519,6 +1526,9 @@ impl Controller {
                     &conversion.source,
                     &destination,
                     &SystemGit,
+                    conversion.retire.as_ref().is_some_and(|checkout| {
+                        checkout.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    }),
                 )
                 .context("snapshot the host checkout for its new target")?;
                 resume_notices.push(conversion_notice(

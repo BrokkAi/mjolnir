@@ -183,6 +183,7 @@ impl RuntimeState {
         let registered = self
             .start_create_session(CreateSessionRequest {
                 launch_base: None,
+                launch_branch: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,

@@ -279,6 +279,8 @@ pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -325,6 +327,21 @@ pub(crate) fn running_session() -> SessionRecord {
         state: SessionState::Running,
         ..stopped_session()
     }
+}
+
+pub(crate) fn legacy_managed_session(mut session: SessionRecord) -> SessionRecord {
+    let root = PathBuf::from(format!("/srv/project/.mj/worktrees/{}", session.id));
+    session.project_directory = Some(root.clone());
+    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Worktree,
+        source_project_directory: "/srv/project".into(),
+        source_repository: "/srv/project".into(),
+        worktree_root: root,
+        branch: format!("mj/{}", session.id),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: Some("1".repeat(40)),
+    });
+    session
 }
 
 /// A form question the agent is waiting on, as the daemon projects it.

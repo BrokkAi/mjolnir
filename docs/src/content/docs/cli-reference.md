@@ -166,7 +166,7 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
-       [--project-directory <path>] [--base <revision>] [--title <text>]
+       [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
        [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
@@ -177,7 +177,7 @@ mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
-mj suspend --session <id> [--json]
+mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>]
@@ -192,6 +192,13 @@ mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-fil
 mj models --profile <id> [--model <name>] [--json]
 mj set-config --session <id> --key <key> --value <value> [--json]
 ```
+
+`mj new --branch <name>` selects the branch checked out in a new isolated clone;
+otherwise the clone starts on the remote default branch. `--base <revision>`
+records a separate launch base for `mj diff`; it does not change the selected
+branch. A local clone resolves the base in the source repository, while a
+network clone resolves it from fetched Git history. A base cannot be combined
+with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
@@ -208,14 +215,6 @@ mj set-config --session <id> --key <key> --value <value> [--json]
   `--overwrite`.
 - `mj models` lists the models and efforts a profile offers.
 - `mj set-config` applies one session setting, such as the model or effort.
-
-`mj new --base <revision>` starts the session at that Git revision instead of
-HEAD (managed worktree) or the remote default branch (bundle session), and
-records it as the session's launch base, so `mj diff` compares against it. A
-managed-worktree session resolves the revision in the project's repository; a
-bundle session resolves it in the fresh clone, where only what the remote sent
-exists, so name a commit SHA, a tag, or `origin/<branch>`. A base cannot be
-combined with a session that runs in the selected directory without a worktree.
 
 `mj diff` compares against the recorded launch base by default. Use `--base`
 to compare against an explicit Git commit or revision, for example after
@@ -291,13 +290,15 @@ session that should continue elsewhere.
 
 `mj suspend` saves a verified recovery copy and releases the environment. It
 reports acceptance; follow it with `mj wait --session <id>` to observe completion
-or a reported failure. `mj interrupt-turn` interrupts only the current turn and
+or a reported failure. For an independent clone whose work may be unpublished,
+pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
+still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
 keeps the session available for another prompt.
 
 `mj destroy` permanently removes the session, environment, and recovery archive.
-It keeps the managed branch in the source repository unless `--delete-branch` is
-specified. Keeping that branch does not preserve work held only in the destroyed
-environment. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
+New managed clones have no branch in the source repository. For older linked
+worktree sessions, the managed branch remains unless `--delete-branch` is
+specified. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
 remove it (this replaces `mj close --force`). `mj cancel-turn` was removed too;
 use `mj interrupt-turn`. Both old names now fail with clap's `unrecognized
 subcommand` error.

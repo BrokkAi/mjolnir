@@ -13,6 +13,50 @@ use crate::{DashboardState, Focus};
 /// it sorts above the Hel record.
 const NEWER_THAN_THE_CHECKPOINT: i64 = 4_000_000_000_000;
 
+#[test]
+fn managed_clone_resume_row_marks_unpublished_checkpoint_work() {
+    let mut session = stopped_session();
+    let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
+    session.project_directory = Some(root.clone());
+    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: "/srv/project".into(),
+        source_repository: "/srv/project".into(),
+        worktree_root: root,
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: Some("1".repeat(40)),
+    });
+    session.publication = Some(mj_core::state::PublicationAssessment {
+        checkpoint_sha256: "a".repeat(64),
+        state: PublicationState::Unpublished,
+        dirty: false,
+        stashed: false,
+        saved_commits: vec!["2".repeat(40)],
+        destinations: Vec::new(),
+        checked_at: "2026-08-09T01:00:00Z".into(),
+        reason: Some("master contains an unpublished commit".into()),
+    });
+    let rows = merged_resume_rows(&config(), &state_with(vec![session]), &[], &[]);
+    let row = rows
+        .iter()
+        .find(|row| matches!(row.key, ResumeRowKey::Hel(_)))
+        .unwrap();
+    assert_eq!(row.publication, Some(PublicationState::Unpublished));
+    assert!(row.details.contains("Unpublished work"));
+    let line = resume_row_line(
+        row,
+        &RowLayout {
+            profile: 12,
+            origin: 16,
+            activity: 12,
+            title: 40,
+        },
+        &chrono::Utc::now(),
+    );
+    assert!(line.to_string().contains("↑ "));
+}
+
 fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionOption {
     crate::ImportSessionOption {
         native_session_id: id.into(),
@@ -2275,19 +2319,17 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
     );
 }
 
-/// While the first build runs the box says so and cannot be typed into,
-/// the dialog keeps asking, and a ready answer opens it without the person
-/// reopening the dialog.
+/// An ongoing build leaves the query editable across tabs and returns the
+/// indexed matches while polling for more.
 #[test]
-fn the_search_box_is_disabled_until_the_first_build_finishes() {
+fn search_remains_available_while_the_index_builds() {
     let mut dashboard = DashboardState::new(
         config(),
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
-    // Search on the history tabs is the index's answer, so they are where a
-    // box that cannot answer yet says so.
+    replace_search(&mut dashboard, "archived");
     switch_to_hel(&mut dashboard);
     let request_id = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
@@ -2296,7 +2338,7 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     dashboard.apply_wiki_search(
         request_id,
         WikiSearchPage {
-            rows: Vec::new(),
+            rows: vec![wiki_row("gone", true)],
             status: WikiStatus {
                 state: WikiIndexState::Indexing,
                 topping_up: true,
@@ -2306,30 +2348,40 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert!(!dialog.search_enabled());
-    assert_eq!(dialog.search_placeholder(), Some("Indexing…"));
+    assert!(dialog.search_enabled());
+    assert_eq!(dialog.search_placeholder(), None);
 
-    // Tabs and row navigation keep working while it builds.
+    // Tabs preserve the query and the already indexed matches.
     dashboard.handle_key(key(KeyCode::Char('/')));
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert_ne!(
+    assert_eq!(
         dialog.focused(),
         ResumeFocus::Search,
-        "a disabled box does not take the focus"
+        "search remains editable during indexing"
     );
     switch_to_archive(&mut dashboard);
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
     assert_eq!(dialog.tab, ResumeTab::Archive);
+    assert_eq!(dialog.search.value(), "archived");
+    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+    let rendered = drawn(&mut dashboard, 120, 34);
+    let search_line = rendered
+        .iter()
+        .find(|line| line.contains("Search:"))
+        .unwrap();
+    assert!(search_line.contains("archived"), "{search_line}");
+    assert!(!search_line.contains("Indexing"), "{search_line}");
 
     // The build says it is still running, so the dialog asks again.
     let (next_id, query, delay) = dashboard
         .next_wiki_refresh()
         .expect("a building index is asked again");
-    assert_eq!(query, "");
+    assert_eq!(query, "archived");
+    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
     assert_eq!(delay, WIKI_INDEXING_POLL);
 
     dashboard.apply_wiki_search(next_id, ready_page(vec![wiki_row("gone", true)]));
@@ -2338,7 +2390,7 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     };
     assert!(
         dialog.search_enabled(),
-        "the box opens as soon as the build finishes"
+        "search stays available after the build finishes"
     );
     assert_eq!(dialog.search_placeholder(), None);
     assert!(

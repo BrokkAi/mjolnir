@@ -478,6 +478,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     async fn finished(received: &mut mpsc::Receiver<RuntimeEvent>) -> UserShellResult {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {

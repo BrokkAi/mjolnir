@@ -969,6 +969,8 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

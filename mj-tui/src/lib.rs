@@ -361,6 +361,7 @@ pub enum DashboardAction {
     },
     Suspend {
         session_id: String,
+        acknowledge_unpublished_work: bool,
     },
     DiscardSinceCheckpoint {
         session_id: String,

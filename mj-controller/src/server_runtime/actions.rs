@@ -137,6 +137,7 @@ pub(super) async fn apply_phone_action(
             project_directory,
             create_managed_worktree,
             launch_base,
+            launch_branch,
             mjolnir_subagents,
             dirty_ack: _dirty_ack,
         } => {
@@ -179,6 +180,7 @@ pub(super) async fn apply_phone_action(
                     CreateSessionRequest {
                         create_managed_worktree,
                         launch_base,
+                        launch_branch,
                         mjolnir_subagents,
                         initial_prompt: None,
                         workspace_id,
@@ -261,8 +263,14 @@ pub(super) async fn apply_phone_action(
                 .await?;
             Ok(())
         }
-        ControllerAction::Suspend { session_id } => {
-            services.daemon_runtime.suspend_session(session_id).await
+        ControllerAction::Suspend {
+            session_id,
+            acknowledge_unpublished_work,
+        } => {
+            services
+                .daemon_runtime
+                .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                .await
         }
         ControllerAction::Destroy {
             session_id,

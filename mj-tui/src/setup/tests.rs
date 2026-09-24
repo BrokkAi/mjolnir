@@ -2406,7 +2406,10 @@ fn the_first_page_groups_its_sections_and_reports_what_each_one_is_set_to() {
         "podman",
         "On \u{b7} 127.0.0.1:3765",
         "Keeps every session",
-        "Midnight \u{b7} sidebar left",
+        &format!(
+            "{} \u{b7} sidebar left",
+            schema::theme_report("Midnight", theme::no_color_requested())
+        ),
     ] {
         assert!(drawn.contains(state), "missing {state:?} in\n{drawn}");
     }

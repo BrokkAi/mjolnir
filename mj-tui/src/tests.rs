@@ -1354,6 +1354,7 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
     confirm.mode = Mode::Confirm(dialogs::ConfirmDialog::new(
         dialogs::Confirmation::ForceDestroy {
             session_id: "session-1".into(),
+            delete_branch_available: false,
         },
     ));
 
@@ -1549,6 +1550,7 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     parent.state = SessionState::Running;
     parent.project_directory = Some(std::path::PathBuf::from("/worktrees/parent-session"));
     parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: std::path::PathBuf::from("/src/mjolnir-main"),
         source_repository: std::path::PathBuf::from("/src/mjolnir-main"),
         worktree_root: std::path::PathBuf::from("/worktrees/parent-session"),
@@ -4171,12 +4173,15 @@ fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
 
 #[test]
 fn idle_suspension_runs_immediately_and_working_suspension_warns() {
-    let mut dashboard = dashboard_with_session(running_session());
+    let mut session = running_session();
+    session.project_directory = Some("/srv/project".into());
+    let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     assert_eq!(
         dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::Suspend {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -4211,7 +4216,8 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('s'))),
         DashboardAction::Suspend {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: true,
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -4225,6 +4231,41 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn idle_managed_clone_suspension_requires_publication_confirmation() {
+    let mut session = running_session();
+    let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
+    session.project_directory = Some(root.clone());
+    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: "/srv/project".into(),
+        source_repository: "/srv/project".into(),
+        worktree_root: root,
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: Some("1".repeat(40)),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Publication status is unverified"))
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('s'))),
+        DashboardAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: true,
+        }
+    );
 }
 
 #[test]
@@ -4248,7 +4289,7 @@ fn every_confirmation_button_answers_a_unique_letter() {
     );
 
     // The delete dialog's third button is reachable by its letter.
-    let mut dashboard = dashboard_with_session(running_session());
+    let mut dashboard = dashboard_with_session(legacy_managed_session(running_session()));
     dashboard.focus_sessions();
     dashboard.dispatch_command(CommandId::DestroySession);
     let lines = drawn(&mut dashboard, 120, 40);
@@ -5006,7 +5047,8 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::Suspend {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: true,
         }
     );
 }

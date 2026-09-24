@@ -541,11 +541,18 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
-    pub(crate) async fn suspend(&self, session_id: &str) -> Result<()> {
+    pub(crate) async fn suspend(
+        &self,
+        session_id: &str,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         self.send(
             self.http
                 .post(self.url(&format!("/sessions/{session_id}/suspend")))
-                .json(&serde_json::json!({"acknowledge_active_subagents": true}))
+                .json(&serde_json::json!({
+                    "acknowledge_active_subagents": true,
+                    "acknowledge_unpublished_work": acknowledge_unpublished_work,
+                }))
                 .timeout(REQUEST_TIMEOUT),
         )
         .await
@@ -1026,8 +1033,10 @@ mod tests {
         let error = probe_api(&http_client(None).unwrap(), &url)
             .await
             .unwrap_err();
+        // The platform verifier words the rejection per OS (webpki reports
+        // `CaUsedAsEndEntity`, macOS reports an untrusted certificate).
         assert!(
-            format!("{error:#}").contains("CaUsedAsEndEntity"),
+            format!("{error:#}").contains("invalid peer certificate"),
             "unexpected error: {error:#}"
         );
         probe_api(&http_client(Some(&pin)).unwrap(), &url)

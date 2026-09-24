@@ -20,6 +20,7 @@ Point the program's agent command at `mj acp`:
 
 ```text
 mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
+       [--on-exit keep|suspend|destroy]
 ```
 
 | Flag | Meaning |
@@ -28,6 +29,7 @@ mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
 | `--profile <id>` | The [profile](/profiles/) whose account and harness run the session. Omitted follows your saved default. |
 | `--target <id>` | The [target](/targets/) the session runs on: this machine, a container, an SSH host, or an EC2 instance. Omitted follows your saved default. |
 | `--bundle <id>` | The [bundle](/workspaces-bundles/) to provision on a managed target. Without one, the working directory the client submits becomes the project, which is what a local target needs. |
+| `--on-exit <policy>` | What happens to the sessions this process created when it exits: `keep` (the default), `suspend`, or `destroy`. See [When the program exits](#when-the-program-exits). |
 
 `--workspace` is required. The other flags are optional, and an omitted one
 resolves the same way `mj new` resolves it:
@@ -104,7 +106,47 @@ reason instead of waiting for an answer that is never coming.
 
 ## When the program exits
 
-Closing the pipe stops the turns the program can no longer see, and the adapter
-exits. Sessions are not destroyed: they are durable, so a turn interrupted this
-way leaves a session that `mj` can resume, and the work it had checkpointed is
-still there. See [Durability and recovery](/durability/).
+The adapter exits when the program closes its side of the pipe. Any turn still
+running is interrupted first, because nothing can watch or steer it any more.
+What happens to the sessions next is the exit policy's choice, and the policy
+covers every session this `mj acp` process created, however its turns ended:
+finished, refused, failed, cancelled, or cut off when the pipe closed.
+
+| `--on-exit` | Each session is left | Use it for |
+| --- | --- | --- |
+| `keep` (default) | exactly as it was, live on its target | a program whose sessions a person follows up on |
+| `suspend` | checkpointed, with its worker and target released; `mj resume --session <id>` brings it back | a scheduler that wants its runs kept but not running |
+| `destroy` | removed, with its workspace and recovery archive; the branch is kept | a one-shot scheduler that takes its answer from the turn |
+
+A one-shot scheduler — one that starts `mj acp` for a single prompt, reads the
+answer, and exits — should use `destroy`, or `suspend` if a person may want to
+look at a run later. With `keep`, such a scheduler leaves a live session, worker,
+and workspace behind every run, and has no id left to clean them up with once the
+adapter is gone.
+
+`suspend` and `destroy` wait for the daemon to finish, so the adapter can take a
+few minutes to exit after the pipe closes: a suspension checkpoints the
+workspace first. A program should close standard input and then wait for the
+process to exit rather than kill it. `SIGTERM`, `SIGINT`, and `SIGHUP` also run
+the policy; `SIGKILL` cannot, and leaves sessions as `keep` would. Under `keep`
+a signal ends the adapter where it stands, as it always has.
+
+`destroy` waits for an interrupted turn to stop before it removes a session. A
+turn that does not stop within a minute is not destroyed, so no work is removed
+while it is still being written.
+
+The adapter exits with status 0 when every session was retired as asked. When
+any was not — the daemon refused, the operation failed, or it did not finish in
+time — the adapter exits with a non-zero status and an error on standard error
+that names each such session, what went wrong, and the state it was left in. A suspension is refused
+for a clone whose Git work is not verified as pushed, since releasing it could
+lose that work; `mj suspend --session <id> --acknowledge-unpublished-work`
+releases it once you have checked. A failed suspension leaves the session live, and a session
+that was not destroyed is still there; either way `mj sessions --session <id>`
+shows it and `mj suspend` or `mj destroy` retries. A creation still in flight
+when the program leaves is waited for, so its session is retired too; a creation
+the daemon refused made no session, so there is nothing to retire.
+
+Sessions kept or suspended are durable: a turn interrupted by the pipe closing
+leaves a session that `mj` can resume, and the work it had checkpointed is still
+there. See [Durability and recovery](/durability/).

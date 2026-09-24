@@ -644,8 +644,8 @@ The new-session wizard asks for an existing absolute Git project directory on
 the runtime's machine. On `local` the harness retains its configured approval
 behavior because there is no container or instance boundary. On an SSH machine
 the wizard separately asks for an existing absolute remote Git directory; when
-**Create managed worktree** is checked on the final review, the new checkout is
-created below the repository's own `.mj/worktrees/` tree. A bare runtime on an
+**Create isolated checkout** is checked on the final review, the new checkout is
+created below the repository's own `.mj/clones/` tree. A bare runtime on an
 EC2 machine launches one instance per session. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 

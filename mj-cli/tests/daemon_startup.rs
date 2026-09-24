@@ -33,6 +33,41 @@ fn upgrade_command(storage: &common::DaemonStorage) -> Command {
     command
 }
 
+/// Run one concurrent upgrade client with its output in a file and a deadline.
+///
+/// A client whose output pipe a detached daemon inherited never reaches EOF,
+/// so waiting on pipes could outlast the whole CI job. Files and a bounded
+/// wait turn any such hang into a prompt failure that shows what the client
+/// printed.
+fn run_client_with_deadline(
+    command: &mut Command,
+    log: &std::path::Path,
+) -> (std::process::ExitStatus, String) {
+    use std::time::{Duration, Instant};
+    let file = fs::File::create(log).unwrap();
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return (status, fs::read_to_string(log).unwrap_or_default());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "upgrade client did not exit within 180s: {}",
+                fs::read_to_string(log).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     let path = current_store(storage);
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -392,11 +427,10 @@ fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
         }
         let outputs = std::thread::scope(|scope| {
             let clients: Vec<_> = (0..3)
-                .map(|_| {
+                .map(|index| {
                     let mut command = upgrade_command(&storage);
-                    scope.spawn(move || {
-                        mj_core::subprocess::run_with_input(&mut command, &[]).unwrap()
-                    })
+                    let log = storage.path().join(format!("client-{index}.log"));
+                    scope.spawn(move || run_client_with_deadline(&mut command, &log))
                 })
                 .collect();
             clients
@@ -404,12 +438,8 @@ fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
                 .map(|client| client.join().unwrap())
                 .collect::<Vec<_>>()
         });
-        for output in outputs {
-            assert!(
-                output.status.success(),
-                "{version}/{protocol}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        for (status, log) in outputs {
+            assert!(status.success(), "{version}/{protocol}: {log}");
         }
         assert!(old.0.wait().unwrap().success());
         assert_upgraded(&path);

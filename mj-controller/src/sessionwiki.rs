@@ -1230,6 +1230,19 @@ pub fn sessions_ready_to_archive(
         sessions.get(session_id).is_some_and(|record| {
             record.state == mj_core::state::SessionState::Stopped
                 && parse_time(&record.updated_at).is_some_and(|updated| updated <= cutoff)
+                && (record.managed_worktree.as_ref().is_some_and(|checkout| {
+                    checkout.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                }) || (record.managed_worktree.is_none() && record.project_directory.is_some())
+                    || record
+                        .checkpoint
+                        .as_ref()
+                        .zip(record.publication.as_ref())
+                        .is_some_and(|(checkpoint, publication)| {
+                            publication.checkpoint_sha256 == checkpoint.sha256
+                                && publication.state == mj_core::state::PublicationState::Published
+                                && !publication.dirty
+                                && !publication.stashed
+                        }))
         })
     };
     let selected: BTreeSet<String> = sessions
@@ -1895,6 +1908,8 @@ mod tests {
         SessionRecord {
             target_runtime: None,
             launch_base: None,
+            launch_branch: None,
+            publication: None,
             build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
@@ -2422,6 +2437,50 @@ mod tests {
             now,
             3,
         )
+    }
+
+    #[test]
+    fn aged_clone_requires_clean_published_evidence_for_its_current_checkpoint() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let root = PathBuf::from(format!("/srv/project/.mj/clones/{id}"));
+        let mut session = record(
+            id,
+            mj_core::state::SessionState::Stopped,
+            "2026-09-01T00:00:00Z",
+        );
+        session.project_directory = Some(root.clone());
+        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: "/srv/project".into(),
+            source_repository: "/srv/project".into(),
+            worktree_root: root,
+            branch: "feature".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: Some("1".repeat(40)),
+        });
+        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+            archive_path: "sessions/checkpoint.hel.zip".into(),
+            sha256: "a".repeat(64),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            event_frontier: 0,
+        });
+        assert!(ready(vec![session.clone()], vec![]).is_empty());
+        session.publication = Some(mj_core::state::PublicationAssessment {
+            checkpoint_sha256: "a".repeat(64),
+            state: mj_core::state::PublicationState::Published,
+            dirty: false,
+            stashed: false,
+            saved_commits: vec!["2".repeat(40)],
+            destinations: vec!["https://example.test/repository.git".into()],
+            checked_at: "2026-09-01T01:00:00Z".into(),
+            reason: Some("feature branch was pushed but not merged".into()),
+        });
+        assert_eq!(ready(vec![session.clone()], vec![]), vec![id]);
+        session.publication.as_mut().unwrap().stashed = true;
+        assert!(ready(vec![session.clone()], vec![]).is_empty());
+        session.publication.as_mut().unwrap().stashed = false;
+        session.publication.as_mut().unwrap().checkpoint_sha256 = "b".repeat(64);
+        assert!(ready(vec![session], vec![]).is_empty());
     }
 
     /// A session whose checkpoint archive and attachments sit under `root`.

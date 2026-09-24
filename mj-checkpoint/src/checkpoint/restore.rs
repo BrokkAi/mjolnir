@@ -251,6 +251,23 @@ pub fn restore_single_repository_onto_branch(
     Ok(archived_branch)
 }
 
+/// Restore a retired independent clone on the branch saved in its archive.
+pub fn restore_single_repository_into_checkout(
+    archive_path: &Path,
+    repository_path: &Path,
+    git: &dyn GitCommandRunner,
+) -> Result<()> {
+    ensure!(repository_path.is_dir(), "restore checkout is missing");
+    let archive = read_archive_verified(archive_path)?;
+    let [repository] = archive.manifest.repositories.as_slice() else {
+        bail!("an isolated checkout requires exactly one archived repository");
+    };
+    let mut snapshot = archived_repository_snapshot(&archive, repository)?;
+    snapshot.metadata.remote_workspace = false;
+    restore_git_snapshot(git, repository_path, &snapshot)
+        .context("restore independent checkout before moving it into a target")
+}
+
 /// Native session files use harness-specific working-directory keys. Rewrite
 pub(super) fn restored_native_relative_path(
     harness: HarnessKind,
