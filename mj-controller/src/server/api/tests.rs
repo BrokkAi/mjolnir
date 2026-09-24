@@ -1441,6 +1441,36 @@ async fn workspaces_are_created_by_name_idempotently_and_listed() {
     assert_eq!(backend.workspaces.0.lock().unwrap().len(), 1);
 }
 
+/// Launch finding R2-4: `mj workspaces create default` answered `500
+/// Internal Server Error` with a sentence about sessions made before a
+/// workspace was required. The name is the caller's mistake, so it is refused
+/// as other unusable names are, in words a new user can act on.
+#[tokio::test]
+async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/workspaces"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":" Default "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(
+        body.contains("the workspace name \\\"default\\\" is reserved; choose another name"),
+        "{body}"
+    );
+    assert!(backend.workspaces.0.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn start_rejects_a_request_that_still_sends_an_idempotency_key() {
     let backend = Arc::new(FakeBackend::default());
