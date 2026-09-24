@@ -284,21 +284,52 @@ impl Controller {
         error: anyhow::Error,
         executor: &impl CommandExecutor,
     ) -> Result<anyhow::Error> {
+        self.rollback_failed_new_session_with(
+            session_id,
+            error,
+            executor,
+            // Rollback must remain possible after the foreground operation's
+            // cancellation token has been set.
+            &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+        )
+    }
+
+    fn rollback_failed_new_session_with(
+        &mut self,
+        session_id: &str,
+        error: anyhow::Error,
+        executor: &impl CommandExecutor,
+        target_cleanup_executor: &impl CommandExecutor,
+    ) -> Result<anyhow::Error> {
         let session = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        // The failure goes on record before anything the record points at is
+        // removed. Removing the worker and its checkout can outlast a daemon
+        // that is stopping, and a daemon that exits partway would otherwise
+        // leave a record naming a worker that no longer exists, which every
+        // later daemon keeps reconnecting to. A failed record that still
+        // names its target is one Destroy knows how to clean up.
+        let original = note_new_session_launch_failure(session_id, &error);
+        apply_failed_new_session_launch(&mut self.state, session_id, &original);
+        self.persist_session_transition_or_restore(
+            session_id,
+            &session,
+            "record the failed launch before removing its target",
+        )
+        .map_err(|persist_error| {
+            persist_error.context(format!(
+                "{original}; its target was left in place because the failure could not be recorded"
+            ))
+        })?;
         let target_cleanup = match session.target.as_ref() {
             Some(locator) => (|| -> Result<()> {
                 let backend = backend_locator(locator, &session, &self.config)?;
                 targets::close_plan(&backend, session_id)?
-                    // Rollback must remain possible after the foreground
-                    // operation's cancellation token has been set.
-                    .execute(&CancellableProcessExecutor::with_timeout(
-                        Duration::from_secs(15),
-                    ))
+                    .execute(target_cleanup_executor)
                     .map(|_| ())
             })(),
             None => Ok(()),
@@ -318,7 +349,6 @@ impl Controller {
                 "new-session rollback cleanup reported failures"
             );
         }
-        let original = note_new_session_launch_failure(session_id, &error);
         let failure = apply_failed_new_session_rollback(
             &mut self.state,
             session_id,
@@ -865,6 +895,15 @@ fn apply_new_session_provisioning_result(
             Err(error)
         }
     }
+}
+
+/// Mark a new session's launch failed while it still names its target, so the
+/// record is true while the rollback removes that target.
+fn apply_failed_new_session_launch(state: &mut State, session_id: &str, original_error: &str) {
+    let record = state.sessions.get_mut(session_id).unwrap();
+    record.state = SessionState::Error;
+    record.updated_at = now();
+    record.last_error = Some(format!("worker bootstrap failed: {original_error}"));
 }
 
 pub(super) fn apply_failed_new_session_rollback(

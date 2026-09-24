@@ -914,6 +914,141 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     assert_eq!(retained.target_runtime, runtime);
     assert!(failure.to_string().contains("cleanup"));
 }
+
+/// Stands in for the target cleanup, and records what the store said about
+/// the session each time a cleanup command ran.
+struct DurableStateAtCleanup {
+    session_id: String,
+    seen: Mutex<Vec<(SessionState, Option<String>)>>,
+}
+
+impl CommandExecutor for DurableStateAtCleanup {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        let stored = crate::database::load_state()?
+            .sessions
+            .remove(&self.session_id)
+            .context("the session record is gone")?;
+        self.seen
+            .lock()
+            .unwrap()
+            .push((stored.state, stored.last_error));
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// R2-2: `mj daemon restart` while a new session was starting left it
+/// disconnected for good. The stopping daemon cancels the launch, and the
+/// rollback removes the worker and its files before it records the failure.
+/// That removal can outlast the daemon's shutdown, so the daemon exited with
+/// the record still saying "provisioned, worker not attached yet", and every
+/// later daemon reconnected to a worker that no longer existed. The failure
+/// has to be on record before anything the record points at is removed.
+#[test]
+fn a_failed_launch_is_recorded_before_its_target_is_removed() {
+    const CHILD: &str = "MJ_TEST_LAUNCH_ROLLBACK_ORDER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_failed_launch_is_recorded_before_its_target_is_removed",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = ssh_docker_registration_config();
+    config.targets.insert(
+        "remote".into(),
+        TargetTemplate::SshBare {
+            ssh: SshConnection {
+                host: "builder".into(),
+                user: Some("agent".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Guardian,
+            workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+        },
+    );
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let session_id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "remote",
+            "cancelled launch",
+            SessionLaunchOptions {
+                launch_base: None,
+                launch_branch: None,
+                mjolnir_subagents: None,
+                create_managed_worktree: None,
+                initial_prompt: None,
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+                project_directory: Some("/srv/project".into()),
+                session_title_override: None,
+            },
+        )
+        .unwrap();
+    // Provisioning has finished: the record names its target, and the worker
+    // has not attached yet.
+    apply_new_session_provisioning_result(
+        &mut controller.state,
+        &session_id,
+        Ok(TargetLocator::SshBare {
+            host: "builder".into(),
+            workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
+            worker_id: None,
+        }),
+    )
+    .unwrap();
+    controller.persist_session_state(&session_id).unwrap();
+
+    let cleanup = DurableStateAtCleanup {
+        session_id: session_id.clone(),
+        seen: Mutex::new(Vec::new()),
+    };
+    controller
+        .rollback_failed_new_session_with(
+            &session_id,
+            anyhow::anyhow!("operation cancelled while connecting to the worker relay"),
+            &RefusingExecutor("the cancelled launch"),
+            &cleanup,
+        )
+        .unwrap();
+
+    let seen = cleanup.seen.into_inner().unwrap();
+    assert!(!seen.is_empty(), "the rollback removes the target");
+    for (state, last_error) in seen {
+        assert_eq!(
+            state,
+            SessionState::Error,
+            "the target was removed while the record still said {state:?}"
+        );
+        assert!(
+            last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("operation cancelled")),
+            "the record says why the launch failed: {last_error:?}"
+        );
+    }
+    let reloaded = Controller::load().unwrap();
+    let retained = &reloaded.state.sessions[&session_id];
+    assert_eq!(retained.state, SessionState::Error);
+    assert!(retained.target.is_none());
+}
 #[test]
 fn launch_failure_is_persisted_separately_from_session_state() {
     let directory = tempfile::tempdir().unwrap();
