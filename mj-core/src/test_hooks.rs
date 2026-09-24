@@ -82,6 +82,13 @@ pub fn fake_command_dispatcher() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-command.sh")
 }
 
+/// A worker stand-in carrying the same build identity as this test process.
+/// Built before tests start, so executing it cannot race a test's writer.
+#[cfg(all(unix, feature = "test-hooks"))]
+pub fn fake_worker_dispatcher() -> std::path::PathBuf {
+    std::path::Path::new(env!("OUT_DIR")).join("fake-worker.sh")
+}
+
 /// Install a shell stand-in, under `program`, for a command the code under
 /// test looks up on `PATH` in `directory`.
 ///

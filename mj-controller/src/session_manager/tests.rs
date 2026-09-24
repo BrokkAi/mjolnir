@@ -553,8 +553,12 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
     let source = directory.path().join("current-worker");
     let refreshed = directory.path().join("worker-refreshed");
     let restarted = directory.path().join("worker-restarted");
-    std::fs::write(&source, b"current worker binary").unwrap();
-    let current_digest = lower_hex(sha2::Sha256::digest(b"current worker binary"));
+    let bytes = format!(
+        "current worker binary{}",
+        mj_core::worker_build::WORKER_BUILD_STAMP
+    );
+    std::fs::write(&source, &bytes).unwrap();
+    let current_digest = lower_hex(sha2::Sha256::digest(bytes.as_bytes()));
     let recovery = |installed_digest: &str, require_refresh: bool| {
         let mut restart = if require_refresh {
             CommandSpec::new(

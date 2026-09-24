@@ -399,6 +399,7 @@ impl Controller {
                 .profiles
                 .get(&session.last_profile)
                 .context("harness profile disappeared during provisioning")?;
+            super::worker_binary::preflight_worker_binary(template)?;
             super::worker_binary::preflight_harness(template, profile, executor)?;
             self.prepare_managed_raw_worktree(session_id, executor)
         })();
