@@ -1753,6 +1753,55 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// Launch finding E-8 (right edge): a conversation title too long for its
+    /// row stopped at the pane chips with no ellipsis ("End to follo ◇").
+    /// The title must end in an ellipsis before the chips.
+    #[tokio::test]
+    async fn a_long_conversation_title_ends_in_an_ellipsis_before_the_pane_chips() {
+        let session = running_session();
+        let session_id = session.id.clone();
+        for width in [140_u16, 100, 80] {
+            let mut dashboard = dashboard_with_session(session.clone());
+            let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+            let chat = ActiveChat::open(
+                fixture.stopped,
+                "hel",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity {
+                    title: "a very long session title ".repeat(8),
+                    ..Default::default()
+                },
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            );
+            let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let row = &lines[0];
+            let title = row
+                .split_once("| Conversation")
+                .map(|(_, title)| title)
+                .unwrap_or_else(|| panic!("{width}: no pane title in {row}"));
+            let before_chips = title.split(theme::glyphs().pin).next().unwrap();
+            assert!(
+                before_chips.trim_end_matches([' ', '─']).ends_with('…'),
+                "{width}: {row}"
+            );
+        }
+    }
+
     /// Launch finding A-12 / R1-2: the composer footer drew the host's
     /// unlabeled first chord over the "ctrl+b then " label, so the row read
     /// "g sessionsn g sessions". The label and the chord after it must read
