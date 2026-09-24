@@ -556,7 +556,7 @@ async fn run_command(
             .map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
-                return Err(workspace_required("mj acp", false).await);
+                return Err(workspace_required("mj acp").await);
             };
             let workspace = Some(workspace);
             acp::serve(args, workspace)
@@ -1127,32 +1127,60 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
 ///
 /// There is no hidden workspace to fall back on: every session lives in one
 /// the dashboard and the viewer list, so the command has to name it (launch
-/// finding H-3). The refusal lists what exists, from the daemon, and how to
-/// make one. A daemon that cannot be reached leaves the list out rather than
-/// hiding the reason. `start_daemon` is false for `mj acp`, which must never
-/// start a daemon before a client has asked it for a session.
-pub(crate) async fn workspace_required(command: &str, start_daemon: bool) -> anyhow::Error {
-    let connected = if start_daemon {
-        daemon::connect_or_start().await
-    } else {
-        daemon::connect_existing().await
-    };
-    let workspaces = match connected {
-        Ok(mut daemon) => daemon.list_workspaces().await.map_err(|error| {
-            tracing::warn!(%error, "could not list workspaces for the refusal");
-        }),
+/// finding H-3). The refusal lists what exists and how to make one.
+///
+/// It never starts a daemon: starting one only to refuse cost `mj new` more
+/// than a second (launch finding R2-14), and `mj acp` must not start one
+/// before a client has asked it for a session. A running daemon supplies the
+/// list; without one the list is read from the store, and a store that does
+/// not exist yet has none. A list that cannot be read is left out rather than
+/// hiding the reason.
+pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
+    let workspaces = match daemon::connect_existing().await {
+        Ok(mut daemon) => daemon
+            .list_workspaces()
+            .await
+            .map(|workspaces| {
+                workspaces
+                    .into_iter()
+                    .map(|listing| listing.workspace)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| {
+                tracing::warn!(%error, "could not list workspaces for the refusal");
+            })
+            .ok(),
+        Err(error) if daemon::daemon_not_running(&error).is_some() => {
+            tokio::task::spawn_blocking(stored_workspaces)
+                .await
+                .ok()
+                .flatten()
+        }
         Err(error) => {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
-            Err(())
+            None
         }
     };
-    let workspaces = workspaces.ok().map(|workspaces| {
+    let workspaces = workspaces.map(|workspaces| {
         workspaces
             .into_iter()
-            .map(|listing| (listing.workspace.name, listing.workspace.session_count))
+            .map(|workspace| (workspace.name, workspace.session_count))
             .collect::<Vec<_>>()
     });
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
+}
+
+/// The workspaces in the store, read without a daemon. A store that does not
+/// exist yet has none; one that cannot be read answers `None`.
+fn stored_workspaces() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    if !mj_controller::database::database_path().exists() {
+        return Some(Vec::new());
+    }
+    mj_controller::database::list_workspaces()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read the workspaces from the store");
+        })
+        .ok()
 }
 
 fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {

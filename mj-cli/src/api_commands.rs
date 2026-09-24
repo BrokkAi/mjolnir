@@ -590,7 +590,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
         (Some(workspace_id), _) => Some(workspace_id.clone()),
         (None, Some(name)) => Some(crate::resolve_store_workspace(Some(name)).await?),
-        (None, None) => return Err(crate::workspace_required("mj new", true).await),
+        (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
         mjolnir_subagents: None,
