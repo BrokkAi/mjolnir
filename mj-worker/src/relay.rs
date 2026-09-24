@@ -280,6 +280,7 @@ impl DurableRelay {
                 // The accepted model and effort the worker pins on its first
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
+                snapshot.restored_native_session_unused = restored.native_session_unused;
                 for queued in restored.queued_prompts {
                     validate_identifier(&queued.command_id, "restored queued command ID")?;
                     if queued.content.is_empty() {
@@ -799,9 +800,12 @@ impl DurableRelay {
         // the floor has every event about it above the floor too, so the
         // archive cannot hold any of its content. An unknown opening ordinal —
         // an older snapshot, or no session opened yet — cannot be placed
-        // against the floor, so it counts as history.
+        // against the floor, so it counts as history. The exception is a relay
+        // restored from a checkpoint that shows the session it continues was
+        // never prompted: everything below the floor is that archive.
         match self.snapshot.native_session_opened_ordinal {
             Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
+            None if self.snapshot.restored_native_session_unused => {}
             _ => return true,
         }
         // A prompt that only waits in the durable queue never reached the
@@ -810,6 +814,14 @@ impl DurableRelay {
             .dispatches
             .values()
             .any(native_history::prompt_may_have_reached_agent)
+    }
+
+    /// Whether the checkpoint this relay was restored from shows that the
+    /// native session it continues never received a prompt, while no session
+    /// has opened here yet.
+    pub fn restored_native_session_unused(&self) -> bool {
+        self.snapshot.restored_native_session_unused
+            && self.snapshot.native_session_opened_ordinal.is_none()
     }
 
     /// Record that the native thread has been used and can never be replaced.

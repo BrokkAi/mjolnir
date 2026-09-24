@@ -93,6 +93,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
+            snapshot.restored_native_session_unused = false;
             // A normal open clears the flag; only the fallback sets it.
             snapshot.native_continuity_lost = *native_continuity_lost;
             // A resumed thread was not created here, so this journal cannot

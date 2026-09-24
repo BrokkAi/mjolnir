@@ -177,6 +177,14 @@ pub struct RestoredRelaySeed {
     /// resume keeps the session's model instead of the harness default.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub accepted_config: BTreeMap<String, String>,
+    /// The archived conversation shows that the native session this restore
+    /// continues never received a prompt, so its harness wrote no history for
+    /// it. The restored worker may then replace that session when the
+    /// harness cannot find it, exactly as it may for a session its own journal
+    /// opened and never used. Seeds from older releases omit the field, which
+    /// reads as `false`: the imported identity counts as used.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_session_unused: bool,
 }
 
 impl RestoredRelaySeed {

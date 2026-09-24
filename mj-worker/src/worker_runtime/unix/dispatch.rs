@@ -1072,12 +1072,18 @@ pub(crate) fn select_resume_session(
 /// A native identity that arrived with the launch configuration was created
 /// somewhere other than this journal, which therefore cannot show what the
 /// thread contains. Record that durably before the thread is used again, so a
-/// later resume failure can never be answered by replacing it.
+/// later resume failure can never be answered by replacing it. The one
+/// exception is a relay restored from a checkpoint whose conversation shows
+/// the session never received a prompt (I2-7): the harness wrote nothing for
+/// it, so there is nothing a replacement could lose.
 pub(crate) fn record_imported_native_identity(
     config: &WorkerLaunchConfig,
     relay: &mut DurableRelay,
 ) -> Result<()> {
-    if config.native_session_id.is_some() && relay.operational_state().native_session_id.is_none() {
+    if config.native_session_id.is_some()
+        && relay.operational_state().native_session_id.is_none()
+        && !relay.restored_native_session_unused()
+    {
         relay.mark_native_session_used()?;
     }
     Ok(())

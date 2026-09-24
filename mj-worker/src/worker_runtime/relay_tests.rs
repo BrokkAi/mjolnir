@@ -4669,6 +4669,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             queued_prompts: Vec::new(),
             accepted_config: Default::default(),
+            native_session_unused: false,
         })
         .unwrap(),
     )
@@ -4712,6 +4713,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
             ]
             .into_iter()
             .collect(),
+            native_session_unused: false,
         })
         .unwrap(),
     )
@@ -4722,6 +4724,62 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
         crate::acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options);
     assert_eq!(accepted.model.as_deref(), Some("opus[1m]"));
     assert_eq!(accepted.effort.as_deref(), Some("high"));
+}
+
+/// I2-7: a session suspended before any prompt resumed on a relay restored
+/// from its checkpoint, with the native identity arriving in the launch
+/// configuration. The worker counted that identity as used because its own
+/// journal had not created it, so when Codex answered "thread not found" it
+/// refused to start a fresh thread. The checkpoint now says the session was
+/// never prompted, and that holds until the replacement opens.
+#[test]
+fn a_restored_never_prompted_session_may_replace_its_native_session() {
+    for native_session_unused in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        std::fs::write(
+            mj_core::relay::restored_relay_seed_path(&root),
+            serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+                event_frontier: 7,
+                event_frontier_digest: "b".repeat(64),
+                queued_prompts: Vec::new(),
+                accepted_config: Default::default(),
+                native_session_unused,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+        config.native_session_id = Some("missing-thread".into());
+
+        for _worker_start in 0..2 {
+            let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+            unix::record_imported_native_identity(&config, &mut relay).unwrap();
+            assert_eq!(
+                unix::select_resume_session(&config, &relay).as_deref(),
+                Some("missing-thread")
+            );
+            assert_eq!(
+                relay.native_session_may_have_history(),
+                !native_session_unused,
+                "unused={native_session_unused}"
+            );
+        }
+
+        let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "replacement".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert_eq!(
+            relay.native_session_may_have_history(),
+            !native_session_unused,
+            "the replacement opened here and has not been used"
+        );
+    }
 }
 
 /// Codex rebuilds a resumed thread from the launch request, so the bridge has

@@ -2234,6 +2234,68 @@ fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_
     assert!(seed_for(false).is_empty());
 }
 
+/// I2-7: an archive carries no relay journal, so the worker restored from a
+/// session suspended before any prompt could not tell its native session was
+/// never used, and refused to replace it when the harness had no record of
+/// it. The seed now says whether the native session the restore continues
+/// ever received a prompt. `/clear` starts a new native session, so only the
+/// conversation after the newest context boundary counts.
+#[test]
+fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (base, _) = fixture(temp.path());
+    let boundary = CanonicalTranscriptItem {
+        stable_id: format!("{}clear-1", mj_core::archive::CONTEXT_BOUNDARY_PREFIX),
+        position: 2,
+        latest_content_event_ordinal: None,
+        created_at_ms: 2,
+        last_changed_at_ms: 2,
+        body: CanonicalTranscriptBody::System {
+            text: "Context cleared — a new conversation starts here.".into(),
+        },
+    };
+    let unused_after_restore =
+        |name: &str, transcript: Vec<CanonicalTranscriptItem>, restore_native: bool| {
+            let mut spec = base.clone();
+            spec.canonical_session.transcript = transcript;
+            spec.canonical_session.event_frontier = 2;
+            spec.output_path = spec.relay_root.join(format!("{name}.hel.zip"));
+            export_checkpoint(&spec).unwrap();
+            let relay_root = temp.path().join(format!("relay-{name}"));
+            restore_checkpoint(
+                &CheckpointRestoreSpec {
+                    archive_path: spec.output_path.clone(),
+                    workspace_root: spec.workspace_root.clone(),
+                    relay_root: relay_root.clone(),
+                    harness_home: temp.path().join(format!("harness-{name}")),
+                    restore_repositories: false,
+                    restore_native,
+                    discard_queued_prompts: false,
+                    primary_repository_root: None,
+                },
+                &SystemGit,
+            )
+            .unwrap();
+            restored_seed(&relay_root).native_session_unused
+        };
+    let prompt = base.canonical_session.transcript[0].clone();
+
+    assert!(unused_after_restore("never-prompted", Vec::new(), true));
+    assert!(
+        !unused_after_restore("prompted", vec![prompt.clone()], true),
+        "a prompted session keeps its imported identity protected"
+    );
+    assert!(unused_after_restore(
+        "cleared",
+        vec![prompt.clone(), boundary.clone()],
+        true
+    ));
+    assert!(
+        !unused_after_restore("text-handoff", Vec::new(), false),
+        "a restore that does not continue the native session says nothing about it"
+    );
+}
+
 #[test]
 fn restore_seeds_the_relay_frontier_and_can_discard_queued_prompts() {
     let temp = tempfile::tempdir().unwrap();

@@ -1135,6 +1135,15 @@ pub struct RelaySnapshot {
     /// reading the snapshots of sessions that never opened one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_opened_ordinal: Option<u64>,
+    /// This relay was restored from a checkpoint whose conversation shows the
+    /// native session it continues never received a prompt
+    /// (`RestoredRelaySeed::native_session_unused`). The identity arrives with
+    /// the launch configuration rather than from this journal, and this is the
+    /// evidence that it is unused. The first `SessionOpened` clears it, since
+    /// that opening then places the session against the recovery floor. Written
+    /// only while true, so an older worker still reads every other snapshot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restored_native_session_unused: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
     pub config_options: Vec<SessionConfigOption>,
@@ -1189,6 +1198,7 @@ impl RelaySnapshot {
             native_continuity_lost: false,
             native_session_used: false,
             native_session_opened_ordinal: None,
+            restored_native_session_unused: false,
             agent_capabilities: None,
             agent_info: None,
             config_options: Vec::new(),
