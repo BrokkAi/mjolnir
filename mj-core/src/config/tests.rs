@@ -1,5 +1,64 @@
 use super::*;
 
+/// R4-6: `[targets.x] kind = "podman"` without `image` stopped the daemon
+/// from starting ("missing field `image`"), and `extra_run_args`, which is not
+/// a target setting, was accepted without a word.
+#[test]
+fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys() {
+    for kind in ["podman", "docker"] {
+        let config: Config = toml::from_str(&format!(
+            "version = {CONFIG_VERSION}\n[targets.r4-{kind}]\nkind = \"{kind}\"\n\
+             extra_run_args = [\"--network=host\"]\n"
+        ))
+        .unwrap_or_else(|error| panic!("{kind}: {error:#}"));
+        let (TargetTemplate::LocalPodman { container } | TargetTemplate::LocalDocker { container }) =
+            &config.targets[&format!("r4-{kind}")]
+        else {
+            panic!("{kind} changed kind")
+        };
+        assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+    }
+
+    let table = serde_json::json!({
+        "kind": "podman", "image": "a:1", "machine": "local", "pull_policy": "never",
+        "platform": "linux/amd64", "cpus": "2", "memory": "4g", "environment": {},
+        "workspace_storage": {"kind": "container-layer"}, "extra_run_args": ["--network=host"],
+    });
+    let table = table.as_object().unwrap();
+    assert_eq!(
+        newly_unknown_target_keys("r4-unknown-keys", "podman", table),
+        ["extra_run_args"]
+    );
+    assert!(
+        newly_unknown_target_keys("r4-unknown-keys", "podman", table).is_empty(),
+        "each unknown key is reported once"
+    );
+    let bare = serde_json::json!({"kind": "bare", "machine": "box", "permissions": "guardian"});
+    assert!(newly_unknown_target_keys("r4-bare", "bare", bare.as_object().unwrap()).is_empty());
+
+    // The list of known keys is every setting a container table can carry.
+    let every_setting = ContainerTemplate {
+        image: "a:1".into(),
+        pull_policy: ImagePullPolicy::Never,
+        platform: Some("linux/amd64".into()),
+        cpus: Some("2".into()),
+        memory: Some("4g".into()),
+        environment: BTreeMap::from([("A".into(), "1".into())]),
+        workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
+        build_cache: Some(TargetBuildCache {
+            enabled: Some(true),
+            directory: None,
+            max_size: None,
+        }),
+    };
+    let serialized = serde_json::to_value(&every_setting).unwrap();
+    let mut keys: Vec<_> = serialized.as_object().unwrap().keys().cloned().collect();
+    let mut known: Vec<_> = targets::CONTAINER_TEMPLATE_KEYS.map(str::to_owned).to_vec();
+    keys.sort();
+    known.sort();
+    assert_eq!(keys, known);
+}
+
 /// A machine whose file never named a workspace directory keeps using the
 /// directory its workspaces are already in, under the former product name;
 /// new machines get Mjolnir's own. Launch campaign finding C-17.

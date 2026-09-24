@@ -30,7 +30,7 @@ pub use machines::*;
 pub use targets::*;
 pub use ui::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 
@@ -498,6 +498,41 @@ enum InterpretedTarget {
     Legacy(TargetTemplate),
 }
 
+/// Keys of a `[targets.<id>]` table that its runtime kind does not read,
+/// leaving out any already reported by this process.
+///
+/// Serde cannot refuse them: a container runtime's settings are flattened into
+/// the tagged `StoredTarget`, and flattening turns `deny_unknown_fields` off.
+/// A misspelled or invented setting is therefore ignored, and saying so once
+/// is what stops a person from believing it applies (R4-6). The configuration
+/// is read many times in one process, so each key is reported only the first
+/// time.
+fn newly_unknown_target_keys(
+    id: &str,
+    kind: &str,
+    table: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    static REPORTED: std::sync::Mutex<BTreeSet<(String, String)>> =
+        std::sync::Mutex::new(BTreeSet::new());
+    let known = |key: &str| {
+        matches!(key, "kind" | "machine")
+            || match kind {
+                "bare" => key == "permissions",
+                "podman" | "docker" | "apple-container" => {
+                    targets::CONTAINER_TEMPLATE_KEYS.contains(&key)
+                }
+                _ => true,
+            }
+    };
+    let mut reported = REPORTED.lock().unwrap_or_else(|error| error.into_inner());
+    table
+        .keys()
+        .filter(|key| !known(key))
+        .filter(|key| reported.insert((id.to_owned(), (*key).clone())))
+        .cloned()
+        .collect()
+}
+
 fn interpret_target(
     id: &str,
     value: &serde_json::Value,
@@ -527,6 +562,13 @@ fn interpret_target(
         // In an old file without a `machine` key it is the fused kind.
         let fused = kind == "apple-container" && !table.contains_key("machine") && version <= 11;
         if !fused {
+            for key in newly_unknown_target_keys(id, kind, table) {
+                tracing::warn!(
+                    target = id,
+                    key,
+                    "target {id:?} ({kind}) has a key Mjolnir does not use, {key:?}; it is ignored"
+                );
+            }
             return from_value().map(InterpretedTarget::Stored);
         }
     } else if legacy_kind_advice(kind).is_none() {

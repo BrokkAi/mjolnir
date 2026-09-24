@@ -685,7 +685,7 @@ EC2 machine launches one instance per session. See
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | yes | none | Non-blank image reference. |
+| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image `mj setup` writes. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
@@ -694,7 +694,8 @@ EC2 machine launches one instance per session. See
 | `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 
 The schema checks that `image` is non-blank but leaves CPU, memory, and platform
-syntax to the selected runtime. Profile `environment` and target `environment`
+syntax to the selected runtime. A key a target table does not use is ignored,
+and the daemon log names it once. Profile `environment` and target `environment`
 are different: profile values configure the harness and profile commands, while
 target values become container environment variables.
 
