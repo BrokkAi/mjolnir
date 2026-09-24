@@ -919,6 +919,95 @@ const MOUNT_HISTORY_FAILURE_CHILD: &str = "MJ_TEST_MOUNT_HISTORY_FAILURE_CHILD";
 
 const CONTAINER_SIZE_HISTORY_CHILD: &str = "MJ_TEST_CONTAINER_SIZE_HISTORY_CHILD";
 
+const CONTAINER_MOUNT_SOURCE_CHILD: &str = "MJ_TEST_CONTAINER_MOUNT_SOURCE_CHILD";
+
+/// Launch finding J-24: Container settings accepted a mount whose host
+/// directory did not exist, and Docker then created it, owned by root, when
+/// the container was recreated. A new attached directory is checked where the
+/// container will read it when the settings are saved, and the refusal names
+/// the path.
+#[test]
+fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
+    if std::env::var_os(CONTAINER_MOUNT_SOURCE_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            CONTAINER_MOUNT_SOURCE_CHILD,
+            "container_settings_refuse_a_new_mount_whose_source_does_not_exist",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "mounts",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let mount = |source: &Path| targets::AdditionalMount {
+        source: source.to_path_buf(),
+        destination: "/mnt/extra".into(),
+        access: targets::MountAccess::Ro,
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let missing = scratch.path().join("nonexistent-r3");
+
+    let error = controller
+        .update_session_container_settings(
+            &id,
+            None,
+            None,
+            vec![mount(&missing)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&missing.display().to_string()),
+        "{error:#}"
+    );
+    assert!(controller.state.sessions[&id].additional_mounts.is_empty());
+    assert!(
+        crate::database::load_state().unwrap().sessions[&id]
+            .additional_mounts
+            .is_empty()
+    );
+    assert!(!missing.exists(), "the check must not create the directory");
+
+    let present = scratch.path().join("present");
+    std::fs::create_dir(&present).unwrap();
+    controller
+        .update_session_container_settings(
+            &id,
+            None,
+            None,
+            vec![mount(&present)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap();
+    // A directory already attached is not checked again, so a size change
+    // still saves after it has gone away; the check is for what is added.
+    std::fs::remove_dir(&present).unwrap();
+    controller
+        .update_session_container_settings(
+            &id,
+            Some("2".into()),
+            None,
+            vec![mount(&present)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap();
+}
+
 #[test]
 fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() {
     if std::env::var_os(CONTAINER_SIZE_HISTORY_CHILD).is_none() {
@@ -962,6 +1051,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
             Some("4g".into()),
             Vec::new(),
             Vec::new(),
+            &ProcessExecutor,
         )
         .unwrap();
     assert_eq!(

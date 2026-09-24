@@ -201,6 +201,7 @@ pub(super) async fn handle_action(
                     memory,
                     mounts,
                     mount_history,
+                    &crate::targets::ProcessExecutor,
                 )
             })
             .await?;

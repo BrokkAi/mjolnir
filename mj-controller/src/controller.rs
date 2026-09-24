@@ -1102,11 +1102,29 @@ impl Controller {
         memory: Option<String>,
         additional_mounts: Vec<targets::AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
+        executor: &impl CommandExecutor,
     ) -> Result<()> {
-        ensure!(
-            self.state.sessions.contains_key(session_id),
-            "unknown session {session_id}"
-        );
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        // A directory the runtime cannot find is created by Docker, owned by
+        // root, when the container is recreated (launch finding J-24). Check
+        // each newly attached source where the container will read it: on
+        // this host for a local runtime, over the machine's connection for an
+        // SSH one. A directory already attached was checked when it was
+        // added, and a size change must not fail because it has since gone.
+        for mount in &additional_mounts {
+            if session
+                .additional_mounts
+                .iter()
+                .any(|attached| attached.source == mount.source)
+            {
+                continue;
+            }
+            self.validate_mount_source(&session.target_template_id, &mount.source, executor)?;
+        }
         let cpus = cpus.filter(|value| !value.trim().is_empty());
         let memory = memory.filter(|value| !value.trim().is_empty());
         let updated_at = now();
