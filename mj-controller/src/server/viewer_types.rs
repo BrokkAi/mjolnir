@@ -20,6 +20,9 @@ pub struct ViewerSnapshot {
     pub profiles: Vec<ViewerProfile>,
     pub targets: Vec<ViewerTarget>,
     pub bundles: Vec<ViewerBundle>,
+    /// Controller-side project folders usable as sources for isolated sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_project_directories: Vec<String>,
     /// The bounded part of `[review]` needed to report whether review is
     /// armed. Reviewer model and effort remain controller-private.
     #[serde(default)]
@@ -253,6 +256,11 @@ impl ViewerSnapshot {
             profiles,
             targets,
             bundles,
+            local_project_directories: state
+                .project_directories("local")
+                .iter()
+                .map(|directory| directory.to_string_lossy().into_owned())
+                .collect(),
             review_config: ViewerReviewConfig {
                 enabled: config.review.enabled,
                 tier: config.review.tier.label().to_owned(),

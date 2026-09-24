@@ -1033,6 +1033,7 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
         vec!["/srv/builder"]
     );
     assert!(target("podman").recent_project_directories.is_empty());
+    assert_eq!(snapshot.local_project_directories, vec!["/work/local"]);
 }
 
 #[test]
@@ -1341,6 +1342,7 @@ const request = (url, options) => new Promise(resolve => {
 class Event { constructor(type) { this.type = type; } }
 const input = {
   value: '',
+  dataset: {},
   listeners: new Map(),
   after(node) { this.next = node; },
   addEventListener(type, listener) {

@@ -68,6 +68,8 @@ pub(crate) enum WizardControl {
     TargetList,
     ProjectDirectory,
     RecentProject(usize),
+    BrowseProject,
+    ProjectParent,
     NewBundleRepositories,
     NewBundleSource,
     NewBundleRemove,
@@ -136,6 +138,8 @@ pub(crate) struct NewWizard {
 
     pub(crate) profile: usize,
     bundle: usize,
+    project_choices: Vec<ProjectChoice>,
+    project_choice: usize,
     pub(crate) target: usize,
     pub(crate) mounts: MountWizard,
 
@@ -169,6 +173,8 @@ impl PartialEq for NewWizard {
             && self.step == other.step
             && self.profile == other.profile
             && self.bundle == other.bundle
+            && self.project_choices == other.project_choices
+            && self.project_choice == other.project_choice
             && self.target == other.target
             && self.mounts == other.mounts
             && self.new_bundle_selected == other.new_bundle_selected
@@ -189,6 +195,49 @@ impl PartialEq for NewWizard {
 }
 
 impl Eq for NewWizard {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectChoice {
+    label: String,
+    bundle_id: Option<String>,
+    source: Option<std::path::PathBuf>,
+}
+
+fn project_choices(dashboard: &DashboardState) -> Vec<ProjectChoice> {
+    let mut choices = Vec::new();
+    if let Some(directory) = &dashboard.launch_project_directory {
+        choices.push(ProjectChoice {
+            label: format!("Current project · {}", directory.display()),
+            bundle_id: None,
+            source: Some(directory.clone()),
+        });
+    }
+    for id in bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state) {
+        let bundle = &dashboard.config.bundles[id];
+        choices.push(ProjectChoice {
+            label: format!(
+                "{id}  {}",
+                crate::widgets::counted(bundle.repositories.len(), "repository", "repositories")
+            ),
+            bundle_id: Some(id.to_owned()),
+            source: None,
+        });
+    }
+    for directory in dashboard.state.project_directories("local") {
+        if choices
+            .iter()
+            .any(|choice| choice.source.as_ref() == Some(directory))
+        {
+            continue;
+        }
+        choices.push(ProjectChoice {
+            label: format!("Recent project · {}", directory.display()),
+            bundle_id: None,
+            source: Some(directory.clone()),
+        });
+    }
+    choices
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountWizard {

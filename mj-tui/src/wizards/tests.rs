@@ -391,12 +391,8 @@ fn new_session_can_request_a_repository_when_no_bundle_exists() {
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
     for character in "example/new-repo".chars() {
         ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    for _ in 0..4 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
     }
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
@@ -411,7 +407,6 @@ fn dashboard_at_new_bundle_editor() -> DashboardState {
     config.bundles.clear();
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(matches!(
@@ -430,8 +425,109 @@ fn type_source(dashboard: &mut DashboardState, source: &str) {
     }
 }
 
-/// The bundle list holds real bundles only; the creator is a button pinned to
-/// the action row's right side, the way Workspaces pins its actions.
+#[test]
+fn current_repository_prepares_automatically_without_configured_projects() {
+    let mut configuration = config();
+    configuration.bundles.clear();
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.set_launch_project_directory(Some("/work/current".into()));
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/current".into()],
+        }
+    );
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    dashboard.fail_bundle_creation("remote unavailable");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/current".into()],
+        }
+    );
+    dashboard.apply_created_bundle(config(), "hel");
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
+}
+
+#[test]
+fn recent_local_project_is_available_for_an_isolated_session_without_typing() {
+    let mut configuration = config();
+    configuration.bundles.clear();
+    let mut state = State::default();
+    state.remember_project_directory("local", std::path::Path::new("/work/recent"));
+    state.remember_project_directory("remote", std::path::Path::new("/remote/unrelated"));
+    let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/recent".into()],
+        }
+    );
+}
+
+#[test]
+fn browse_project_lists_home_and_navigates_folders_without_typing() {
+    use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::BrowseProject);
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CompletePath {
+            host: CompletionHost::Local,
+            kind: CompletionKind::Directories,
+            prefix: "~/".into(),
+        }
+    );
+    let context = dashboard.path_input_context();
+    dashboard.apply_path_completions(
+        &context,
+        "~/",
+        PathCompletion {
+            candidates: vec!["~/projects/".into()],
+            insert: Some("~/projects/".into()),
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert_eq!(
+        wizard.new_bundle_source, "~/",
+        "browsing does not silently choose an only child"
+    );
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CompletePath {
+            host: CompletionHost::Local,
+            kind: CompletionKind::Directories,
+            prefix: "~/projects/".into(),
+        }
+    );
+    let context = dashboard.path_input_context();
+    dashboard.apply_path_completions(&context, "~/projects/", PathCompletion::default());
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["~/projects/".into()],
+        }
+    );
+}
+
+/// Known projects stay selectable beside the action for choosing another.
 #[test]
 fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -451,7 +547,7 @@ fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
     assert!(list.contains("hel  1 repository"), "{list}");
     let action_row = lines
         .iter()
-        .find(|line| line.contains("New bundle…"))
+        .find(|line| line.contains("Choose another project…"))
         .unwrap_or_else(|| panic!("the creator is pinned in the dialog: {list}"));
     assert!(
         action_row.contains("Cancel") && action_row.contains("Next"),
@@ -461,7 +557,7 @@ fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
         .split("Next")
         .nth(1)
         .unwrap_or_default()
-        .contains("New bundle…");
+        .contains("Choose another project…");
     assert!(
         after_next,
         "the creator sits right of the navigation buttons: {action_row}"
@@ -479,57 +575,47 @@ fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
     ));
 }
 
-/// Without bundles there is nothing to select, so the creator is the only way
-/// forward: the list is a hint, Next is disabled, and Enter opens the editor.
 #[test]
-fn bundle_step_without_bundles_routes_everything_to_the_creator() {
+fn a_first_project_opens_the_picker_without_a_configuration_step() {
     let mut configuration = config();
     configuration.bundles.clear();
     let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
     dashboard.begin_new();
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::Bundle
-    ));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::NewBundle));
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("No bundles yet."), "{text}");
-    assert!(text.contains("New bundle…"), "{text}");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None,
-        "Enter falls through the empty list to the creator"
-    );
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::NewBundle
-    ));
+    assert!(text.contains("Choose project"), "{text}");
+    assert!(text.contains("Browse…"), "{text}");
+    assert!(!text.to_lowercase().contains("bundle"), "{text}");
 }
 
-fn focus_create_bundle(dashboard: &mut DashboardState, tabs: usize) {
-    for _ in 0..tabs {
-        ready_key(dashboard, key(KeyCode::Tab));
-    }
+fn add_project_repository(dashboard: &mut DashboardState) {
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::Add);
+    assert_eq!(
+        ready_key(dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::NewBundleSource);
 }
 
 #[test]
 fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/primary");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
+    add_project_repository(&mut dashboard);
     type_source(&mut dashboard, "owner/secondary");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
+    add_project_repository(&mut dashboard);
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected new-bundle editor");
     };
@@ -554,9 +640,7 @@ fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
 fn new_bundle_editor_creates_from_current_source_without_add() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/only");
-    // Source → Add → Cancel → Back → Create. Remove is disabled while the
-    // draft is empty, so the form skips it during focus navigation.
-    focus_create_bundle(&mut dashboard, 4);
+    // Enter on the source prepares this project directly.
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
@@ -574,7 +658,6 @@ fn new_bundle_editor_creates_from_current_source_without_add() {
 fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/only");
-    focus_create_bundle(&mut dashboard, 4);
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
@@ -589,7 +672,7 @@ fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
     assert_eq!(wizard.new_bundle_source, "owner/only");
     assert_eq!(
         dashboard.notice().as_deref(),
-        Some("Could not create bundle: repository not found")
+        Some("Could not prepare project: repository not found")
     );
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
@@ -603,10 +686,8 @@ fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
 fn new_bundle_editor_submits_all_sources_once_and_advances_after_success() {
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/primary");
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    add_project_repository(&mut dashboard);
     type_source(&mut dashboard, "owner/secondary");
-    // Add, Remove, Cancel, Back, Create.
-    focus_create_bundle(&mut dashboard, 5);
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
@@ -639,7 +720,7 @@ fn new_bundle_editor_renders_separate_input_and_help_and_accepts_mouse_add() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let mut dashboard = dashboard_at_new_bundle_editor();
     type_source(&mut dashboard, "owner/visible");
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
     dashboard.reset_component_geometry();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -651,13 +732,13 @@ fn new_bundle_editor_renders_separate_input_and_help_and_accepts_mouse_add() {
         .unwrap();
     let help_row = lines
         .iter()
-        .position(|line| line.contains("Enter adds"))
+        .position(|line| line.contains("Enter continues"))
         .unwrap();
     assert_ne!(source_row, help_row);
     let rendered = lines.join("\n");
-    assert!(rendered.contains("New bundle"));
-    assert!(rendered.contains("Create bundle"));
-    assert!(rendered.contains("GitHub source or local Git path with a network remote"));
+    assert!(rendered.contains("Choose project"));
+    assert!(!rendered.contains("bundle"));
+    assert!(rendered.contains("Repository link or local Git folder"));
     assert!(!rendered.contains("Create repository"));
     let (row, column) = lines
         .iter()

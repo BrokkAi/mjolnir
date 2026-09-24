@@ -267,7 +267,7 @@ pub(super) async fn create_quick_bundle(
             ),
             BundleFailure::Controller => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "the controller could not create the bundle",
+                "the controller could not prepare the project",
             ),
         })
 }

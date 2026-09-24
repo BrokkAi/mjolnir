@@ -42,6 +42,29 @@ impl DashboardState {
                 action
             }
             WizardStep::Bundle => {
+                let Some(project) = wizard.project_choices.get(wizard.project_choice) else {
+                    self.mode = Mode::New(wizard);
+                    return DashboardAction::None;
+                };
+                if let Some(source) = &project.source {
+                    let sources = vec![source.to_string_lossy().into_owned()];
+                    wizard.bundle_creation_in_flight = true;
+                    self.notices.set("Preparing project…");
+                    self.mode = Mode::New(wizard);
+                    return DashboardAction::CreateBundle { sources };
+                }
+                let Some(bundle) = bundle_ids_by_recent_creation(&self.config, &self.state)
+                    .iter()
+                    .position(|id| Some(*id) == project.bundle_id.as_deref())
+                else {
+                    wizard.project_choices = project_choices(self);
+                    wizard.project_choice = 0;
+                    self.notices
+                        .set("This project is no longer configured. Choose another project.");
+                    self.mode = Mode::New(wizard);
+                    return DashboardAction::None;
+                };
+                wizard.bundle = bundle;
                 wizard.step = WizardStep::Review;
                 wizard.form.get_mut().focus(WizardControl::Submit);
                 self.mode = Mode::New(wizard);
@@ -116,7 +139,19 @@ impl DashboardState {
                         .and_then(|host| self.state.mount_history.get(host))
                         .cloned()
                         .unwrap_or_default();
-                    WizardStep::Bundle
+                    if wizard.project_choices.is_empty() {
+                        wizard.project_choices = project_choices(self);
+                        if self.launch_project_directory.is_some() {
+                            wizard.project_choice = 0;
+                            wizard.step = WizardStep::Bundle;
+                            return self.advance_new_wizard(wizard);
+                        }
+                    }
+                    if wizard.project_choices.is_empty() {
+                        WizardStep::NewBundle
+                    } else {
+                        WizardStep::Bundle
+                    }
                 };
                 wizard.form.get_mut().focus(step_initial(wizard.step));
                 self.mode = Mode::New(wizard);
@@ -287,14 +322,23 @@ impl DashboardState {
             .position(|id| *id == bundle_id)
         else {
             self.notices
-                .set(format!("Created bundle {bundle_id:?} was not found."));
+                .set(format!("Prepared project {bundle_id:?} was not found."));
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         };
         self.invalidate_new_remote_preflight(&mut wizard);
         wizard.bundle = index;
+        wizard.project_choices = project_choices(self);
+        wizard.project_choice = wizard
+            .project_choices
+            .iter()
+            .position(|choice| choice.bundle_id.as_deref() == Some(bundle_id))
+            .unwrap_or(0);
         wizard.step = WizardStep::Review;
-        self.notices.set(format!("Created bundle {bundle_id}."));
+        wizard.form.get_mut().focus(WizardControl::Submit);
+        if self.notice().as_deref() == Some("Preparing project…") {
+            self.notices.clear();
+        }
         self.mode = Mode::New(wizard);
         DashboardAction::None
     }
@@ -309,7 +353,7 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
         }
         self.notices
-            .set(format!("Could not create bundle: {error}"));
+            .set(format!("Could not prepare project: {error}"));
     }
 
     pub fn apply_aws_resource_options(

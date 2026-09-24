@@ -232,7 +232,7 @@ test('commit refuses unready, pending, or failed preflight even when called dire
 
 test('entering Review does not wait for project preflight', async () => {
   let complete;
-  const draft = { step: 0, bundleId: 'project' };
+  const draft = { step: 0, bundleId: 'project', bundleSource: '' };
   const context = vm.createContext({
     newDraft: draft, pendingNewPreflight: null,
     visibleSteps: () => [{ key: 'project' }, { key: 'review' }],
@@ -909,6 +909,7 @@ test('path suggestions abort superseded requests and drop stale replies', async 
   const input = {
     value: '',
     className: '',
+    dataset: {},
     listeners: new Map(),
     after(node) {
       this.next = node;

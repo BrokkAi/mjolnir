@@ -1241,9 +1241,17 @@ impl DashboardContext {
                 Ok(completion) => self
                     .dashboard
                     .apply_path_completions(&context, &prefix, completion),
-                Err(error) => self
-                    .dashboard
-                    .set_notice(format!("Path completion failed: {error}")),
+                Err(error) => {
+                    if self.dashboard.path_input_context() == context {
+                        self.dashboard.apply_path_completions(
+                            &context,
+                            &prefix,
+                            Default::default(),
+                        );
+                        self.dashboard
+                            .set_notice(format!("Could not list folders: {error}"));
+                    }
+                }
             },
             DashboardIoUpdate::MountValidation {
                 context,

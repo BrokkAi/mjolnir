@@ -114,7 +114,7 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     /// Why this draft cannot use `target_id`, or `None` when it can.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
     /// Declares the controls of a step only one wizard has.
-    fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>);
+    fn declare_extra_step(&self, _dashboard: &DashboardState, form: &mut Dialog<WizardControl>);
     /// Declares the review controls only one wizard has and answers whether
     /// its primary button is enabled.
     fn declare_review_extras(
@@ -288,6 +288,12 @@ impl WizardDraft for NewWizard {
             return Err(self);
         }
         if self.step == WizardStep::ProjectDirectory {
+            if matches!(
+                id,
+                WizardControl::BrowseProject | WizardControl::ProjectParent
+            ) {
+                return Ok(dashboard.browse_new_project(self, id == WizardControl::ProjectParent));
+            }
             if let WizardControl::RecentProject(index) = id {
                 if let Some(directory) = self.project_history.get(index) {
                     self.project_history_index = index;
@@ -367,10 +373,10 @@ impl WizardDraft for NewWizard {
     ) {
         match interaction {
             Interaction::Select(WizardControl::BundleList, selected) => {
-                if self.bundle != *selected {
+                if self.project_choice != *selected {
                     self.note_draft_change(dashboard, DraftChange::BundleSelected);
                 }
-                self.bundle = *selected;
+                self.project_choice = *selected;
             }
             Interaction::Select(WizardControl::NewBundleRepositories, selected) => {
                 let next = (*selected).min(self.new_bundle_repositories.len().saturating_sub(1));
@@ -453,19 +459,19 @@ impl WizardDraft for NewWizard {
         }
     }
 
-    fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>) {
+    fn declare_extra_step(&self, _dashboard: &DashboardState, form: &mut Dialog<WizardControl>) {
         match self.step {
             WizardStep::Bundle => {
                 form.declare_with_enabled(
                     WizardControl::BundleList,
                     ControlKind::ChoiceList {
-                        len: dashboard.config.bundles.len(),
-                        selected: self.bundle,
+                        len: self.project_choices.len(),
+                        selected: self.project_choice,
                     },
-                    !dashboard.config.bundles.is_empty(),
+                    !self.project_choices.is_empty(),
                 );
                 form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
-                declare_wizard_buttons(form, true, !dashboard.config.bundles.is_empty());
+                declare_wizard_buttons(form, true, !self.project_choices.is_empty());
             }
             WizardStep::ProjectDirectory => {
                 form.declare_with_enabled(
@@ -481,6 +487,8 @@ impl WizardDraft for NewWizard {
                     );
                 }
                 declare_wizard_buttons(form, true, true);
+                form.declare_with_enabled(WizardControl::BrowseProject, ControlKind::Button, true);
+                form.declare_with_enabled(WizardControl::ProjectParent, ControlKind::Button, true);
             }
             WizardStep::NewBundle => {
                 form.declare_with_enabled(
@@ -495,6 +503,16 @@ impl WizardDraft for NewWizard {
                     WizardControl::NewBundleSource,
                     self.new_bundle_source.control_kind(),
                     true,
+                );
+                form.declare_with_enabled(
+                    WizardControl::BrowseProject,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight,
+                );
+                form.declare_with_enabled(
+                    WizardControl::ProjectParent,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight,
                 );
                 form.declare_with_enabled(
                     WizardControl::Add,

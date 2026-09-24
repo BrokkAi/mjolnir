@@ -56,6 +56,8 @@ impl DashboardState {
 
             profile,
             bundle,
+            project_choices: Vec::new(),
+            project_choice: bundle,
             target,
             mounts: MountWizard::new(Vec::new()),
 

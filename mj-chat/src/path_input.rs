@@ -18,6 +18,7 @@ struct Completion {
     selected: usize,
     truncated: bool,
     requested: Option<String>,
+    browsing: bool,
 }
 
 impl Completion {
@@ -106,6 +107,16 @@ impl PathInput {
         Some(value)
     }
 
+    /// List a folder without inserting a common prefix or selecting its only child.
+    pub fn request_browse(&mut self) -> Option<String> {
+        self.completion.browsing = true;
+        self.request_completion()
+    }
+
+    pub fn is_browsing(&self) -> bool {
+        self.completion.browsing
+    }
+
     /// Applies a host reply. A reply for text the field no longer holds is
     /// dropped and reported as unapplied.
     pub fn apply_completion(&mut self, prefix: &str, completion: PathCompletion) -> bool {
@@ -113,12 +124,15 @@ impl PathInput {
         if self.text.value() != prefix {
             return false;
         }
-        if let Some(insert) = completion.insert.as_deref()
+        if !self.completion.browsing
+            && let Some(insert) = completion.insert.as_deref()
             && insert != prefix
         {
             self.text.set_value(insert);
         }
-        if completion.candidates.len() > 1 {
+        if completion.candidates.len() > 1
+            || (self.completion.browsing && !completion.candidates.is_empty())
+        {
             self.completion.candidates = completion.candidates;
             self.completion.selected = 0;
             self.completion.truncated = completion.truncated;
@@ -157,6 +171,7 @@ impl PathInput {
     pub fn dismiss_completion(&mut self) {
         self.completion.clear_popup();
         self.completion.requested = None;
+        self.completion.browsing = false;
     }
 }
 impl Deref for PathInput {
@@ -314,5 +329,18 @@ mod tests {
         input.dismiss_completion();
         assert_eq!(input.completion_pending(), None);
         assert_eq!(input.request_completion().as_deref(), Some("~/prq"));
+    }
+
+    #[test]
+    fn browsing_requires_choosing_a_child_even_when_only_one_exists() {
+        let mut input = PathInput::from("~/");
+        assert_eq!(input.request_browse().as_deref(), Some("~/"));
+        input.apply_completion("~/", reply(&["~/project/"], Some("~/project/"), false));
+        assert_eq!(input.value(), "~/");
+        assert!(input.is_completing());
+        assert!(input.accept_completion());
+        assert_eq!(input.request_browse().as_deref(), Some("~/project/"));
+        input.dismiss_completion();
+        assert!(!input.is_browsing());
     }
 }

@@ -362,7 +362,11 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardControl::Back => {
-                wizard.step = WizardStep::Bundle;
+                wizard.step = if wizard.project_choices.is_empty() {
+                    WizardStep::Target
+                } else {
+                    WizardStep::Bundle
+                };
                 wizard.form.get_mut().focus(step_initial(wizard.step));
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -377,7 +381,10 @@ impl DashboardState {
             }
             WizardControl::NewBundleSource => {
                 wizard.form.get_mut().focus(WizardControl::NewBundleSource);
-                self.add_or_report_new_bundle_repository(wizard)
+                self.submit_new_bundle(wizard)
+            }
+            WizardControl::BrowseProject | WizardControl::ProjectParent => {
+                self.browse_new_project(wizard, id == WizardControl::ProjectParent)
             }
             WizardControl::Add => {
                 wizard.form.get_mut().focus(WizardControl::Add);
@@ -430,9 +437,58 @@ impl DashboardState {
             return DashboardAction::None;
         }
         wizard.bundle_creation_in_flight = true;
-        self.notices.set("Creating bundle…");
+        self.notices.set("Preparing project…");
         self.mode = Mode::New(wizard);
         DashboardAction::CreateBundle { sources }
+    }
+
+    pub(super) fn browse_new_project(
+        &mut self,
+        mut wizard: NewWizard,
+        parent: bool,
+    ) -> DashboardAction {
+        use mj_core::path_completion::{CompletionHost, CompletionKind, looks_like_path};
+        let (input, control, host) = if wizard.step == WizardStep::ProjectDirectory {
+            (
+                &mut wizard.project_directory,
+                WizardControl::ProjectDirectory,
+                CompletionHost::Target(nth_key(&self.config.targets, wizard.target)),
+            )
+        } else {
+            (
+                &mut wizard.new_bundle_source,
+                WizardControl::NewBundleSource,
+                CompletionHost::Local,
+            )
+        };
+        let directory = if looks_like_path(input.value()) {
+            std::path::Path::new(input.value()).join("")
+        } else {
+            std::path::PathBuf::from("~/")
+        };
+        let directory = if parent && directory == std::path::Path::new("~") {
+            directory.join("..").join("")
+        } else if parent {
+            directory
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("/"))
+                .join("")
+        } else {
+            directory
+        };
+        input.set_value(directory.to_string_lossy());
+        input.dismiss_completion();
+        let prefix = input
+            .request_browse()
+            .expect("browse directory is nonempty");
+        wizard.form.get_mut().focus(control);
+        self.mode = Mode::New(wizard);
+        DashboardAction::CompletePath {
+            host,
+            kind: CompletionKind::Directories,
+            prefix,
+        }
     }
 }
 

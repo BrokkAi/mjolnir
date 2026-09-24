@@ -36,9 +36,14 @@ pub(crate) fn route_path_completion<K: Copy + Eq, S: CompletesPaths>(
             }
         }
         Some(Interaction::PathCommit(_, index)) => {
-            if let Some((input, ..)) = screen.focused_path_input(dashboard) {
+            if let Some((input, host, kind)) = screen.focused_path_input(dashboard) {
                 input.select_completion(index);
                 input.accept_completion();
+                if input.is_browsing()
+                    && let Some(prefix) = input.request_browse()
+                {
+                    return Ok(DashboardAction::CompletePath { host, kind, prefix });
+                }
             }
             Ok(DashboardAction::None)
         }

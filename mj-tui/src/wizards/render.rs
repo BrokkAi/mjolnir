@@ -271,6 +271,8 @@ pub(crate) fn render_new_wizard(
                 (WizardControl::Cancel, "Cancel", true),
                 (WizardControl::Back, "Back", true),
                 (WizardControl::Next, "Next", true),
+                (WizardControl::BrowseProject, "Browse…", true),
+                (WizardControl::ProjectParent, "Up", true),
             ],
             &mut form,
         );
@@ -295,7 +297,8 @@ pub(crate) fn render_new_wizard(
         let popup_height = u16::try_from(wizard.new_bundle_repositories.len())
             .unwrap_or(u16::MAX)
             .saturating_add(8)
-            .clamp(10, 24);
+            .saturating_add(PathField::popup_rows(&wizard.new_bundle_source))
+            .clamp(12, 28);
         let popup = centered_modal(frame, surfaces, 76, popup_height, area);
         let content = popup.inner(ratatui::layout::Margin {
             horizontal: 1,
@@ -304,13 +307,17 @@ pub(crate) fn render_new_wizard(
         let title_line = dismissible_modal_title(
             &mut form,
             popup,
-            "New bundle",
+            "Choose project",
             theme::title(true),
             !wizard.bundle_creation_in_flight,
         );
         frame.render_widget(theme::modal().title(title_line), popup);
         frame.render_widget(
-            Paragraph::new("Repositories (first is primary):"),
+            Paragraph::new(if wizard.new_bundle_repositories.is_empty() {
+                "Choose a project to work on."
+            } else {
+                "Repositories to open together (first is primary):"
+            }),
             Rect::new(content.x, content.y, content.width, 1.min(content.height)),
         );
         let list_y = content.y.saturating_add(1);
@@ -325,7 +332,7 @@ pub(crate) fn render_new_wizard(
         if wizard.new_bundle_repositories.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    "No repositories added yet.",
+                    "Choose a folder or paste a repository link below.",
                     Style::default().fg(theme::palette().muted),
                 )),
                 list_area,
@@ -364,7 +371,7 @@ pub(crate) fn render_new_wizard(
         }
         let source_label_y = list_y.saturating_add(list_height);
         frame.render_widget(
-            Paragraph::new("GitHub source or local Git path with a network remote:"),
+            Paragraph::new("Repository link or local Git folder:"),
             Rect::new(
                 content.x,
                 source_label_y,
@@ -397,9 +404,9 @@ pub(crate) fn render_new_wizard(
         frame.render_widget(
             Paragraph::new(Line::styled(
                 if wizard.bundle_creation_in_flight {
-                    "Creating bundle…"
+                    "Preparing project…"
                 } else {
-                    "Enter adds · Delete removes · Tab moves focus · Esc cancels"
+                    "Enter continues · Tab completes paths · Esc goes back"
                 },
                 Style::default().fg(theme::palette().muted),
             )),
@@ -416,10 +423,20 @@ pub(crate) fn render_new_wizard(
                 1.min(content.height),
             ),
             &[
+                (
+                    WizardControl::BrowseProject,
+                    "Browse…",
+                    !wizard.bundle_creation_in_flight,
+                ),
+                (
+                    WizardControl::ProjectParent,
+                    "Up",
+                    !wizard.bundle_creation_in_flight,
+                ),
                 (WizardControl::Add, "Add repository", action_enabled),
                 (
                     WizardControl::NewBundleRemove,
-                    "Remove selected repository",
+                    "Remove",
                     !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
                 ),
             ],
@@ -447,9 +464,9 @@ pub(crate) fn render_new_wizard(
                 (
                     WizardControl::Next,
                     if wizard.bundle_creation_in_flight {
-                        "Creating…"
+                        "Preparing…"
                     } else {
-                        "Create bundle"
+                        "Next"
                     },
                     !wizard.bundle_creation_in_flight
                         && !wizard.new_bundle_sources_for_submit().is_empty(),
@@ -473,22 +490,13 @@ pub(crate) fn render_new_wizard(
             wizard.profile,
         ),
         WizardStep::Bundle => (
-            " New session · 3/4 project bundle ",
-            bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
-                .into_iter()
-                .map(|id| {
-                    let bundle = &dashboard.config.bundles[id];
-                    PickerChoice::text(format!(
-                        "{id}  {}",
-                        crate::widgets::counted(
-                            bundle.repositories.len(),
-                            "repository",
-                            "repositories"
-                        )
-                    ))
-                })
+            " New session · 3/4 project ",
+            wizard
+                .project_choices
+                .iter()
+                .map(|choice| PickerChoice::text(choice.label.clone()))
                 .collect(),
-            wizard.bundle,
+            wizard.project_choice,
         ),
         WizardStep::Target => (
             " New session · 2/4 target ",
@@ -519,7 +527,9 @@ pub(crate) fn render_new_wizard(
         WizardStep::NewBundle => unreachable!("bundle input was rendered above"),
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
-    let mut help = vec![if wizard.step == WizardStep::Target {
+    let mut help = vec![if wizard.bundle_creation_in_flight {
+        Line::raw("Preparing project…")
+    } else if wizard.step == WizardStep::Target {
         picker_help(&resource_help(dashboard))
     } else {
         picker_help("↑/↓ select · Tab moves focus · Enter activates")
@@ -566,16 +576,16 @@ pub(crate) fn render_new_wizard(
                 }
                 // Without a bundle there is nothing to review; the pinned
                 // action is the only way forward.
-                WizardStep::Bundle => !dashboard.config.bundles.is_empty(),
+                WizardStep::Bundle => !wizard.project_choices.is_empty(),
                 _ => true,
             },
             pinned_action: (wizard.step == WizardStep::Bundle).then_some((
                 WizardControl::Add,
-                "New bundle…",
+                "Choose another project…",
                 true,
             )),
-            empty_hint: (wizard.step == WizardStep::Bundle && dashboard.config.bundles.is_empty())
-                .then_some("No bundles yet."),
+            empty_hint: (wizard.step == WizardStep::Bundle && wizard.project_choices.is_empty())
+                .then_some("Choose a folder or repository to get started."),
         },
         &mut form,
         surfaces,

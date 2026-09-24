@@ -16,7 +16,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       ], bundles, capacity: [], launch_failures: [],
     },
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
-    completions: [],
+    completions: [], directoryEntries: null,
     holdCreate: null, holdLaunch: null,
     holdPreflight: null, preflightError: null, remoteRepairs: [], resolvedDirectory: null,
     worktreeOptions: { available: true, default_create: true },
@@ -55,7 +55,9 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       });
     }
     if (pathname === '/api/paths/complete') {
-      state.completions.push(route.request().postDataJSON());
+      const request = route.request().postDataJSON();
+      state.completions.push(request);
+      if (state.directoryEntries) return json({ candidates: state.directoryEntries[request.prefix] || [], insert: null, truncated: false });
       return json({ candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false });
     }
     if (pathname === '/api/bundles') {
@@ -170,33 +172,66 @@ test('a project directory suggests paths on its own host and a bundle source onl
   await page.locator('#new-back').click();
   await page.locator('#new-target').getByRole('radio', { name: /^container/ }).check();
   await page.locator('#new-next').click();
-  await page.getByRole('button', { name: 'Create bundle', exact: true }).click();
-  await page.locator('#new-bundle-source').fill('owner/repo');
+  await page.locator('#new-project-source').fill('owner/repo');
   await page.waitForTimeout(400);
   expect(state.completions).toHaveLength(2);
 });
 
-test('empty bundle list supports creation, retry, selection, and remote review', async ({ page }) => {
+test('a repository link proceeds directly to review and retains the source after failure', async ({ page }) => {
   const state = await mount(page, { bundles: [] });
   await projectStep(page);
   await page.locator('#new-next').click();
-  await expect(page.locator('#new-error')).toContainText('Choose or create a bundle');
-  await page.locator('#new-bundle-source').fill('example/created');
+  await expect(page.locator('#new-error')).toContainText('Choose a project');
+  await page.locator('#new-project-source').fill('example/created');
   state.rejectCreate = true;
-  await page.getByRole('button', { name: 'Save bundle', exact: true }).click();
-  await expect(page.locator('#new-error')).toContainText('Repository source is invalid');
-  await expect(page.locator('#new-bundle-source')).toHaveValue('example/created');
-  state.rejectCreate = false;
-  await page.getByRole('button', { name: 'Save bundle', exact: true }).click();
-  await expect(page.locator('#new-bundle').getByRole('radio', { name: 'created', exact: true })).toBeChecked();
-  expect(state.creates).toEqual([{ source: 'example/created' }, { source: 'example/created' }]);
   await page.locator('#new-next').click();
+  await expect(page.locator('#new-error')).toContainText('Repository source is invalid');
+  await expect(page.locator('#new-project-source')).toHaveValue('example/created');
+  state.rejectCreate = false;
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  expect(state.creates).toEqual([{ source: 'example/created' }, { source: 'example/created' }]);
   await expect(page.locator('#new-step')).toContainText('Local changes');
   await page.locator('#new-next').click();
   await expect(page).toHaveURL(/#workspace\/test$/);
   expect(state.actions).toHaveLength(1);
   expect(state.actions[0]).toMatchObject({ action: 'new', workspace_id: 'test', bundle_id: 'created' });
   expect(state.actions[0]).not.toHaveProperty('dirty_ack');
+});
+
+test('an isolated session can use a recent local project without entering a source', async ({ page }) => {
+  const state = await mount(page, { bundles: [] });
+  state.snapshot.local_project_directories = ['/work/recent'];
+  await refresh(page, state);
+  await projectStep(page);
+  await expect(page.locator('#new-step')).not.toContainText(/bundle/i);
+  await page.getByRole('radio', { name: /^\/work\/recent/ }).check();
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  expect(state.creates).toEqual([{ source: '/work/recent' }]);
+  expect(state.preflights).toHaveLength(1);
+  await page.locator('#new-back').click();
+  await expect(page.getByRole('radio', { name: 'created', exact: true })).toBeChecked();
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  expect(state.creates).toHaveLength(1);
+});
+
+test('folder browsing navigates and selects a project without typing a path', async ({ page }) => {
+  const state = await mount(page, { bundles: [] });
+  state.directoryEntries = { '~/': ['~/projects/'], '~/projects/': ['~/projects/app/'] };
+  await projectStep(page);
+  await page.getByRole('button', { name: 'Browse folders', exact: true }).click();
+  await page.getByRole('option', { name: '~/projects/', exact: true }).click();
+  await page.getByRole('option', { name: '~/projects/app/', exact: true }).click();
+  await expect(page.locator('#new-project-source')).toHaveValue('~/projects/app/');
+  await page.getByRole('button', { name: 'Parent folder', exact: true }).click();
+  await expect(page.locator('#new-project-source')).toHaveValue('~/projects/');
+  await page.getByRole('option', { name: '~/projects/app/', exact: true }).click();
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  expect(state.creates).toEqual([{ source: '~/projects/app/' }]);
+  expect(state.completions.every(request => request.target_id === null)).toBe(true);
 });
 
 test('late launch completion cannot replace another workspace wizard', async ({ page }) => {
@@ -326,15 +361,17 @@ test('a pending client does not prevent another client from completing preflight
   await expect(page.locator('#new-next')).toBeEnabled();
 });
 
-test('bundle save stays single-flight and a late result cannot alter a replacement wizard', async ({ page }) => {
+test('project preparation stays single-flight and a late result cannot alter a replacement wizard', async ({ page }) => {
   const state = await mount(page, { bundles: [] });
   await projectStep(page);
   let release;
   state.holdCreate = new Promise(resolve => { release = resolve; });
-  await page.locator('#new-bundle-source').fill('example/created');
-  await page.getByRole('button', { name: 'Save bundle', exact: true }).click();
+  await page.locator('#new-project-source').fill('example/created');
+  await page.locator('#new-next').click();
   await expect.poll(() => state.creates.length).toBe(1);
-  await expect(page.getByRole('button', { name: 'Creating bundle…', exact: true })).toBeDisabled();
+  await expect(page.locator('#new-next')).toHaveText('Preparing project…');
+  await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(state.creates).toHaveLength(1);
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.evaluate(() => { location.hash = '#workspace/other/new'; });
   await expect(page.locator('#new-profile')).toBeVisible();

@@ -1,19 +1,17 @@
 ---
-title: Workspaces and bundles
+title: Workspaces and projects
 description: Organize Mjolnir sessions, compose multi-repository projects, use network-backed Git remotes, and understand persistent project memory.
 ---
 
-Workspaces and bundles solve different problems:
+A **workspace** groups sessions, drafts, and read state for one operator
+context. A **project** is the repository or set of repositories an agent works
+on. The same project can be used in several workspaces, and a workspace can
+hold sessions for several projects. Persistent project memory follows the
+project, independently of the workspace name.
 
-- A **workspace** is a named control-plane view. It groups live sessions,
-  drafts, and read state for one operator context.
-- A **bundle** is a configured project shape. It tells a managed target which
-  repositories to check out and which one is the agent's primary working
-  directory.
-
-They are deliberately independent. The same bundle can be used by sessions in
-several workspaces, and a workspace can hold sessions from several bundles.
-Persistent project memory follows the project identity, not the workspace name.
+Choose a project when starting a session; Mjolnir prepares its configuration
+automatically. The configuration format calls a group of repositories a
+*bundle*, but you do not need to create one separately.
 
 ## Workspaces organize the dashboard
 
@@ -90,7 +88,9 @@ and recovery guarantees, see [Durability and recovery](/durability/).
 Workspaces are stored in `mj.sqlite3`, not `config.toml`. Do not add a
 `[workspaces]` table to the configuration file.
 
-## Bundles define managed projects
+<a id="bundles-define-managed-projects"></a>
+
+## Advanced: configure repositories together
 
 Container, SSH Podman, and EC2 targets start from a bundle. A bundle can contain
 one repository or assemble several repositories into a virtual monorepo. Its
@@ -139,13 +139,27 @@ and `api/generated` cannot coexist because one would contain the other.
 See the [Configuration reference](/configuration/) for every accepted source
 form and validation rule.
 
-### Create a bundle from the wizard
+<a id="create-a-bundle-from-the-wizard"></a>
 
-The terminal new-session wizard can quick-add a simple bundle from an existing
-local repository path or a GitHub `owner/repository`/URL. Edit `config.toml`
-when you need a stable multi-repository layout or a different primary
-repository. Isolated sessions always begin at the resolved fetch remote's
-default branch; `git_ref` is obsolete and is rejected with migration guidance.
+### Choose a project in the wizard
+
+When the terminal was opened inside a repository, selecting an isolated target
+prepares that project automatically and opens review. Use **Back** to choose a
+different project. The project picker offers saved projects and recent local
+folders. **Choose another project…** lets you browse folders or paste a GitHub
+repository link; **Next** prepares it and continues directly to review.
+**Add repository** optionally combines several repositories, with the first as
+primary.
+
+In the browser, choose a project or recent local folder, use **Browse folders**,
+or paste a repository link, then select **Next**. Folder browsing lists the
+controller's filesystem for isolated sessions and the selected host's filesystem
+for bare sessions. It does not select files on your phone or browser device.
+
+Isolated sessions clone network remotes; review shows the source and explains
+that unpublished local changes are excluded. Sessions begin at the resolved
+fetch remote's default branch; `git_ref` is obsolete and is rejected with
+migration guidance.
 
 Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a

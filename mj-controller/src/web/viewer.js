@@ -1391,7 +1391,7 @@ function freshDraft() {
     worktreeSelection: null,
     bundleSource: '',
     creatingBundle: false,
-    showBundleSource: false,
+    projectChoice: snapshot?.bundles[0]?.id ? `bundle:${snapshot.bundles[0].id}` : '',
     projectDirectories: {},
   };
 }
@@ -1440,7 +1440,7 @@ function renderNewForm() {
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
-    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
+    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, snapshot.local_project_directories] : null,
     remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
@@ -1520,47 +1520,46 @@ function renderNewForm() {
               host: () => newDraft.targetId,
               kind: 'directories',
               applies: () => true,
+              browse: true,
             },
           ),
         );
       } else {
-        body.append(
-          pickerField('Bundle', 'new-bundle', snapshot.bundles, newDraft.bundleId, value => {
-            newDraft.bundleId = value;
+        const projects = snapshot.bundles.map(bundle => ({
+          id: `bundle:${bundle.id}`,
+          label: bundle.id,
+          kind: bundle.repositories.length > 1 ? `${bundle.repositories.length} repositories` : '',
+        }));
+        for (const directory of snapshot.local_project_directories || []) {
+          projects.push({ id: `source:${directory}`, label: directory, kind: 'Recent project on this machine' });
+        }
+        if (projects.length) body.append(
+          pickerField('Project', 'new-project', projects, newDraft.projectChoice, value => {
+            newDraft.projectChoice = value;
+            newDraft.bundleId = value.startsWith('bundle:') ? value.slice(7) : '';
+            newDraft.bundleSource = value.startsWith('source:') ? value.slice(7) : '';
             newDraft.preflighted = false;
             newDraft.remoteRepositories = [];
             newDraft.localChangesExcluded = false;
             newDraft.preflightError = '';
+            document.querySelector('#new-project-source').value = newDraft.bundleSource;
           }),
         );
-        const create = el('button', 'secondary', 'Create bundle');
-        create.type = 'button';
-        create.onclick = () => {
-          newDraft.showBundleSource = !newDraft.showBundleSource;
-          renderNewForm();
-          document.querySelector('#new-bundle-source')?.focus();
-        };
-        body.append(create);
-        if (newDraft.showBundleSource || !snapshot.bundles.length) {
-          body.append(
-            pathField(
-              'Repository source',
-              'new-bundle-source',
-              newDraft.bundleSource,
-              value => {
-                newDraft.bundleSource = value;
-              },
-              // A bundle source may be a URL or an `owner/repo` shorthand, and
-              // a path here belongs to the controller's own machine.
-              { host: () => null, kind: 'directories', applies: looksLikePath },
-            ),
-          );
-          body.append(el('p', 'dim', 'Use a GitHub owner/repository or URL, or an existing repository path with a network remote. The isolated session starts from the remote default branch and excludes local unpublished changes.'));
-          const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
-          save.type = 'button';
-          save.onclick = createNewBundle;
-          body.append(save);
-        }
+        body.append(pathField(
+          'Repository link or folder',
+          'new-project-source',
+          newDraft.bundleSource,
+          value => {
+            newDraft.bundleSource = value;
+            newDraft.bundleId = '';
+            newDraft.projectChoice = '';
+            newDraft.preflighted = false;
+            for (const radio of document.querySelectorAll('#new-project input')) radio.checked = false;
+          },
+          { host: () => null, kind: 'directories', applies: looksLikePath, browse: true },
+        ));
+        body.append(el('p', 'dim', 'Browse folders on the machine running Mjolnir, or paste a GitHub repository link.'));
+
       }
       body.append(
         textField('Title (optional)', 'new-title', newDraft.title, value => {
@@ -1576,7 +1575,7 @@ function renderNewForm() {
         ['Target', newDraft.targetId],
         targetIsBare(newDraft.targetId)
           ? ['Project directory', newDraft.projectDirectory]
-          : ['Bundle', newDraft.bundleId],
+          : ['Project', newDraft.bundleId],
         ['Name', newDraft.title.trim() || derivedTitle()],
       ];
       if (newDraft.localChangesExcluded) {
@@ -1634,6 +1633,7 @@ function renderNewForm() {
     newNextButton.textContent = 'Checking…';
   }
   const busy = newDraft.committing === true || newDraft.creatingBundle;
+  if (newDraft.creatingBundle) newNextButton.textContent = 'Preparing project…';
   newNextButton.disabled = busy || checking || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
   newBackButton.disabled ||= busy;
   for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
@@ -1657,30 +1657,33 @@ function pickerField(label, id, items, value, onChange) {
   return field;
 }
 
-async function createNewBundle() {
+async function prepareNewProject() {
   const draft = newDraft;
-  if (!draft || draft.creatingBundle) return;
+  if (!draft || draft.creatingBundle) return false;
   const source = draft.bundleSource.trim();
   if (!source) {
-    newError.textContent = 'Enter a repository source for the bundle.';
-    return;
+    newError.textContent = 'Choose a project, browse a folder, or paste a repository link.';
+    return false;
   }
   draft.creatingBundle = true;
   newError.textContent = '';
   renderNewForm();
   try {
     const result = await request('/api/bundles', { method: 'POST', body: JSON.stringify({ source }) });
-    if (newDraft !== draft) return;
+    if (newDraft !== draft) return false;
+    await refresh();
+    if (newDraft !== draft) return false;
     draft.bundleId = result.bundle_id;
-    draft.showBundleSource = false;
+    draft.projectChoice = `bundle:${result.bundle_id}`;
     draft.bundleSource = '';
     draft.preflighted = false;
     draft.remoteRepositories = [];
     draft.localChangesExcluded = false;
     draft.preflightError = '';
-    await refresh();
+    return true;
   } catch (error) {
     if (newDraft === draft) newError.textContent = error.message;
+    return false;
   } finally {
     draft.creatingBundle = false;
     if (newDraft === draft) renderNewForm();
@@ -1769,6 +1772,10 @@ function attachPathSuggestions(input, complete) {
     const prefix = input.value;
     const controller = new AbortController();
     state.controller = controller;
+    if (input.dataset.browsing === 'true') {
+      list.replaceChildren(el('p', 'dim', 'Loading folders…'));
+      list.classList.remove('hidden');
+    }
     let answer;
     try {
       answer = await request('/api/paths/complete', {
@@ -1776,10 +1783,14 @@ function attachPathSuggestions(input, complete) {
         signal: controller.signal,
         body: JSON.stringify({ target_id: complete.host(), prefix, kind: complete.kind }),
       });
-    } catch {
-      // An abort, a lost connection, and a host that cannot list the
-      // directory all mean the same thing to someone typing: no suggestions.
-      if (state.controller === controller) hide();
+    } catch (error) {
+      if (state.controller === controller) {
+        hide();
+        if (!controller.signal.aborted && input.dataset.browsing === 'true') {
+          list.append(el('p', 'error', `Could not browse folders: ${error.message}`));
+          list.classList.remove('hidden');
+        }
+      }
       return;
     }
     if (controller.signal.aborted || input.value !== prefix || document.activeElement !== input) return;
@@ -1787,6 +1798,10 @@ function attachPathSuggestions(input, complete) {
     state.selected = 0;
     if (!state.matches.length) {
       hide();
+      if (input.dataset.browsing === 'true') {
+        list.append(el('p', 'dim', 'No subfolders. Next uses this folder.'));
+        list.classList.remove('hidden');
+      }
       return;
     }
     render(Boolean(answer.truncated));
@@ -1827,6 +1842,27 @@ function pathField(label, id, value, onInput, complete = null) {
   input.autocapitalize = 'none';
   input.setAttribute('aria-description', '~ expands on apply using the home directory on the selected machine.');
   if (complete) attachPathSuggestions(input, complete);
+  if (complete?.browse) {
+    const actions = el('div', 'page-actions');
+    const browse = el('button', 'secondary', 'Browse folders');
+    const parent = el('button', 'secondary', 'Parent folder');
+    for (const button of [browse, parent]) button.type = 'button';
+    const show = prefix => {
+      input.value = prefix;
+      input.dataset.browsing = 'true';
+      input.focus();
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    browse.onclick = () => show(looksLikePath(input.value) ? `${input.value.replace(/[\\/]+$/, '')}/` : '~/');
+    parent.onclick = () => {
+      // Paths cross this browser boundary as text with slash separators.
+      const directory = input.value.replace(/\\/g, '/').replace(/\/+$/, '');
+      const split = directory.lastIndexOf('/');
+      show(directory === '~' ? '~/../' : /^[A-Za-z]:$/.test(directory) ? `${directory}/` : split >= 0 ? `${directory.slice(0, split)}/` : '/');
+    };
+    actions.append(browse, parent);
+    field.append(actions);
+  }
   return field;
 }
 
@@ -1918,9 +1954,13 @@ async function advanceNew() {
   }
 
   if (step.key === 'project') {
-    if (!targetIsBare(newDraft.targetId) && !snapshot.bundles.some(b => b.id === newDraft.bundleId)) {
-      newError.textContent = 'Choose or create a bundle before continuing.';
-      return;
+    if (!targetIsBare(newDraft.targetId)) {
+      if (newDraft.bundleSource.trim()) {
+        if (!await prepareNewProject()) return;
+      } else if (!snapshot.bundles.some(b => b.id === newDraft.bundleId)) {
+        newError.textContent = 'Choose a project, browse a folder, or paste a repository link.';
+        return;
+      }
     }
     if (targetIsBare(newDraft.targetId) && !newDraft.projectDirectory.trim()) {
       newError.textContent = 'Name the project directory to open.';
@@ -5975,10 +6015,6 @@ newBackButton.onclick = () => {
 newForm.onsubmit = async event => {
   event.preventDefault();
   try {
-    if (document.activeElement?.id === 'new-bundle-source') {
-      await createNewBundle();
-      return;
-    }
     await advanceNew();
   } catch (err) {
     newError.textContent = err.message;

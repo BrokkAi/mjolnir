@@ -1124,7 +1124,7 @@ pub(crate) fn spawn_create_bundle(
 ) {
     spawn_critical_io(
         tracker,
-        "creating bundle",
+        "preparing project",
         updates,
         move || {
             // Load fresh so a concurrent background save (e.g. an import
