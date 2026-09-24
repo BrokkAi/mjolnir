@@ -66,6 +66,11 @@ where
     // updates on the same ACP connection.
     let live_tool_calls = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let notification_live_tool_calls = live_tool_calls.clone();
+    // What an open tool call spelled out as its content, for the permission
+    // form of a harness that sends no `rawInput` (R4-10).
+    let tool_content = ToolCallContentInput::default();
+    let notification_tool_content = tool_content.clone();
+    let permission_tool_content = tool_content;
     let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
@@ -230,6 +235,7 @@ where
                 if session_update_has_native_history(&update) {
                     notification_resume_required.store(true, Ordering::Release);
                 }
+                notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
                     &notification_live_tool_calls,
@@ -524,7 +530,8 @@ where
                 {
                     Some(title) => permission_title_with_command(
                         title,
-                        request.tool_call.fields.raw_input.as_ref(),
+                        permission_tool_input(&request.tool_call, &permission_tool_content)
+                            .as_ref(),
                     ),
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
@@ -995,6 +1002,99 @@ where
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// The input a tool call carried as text content, by tool call id, while the
+/// call is open. Kimi sends no `rawInput` for a shell call: the input exists
+/// only as a text block it streams as the call's content, growing to
+/// `{"command": "..."}` (R4-10). The latest text replaces the earlier one,
+/// and a finished call is forgotten.
+#[derive(Clone, Default)]
+pub(super) struct ToolCallContentInput(Arc<Mutex<BTreeMap<String, String>>>);
+
+impl ToolCallContentInput {
+    /// Open calls remembered at once; the oldest id is dropped past this.
+    const OPEN_CALLS: usize = 64;
+
+    pub(super) fn observe(&self, update: &SessionUpdate) {
+        let (id, content, status) = match update {
+            SessionUpdate::ToolCall(call) => {
+                (&call.tool_call_id, Some(&call.content), Some(call.status))
+            }
+            SessionUpdate::ToolCallUpdate(call) => (
+                &call.tool_call_id,
+                call.fields.content.as_ref(),
+                call.fields.status,
+            ),
+            _ => return,
+        };
+        let id = id.to_string();
+        let mut texts = self.0.lock().expect("tool call input lock poisoned");
+        if matches!(
+            status,
+            Some(
+                agent_client_protocol::schema::v1::ToolCallStatus::Completed
+                    | agent_client_protocol::schema::v1::ToolCallStatus::Failed
+            )
+        ) {
+            texts.remove(&id);
+            return;
+        }
+        if let Some(text) = content.and_then(|content| single_text_content(content)) {
+            if !texts.contains_key(&id) && texts.len() >= Self::OPEN_CALLS {
+                texts.pop_first();
+            }
+            texts.insert(id, text.to_owned());
+        }
+    }
+
+    /// The JSON object the call's content spelled out, if it did.
+    pub(super) fn input(&self, tool_call_id: &str) -> Option<serde_json::Value> {
+        let texts = self.0.lock().expect("tool call input lock poisoned");
+        json_object_text(texts.get(tool_call_id)?)
+    }
+}
+
+fn single_text_content(
+    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+) -> Option<&str> {
+    match content {
+        [agent_client_protocol::schema::v1::ToolCallContent::Content(block)] => {
+            match &block.content {
+                ContentBlock::Text(text) => Some(&text.text),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_object_text(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .filter(serde_json::Value::is_object)
+}
+
+/// What a permission request's tool call would run with: its `rawInput`, or
+/// else the JSON its content spells out, in the request itself or streamed
+/// for the same call before it.
+pub(super) fn permission_tool_input(
+    tool_call: &agent_client_protocol::schema::v1::ToolCallUpdate,
+    streamed: &ToolCallContentInput,
+) -> Option<serde_json::Value> {
+    tool_call
+        .fields
+        .raw_input
+        .clone()
+        .or_else(|| {
+            tool_call
+                .fields
+                .content
+                .as_deref()
+                .and_then(single_text_content)
+                .and_then(json_object_text)
+        })
+        .or_else(|| streamed.input(&tool_call.tool_call_id.to_string()))
 }
 
 /// A permission form's text: the tool call's title, and the command it would

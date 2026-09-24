@@ -6686,6 +6686,143 @@ fn a_permission_form_shows_the_command_it_approves() {
     );
 }
 
+/// R4-10: Kimi's Bash call carries no `rawInput`. The command exists only as
+/// the call's streamed text content, `{"command": ...}`, so the form read
+/// "Kimi Code requests permission: Bash" and nothing else. The recorded
+/// updates are replayed from the reviewer journal R4 saved
+/// (`reviewer-B-kimi-bash-permission.jsonl`), followed by a permission request
+/// that names the call and carries no input, as Kimi's did.
+#[tokio::test]
+async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client, agent) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client);
+    let (agent_read, mut agent_write) = tokio::io::split(agent);
+    let (commands, mut requests) = mpsc::channel(16);
+    let (event_tx, mut events) = mpsc::channel(256);
+    let spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "kimi-probe".into(),
+        args: vec![],
+        environment: BTreeMap::new(),
+        cwd: "/workspace".into(),
+        additional_directories: vec![],
+        extra_mcp_servers: vec![],
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Kimi,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            ByteStreams::new(client_write.compat_write(), client_read.compat()),
+            spec,
+            &mut requests,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    let mut input = BufReader::new(agent_read).lines();
+    let mut next_message = async || -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
+            .await
+            .expect("ACP message timed out")
+            .unwrap()
+            .expect("ACP closed unexpectedly");
+        serde_json::from_str(&line).unwrap()
+    };
+    let mut send = async |message: Value| {
+        agent_write
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    };
+
+    // Answer the session setup, whatever it asks for, until the prompt.
+    commands
+        .send(CommandRequest::Prompt {
+            request_id: "review-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("review the change"))],
+        })
+        .await
+        .unwrap();
+    loop {
+        let message = next_message().await;
+        let result = match message["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion": 1}),
+            Some("session/new") => json!({"sessionId": "kimi-session"}),
+            Some("session/prompt") => break,
+            _ => json!({}),
+        };
+        if !message["id"].is_null() {
+            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
+        }
+    }
+
+    let journal = include_str!("testdata/kimi_bash_permission.jsonl");
+    let mut tool_call_id = None;
+    for line in journal.lines() {
+        let event: Value = serde_json::from_str(line).unwrap();
+        let observation = &event["observation"];
+        if observation["type"] != "session_update" {
+            continue;
+        }
+        let update = observation["data"]["update"].clone();
+        tool_call_id = update["toolCallId"].as_str().map(str::to_owned);
+        send(json!({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "kimi-session", "update": update},
+        }))
+        .await;
+    }
+    send(json!({
+        "jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission",
+        "params": {
+            "sessionId": "kimi-session",
+            "toolCall": {"toolCallId": tool_call_id.unwrap(), "title": "Bash", "kind": "execute"},
+            "options": [
+                {"optionId": "approve_once", "name": "Approve once", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+            ],
+        },
+    }))
+    .await;
+
+    let message = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the permission form must be requested")
+            .expect("runtime stopped");
+        if let RuntimeEvent::ElicitationRequested { request } = event {
+            break request.message;
+        }
+    };
+    assert_eq!(
+        message,
+        "Kimi Code requests permission:\nBash\n$ git status --short && git ls-files && ls -a"
+    );
+    driver.abort();
+}
+
 #[test]
 fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
