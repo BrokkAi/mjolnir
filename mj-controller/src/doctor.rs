@@ -2483,6 +2483,70 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     residue
 }
 
+/// The repositories a person works in by hand, where review leftovers are
+/// worth reporting.
+///
+/// These are the configured bundle repositories and the directories sessions
+/// started with `--project-directory` use. A session's own managed checkout
+/// (`<repository>/.mj/clones/<id>` or `<repository>/.mj/worktrees/<id>`) is
+/// Mjolnir's working state, not a leftover, so it is never reported. Neither is
+/// a repository a live session is working in, because its refs are in use; a
+/// linked worktree shares its refs with the repository it came from, so a live
+/// worktree session keeps that repository out too.
+pub(crate) fn review_residue_repositories(
+    configured: impl IntoIterator<Item = PathBuf>,
+    sessions: &[&mj_core::state::SessionRecord],
+) -> Vec<PathBuf> {
+    use mj_core::state::ManagedCheckoutKind;
+
+    let managed_roots = sessions
+        .iter()
+        .filter_map(|session| session.managed_worktree.as_ref())
+        .map(|worktree| worktree.worktree_root.as_path())
+        .collect::<Vec<_>>();
+    let mut in_use = Vec::new();
+    for session in sessions.iter().filter(|session| session.state.is_active()) {
+        if let Some(directory) = &session.project_directory {
+            in_use.push(directory.as_path());
+        }
+        if let Some(worktree) = &session.managed_worktree
+            && worktree.kind == ManagedCheckoutKind::Worktree
+        {
+            in_use.push(worktree.source_repository.as_path());
+        }
+    }
+    let mut repositories = configured
+        .into_iter()
+        .chain(
+            sessions
+                .iter()
+                .filter_map(|session| session.project_directory.clone()),
+        )
+        .filter(|repository| {
+            !is_inside_managed_checkout(repository)
+                && !managed_roots
+                    .iter()
+                    .any(|root| repository.starts_with(root))
+                && !in_use.iter().any(|directory| repository == directory)
+        })
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Whether `path` is at or under `<repository>/.mj/clones/<id>` or
+/// `<repository>/.mj/worktrees/<id>`.
+fn is_inside_managed_checkout(path: &Path) -> bool {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(3)
+        .any(|window| window[0] == ".mj" && (window[1] == "clones" || window[1] == "worktrees"))
+}
+
 /// Report Mjolnir's own leftovers in the repositories the configuration names.
 ///
 /// This deletes nothing. Removing refs and running `git gc` in someone else's
@@ -2492,26 +2556,19 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
     };
-    let mut repositories: Vec<PathBuf> = config
+    let configured = config
         .bundles
         .values()
         .flat_map(|bundle| bundle.repositories.iter())
-        .filter_map(|repository| repository.local.clone())
-        .collect();
-    // A session started with `--project-directory` has no bundle, and those
-    // are exactly the repositories a person works in by hand, so they are the
-    // ones where leftovers matter most. A daemon-less machine has no session
-    // database, which is not a reason to skip the configured repositories.
-    if let Ok(state) = crate::database::load_state() {
-        repositories.extend(
-            state
-                .sessions
-                .values()
-                .filter_map(|session| session.project_directory.clone()),
-        );
-    }
-    repositories.sort();
-    repositories.dedup();
+        .filter_map(|repository| repository.local.clone());
+    // A daemon-less machine has no session database, which is not a reason to
+    // skip the configured repositories.
+    let state = crate::database::load_state().ok();
+    let sessions = state
+        .as_ref()
+        .map(|state| state.sessions.values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let repositories = review_residue_repositories(configured, &sessions);
     if repositories.is_empty() {
         return Vec::new();
     }
@@ -2570,11 +2627,7 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     vec![DoctorCheck::fixable(
         "review.residue",
         "Review leftovers in your repositories",
-        format!(
-            "Mjolnir left these in repositories it does not own: {detail}. \
-             A running session's own `refs/hel/review-baseline` is in use; \
-             remove that one only when no session is working in that repository."
-        ),
+        format!("Mjolnir left these in repositories it does not own: {detail}."),
         format!("Remove them yourself when you are ready:\n{commands}"),
     )]
 }
