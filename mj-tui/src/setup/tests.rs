@@ -75,6 +75,40 @@ fn continuation_reads_as_off_while_jev_is_off() {
     assert!(row.contains("On · 3 continuations"), "{row:?}");
 }
 
+/// Workers read the Jev switch when they start, so a running session keeps
+/// classifying until it is resumed or restarted. The page and the save
+/// notice say so instead of "Off: nothing is sent". Launch re-verification
+/// finding R3-8.
+#[test]
+fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
+    let jev = schema::help(&["jev".to_owned()]);
+    assert!(!jev.contains("nothing is sent"), "{jev}");
+    assert!(jev.contains("resume or restart"), "{jev}");
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("jev", None);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.draft["jev"]["enabled"] = json!(false);
+    let generation = dialog.generation;
+    let saved = saved_config(dialog);
+    assert!(!saved.jev.enabled);
+    dashboard.setup_saved(generation, Ok(saved));
+    let notice = dashboard.notice().unwrap();
+    assert!(
+        notice.contains("running sessions follow it after their next resume or restart"),
+        "{notice}"
+    );
+
+    // A save that leaves Jev alone does not mention it.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    let generation = dialog.generation;
+    let saved = saved_config(dialog);
+    dashboard.setup_saved(generation, Ok(saved));
+    assert!(!dashboard.notice().unwrap().contains("Jev"));
+}
+
 /// The additional eligible profiles are a set of checkboxes, so their row
 /// says how many are chosen rather than reading like an off switch.
 /// Launch campaign finding C-3.

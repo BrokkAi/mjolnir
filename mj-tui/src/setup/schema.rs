@@ -423,7 +423,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
         }
         "jev" => {
             if section["enabled"] == Value::Bool(false) {
-                "Off · nothing is sent".to_owned()
+                "Off · new sessions send nothing".to_owned()
             } else {
                 "On · sends turn text for classification".to_owned()
             }
@@ -683,7 +683,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "jev" => {
-            "Sends turn and help-search text to a hosted classifier. Off: nothing is sent and continuation stops."
+            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."

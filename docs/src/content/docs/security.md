@@ -27,12 +27,13 @@ following.
 
 One switch stops every Jev request: set `enabled = false` under `[jev]` in
 `config.toml`, or clear **Setup → Privacy → Jev (hosted service)**. Then
-nothing in the first three rows leaves the machine. What you give up: a turn
-ends only when the harness ends it, so a turn that goes quiet while the agent
-waits for you stays **Working** until the harness reports the end of the
-turn; automatic continuation does not run; and help search matches text
-only. Workers read the switch when they start, so resume or restart a
-running session for it to apply there. See
+nothing in the first three rows leaves the machine from the dashboard or
+from sessions started afterwards. Workers read the switch when they start,
+so a session that was already running keeps sending turn text until you
+resume or restart it. What you give up: a turn ends only when the harness
+ends it, so a turn that goes quiet while the agent waits for you stays
+**Working** until the harness reports the end of the turn; automatic
+continuation does not run; and help search matches text only. See
 [Configuration](/configuration/#hosted-jev-service-jev).
 
 The proxy source is in `services/jev-proxy/`. It does not write request bodies
