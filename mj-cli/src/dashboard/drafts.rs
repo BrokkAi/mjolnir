@@ -206,7 +206,7 @@ impl DashboardContext {
             title: if self.dashboard.go_mode().is_some() {
                 self.dashboard.go_conversation_title(session_id)
             } else {
-                session_record.display_title().to_owned()
+                session_record.listed_title().to_owned()
             },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self.dashboard.subagent_count_for(&session_record.id),

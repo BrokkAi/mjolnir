@@ -997,7 +997,9 @@ impl ActiveChat {
             .unwrap_or(&context.session)
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
-        let title = context.session.display_title().to_owned();
+        // The name the Sessions row shows: until the harness names the
+        // session, its creation title rather than its id (R3-11).
+        let title = context.session.listed_title().to_owned();
         let harness_kind = context.session.harness_kind;
         self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);

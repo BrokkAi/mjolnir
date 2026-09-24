@@ -1355,6 +1355,47 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
     assert!(!rendered.contains("Harness session title"));
 }
 
+/// Launch finding R3-11: before the harness named a new session, the
+/// conversation header showed its 32-hex id while the Sessions row showed the
+/// title it was created with ("project via fake"). The header uses the
+/// listed title too.
+#[tokio::test]
+async fn an_unnamed_session_s_header_uses_its_listed_title_not_its_id() {
+    use mj_core::config::HarnessKind;
+
+    let session_id = "a225e234d043d75737319553cd926f50";
+    let fixture = mj_client::session::replacement_session_test_fixture(session_id, 91);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(chat_context(session_id, &[("codex-1", HarnessKind::Codex)])),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let reloaded = config_with_profiles(&[("codex-1", HarnessKind::Codex)]);
+    let mut unnamed = context_session_record(session_id, "workspace-1");
+    unnamed.title = "project via fake".into();
+    unnamed.acp_session_title = None;
+    unnamed.session_title_override = None;
+    chat.refresh_context(&reloaded, Some(&unnamed), Some(&unnamed));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    terminal
+        .draw(|frame| render_full_frame(frame, &mut chat.state, false))
+        .expect("draw refreshed chat");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("project via fake"), "{rendered:?}");
+    assert!(!rendered.contains("a225e234d043"), "{rendered:?}");
+}
+
 #[tokio::test]
 async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-resumed", 74);
