@@ -41,6 +41,40 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
     }
 }
 
+/// Continuation runs only while Jev is on (`Config::automatic_continuation_enabled`).
+/// With Jev off, the Continuation row and page say it is off and why, and
+/// point to the Privacy page, rather than "On" and a ticked box alone.
+/// Launch re-verification finding R3-2.
+#[test]
+fn continuation_reads_as_off_while_jev_is_off() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.jev.enabled = false;
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Continuation"))
+        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
+    assert!(row.contains("Off"), "{row:?}");
+    assert!(row.contains("Jev"), "{row:?}");
+    assert!(!row.contains("On ·"), "{row:?}");
+
+    dashboard.begin_settings_section("continuation", None);
+    let page = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(page.contains("Jev is off"), "{page}");
+    assert!(page.contains("Privacy"), "{page}");
+
+    // With Jev on, the page and row keep their ordinary text.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Continuation"))
+        .unwrap();
+    assert!(row.contains("On · 3 continuations"), "{row:?}");
+}
+
 /// The additional eligible profiles are a set of checkboxes, so their row
 /// says how many are chosen rather than reading like an off switch.
 /// Launch campaign finding C-3.
@@ -2746,6 +2780,15 @@ fn every_setting_description_fits_its_two_rows() {
         .map(|path| path.join("."))
         .collect::<Vec<_>>();
     assert!(overflowing.is_empty(), "{overflowing:#?}");
+    let jev_off = json!({"jev": {"enabled": false}});
+    let continuation = schema::page_help(&["continuation".to_owned()], &jev_off);
+    assert!(
+        ratatui::widgets::Paragraph::new(continuation)
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            <= 2,
+        "{continuation}"
+    );
 }
 
 /// A new SSH machine keeps its workspaces under Mjolnir's own directory, not

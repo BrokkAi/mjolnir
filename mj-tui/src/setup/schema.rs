@@ -413,6 +413,10 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
         "continuation" => {
             if section["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
+            } else if !jev_enabled(draft) {
+                // `Config::automatic_continuation_enabled`: the classifier
+                // that judges each reply is Jev, so without it nothing runs.
+                "Off · Jev is off (Privacy)".to_owned()
             } else {
                 "On · 3 continuations plus quota recovery".to_owned()
             }
@@ -601,6 +605,23 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         return values;
     }
     values.iter().map(|v| Value::String((*v).into())).collect()
+}
+
+/// Whether the draft leaves the hosted Jev service on.
+fn jev_enabled(draft: &Value) -> bool {
+    draft["jev"]["enabled"] != Value::Bool(false)
+}
+
+/// The description drawn above the page `path`: its [`help`], except where
+/// another setting in the draft changes what the page does. Continuation
+/// cannot run while Jev is off, whatever its own box says.
+pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
+    match path {
+        [section] if section == "continuation" && !jev_enabled(draft) => {
+            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
+        }
+        _ => help(path),
+    }
 }
 
 pub(super) fn help(path: &[String]) -> &'static str {

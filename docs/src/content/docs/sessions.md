@@ -483,12 +483,14 @@ Continue with [durability and recovery](/durability/) for the archive guarantees
 
 Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
 
-This is enabled by default. Uncheck **Enabled** under **Settings → Automatically continue unfinished requests** to disable it, or set:
+This is enabled by default. Uncheck **Enabled** under **Setup → Continuation** to disable it, or set:
 
 ```toml
 [continuation]
 enabled = false
 ```
+
+Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Setup reads **Off · Jev is off (Privacy)**.
 
 The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
 

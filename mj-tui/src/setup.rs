@@ -2466,7 +2466,7 @@ pub(crate) fn render_setup(
     }
     let help_y = inner.y + u16::from(nested);
     frame.render_widget(
-        Paragraph::new(schema::help(path))
+        Paragraph::new(schema::page_help(path, &dialog.draft))
             .wrap(Wrap { trim: false })
             .style(theme::muted()),
         Rect::new(inner.x, help_y, inner.width, 2),
