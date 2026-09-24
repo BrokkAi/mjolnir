@@ -19,7 +19,8 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
 - [x] (2026-09-24) Daemon: the `Handback` action, the report rule in sub-agent `wait` and `list_agents`, the reminder in the child turn-end hook, and the session wait.
 - [x] (2026-09-24) `request_key` removed from the model and HTTP surfaces; `TaskStop`/`TaskOutput` unhidden.
 - [x] (2026-09-24) Automated tests, clippy.
-- [ ] Live runs on `morannon-podman` with three parent/child model pairs, and a tmux check of the TUI's Sub-agents view.
+- [x] (2026-09-24) Live runs on `morannon-podman`: Claude Opus with Codex luna children (#1144), Claude Opus with DeepSeek flash children (#480), Codex gpt-6-sol with DeepSeek flash children (#1137). Handbacks, reminders and the parents' `wait` answers were exercised; two defects found and fixed (early `completed`, and stopped children unreadable in the TUI).
+- [x] (2026-09-24) tmux check of the TUI's Sub-agents view; stopped children now open as read-only stored transcripts.
 
 ## Surprises & Discoveries
 
@@ -58,7 +59,11 @@ The same change removes the caller-chosen `request_key` from `spawn` and from th
 
 ## Outcomes & Retrospective
 
-To be completed after the live runs.
+Live runs showed the design working end to end: every child that finished a task turn had its report recorded, and the parents' `wait` answers carried `report_source: handback`. Most children (three of four in the first wave) handed back only after the reminder, which is why the instruction now leads the first prompt.
+
+The runs also found two defects outside the handback itself, both fixed in this work: the sub-agent `wait` read an idle child as finished before the store had seen its new turn (and hid failed turns as `completed`), and the TUI could not show a stopped child's conversation at all. A third observation, a child whose worker relay never answered its first hello so its first prompt was never delivered, reproduced once and is not explained yet; its parent's `wait` correctly kept it `running`, and the parent replaced it.
+
+Two parents hit provider usage limits (`codex2`, `codex3`); the TUI's quota pane had shown them correctly as 0% remaining.
 
 ## Context and Orientation
 
