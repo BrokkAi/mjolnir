@@ -14,7 +14,8 @@ Native Codex and Claude sessions stored in additional profile homes must remain 
 - [x] (2026-09-24 00:51Z) Kept cross-tab hit counts fresh while Live is selected and searched the index while typing there. Focused resume tests pass.
 - [x] (2026-09-24 00:51Z) Shared scrollbar pointer handling between the chat transcript and resume preview; added click-and-drag and hit arrows. Focused chat and resume tests pass.
 - [x] (2026-09-24 00:58Z) Completed full Mjolnir tests and clippy; the 4,000-native-session dialog benchmark measured 5.9 ms per rebuild.
-- [ ] Publish the prepared fork package only with external-publication approval; then update Mjolnir's dependency and install the corrected binary.
+- [x] (2026-09-24) Pushed Mjolnir's validated UI/search commit `180c4733` to `origin/master`, the fork fix `effa77d` to `origin/publish`, and source commit `6f84b8b` to upstream SessionWiki PR #29. The PR port passed tests, clippy, and formatting.
+- [ ] Publish the approved fork package. The first `cargo publish --locked` attempt packaged and verified 0.30.2 but crates.io rejected upload with 403 authentication failed. Retry after credentials or ownership are repaired, then update Mjolnir's dependency and install the corrected binary.
 - [ ] Repair the affected live index only after the corrected code is installed.
 
 ## Surprises & Discoveries
@@ -35,7 +36,7 @@ Native Codex and Claude sessions stored in additional profile homes must remain 
 
 ## Outcomes & Retrospective
 
-The prepared fork package fixes false native archival and makes the repair of unchanged sources cheap. Mjolnir now returns search results without the unnecessary full recent-session scan on common terms, searches history while the Live tab is selected, and updates cross-tab counts immediately when the answer arrives. The preview supports shared scrollbar dragging and clickable hit arrows. The fork has not been published or installed, so existing binaries can still mark alternate-profile rows archived until distribution is approved. The live index has not been mutated by this work.
+The prepared fork package fixes false native archival and makes the repair of unchanged sources cheap. Mjolnir now returns search results without the unnecessary full recent-session scan on common terms, searches history while the Live tab is selected, and updates cross-tab counts immediately when the answer arrives. The preview supports shared scrollbar dragging and clickable hit arrows. The fork and Mjolnir UI/search commits have been pushed, and upstream PR #29 includes the source fix. The crate has not been published or installed because crates.io rejected authentication. Existing binaries can still mark alternate-profile rows archived. The live index has not been mutated by this work.
 
 Validation: fork `cargo test`, clippy, and `cargo publish --dry-run` passed. Mjolnir full `cargo test`, clippy, focused controller and resume tests, and the dialog benchmark passed. A 2,000-row title fallback took 2.846 seconds on the live index when it fetched previews, summaries, and tags, while the metadata-only selection took 0.045 seconds; the filled `restic` result path now skips it entirely. This establishes the avoidable query cost but does not claim a measured end-to-end 30-second reproduction because the old live daemon was no longer running when inspected.
 

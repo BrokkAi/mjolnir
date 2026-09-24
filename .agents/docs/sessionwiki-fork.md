@@ -128,3 +128,11 @@ Mjolnir still links 0.30.1. After publication, update the root `Cargo.toml`,
 in one commit, then install the matching standalone binary. Run a Mjolnir full
 sync to repair rows in additional profile homes; a standalone sync only scans
 the stock homes.
+
+The fork fix was pushed to `origin/publish` as `effa77d`. The same source fix
+was ported to the open upstream [PR #29](https://github.com/youdie006/sessionwiki/pull/29)
+as `6f84b8b`, with its description updated. That PR branch passed tests,
+Clippy, and formatting. The first `cargo publish --locked` of 0.30.2 packaged
+and verified successfully but crates.io rejected the upload with 403
+authentication failed. Retry publication after restoring registry credentials
+or package ownership; no 0.30.2 release tag has been created yet.
