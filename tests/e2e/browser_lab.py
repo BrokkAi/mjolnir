@@ -93,8 +93,13 @@ def stop_from_dashboard(client) -> None:
     # The palette is a prefix chord (ctrl+b then :); it has no function key.
     client.send(b"\x02:")
     client.wait_for("Search commands")
-    # An idle session with no sub-agents suspends without a confirmation.
     client.send(b"suspend session\r")
+    # The browser provisions a managed clone whose publication has not been
+    # verified, so the surface asks before suspending: the recovery copy keeps
+    # any unpublished Git work. Require that question, then confirm it.
+    client.wait_for("Suspend session?")
+    client.wait_for("Publication status is unverified")
+    client.send(b"s")
     # A stop needs the daemon's session manager to have adopted the session,
     # and adoption is asynchronous: a session the browser created moments ago
     # can still be unmanaged when the first stop reaches it. The surface offers
