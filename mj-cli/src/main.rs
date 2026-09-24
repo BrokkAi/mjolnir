@@ -1824,7 +1824,7 @@ mod tests {
             !help.contains("cancel-turn"),
             "the old names stay out of --help"
         );
-}
+    }
 
     /// `mj login` for a harness whose CLI is not installed names the missing
     /// program and how to install it, instead of a bare ENOENT.

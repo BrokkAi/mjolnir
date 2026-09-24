@@ -108,16 +108,9 @@ impl ApiClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
+            busy_retry: BusyRetry::DEFAULT,
             http,
         }
-}
-
-            busy_retry: BusyRetry::DEFAULT,
-            http: reqwest::Client::builder()
-                .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .context("build the API HTTP client")?,
-        })
     }
 
     pub(crate) fn base_url(&self) -> &str {
