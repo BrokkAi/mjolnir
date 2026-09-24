@@ -418,6 +418,36 @@ See [Search and restore archived sessions](/sessions/#search-and-restore-archive
 for what archiving deletes and keeps, and for the rule that the `sessionwiki`
 command-line tool must match the version Mjolnir links.
 
+## Sub-agents `[subagents]`
+
+A Claude or Codex session can start child sessions, called sub-agents, through
+Mjolnir's `spawn` tool. This section says whether it may, how many at once, and
+which profiles the children may run on.
+
+```toml
+[subagents]
+# enabled = true
+# max_concurrent = 6
+
+[subagents.eligible_profiles]
+codex = true
+codex2 = true
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | When `false`, sessions get no sub-agent tools. |
+| `max_concurrent` | integer | no | `6` | Most sub-agents one session may have running at once; between `1` and `64`. |
+| `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled or unknown profile id is ignored, and `mj doctor` warns about it. |
+
+A `spawn` call must name a model, or `current` for the parent session's own
+model. Unless the call also names a profile, Mjolnir runs the child on the
+eligible profile that offers that model and has the most quota left, meaning
+the lower of its 5-hour and weekly remaining percentages. A pay-per-use
+profile counts as 100% left, and a profile with no quota report comes last. On
+a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
+where its quota comes from and whether other sessions' sub-agents may use it.
+
 ## Profiles `[profiles.<id>]`
 
 Each profile names one harness installation or account on the controller:
