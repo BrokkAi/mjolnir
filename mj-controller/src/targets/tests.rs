@@ -2697,6 +2697,54 @@ fn bare_project_validation_checks_directory_and_git_repository() {
     assert_eq!(not_git.seen.borrow().len(), 2);
 }
 
+/// Launch finding R3-6: a host-key refusal during `mj new --target <ssh>`
+/// reached the CLI as "500 ... the daemon log records the reason under
+/// reference ...". The caller gets ssh's own words and what to do, as a
+/// refusal (a 4xx), and the sentence names no host.
+#[test]
+fn a_host_key_refusal_at_the_remote_directory_check_tells_the_caller_what_to_do() {
+    let refused = |stderr: &str| {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status: 255,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        }]);
+        validate_bare_project_directory(&ssh(), Path::new("/srv/project"), &executor).unwrap_err()
+    };
+    let error = refused(
+        "No ED25519 host key is known for 203.0.113.9 and you have requested strict checking.\r\nHost key verification failed.\r\n",
+    );
+    let refusal = mj_core::refusal::Refusal::of(&error)
+        .expect("a host-key refusal is a reason the caller may see, not a log reference");
+    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+    let message = refusal.message();
+    assert!(
+        message.contains("Host key verification failed"),
+        "{message}"
+    );
+    assert!(message.contains("known_hosts"), "{message}");
+    assert!(
+        message.contains("-o StrictHostKeyChecking=accept-new"),
+        "{message}"
+    );
+    assert!(!message.contains("203.0.113.9"), "{message}");
+    // The daemon log keeps ssh's full text.
+    assert!(format!("{error:#}").contains("203.0.113.9"), "{error:#}");
+
+    let changed = refused(
+        "@@@@@@@@\r\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\nHost key verification failed.\r\n",
+    );
+    let message = mj_core::refusal::Refusal::of(&changed)
+        .unwrap()
+        .message()
+        .to_owned();
+    assert!(message.contains("ssh-keygen -R"), "{message}");
+
+    // Any other ssh failure stays internal.
+    let other = refused("ssh: connect to host example.test port 22: Connection refused\r\n");
+    assert!(mj_core::refusal::Refusal::of(&other).is_none(), "{other:#}");
+}
+
 #[test]
 fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
     let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {

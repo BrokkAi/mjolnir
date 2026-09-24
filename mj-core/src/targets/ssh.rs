@@ -363,11 +363,38 @@ pub fn ssh_directory_exists(
     match output.status {
         0 => Ok(true),
         1 => Ok(false),
-        status => bail!(
-            "remote directory check failed with status {status}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
+        status => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let error = anyhow::anyhow!(
+                "remote directory check failed with status {status}: {}",
+                stderr.trim()
+            );
+            Err(match host_key_refusal(&stderr) {
+                Some(refusal) => error.context(refusal),
+                None => error,
+            })
+        }
     }
+}
+
+/// What the caller is told when `ssh` refused the host's key, so it does not
+/// get only a daemon log reference (launch finding R3-6).
+///
+/// OpenSSH's wording is the only signal: "Host key verification failed." ends
+/// both an unknown key under strict checking and a key that changed. The
+/// sentence quotes that line and names no host, so it may reach any client;
+/// the full ssh text stays on the error chain for the daemon log.
+fn host_key_refusal(stderr: &str) -> Option<crate::refusal::Refusal> {
+    if !stderr.contains("Host key verification failed") {
+        return None;
+    }
+    Some(crate::refusal::Refusal::precondition(
+        if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            "ssh reported \"Host key verification failed\": the machine's host key is not the one saved in ~/.ssh/known_hosts. If you expected the change, remove the old entry with `ssh-keygen -R` and the host name, add the new key, and try again."
+        } else {
+            "ssh reported \"Host key verification failed\": the machine's host key is not in ~/.ssh/known_hosts, and its ssh options require a known key. Add the host key (for example with `ssh-keyscan`, after checking the fingerprint), or put `-o StrictHostKeyChecking=accept-new` in the machine's extra_args, and try again."
+        },
+    ))
 }
 
 /// Verify that a bare-SSH project path exists and has a committed Git HEAD.
