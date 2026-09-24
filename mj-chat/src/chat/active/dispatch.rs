@@ -387,6 +387,13 @@ impl ActiveChat {
     pub fn toggle_dictation(&mut self) {
         let action = self.state.dictation_toggle_action();
         if action == ChatAction::None {
+            let reason = self.dictation_unavailable_notice();
+            tracing::info!(
+                session_id = %self.session_id(),
+                %reason,
+                "dictation key pressed while dictation is unavailable"
+            );
+            self.state.set_notice(reason);
             return;
         }
         // Dictation never asks the host to leave the conversation, so there

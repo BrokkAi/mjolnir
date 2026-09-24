@@ -473,6 +473,9 @@ pub struct ActiveChat {
     voice_probe_at: Option<std::time::Instant>,
     voice_probe_pending: bool,
     voice_probe_paths: Vec<std::path::PathBuf>,
+    /// Why the last availability probe found dictation unavailable, as the
+    /// sentence the dictation key shows. `None` until a probe says.
+    voice_unavailable: Option<String>,
     voice_finishing: bool,
     /// A closed feed reports `None` for ever, which would leave its arm
     /// permanently ready. Each flag retires its own arm instead.
@@ -828,6 +831,7 @@ impl ActiveChat {
             voice_probe_at: None,
             voice_probe_pending: false,
             voice_probe_paths: Vec::new(),
+            voice_unavailable: None,
             voice_finishing: false,
             remote_open: true,
             session_open: true,
@@ -1056,9 +1060,11 @@ impl Drop for ActiveChat {
 }
 
 enum VoiceUpdate {
+    /// The probed auth paths, and either the auth file dictation would use or
+    /// the sentence saying why it cannot start.
     Availability(
         Vec<std::path::PathBuf>,
-        anyhow::Result<Option<std::path::PathBuf>>,
+        anyhow::Result<Result<std::path::PathBuf, String>>,
     ),
     Status(String),
     Finished(anyhow::Result<String>),

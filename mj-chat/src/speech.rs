@@ -373,13 +373,26 @@ mod worker {
 }
 
 pub fn voice_input_supported() -> bool {
+    voice_input_unavailable_reason().is_none()
+}
+
+/// Why this build cannot record dictation, as a sentence for the person who
+/// pressed the dictation key, or `None` when it can.
+pub fn voice_input_unavailable_reason() -> Option<String> {
     #[cfg(not(target_os = "android"))]
     {
-        worker::voice_worker_executable().is_ok()
+        worker::voice_worker_executable().err().map(|error| {
+            let error = format!("{error:#}");
+            let mut characters = error.chars();
+            let error = characters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(characters).collect::<String>()
+            });
+            format!("Dictation is unavailable. {error}.")
+        })
     }
     #[cfg(target_os = "android")]
     {
-        false
+        Some("Dictation is unavailable on this platform.".to_owned())
     }
 }
 

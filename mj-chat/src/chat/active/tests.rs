@@ -822,6 +822,44 @@ async fn dictation_completion_preserves_edits_and_recovers_after_errors() {
     assert_eq!(chat.draft(), "edited while recording spoken words");
 }
 
+/// Launch findings A-4 and E-9: with no voice helper or no dictation sign-in,
+/// the dictation chord changed nothing on screen and wrote no log line, so the
+/// key looked broken. It now says why nothing started.
+#[tokio::test]
+async fn the_dictation_chord_says_why_dictation_is_unavailable() {
+    let fixture =
+        mj_client::session::replacement_session_test_fixture("session-dictation-unavailable", 72);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+
+    chat.toggle_dictation();
+
+    assert!(!chat.state.voice_active);
+    let notice = chat.state.notice().expect("the chord explains itself");
+    assert!(notice.starts_with("Dictation is unavailable"), "{notice}");
+    assert_eq!(chat.draft(), "");
+
+    // Once the probe has answered, the chord gives its reason.
+    chat.apply_voice_update(VoiceUpdate::Availability(
+        Vec::new(),
+        Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
+    ));
+    chat.state.clear_notice();
+    chat.toggle_dictation();
+    assert_eq!(
+        chat.state.notice().as_deref(),
+        Some(io::DICTATION_NEEDS_A_CODEX_PROFILE)
+    );
+    assert!(!chat.state.voice_active);
+}
+
 #[tokio::test]
 async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-replaced", 73);

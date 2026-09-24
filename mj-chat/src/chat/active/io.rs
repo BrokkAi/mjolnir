@@ -366,6 +366,15 @@ impl ActiveChat {
         spawn_transcript_prefix(pending, attempt, self.chat_io_tx.clone());
     }
 
+    /// The sentence the dictation key shows when dictation cannot start, so
+    /// the key never does nothing without saying why (launch findings A-4
+    /// and E-9).
+    pub(crate) fn dictation_unavailable_notice(&self) -> String {
+        self.voice_unavailable
+            .clone()
+            .unwrap_or_else(|| DICTATION_NOT_CHECKED.to_owned())
+    }
+
     pub(crate) fn refresh_voice_availability(&mut self) {
         let Some(context) = &self.context else {
             return;
@@ -374,6 +383,7 @@ impl ActiveChat {
         if paths != self.voice_probe_paths {
             self.voice_probe_paths.clone_from(&paths);
             self.voice_auth = None;
+            self.voice_unavailable = None;
             self.state.set_voice_available(false);
             self.voice_probe_at = None;
         }
@@ -390,11 +400,14 @@ impl ActiveChat {
         tokio::spawn(async move {
             let probed_paths = paths.clone();
             let result = tokio::task::spawn_blocking(move || {
-                if crate::speech::voice_input_supported() {
-                    mj_client::auth::available_auth(paths)
-                } else {
-                    None
+                if let Some(reason) = crate::speech::voice_input_unavailable_reason() {
+                    return Err(reason);
                 }
+                if paths.is_empty() {
+                    return Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned());
+                }
+                mj_client::auth::available_auth(paths)
+                    .ok_or_else(|| DICTATION_NEEDS_A_CHATGPT_SIGN_IN.to_owned())
             })
             .await;
             let result = result
@@ -413,9 +426,15 @@ impl ActiveChat {
                     return;
                 }
                 match result {
-                    Ok(path) => {
-                        self.state.set_voice_available(path.is_some());
-                        self.voice_auth = path;
+                    Ok(Ok(path)) => {
+                        self.state.set_voice_available(true);
+                        self.voice_auth = Some(path);
+                        self.voice_unavailable = None;
+                    }
+                    Ok(Err(reason)) => {
+                        self.state.set_voice_available(false);
+                        self.voice_auth = None;
+                        self.voice_unavailable = Some(reason);
                     }
                     Err(error) => self.state.set_notice(error.to_string()),
                 }
@@ -543,3 +562,9 @@ impl ActiveChat {
         }
     }
 }
+
+/// Shown until the first availability probe answers. A conversation opened
+/// without its session's settings never probes, so this also covers that.
+const DICTATION_NOT_CHECKED: &str = "Dictation is unavailable until Mjolnir has checked for the voice helper and a Codex sign-in. Try again in a moment.";
+pub(super) const DICTATION_NEEDS_A_CODEX_PROFILE: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is configured. Add one in Setup.";
+const DICTATION_NEEDS_A_CHATGPT_SIGN_IN: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is signed in that way; an API key does not work. Sign a Codex profile in with ChatGPT.";
