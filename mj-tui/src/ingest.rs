@@ -539,6 +539,23 @@ impl DashboardState {
         }
     }
 
+    /// Puts the listed workspace tabs first, in the given order, ahead of
+    /// any others. The host passes the workspaces in creation order, so the
+    /// tabs read the same after a restart; ids alone are random.
+    pub fn order_workspaces(&mut self, ids: &[String]) {
+        let mut order = ids
+            .iter()
+            .filter(|id| self.workspace_order.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in &self.workspace_order {
+            if !order.contains(id) {
+                order.push(id.clone());
+            }
+        }
+        self.workspace_order = order;
+    }
+
     pub fn set_workspace_name(&mut self, workspace_name: String) {
         if self.workspace_name != workspace_name {
             self.workspace_name = workspace_name;

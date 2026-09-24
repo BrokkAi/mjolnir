@@ -146,6 +146,54 @@ fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
     assert!(!remediation.contains("mj setup"), "{remediation}");
 }
 
+/// Sessions start from a plain project directory without any bundle, so a
+/// configuration with an enabled profile and no bundle is complete.
+#[test]
+fn a_config_without_a_bundle_is_ready_for_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: directory.path().join("codex-home"),
+        environment: std::collections::BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    Config {
+        profiles: [("work".to_owned(), profile)].into_iter().collect(),
+        ..Config::default()
+    }
+    .save_to(&path)
+    .unwrap();
+
+    let (_, checks) = configuration_checks(&path);
+
+    let check = checks
+        .iter()
+        .find(|check| check.id == "config.session-prerequisites")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
+    assert!(all_ready(&checks));
+}
+
+#[test]
+fn a_config_without_an_enabled_profile_cannot_start_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    Config::default().save_to(&path).unwrap();
+
+    let (_, checks) = configuration_checks(&path);
+
+    let check = checks
+        .iter()
+        .find(|check| check.id == "config.session-prerequisites")
+        .unwrap();
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert!(check.detail.contains("profile"), "{}", check.detail);
+    assert!(!check.detail.contains("bundle"), "{}", check.detail);
+}
+
 /// A newer build's configuration is the one case doctor cannot read and the
 /// user cannot repair in the file, so no check in the run may send them to fix
 /// TOML; the checks that depend on a configuration skip and say why.
@@ -484,6 +532,8 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
     let mut responses = passing_podman_probes();
     responses.push(Ok(output(b"")));
     responses.push(Ok(failed(b"")));
+    // The built-in `podman` target the dashboard also lists.
+    responses.push(Ok(output(b"")));
     let executor = FakeExecutor::new(responses);
     let config = config_with([
         (
@@ -510,11 +560,13 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
         vec![
             "runtime.podman",
             "runtime.podman.image.alpha",
-            "runtime.podman.image.beta"
+            "runtime.podman.image.beta",
+            "runtime.podman.image.podman"
         ]
     );
     assert_eq!(checks[1].status, CheckStatus::Ready);
     assert_eq!(checks[2].status, CheckStatus::Fixable);
+    assert_eq!(checks[3].status, CheckStatus::Ready);
 }
 
 #[test]
@@ -553,6 +605,72 @@ fn docker_checks_probe_the_daemon_then_the_configured_image() {
     assert_eq!(
         commands[1].args,
         ["image", "inspect", "ghcr.io/example/dev:1"]
+    );
+}
+
+/// The dashboard lists the built-in `docker` target (and downloads its image)
+/// without any configured Docker target. Doctor checks the same target set:
+/// it probes Docker and the image for the built-in target, and when Docker
+/// is missing it reports the built-in target as unavailable, not as a fault.
+#[test]
+fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
+    let executor = FakeExecutor::new([
+        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(b"image metadata\n")),
+    ]);
+    let checks = docker_checks(Ok(&Config::default()), &executor, false);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| (check.id.as_str(), check.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("runtime.docker", CheckStatus::Ready),
+            ("runtime.docker.image.docker", CheckStatus::Ready)
+        ]
+    );
+
+    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let checks = docker_checks(Ok(&Config::default()), &missing_image, false);
+    assert_eq!(
+        checks[1].status,
+        CheckStatus::Warning,
+        "the dashboard downloads a built-in target's image itself: {}",
+        checks[1].detail
+    );
+
+    let checks = docker_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Unsupported);
+    assert!(
+        checks[0].detail.contains("built-in `docker` target"),
+        "{}",
+        checks[0].detail
+    );
+
+    let configured = config_with([(
+        "docker",
+        TargetTemplate::LocalDocker {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]);
+    let checks = docker_checks(Ok(&configured), &AlwaysFailingExecutor, false);
+    assert_eq!(
+        checks[0].status,
+        CheckStatus::Fixable,
+        "a target the user configured is still a fault to fix"
+    );
+}
+
+#[test]
+fn podman_checks_cover_the_built_in_podman_target() {
+    let checks = podman_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Unsupported);
+    assert!(
+        checks[0].detail.contains("built-in `podman` target"),
+        "{}",
+        checks[0].detail
     );
 }
 
@@ -1309,6 +1427,7 @@ fn harness_discovery_reports_each_authentication_state() {
             },
         ],
         true,
+        "ctrl+b s",
     );
 
     assert_eq!(check.status, CheckStatus::Ready);
@@ -1324,14 +1443,66 @@ fn harness_discovery_reports_each_authentication_state() {
     );
 }
 
+/// Settings opens with `prefix+s`; F7 is not bound, so no fix may send the
+/// user there, and every fix names the key the configuration binds.
+#[test]
+fn settings_fixes_name_the_bound_settings_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.toml");
+    let (_, checks) = configuration_checks(&missing);
+    let empty = Config::default();
+    let executor = FakeExecutor::new([]);
+    let checks = checks
+        .into_iter()
+        .chain(harness_checks(Ok(&empty), &executor))
+        .collect::<Vec<_>>();
+    for check in &checks {
+        let remediation = check.remediation.as_deref().unwrap_or_default();
+        assert!(!remediation.contains("F7"), "{remediation}");
+    }
+    assert!(
+        checks
+            .iter()
+            .filter_map(|check| check.remediation.as_deref())
+            .all(|fix| !fix.contains("Settings") || fix.contains("ctrl+b s")),
+        "{checks:?}"
+    );
+}
+
+/// An installed user has no repository checkout, so the Podman fix links the
+/// published guide, and the human report prints the fix once, not also inside
+/// the detail.
+#[test]
+fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
+    for response in [
+        Err(anyhow!("No such file or directory (os error 2)")),
+        Ok(failed(b"podman: command not found")),
+    ] {
+        let check = local_podman_runtime_check(&FakeExecutor::new([response]));
+        assert_eq!(check.status, CheckStatus::Fixable);
+        let remediation = check.remediation.as_deref().unwrap();
+        let mut human = Vec::new();
+        render_human(std::slice::from_ref(&check), &mut human).unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains("docs/PODMAN.md"), "{human}");
+        assert!(
+            remediation.contains("https://mjolnir.brokk.ai/podman/"),
+            "{remediation}"
+        );
+        assert_eq!(human.matches("sudo apt install").count(), 1, "{human}");
+    }
+}
+
 #[test]
 fn missing_harness_homes_are_fixable_without_a_configured_profile() {
-    let check = harness_discovery_check_from(&[], false);
+    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
 
     assert_eq!(check.status, CheckStatus::Fixable);
     assert_eq!(
         check.remediation.as_deref(),
-        Some("Install and sign in to a supported harness, then open F7 Settings → Agent Profiles.")
+        Some(
+            "Install and sign in to a supported harness, then open Mjolnir, press ctrl+b s for Settings, and choose Agent Profiles."
+        )
     );
 }
 
@@ -1684,6 +1855,22 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     assert!(instructions.contains("Podman **4.3.0 or newer**"));
     assert!(instructions.contains("kind = \"docker\""));
     assert!(instructions.contains("--opt type=overlay"));
+}
+
+#[test]
+fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
+    for platform in [InstructionsPlatform::Linux, InstructionsPlatform::Macos] {
+        let instructions = setup_instructions(platform);
+        assert!(!instructions.contains("Hel"), "{instructions}");
+        assert!(instructions.contains("## Local bare runtime"));
+        assert!(instructions.contains("Node.js 22 or newer and npm"));
+        assert!(instructions.ends_with('\n'));
+        assert!(!instructions.contains("](#"), "{instructions}");
+        assert!(!instructions.contains("keep-id:uid=,"));
+        assert!(!instructions.contains("Disposable EC2"));
+    }
+    let macos = setup_instructions(InstructionsPlatform::Macos);
+    assert!(!macos.contains("local Podman"), "{macos}");
 }
 
 /// Releases before this one wrote Mjolnir's own refs into user repositories

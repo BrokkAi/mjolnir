@@ -38,7 +38,7 @@ enum CommandSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CommandChoice {
-    name: String,
+    pub(super) name: String,
     description: String,
     input_hint: Option<String>,
     source: CommandSource,
@@ -370,7 +370,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
         ),
         (
             "attach",
-            "add an image file to the current prompt",
+            "add an image file (PNG, JPEG or WebP) to the prompt",
             Some("path"),
         ),
     ]
@@ -690,7 +690,7 @@ mod tests {
 
         chat.input = "/plan".into();
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert_eq!(chat.input, "/plan");
+        assert!(chat.input.is_empty());
 
         chat.input = "/goal ship the release".into();
         assert_eq!(
@@ -855,7 +855,7 @@ mod tests {
                     assert!(chat.input.is_empty());
                 } else {
                     assert_eq!(result, ChatAction::None);
-                    assert_eq!(chat.input, command);
+                    assert!(chat.input.is_empty());
                     assert!(chat.feedback.current().unwrap().contains("not supported"));
                 }
             }

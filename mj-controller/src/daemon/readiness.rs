@@ -59,7 +59,7 @@ impl UnreadySession {
     /// The sentence stored on the record and shown to the person.
     pub(super) fn cause(&self) -> String {
         let mut cause = format!(
-            "the harness never advertised its configuration within {}s, so this session cannot be used; close it and create a replacement",
+            "the harness never advertised its configuration within {}s, so this session cannot be used; destroy it and create a replacement",
             self.waited.as_secs()
         );
         if let Some(detail) = &self.detail {

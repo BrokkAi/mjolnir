@@ -517,7 +517,7 @@ impl Controller {
             .clone();
         ensure!(
             has_nothing_to_checkpoint(&session),
-            "session {session_id} has a workspace to checkpoint; close it gracefully instead"
+            "session {session_id} has a workspace to checkpoint; suspend it instead"
         );
         self.stop_target_and_settle(session_id, &session, executor, &persist)
     }

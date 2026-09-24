@@ -376,7 +376,7 @@ pub(super) async fn serve_session(
         .or(spec.context_restore.as_ref())
     {
         for (key, value) in &reset.selectors {
-            apply_session_selector(
+            let applied = apply_session_selector(
                 connection,
                 &session_id,
                 &mut config_options,
@@ -385,8 +385,26 @@ pub(super) async fn serve_session(
                 key,
                 value,
             )
-            .await
-            .with_context(|| format!("restore {key} after clear"))?;
+            .await;
+            let Err(error) = applied else { continue };
+            // These values are what the previous bridge reported, not what
+            // the user chose (the accepted configuration above carries that).
+            // A resumed Claude bridge reports its model as a raw id it does
+            // not list, and it refuses that id when it is sent back. Such a
+            // value cannot be restored, so the new conversation keeps the
+            // bridge's own value. The rollback after a failed clear never
+            // fails on a selector: it must leave a usable session.
+            if spec.clear_context_request.is_some()
+                && selector_value_is_offered(&config_options, key, value)
+            {
+                return Err(error.context(format!("restore {key} after clear")));
+            }
+            tracing::warn!(
+                selector = key.as_str(),
+                value = value.as_str(),
+                error = format!("{error:#}"),
+                "kept the bridge's value after clear because the reported value could not be restored"
+            );
         }
         if let Some(mode) = &reset.mode {
             enforce_execution_mode(
@@ -967,7 +985,7 @@ pub(super) async fn serve_session(
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() }).await?;
                                 } else {
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
@@ -994,7 +1012,7 @@ pub(super) async fn serve_session(
                                 approved_plan = None;
                                 implementation_deadline = None;
                                 if !prompt_running {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                         request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
@@ -1009,7 +1027,7 @@ pub(super) async fn serve_session(
                                         pending_steer = Some(start_steer(connection, &session_id, cancel_id, steering_prompt));
                                     }
                                 } else {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     if cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }
@@ -1241,7 +1259,7 @@ pub(super) async fn serve_session(
                 )
                 .await;
                 match applied {
-                    Ok(()) => {
+                    Ok(value) => {
                         spec.accepted_config
                             .lock()
                             .map_err(|_| {
@@ -1341,7 +1359,15 @@ pub(super) async fn serve_session(
                 .await?;
             }
             CommandRequest::Cancel { request_id, .. } => {
-                apply_cancel(connection, &session_id, request_id, events, terminals).await?;
+                apply_cancel(
+                    connection,
+                    &session_id,
+                    request_id,
+                    events,
+                    terminals,
+                    pending_elicitations,
+                )
+                .await?;
             }
             CommandRequest::ReleasePrompt { request_id, .. } => {
                 // The adapter's reply ended this prompt before the coordinator

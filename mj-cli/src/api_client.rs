@@ -6,6 +6,7 @@
 //! means the CLI and the server cannot disagree about them.
 
 pub(crate) mod events;
+mod pinned_tls;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,10 +35,32 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
 /// that reaches its deadline answers `timeout` rather than failing the client.
 const WAIT_SLACK: Duration = Duration::from_secs(30);
 
+/// How a request the daemon refused with 429 (all of its concurrent action
+/// slots are taken) is retried. A 429 is answered before the daemon admits
+/// the action, so sending it again cannot repeat any work.
+#[derive(Debug, Clone, Copy)]
+struct BusyRetry {
+    first_delay: Duration,
+    max_delay: Duration,
+    /// How long to keep retrying before reporting the refusal.
+    limit: Duration,
+}
+
+impl BusyRetry {
+    /// Session creation holds a slot until provisioning ends, which over SSH
+    /// takes minutes, so the client waits about as long as one provision.
+    const DEFAULT: Self = Self {
+        first_delay: Duration::from_secs(2),
+        max_delay: Duration::from_secs(15),
+        limit: Duration::from_secs(600),
+    };
+}
+
 /// A client for one daemon's API.
 pub(crate) struct ApiClient {
     base_url: String,
     token: String,
+    busy_retry: BusyRetry,
     http: reqwest::Client,
 }
 
@@ -47,7 +70,16 @@ impl ApiClient {
     pub(crate) async fn connect() -> Result<Self> {
         let mut client = daemon::connect_or_start().await?;
         let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
-        probe_api(&viewer_url).await?;
+        // The viewer may serve a self-signed certificate; the daemon publishes
+        // its SHA-256 beside the URL so this client trusts exactly that one.
+        let certificate_sha256 = match client.web_access().await? {
+            mj_client::web::WebViewerAccess::Ready {
+                certificate_sha256, ..
+            } => certificate_sha256,
+            _ => None,
+        };
+        let http = http_client(certificate_sha256.as_deref())?;
+        probe_api(&http, &viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)
             .with_context(|| {
@@ -64,18 +96,21 @@ impl ApiClient {
                 token_path.display()
             );
         }
-        Self::new(viewer_url, token)
+        Ok(Self::with_http(viewer_url, token, http))
     }
 
+    #[cfg(test)]
     pub(crate) fn new(base_url: String, token: String) -> Result<Self> {
-        Ok(Self {
+        Ok(Self::with_http(base_url, token, http_client(None)?))
+    }
+
+    fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
+        Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
-            http: reqwest::Client::builder()
-                .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .context("build the API HTTP client")?,
-        })
+            busy_retry: BusyRetry::DEFAULT,
+            http,
+        }
     }
 
     pub(crate) fn base_url(&self) -> &str {
@@ -111,7 +146,43 @@ impl ApiClient {
     /// One request, separating "the API refused it" from "the API could not be
     /// reached or does not speak this contract". Only the refusal is something
     /// a caller may interpret.
+    ///
+    /// A 429 means the daemon is already running as many actions as it allows
+    /// and did not admit this one. The request is sent again with growing
+    /// delays for up to [`BusyRetry::limit`], and each wait is reported on
+    /// stderr so the person sees what the command is waiting for.
     async fn dispatch(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<std::result::Result<reqwest::Response, ApiError>> {
+        let started = std::time::Instant::now();
+        let mut delay = self.busy_retry.first_delay;
+        let mut request = request;
+        loop {
+            let retry = request.try_clone();
+            match self.dispatch_once(request).await? {
+                Err(failure) if failure.status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    let Some(retry) = retry else {
+                        return Ok(Err(failure));
+                    };
+                    if started.elapsed() + delay > self.busy_retry.limit {
+                        return Ok(Err(failure));
+                    }
+                    eprintln!(
+                        "The daemon is busy: {}. Trying again in {}s.",
+                        failure.message.trim_end_matches("; retry shortly"),
+                        delay.as_secs().max(1),
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(self.busy_retry.max_delay);
+                    request = retry;
+                }
+                outcome => return Ok(outcome),
+            }
+        }
+    }
+
+    async fn dispatch_once(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<std::result::Result<reqwest::Response, ApiError>> {
@@ -518,9 +589,21 @@ impl ApiClient {
     }
 }
 
+/// The HTTP client for the daemon API. With a pin it trusts only the
+/// certificate the daemon published; without one (plain HTTP, or a publicly
+/// trusted Tailscale certificate) it verifies as any HTTPS client does.
+fn http_client(certificate_sha256: Option<&str>) -> Result<reqwest::Client> {
+    let mut builder =
+        reqwest::Client::builder().user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")));
+    if let Some(pin) = certificate_sha256 {
+        builder = builder.tls_backend_preconfigured(pinned_tls::pinned_client_config(pin)?);
+    }
+    builder.build().context("build the API HTTP client")
+}
+
 /// An unauthenticated versioned 401 proves the route exists before a token is read.
-async fn probe_api(base_url: &str) -> Result<()> {
-    let response = reqwest::Client::new()
+async fn probe_api(http: &reqwest::Client, base_url: &str) -> Result<()> {
+    let response = http
         .get(format!(
             "{}/api/v1/sessions",
             base_url.trim_end_matches('/')
@@ -779,17 +862,79 @@ mod tests {
         );
     }
 
+    /// A 429 is sent before the daemon admits anything, so the client sends
+    /// the request again until it is admitted, and gives up with the
+    /// daemon's own reason once its time runs out.
+    #[tokio::test]
+    async fn a_busy_daemon_is_retried_until_it_admits_the_request() {
+        let refusals = Arc::new(Mutex::new(2_usize));
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions/{session_id}/prompt",
+                axum::routing::post(|State(refusals): State<Arc<Mutex<usize>>>| async move {
+                    let mut left = refusals.lock().unwrap();
+                    if *left > 0 {
+                        *left -= 1;
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(serde_json::json!({ "error": "at its concurrent action limit" })),
+                        );
+                    }
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({ "turn_id": 7 })),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let mut response = next.run(request).await;
+                    response
+                        .headers_mut()
+                        .insert(API_VERSION_HEADER, "1".parse().unwrap());
+                    response
+                },
+            ))
+            .with_state(refusals.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut client = ApiClient::new(url, "secret-token".into()).unwrap();
+        client.busy_retry = BusyRetry {
+            first_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(20),
+            limit: Duration::from_secs(5),
+        };
+
+        let response = client.prompt("session-1", "hello".into()).await.unwrap();
+        assert_eq!(response.turn_id, 7);
+        assert_eq!(*refusals.lock().unwrap(), 0);
+
+        *refusals.lock().unwrap() = usize::MAX;
+        client.busy_retry.limit = Duration::from_millis(50);
+        let error = client
+            .prompt("session-1", "hello".into())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("concurrent action limit"),
+            "unexpected error: {error:#}"
+        );
+    }
+
     #[tokio::test]
     async fn api_probe_succeeds_without_reading_a_token() {
         let (url, seen) = serve(Some("1")).await;
-        probe_api(&url).await.unwrap();
+        probe_api(&http_client(None).unwrap(), &url).await.unwrap();
         assert!(
             seen.lock().unwrap().is_empty(),
             "the support probe must not need authentication"
         );
         let (url, _) = serve(Some("2")).await;
         assert!(
-            probe_api(&url)
+            probe_api(&http_client(None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -801,7 +946,7 @@ mod tests {
             axum::serve(listener, Router::new()).await.unwrap();
         });
         assert!(
-            probe_api(&url)
+            probe_api(&http_client(None).unwrap(), &url)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -832,6 +977,80 @@ mod tests {
         assert!(
             format!("{error:#}").contains("version 2"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    /// Serve the API's unauthenticated probe over HTTPS with a generated
+    /// self-signed certificate; returns the URL and the certificate's pin.
+    async fn serve_https(certificate_authority: bool) -> (String, String) {
+        mj_controller::server::install_rustls_crypto_provider();
+        let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+        if certificate_authority {
+            // What `openssl req -x509` makes by default, as the lab does.
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        }
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
+        let pin =
+            mj_controller::server::api::served_certificate_sha256(certificate.pem().as_bytes())
+                .unwrap();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            certificate.pem().into_bytes(),
+            key.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let app = Router::new().route(
+            "/api/v1/sessions",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(API_VERSION_HEADER, API_VERSION)],
+                )
+            }),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, tls)
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (url, pin)
+    }
+
+    #[tokio::test]
+    async fn the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin() {
+        let (url, pin) = serve_https(true).await;
+        let error = probe_api(&http_client(None).unwrap(), &url)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("CaUsedAsEndEntity"),
+            "unexpected error: {error:#}"
+        );
+        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_cli_reaches_a_viewer_serving_a_self_signed_leaf_certificate_by_its_pin() {
+        let (url, pin) = serve_https(false).await;
+        probe_api(&http_client(Some(&pin)).unwrap(), &url)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_cli_refuses_a_certificate_other_than_the_pinned_one() {
+        let (url, _pin) = serve_https(true).await;
+        let other = "0".repeat(64);
+        assert!(
+            probe_api(&http_client(Some(&other)).unwrap(), &url)
+                .await
+                .is_err()
         );
     }
 }

@@ -166,7 +166,12 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/maskable-512.png", get(maskable_512))
         .route("/apple-touch-icon.png", get(apple_touch_icon))
         .route("/fonts/jetbrains-mono.woff2", get(mono_font))
-        .route("/auth/session", post(create_session).delete(clear_session))
+        .route(
+            "/auth/session",
+            get(session_status)
+                .post(create_session)
+                .delete(clear_session),
+        )
         .route("/auth/login", get(create_session_from_query))
         .merge(protected)
         .nest("/api/v1", api::router(state.clone()))

@@ -456,6 +456,24 @@ pub(super) fn viewer_snapshot(
             name: workspace.name.clone(),
         })
         .collect();
+    // The published list comes from the workspace table, which omits an
+    // empty `default` and can predate a session created since (`mj new`
+    // makes one without any dashboard opening its workspace). The browser
+    // draws its tabs from this list, so a session whose workspace is missing
+    // would have no tab at all. List each such workspace by its id.
+    for session in &snapshot.sessions {
+        if !session.workspace_id.is_empty()
+            && !snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == session.workspace_id)
+        {
+            snapshot.workspaces.push(crate::server::ViewerWorkspace {
+                id: session.workspace_id.clone(),
+                name: session.workspace_id.clone(),
+            });
+        }
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -554,6 +572,17 @@ pub(super) fn viewer_snapshot(
             && operation.kind.transition_kind().is_some()
         {
             session.transitioning = true;
+        }
+        if session.state == mj_core::state::SessionState::Disconnected.as_str()
+            && session.operation.as_ref().is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    crate::server::ViewerOperationKind::Create
+                        | crate::server::ViewerOperationKind::Resume
+                )
+            })
+        {
+            session.state = crate::server::LAUNCHING_STATE.to_owned();
         }
         let live = operational.get(&session.id);
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();

@@ -764,6 +764,73 @@ pub enum TargetLocator {
     },
 }
 
+impl ManagedWorktreeTarget {
+    /// Whether `other` reaches the same checkout: the same kind and, over
+    /// SSH, the same destination, port, and login user.
+    ///
+    /// The other `ssh` options (keys, `ControlPath`, keepalives, host-key
+    /// policy) say how to connect, not where the worktree lives, so they
+    /// follow the machine's current configuration and never make a
+    /// suspended session unable to resume.
+    pub fn same_location(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local, Self::Local) => true,
+            (
+                Self::Ssh {
+                    destination,
+                    ssh_args,
+                },
+                Self::Ssh {
+                    destination: other_destination,
+                    ssh_args: other_args,
+                },
+            ) => {
+                destination == other_destination
+                    && ssh_location_option(ssh_args, 'p', "port")
+                        == ssh_location_option(other_args, 'p', "port")
+                    && ssh_location_option(ssh_args, 'l', "user")
+                        == ssh_location_option(other_args, 'l', "user")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The value `ssh` would use for an option that has both a short flag
+/// (`-p 22`, `-p22`) and an `-o` spelling (`-o Port=22`, `-oPort 22`). OpenSSH
+/// keeps the first value it sees.
+fn ssh_location_option(args: &[String], flag: char, option: &str) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(argument) = args.next() {
+        let Some(rest) = argument.strip_prefix('-') else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let Some(name) = chars.next() else { continue };
+        if name != flag && name != 'o' {
+            continue;
+        }
+        let inline = chars.as_str();
+        let value = if inline.is_empty() {
+            args.next().cloned()
+        } else {
+            Some(inline.to_owned())
+        };
+        if name == flag {
+            return value;
+        }
+        if let Some(setting) = value {
+            let (key, found) = setting
+                .split_once(['=', ' ', '\t'])
+                .unwrap_or((setting.as_str(), ""));
+            if key.trim().eq_ignore_ascii_case(option) {
+                return Some(found.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ManagedWorktreeTarget {
@@ -1795,12 +1862,35 @@ impl State {
                             != Some(target.without_launch_only_settings())
                     });
             if protected || bundle_changed || target_changed {
+                // Named as the screen names them: the session by its title,
+                // the project by its name rather than the internal bundle
+                // id, and only the parts this change touches.
+                let mut used = Vec::new();
+                if protected {
+                    used.push(format!("agent profile {:?}", session.last_profile));
+                }
+                if bundle_changed {
+                    used.push(format!("project {:?}", session.project_name(before)));
+                }
+                if target_changed {
+                    used.push(format!("runtime {:?}", session.target_template_id));
+                }
+                let used = match used.as_slice() {
+                    [only] => only.clone(),
+                    [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                    [] => unreachable!("something changed"),
+                };
+                let title = session.display_title();
+                let named = if title == session.id {
+                    format!(
+                        "a running session in project {:?}",
+                        session.project_name(before)
+                    )
+                } else {
+                    format!("the running session {title:?}")
+                };
                 bail!(
-                    "Setup would change configuration used by active session {:?}. Keep its profile {:?}, bundle {:?}, and target {:?}; add a separate entry for new settings, or stop the session before editing its configuration.",
-                    session.id,
-                    session.last_profile,
-                    session.bundle_id,
-                    session.target_template_id
+                    "Setup would change the {used} that {named} uses. Save the new settings under a new name, or stop the session first."
                 );
             }
         }

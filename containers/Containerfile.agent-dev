@@ -11,6 +11,7 @@ ARG RUST_IMAGE=docker.io/library/rust:1.96.0-trixie
 # and the version moves only when someone edits this line. Bifrost pins a newer
 # compiler than Hel does (its rust-toolchain.toml names 1.97.1), so it is built
 # in its own stage and only the binary is copied out.
+# Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
 ARG BIFROST_VERSION=0.10.7
 ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 

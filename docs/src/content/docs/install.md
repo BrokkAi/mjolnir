@@ -163,3 +163,7 @@ mj doctor
 `mj doctor` checks the controller, configuration, harness credentials, targets, and required workers. Resolve reported errors before launching a session; the [troubleshooting guide](/troubleshooting/) explains the common failures.
 
 Next, follow the [quickstart](/quickstart/) for first-run setup. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
+
+## Uninstall
+
+Stop your sessions and the daemon first; `mj daemon stop` alone leaves session workers running. The [quickstart](/quickstart/#stopping-and-uninstalling) lists what each way of stopping leaves running and which files and directories to remove.

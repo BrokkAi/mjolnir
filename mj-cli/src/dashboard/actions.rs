@@ -169,6 +169,23 @@ pub(crate) async fn apply_dashboard_action(
                 }
             });
         }
+        DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
+        DashboardAction::InterruptTurn { session_id } => {
+            // The chat is what knows the turn and sends the interrupt, so the
+            // command reaches only a conversation this terminal has open.
+            let notice = match context
+                .chats
+                .get_mut(&session_id)
+                .map(|chat| chat.interrupt_turn())
+            {
+                Some(true) => None,
+                Some(false) => Some("No turn to interrupt."),
+                None => Some("Open the conversation to interrupt its turn."),
+            };
+            if let Some(notice) = notice {
+                context.dashboard.set_notice(notice);
+            }
+        }
         DashboardAction::ExitSubagentWorkspace => {
             let parent_id = context.dashboard.subagent_parent_id().map(str::to_owned);
             context.dashboard.close_subagent_workspace();
@@ -413,6 +430,14 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::CancelWebAccess => {
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);
+        }
+        DashboardAction::LoadMountHistory => {
+            crate::dashboard::spawn_io(
+                "reading recent project directories",
+                context.dashboard_io_tx.clone(),
+                mj_controller::database::load_mount_history,
+                DashboardIoUpdate::MountHistory,
+            );
         }
         DashboardAction::CheckTargetReadiness {
             generation,

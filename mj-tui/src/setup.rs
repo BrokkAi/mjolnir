@@ -278,6 +278,15 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     {
         machines.remove(mj_core::config::LOCAL_MACHINE_ID);
     }
+    // A cleared number that has a default of its own is left out, so the
+    // configuration's default applies instead of a null it cannot read.
+    for (section, key) in [("notify", "delay_seconds"), ("subagents", "max_concurrent")] {
+        if draft[section][key].is_null()
+            && let Some(entries) = draft[section].as_object_mut()
+        {
+            entries.remove(key);
+        }
+    }
     serde_json::from_value(draft)
 }
 
@@ -429,12 +438,22 @@ fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
 /// its contents by the text it draws (`Form::set_list_contents`), so a caret
 /// in the gutter would read as a different list the moment the selection
 /// moved, cancelling the gesture a double-click is halfway through.
+///
+/// When both do not fit, the label gives way first: the value keeps its
+/// width, less a few cells of label, and the two are always separated by at
+/// least one space.
 fn setting_row(name: &str, value: &str, width: u16) -> Line<'static> {
+    const MIN_LABEL: usize = 8;
     let width = usize::from(width).max(SETTING_GUTTER.len() + 4);
-    let name = truncate(name, width.saturating_sub(SETTING_GUTTER.len() + 4));
-    let room = width.saturating_sub(SETTING_GUTTER.len() + name.chars().count() + 2);
-    let value = truncate(value, room);
-    let gap = room.saturating_sub(value.chars().count()) + 1;
+    // Everything between the gutter and the trailing space.
+    let inner = width - SETTING_GUTTER.len() - 1;
+    let label_floor = name.chars().count().min(MIN_LABEL);
+    let value = truncate(value, inner.saturating_sub(label_floor + 1));
+    let value_width = value.chars().count();
+    let name = truncate(name, inner.saturating_sub(value_width + 1));
+    let gap = inner
+        .saturating_sub(name.chars().count() + value_width)
+        .max(1);
     Line::from(vec![
         Span::raw(SETTING_GUTTER),
         Span::raw(name),
@@ -563,15 +582,14 @@ fn value_summary(
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
+        // The eligible profiles are a page of checkboxes, one per profile, so
+        // the row counts the checked ones instead of counting settings.
+        Value::Object(entries) if child_path == ["subagents", "eligible_profiles"] => {
+            let selected = entries.values().filter(|value| **value == true).count();
+            format!("{selected} of {} selected  ›", entries.len())
+        }
         Value::Object(entries) => format!("{} settings  ›", entries.len()),
         Value::Array(entries) => format!("{} entries  ›", entries.len()),
-        Value::Bool(value)
-            if path.first().is_some_and(|section| section == "profiles")
-                && path.len() == 2
-                && key == "enabled" =>
-        {
-            Checkbox::marker(*value).to_owned()
-        }
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.
@@ -582,7 +600,8 @@ fn value_summary(
                 Checkbox::marker(false).to_owned()
             }
         }
-        Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
+        // Every on/off setting is the same checkbox, whichever section holds it.
+        Value::Bool(value) => Checkbox::marker(*value).to_owned(),
         // The cache size is measured in whole GB, whatever unit the file
         // spells it in. Only a hand-edited invalid value keeps its own text.
         Value::String(size) if is_build_cache_field(&child_path, "max_size") => {
@@ -593,6 +612,10 @@ fn value_summary(
         // replaces the number as well as the "Never" placeholder.
         _ => match automatic.filter(|_| key == "archive_after_days") {
             Some(label) => label,
+            None if storage_path(&child_path) == ["theme"] => schema::theme_report(
+                &schema::choice_label(&child_path, value, draft),
+                theme::no_color_requested(),
+            ),
             None => schema::choice_label(&child_path, value, draft),
         },
     };
@@ -1302,8 +1325,7 @@ impl SetupDialog {
             // A half-typed or cleared number means "Never" until it parses.
             return Some(editor.input.to_string().trim().parse::<u32>().ok());
         }
-        // The draft keeps an edited number as text until it is saved, so both
-        // shapes have to read the same.
+        // Edits store a number; a hand-written string is still read the same.
         Some(match &self.draft["sessionwiki"]["archive_after_days"] {
             Value::String(text) => text.trim().parse::<u32>().ok(),
             value => value.as_u64().and_then(|days| u32::try_from(days).ok()),
@@ -1439,22 +1461,8 @@ impl SetupDialog {
             Value::Null
         } else if !editor.choices.is_empty() {
             editor.choices[editor.selected].clone()
-        } else if editor
-            .path
-            .last()
-            .is_some_and(|key| key == "context_window_bytes")
-        {
-            if editor.input.trim().is_empty() {
-                Value::Null
-            } else {
-                Value::from(
-                    editor
-                        .input
-                        .trim()
-                        .parse::<u64>()
-                        .map_err(|_| "Enter a whole number of bytes.".to_owned())?,
-                )
-            }
+        } else if let Some(number) = schema::whole_number(&editor.path) {
+            schema::parse_whole_number(number, &editor.input.to_string())?
         } else if is_build_cache_field(&editor.path, "max_size") {
             let text = editor.input.trim().to_owned();
             if text.is_empty() {
@@ -1498,6 +1506,7 @@ impl SetupDialog {
         if clear
             && !defaults.get(&key).is_some_and(Value::is_null)
             && editor.path != ["interface", "prefix"]
+            && !schema::whole_number(&editor.path).is_some_and(|number| number.defaulted)
         {
             return Err("This setting is required. Choose a value instead of clearing it.".into());
         }
@@ -1603,7 +1612,11 @@ impl SetupDialog {
     }
 
     fn sync_review(&mut self, review: &mj_core::config::ReviewConfig) {
-        self.draft["review"] = serde_json::to_value(review).expect("review serializes");
+        // The saved form leaves defaults out; the draft keeps every field,
+        // so the page reads the same before and after a visit.
+        let mut value = serde_json::to_value(review).expect("review serializes");
+        schema::expand(&mut value, &mut vec!["review".to_owned()]);
+        self.draft["review"] = value;
     }
 
     fn sync_review_validation(&mut self, review: &ReviewSettingsDialog) {
@@ -1700,6 +1713,21 @@ impl ModalSurface for SetupDialog {
             self.form
                 .get_mut()
                 .set_dismiss_actions(&[SetupControl::Back]);
+            // Leaving discards only this field's edit, so the prompt says so.
+            let field = if editor.adding {
+                "the new entry's name".to_owned()
+            } else {
+                format!(
+                    "“{}”",
+                    breadcrumb(&editor.path, &self.draft)
+                        .rsplit(" › ")
+                        .next()
+                        .unwrap_or_default()
+                )
+            };
+            self.form.get_mut().set_confirmation_message(Some(format!(
+                "Your edit to {field} will be lost. The rest of the Settings draft is kept."
+            )));
             self.form.get_mut().set_default_action(SetupControl::Apply);
         } else {
             // The outer setup draft uses its normalized saved-config comparison.
@@ -2443,11 +2471,23 @@ pub(crate) fn render_setup(
     // Back and the commit share the dialog's bottom row; the page's own
     // actions stack in a column beside the body.
     let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    // A notice takes three rows, or as many as its wrapped text needs, as
+    // long as the page keeps a few rows of its own above it.
+    let notice_rows = dialog.notice.as_ref().map_or(3, |notice| {
+        let needed = Paragraph::new(notice.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width);
+        let room = footer_row.y.saturating_sub(body_y).saturating_sub(3);
+        u16::try_from(needed).unwrap_or(u16::MAX).min(room).max(3)
+    });
     let band = Rect::new(
         inner.x,
         body_y,
         inner.width,
-        inner.height.saturating_sub(7 + u16::from(nested)).max(1),
+        inner
+            .height
+            .saturating_sub(4 + notice_rows + u16::from(nested))
+            .max(1),
     );
     // The three rows a notice would occupy belong to the page while no notice
     // is showing in them, never to the footer's row.
@@ -2590,6 +2630,12 @@ pub(crate) fn render_setup(
                 ),
                 None => String::new(),
             };
+            // An open dropdown draws the value itself over this row.
+            let summary = if choice_editor && index == dialog.selected {
+                String::new()
+            } else {
+                summary
+            };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));
             let unavailable = blocked
@@ -2711,7 +2757,14 @@ pub(crate) fn render_setup(
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            editor_notice.unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
+            editor_notice.unwrap_or_else(|| {
+                Rect::new(
+                    inner.x,
+                    footer_row.y.saturating_sub(notice_rows),
+                    inner.width,
+                    notice_rows,
+                )
+            }),
         );
     }
     form.end_frame(initial);

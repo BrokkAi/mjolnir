@@ -10,7 +10,9 @@ But if you expand beyond that, Mjolnir offers flexibility across all three:
 2. Move sessions across harnesses (codex to claude code)
 3. Move sessions across machines or containers (local workstation to ec2)
 
-... while handling details like cross-harness memory sync and integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
+... while handling details like cross-harness memory sync and integrating a no-setup web ui via Tailscale for when you're not at your desk.
+
+By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifier, through a public Cloudflare proxy, to tell a question from ongoing work. [Security boundaries](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default) lists everything that leaves your machine and which parts can be turned off.
 
 Mjolnir is free and open source from the engineers at [Brokk AI]([url](https://brokk.ai/)). We're not trying to make money off of mj; we built it because we wanted to use it.
 
@@ -143,13 +145,16 @@ Switching to another directory-linked workspace also switches the folder and
 saved setup used by **New**; unlinked workspaces keep the normal launch wizard.
 Running `mj go` again selects the invoking directory's workspace regardless of
 which workspace you last visited. **New** (or **prefix+c**) starts another concurrent
-session with those choices. **Menu → Change setup** changes
+session with those choices. **Change fast-start setup** in the command palette (**prefix+:**) changes
 this project's next launch; `mj go --global-default` also changes the default
 for new projects. `mj go --setup` opens that setup directly.
 
 The context banner identifies the source folder and the selected session's
-actual working directory, branch, account, and target. Local bare sessions
-share the selected folder unless you enable a separate worktree in setup.
+actual working directory, branch, account, and target. By default a local bare
+session runs in a managed Git worktree at `.mj/worktrees/<id>` inside your
+repository, on a new branch named `mj/<id>`. To let the session work in the
+folder itself instead, clear **Create managed worktree** on the wizard's review
+step; the agent then edits your checkout directly.
 Container and other isolated targets use the existing repository-clone flow:
 they start from the remote default branch, not uncommitted local changes.
 SSH bare targets ask once for the remote folder. Repository choices, remote

@@ -135,6 +135,8 @@ enum ChatIoUpdate {
     },
     /// The chosen reviewer is running and the review can begin.
     ReviewerStarted(std::result::Result<(), String>),
+    /// A sentence about a reviewer form answer, for the conversation.
+    ReviewerNotice(String),
     /// A page of the reviewer's own relay events.
     ReviewerEvents {
         result: std::result::Result<Vec<mj_core::relay::RelayEvent>, String>,
@@ -341,6 +343,7 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         // acting on one starts more reviewer work.
         ChatIoUpdate::ReviewerPrepared { .. }
         | ChatIoUpdate::ReviewerStarted(_)
+        | ChatIoUpdate::ReviewerNotice(_)
         | ChatIoUpdate::ReviewerEvents { .. }
         | ChatIoUpdate::TurnReviewEvents { .. } => {}
         ChatIoUpdate::AttachmentFinished(_) => {

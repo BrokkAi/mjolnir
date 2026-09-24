@@ -1334,7 +1334,7 @@ fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, Export
         // reason. That is the caller's to fix, so it is a refusal, not a
         // failed export.
         mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE => Err(ExportError::Refused(
-            refusal_reason(&output.stderr, purpose),
+            refusal_reason(&output.stdout, &output.stderr, purpose),
         )),
         status => Err(ExportError::Failed(anyhow!(
             "{purpose} failed with status {status}: {}",
@@ -1345,13 +1345,18 @@ fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, Export
 
 /// The worker's own words for why it refused, or a plain statement when it
 /// said nothing.
-fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
-    let reason = String::from_utf8_lossy(stderr);
-    let reason = reason.trim();
-    match reason.is_empty() {
-        true => format!("{purpose} was refused by the target"),
-        false => reason.to_owned(),
-    }
+///
+/// A refusing worker prints its reason on standard output, where nothing else
+/// is written once it has refused. Standard error also carries the worker's
+/// log, so reading the reason from there put a DEBUG line in front of it
+/// whenever `RUST_LOG` was set (F-13). A worker from before that change
+/// prints the reason only on standard error, which is still read then.
+fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
+    [stdout, stderr]
+        .into_iter()
+        .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
+        .find(|reason| !reason.is_empty())
+        .unwrap_or_else(|| format!("{purpose} was refused by the target"))
 }
 
 impl SubagentBackend for ApiBackend {

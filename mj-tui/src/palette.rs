@@ -529,6 +529,9 @@ impl DashboardState {
                     self.command_session_override = Some(id);
                 }
                 self.mode = Mode::Dashboard;
+                // Everything run from here is listed under Recent, including
+                // commands that also have a pane key.
+                self.remember_command(entry.id);
                 let action = self.run_available_command(entry.id);
                 self.command_session_override = None;
                 return action;
@@ -727,8 +730,12 @@ pub(crate) fn render_palette(
                 let entry = &palette.entries[*index];
                 let spec = spec(entry.id);
                 let keys = dashboard.key_labels(entry.id).join(" / ");
+                // The same form help uses: its own sentence after a dash,
+                // dimmed, not a lowercase fragment in brackets.
                 let reason = match entry.availability {
-                    Availability::Blocked(reason) => format!("  ({reason})"),
+                    Availability::Blocked(reason) => {
+                        format!(" — {}", crate::help::sentence(reason))
+                    }
                     Availability::Ready | Availability::Hidden => String::new(),
                 };
                 let selected = *index == palette.selected;
@@ -755,6 +762,12 @@ pub(crate) fn render_palette(
                     Style::default().fg(theme::palette().text)
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
+                let split = if text.starts_with(label) {
+                    label.len()
+                } else {
+                    text.len()
+                };
+                let (label_text, reason_text) = text.split_at(split);
                 Line::from(vec![
                     Span::styled(
                         if selected {
@@ -764,7 +777,8 @@ pub(crate) fn render_palette(
                         },
                         theme::title(true),
                     ),
-                    Span::styled(text, style),
+                    Span::styled(label_text.to_owned(), style),
+                    Span::styled(reason_text.to_owned(), style.add_modifier(Modifier::DIM)),
                     Span::raw(" ".repeat(padding)),
                     Span::styled(
                         keys,
@@ -910,6 +924,23 @@ mod tests {
         assert_ne!(paged, selected, "ctrl+d must page an empty palette");
         dashboard.handle_key(ctrl('u'));
         assert_eq!(query(&dashboard), ("".to_owned(), selected));
+    }
+
+    /// A-3, palette half: a blocked row gives its reason as a dimmed,
+    /// capitalised sentence after " — ", as help does, not as a lowercase
+    /// fragment in brackets.
+    #[test]
+    fn palette_rows_set_unavailability_reasons_apart_like_help() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_palette();
+        type_query(&mut dashboard, "unpin");
+        let joined = drawn(&mut dashboard, 120, 30).join("\n");
+        assert!(
+            joined.contains("Unpin session — This session is not pinned."),
+            "{joined}"
+        );
+        assert!(!joined.contains("(this session"), "{joined}");
     }
 
     #[test]
@@ -1181,6 +1212,41 @@ mod tests {
         );
     }
 
+    /// Launch campaign finding A-6: a command run from the palette appears
+    /// under Recent even when it also has a pane key, as Create session does,
+    /// and even when it opens a wizard.
+    #[test]
+    fn a_command_run_from_the_palette_is_listed_under_recent() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(!spec(CommandId::NewSessionWizard).pane_keys.is_empty());
+
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "create session");
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::NewSessionWizard)
+        );
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(dashboard.mode, Mode::New(_)),
+            "{:?}",
+            dashboard.mode
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+
+        open_palette(&mut dashboard);
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the palette stays open");
+        };
+        assert_eq!(
+            palette.entries[0].id,
+            CommandId::NewSessionWizard,
+            "{palette:?}"
+        );
+        assert!(palette.entries[0].recent);
+    }
+
     /// Enter runs the row the cursor is on, so the cursor has to follow the
     /// ranking. A command run earlier leads the unfiltered list under Recent,
     /// and the cursor used to ride that command down into the results of the
@@ -1355,7 +1421,7 @@ mod tests {
         type_query(&mut dashboard, "rename");
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(
-            lines.contains("a session transition is in progress"),
+            lines.contains("Rename session — A session transition is in progress."),
             "{lines}"
         );
 

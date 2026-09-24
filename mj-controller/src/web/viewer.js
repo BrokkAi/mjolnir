@@ -157,6 +157,7 @@ async function request(url, options = {}) {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
   if (response.status === 401) {
+    await drainBody(response);
     // Authentication expired. Every route has to reach the login swap, not
     // only the snapshot refresh, or a phone sits on a dead page issuing
     // requests that will never succeed.
@@ -171,8 +172,19 @@ async function request(url, options = {}) {
     failure.status = response.status;
     throw failure;
   }
-  if (response.status === 202 || response.status === 204) return null;
+  if (response.status === 202 || response.status === 204) {
+    await drainBody(response);
+    return null;
+  }
   return response.json();
+}
+
+/// Read a response body nobody needs to its end. Chromium reports a fetch
+/// whose body is left unread as `net::ERR_ABORTED` once the response is
+/// dropped, although the server completed it; cancelling the body would
+/// abort it outright.
+async function drainBody(response) {
+  await response.arrayBuffer().catch(() => {});
 }
 
 /// Upload one image as raw bytes. JSON action requests have a deliberately
@@ -501,6 +513,9 @@ let openSessionMenuTrigger = null;
 let suppressedSessionClickId = null;
 let activeSessionPress = null;
 let snapshotReceivedAtMs = 0;
+/// Set while the login form is up because the server refused this browser,
+/// so waking the page does not send protected requests that can only fail.
+let signedOut = false;
 let dashboardOrderSeeded = false;
 
 function reconcileChildren(parent, desired) {
@@ -3350,6 +3365,7 @@ function startEvents() {
 }
 
 function showLogin() {
+  signedOut = true;
   cancelVoiceInput();
   snapshot = undefined;
   currentSession = null;
@@ -3425,6 +3441,7 @@ function confirmSessionDestruction(session) {
 async function refresh() {
   try {
     snapshot = await request('/api/snapshot');
+    signedOut = false;
     snapshotReceivedAtMs = Date.now();
     reconcileLifecycleActions();
     seedDashboardOrders(snapshot);
@@ -3457,12 +3474,32 @@ async function refresh() {
   }
 }
 
+/// True only when the server says this browser is signed out. Asking first
+/// keeps a signed-out load from sending a protected request that the browser
+/// logs as a failed 401. Any other answer, including a server without the
+/// route, falls through to the snapshot request, which still reaches the
+/// login form on a 401.
+async function knownSignedOut() {
+  try {
+    const response = await upgradeAwareFetch('/auth/session', { cache: 'no-store' });
+    if (!response.ok) return false;
+    const body = await response.json();
+    return body?.signed_in === false;
+  } catch {
+    return false;
+  }
+}
+
 /// Load the snapshot first, then honour the URL.
 ///
 /// A protected route must stay a login page while the snapshot request is
 /// unauthorized: rendering it first would dereference a snapshot that is not
 /// there.
 async function restoreRoute() {
+  if (await knownSignedOut()) {
+    showLogin();
+    return;
+  }
   if (!(await refresh())) return;
   applyRoute();
 }
@@ -6408,6 +6445,7 @@ function setConnection(next) {
 }
 
 function reconnect() {
+  if (signedOut) return;
   setConnection('reconnecting');
   startEvents();
   // A reconnect reconciles by full snapshot rather than assuming the deltas

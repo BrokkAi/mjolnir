@@ -1123,6 +1123,49 @@ fn unmanaged_raw_sessions_require_the_same_bare_target_kind() {
         assert!(reason.contains("directly on its host"), "{reason}");
     }
 }
+/// A suspended SSH-bare session stays where its worktree lives. Editing the
+/// machine's ssh options (a ControlPath, a key, a keepalive) must not strand
+/// it; only a change to the host, the login user, or the port does.
+#[test]
+fn ssh_option_changes_do_not_block_a_resume_but_a_new_location_does() {
+    let session = managed_raw_session(ssh_worktree_target());
+    let with_args = |extra_args: Vec<&str>, host: &str| {
+        let mut config = resume_compatibility_config();
+        let TargetTemplate::SshBare { ssh, .. } = config.targets.get_mut("ssh-bare").unwrap()
+        else {
+            unreachable!()
+        };
+        ssh.extra_args = extra_args.into_iter().map(str::to_owned).collect();
+        ssh.host = host.to_owned();
+        config
+    };
+
+    let changed_options = with_args(
+        vec![
+            "-o",
+            "ControlPath=/tmp/mine",
+            "-o",
+            "ServerAliveInterval=30",
+        ],
+        "builder",
+    );
+    assert_eq!(
+        resume_compatibility(&session, &changed_options, "ssh-bare"),
+        Ok(ResumePlan::InPlace)
+    );
+    for (extra_args, host) in [
+        (vec![], "other-builder"),
+        (vec!["-p", "2222"], "builder"),
+        (vec!["-oPort=2222"], "builder"),
+        (vec!["-l", "root"], "builder"),
+    ] {
+        let config = with_args(extra_args.clone(), host);
+        assert!(
+            resume_compatibility(&session, &config, "ssh-bare").is_err(),
+            "{extra_args:?} on {host} is a different location"
+        );
+    }
+}
 #[test]
 fn resume_compatibility_names_a_target_that_is_gone() {
     let config = resume_compatibility_config();

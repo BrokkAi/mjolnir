@@ -367,6 +367,20 @@ impl ActiveChat {
         self.state.toggle_render_mode();
     }
 
+    /// Interrupts the running turn, exactly as Esc in the composer does.
+    /// Returns `false` when there is no turn to interrupt, or an interrupt
+    /// is already on its way, so the host can say so.
+    ///
+    /// The command that runs this belongs to the host's registry, so it
+    /// answers from the palette and from a pane as well as from the composer.
+    pub fn interrupt_turn(&mut self) -> bool {
+        if self.state.turn_control_pending() || !self.state.turn_interruptible() {
+            return false;
+        }
+        let _ = self.dispatch(ChatAction::Cancel);
+        true
+    }
+
     /// Starts, finishes or cancels dictation, exactly as clicking the
     /// microphone does. Nothing happens while dictation is unavailable and no
     /// recording is running.

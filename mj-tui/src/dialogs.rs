@@ -127,6 +127,8 @@ pub(crate) struct ChangedFilesDialog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RenameEditor {
     pub(crate) session_id: String,
+    /// The name the Sessions list shows, which the dialog names it by.
+    pub(crate) session_name: String,
     pub(crate) title: TextInput,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
@@ -364,6 +366,10 @@ pub(crate) struct ConfirmDialog {
     scroll: u16,
     max_scroll: std::cell::Cell<u16>,
     pub(crate) confirmation: Confirmation,
+    /// The name the Sessions list shows for the session the confirmation is
+    /// about. The body names the session by it, and falls back to the id
+    /// when it is not set.
+    pub(crate) session_name: Option<String>,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
@@ -374,7 +380,14 @@ impl ConfirmDialog {
             max_scroll: std::cell::Cell::new(0),
             form: confirmation_form(&confirmation),
             confirmation,
+            session_name: None,
         }
+    }
+
+    /// Names the session in the body by `name` rather than by its id.
+    pub(crate) fn naming_session(mut self, name: &str) -> Self {
+        self.session_name = Some(name.to_owned());
+        self
     }
 }
 
@@ -514,6 +527,7 @@ impl DashboardState {
                 viewer_code,
                 qr_login_url,
                 fallback_reason,
+                ..
             } => {
                 dialog.viewer_url = Some(viewer_url);
                 dialog.viewer_code = Some(viewer_code);
@@ -1117,6 +1131,7 @@ impl DashboardState {
         };
         self.mode = Mode::Rename(RenameEditor {
             session_id: session.id.clone(),
+            session_name: session.display_title().to_owned(),
             title: TextInput::from_value(
                 session
                     .session_title_override

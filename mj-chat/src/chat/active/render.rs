@@ -33,6 +33,7 @@ pub(crate) fn render_full_frame(
             footer: Some(test_footer(chunks[2])),
             overlay: inner,
             title_controls: 0,
+            title_lead: 0,
             pane_focused: false,
         },
         true,
@@ -121,6 +122,7 @@ pub(crate) fn render_in(
             chat,
             transcript_selected,
             regions.title_controls,
+            regions.title_lead,
             regions.pane_focused,
         );
         if question_height > 0
@@ -176,6 +178,7 @@ pub(crate) fn render_in(
         chat,
         transcript_selected,
         regions.title_controls,
+        regions.title_lead,
         regions.pane_focused,
     );
     chat.reviewer_area = None;
@@ -365,36 +368,36 @@ pub(crate) fn render_chat_footer(
             "Tab pane{sep}Ctrl-V paste{sep}Enter send{sep}Ctrl-R history{sep}Shift-Enter newline"
         )
     };
-    let groups = theme::fit_footer_items(
+    let groups = theme::fit_prefixed_footer_items(
         [
             composer_keys
                 .split(theme::footer_separator())
-                .map(|text| (None, text))
+                .map(|text| (None, text.to_owned()))
                 .collect(),
             footer
                 .chords
                 .iter()
                 .enumerate()
-                .map(|(index, text)| (Some(index), *text))
+                .map(|(index, text)| (Some(index), (*text).to_owned()))
                 .collect(),
             footer
                 .functions
                 .iter()
                 .enumerate()
-                .map(|(index, text)| (Some(footer.chords.len() + index), *text))
+                .map(|(index, text)| (Some(footer.chords.len() + index), (*text).to_owned()))
                 .collect(),
         ],
         footer_area.width,
-        |(_, text)| *text,
+        footer.chord_prefix,
         // The host ranks its hints, and puts the two it wants kept longest —
         // the palette and the help key — at the end of the list.
-        |(command, _)| {
+        |command: &Option<usize>| {
             command.is_some_and(|index| {
                 index + 2 >= footer.chords.len().saturating_add(footer.functions.len())
             })
         },
     );
-    let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
+    let default_footer = theme::footer_items_text(&groups, |(_, text)| text.as_str());
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
     let notice = chat.notices.current();
     let footer = search_footer
@@ -456,7 +459,8 @@ pub(crate) fn render_chat_footer(
 pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     ChatFooter {
         area,
-        chords: &["ctrl+b then: b panes", "q detach", ": palette", "? keys"],
+        chords: &["b panes", "q detach", ": palette", "? keys"],
+        chord_prefix: "ctrl+b then ",
         functions: &[],
         banner: None,
     }
@@ -525,8 +529,19 @@ pub(crate) fn render_composer_band(
     let queue_control = prompt_bottom_queue_control(chat);
     let task_label = (chat.background_task_count() > 0)
         .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
-    let subagent_label = (chat.subagent_count() > 0)
-        .then(|| format!(" Subagents · {} working ", chat.subagent_working_count));
+    // A session created with sub-agents shows the entry, dimmed and not
+    // clickable, before its first child exists, so the user can find where
+    // they will appear. The Sub-agents chord is greyed on the same condition.
+    let subagents_ready = chat.subagent_count() > 0;
+    let subagent_label = if subagents_ready {
+        Some(format!(
+            " Subagents · {} working ",
+            chat.subagent_working_count
+        ))
+    } else {
+        chat.subagents_enabled
+            .then(|| " Subagents · none yet ".to_owned())
+    };
     let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
         // A standby composer cannot send, so the hint says what Enter does
         // there instead of advertising a send that would be refused.
@@ -611,18 +626,22 @@ pub(crate) fn render_composer_band(
         }
         let label = subagent_label.expect("show_subagents implies a label");
         let width = u16::try_from(subagent_width).expect("subagent label fits in u16");
-        chat.subagent_control_area = Some(Rect::new(
-            prompt_area
-                .x
-                .saturating_add(1)
-                .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
-            prompt_area.bottom().saturating_sub(1),
-            width,
-            1,
-        ));
+        chat.subagent_control_area = subagents_ready.then(|| {
+            Rect::new(
+                prompt_area
+                    .x
+                    .saturating_add(1)
+                    .saturating_add(u16::try_from(subagent_start).unwrap_or(u16::MAX)),
+                prompt_area.bottom().saturating_sub(1),
+                width,
+                1,
+            )
+        });
         bottom_spans.push(Span::styled(
             label,
-            if chat.subagent_control_focused() {
+            if !subagents_ready {
+                theme::hint_description()
+            } else if chat.subagent_control_focused() {
                 theme::selection(true)
             } else {
                 // The chip is always clickable, so keep its blue highlight;

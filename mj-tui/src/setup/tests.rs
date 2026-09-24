@@ -6,6 +6,56 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+/// Every on/off setting uses the same checkbox, whichever section holds it.
+/// Launch campaign finding C-3.
+#[test]
+fn every_boolean_setting_is_drawn_as_a_checkbox() {
+    for (section, label) in [
+        ("continuation", "Enabled"),
+        ("subagents", "Enabled"),
+        ("build_cache", "Enabled"),
+        ("phone", "Enabled"),
+        ("phone", "Detect Tailscale"),
+        ("notify", "Ring the terminal bell"),
+        ("notify", "Show counts in the terminal title"),
+        ("advanced", "Detailed activity clocks"),
+        ("advanced", "Show suspended sessions"),
+        ("review", "Enabled"),
+    ] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section(section, None);
+        let lines = drawn(&mut dashboard, 140, 40);
+        let row = lines
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{section}: missing {label:?}: {lines:#?}"));
+        assert!(
+            row.contains('☑') || row.contains('☐'),
+            "{section} › {label} is a checkbox: {row:?}"
+        );
+        assert!(
+            !row.contains(" On ") && !row.contains(" Off "),
+            "{section} › {label} has no On/Off text: {row:?}"
+        );
+    }
+}
+
+/// The additional eligible profiles are a set of checkboxes, so their row
+/// says how many are chosen rather than reading like an off switch.
+/// Launch campaign finding C-3.
+#[test]
+fn the_eligible_profiles_row_reads_as_a_multi_select() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("subagents", None);
+    let lines = drawn(&mut dashboard, 140, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Additional eligible profiles"))
+        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
+    assert!(!row.contains("Off"), "{row:?}");
+    assert!(row.contains("selected"), "{row:?}");
+}
+
 #[test]
 fn settings_can_add_a_profile_without_file_edits() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -1238,31 +1288,44 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
     dashboard.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(dashboard.dialog_confirmation_open());
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
+    // Esc goes back to the first page and keeps the change in the draft, as
+    // the page says it will. Launch campaign finding C-19.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!dashboard.dialog_confirmation_open());
     assert!(!dashboard.config.review.enabled);
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings remains open after leaving review")
     };
+    assert!(dialog.review_editor.is_none(), "Esc left Code Review");
     assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    // The Back button does the same.
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings")
+    };
+    dialog
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(crate::review_settings::ReviewSettingsFocus::Back);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(!dashboard.dialog_confirmation_open());
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings remains open after leaving review")
+    };
+    assert!(dialog.review_editor.is_none(), "Back left Code Review");
+    assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
     dashboard.handle_key(key(KeyCode::Esc));
-    assert!(dashboard.modal_open());
+    // Leaving Settings with the review change still drafted asks once.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
     dashboard.handle_key(key(KeyCode::Right));
     dashboard.handle_key(key(KeyCode::Enter));
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("discard returns to settings")
-    };
-    assert!(dialog.review_editor.is_none());
-    assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
-    dashboard.handle_key(key(KeyCode::Esc));
     assert!(!dashboard.modal_open());
     assert!(!dashboard.config.review.enabled);
 
@@ -2441,4 +2504,351 @@ fn setup_workspace_prefix_completes_on_its_machine() {
         panic!("a target path completes on its own machine");
     };
     assert!(matches!(*machine, mj_core::config::Machine::Ssh { .. }));
+}
+
+/// Launch campaign finding A-9 / C-4: the Continuation section has a short
+/// name, its row shows its whole value, and its page shows its whole
+/// description.
+#[test]
+fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let text = drawn(&mut dashboard, 100, 30).join("\n");
+    let row = text
+        .lines()
+        .find(|line| line.contains("Continuation"))
+        .unwrap_or_else(|| panic!("no Continuation row in {text}"));
+    assert!(
+        row.contains("Continuation ") && row.contains(" On · 3 continuations plus quota recovery"),
+        "{row}"
+    );
+
+    dashboard.begin_settings_section("continuation", None);
+    let text = drawn(&mut dashboard, 100, 30)
+        .iter()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        text.contains(schema::help(&["continuation".to_owned()])),
+        "{text}"
+    );
+}
+
+/// A row too wide for the page gives up its label before its value, and the
+/// two never touch.
+#[test]
+fn a_setting_row_truncates_its_label_before_its_value() {
+    let line = setting_row(
+        "A label far too long to fit beside its value on this page",
+        "On · 3 continuations plus quota recovery",
+        60,
+    );
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.chars().count() <= 60, "{text}");
+    assert!(
+        text.contains("… On · 3 continuations plus quota recovery"),
+        "{text}"
+    );
+
+    // A value wider than the row keeps a few label cells and a space.
+    let line = setting_row("Name", &"x".repeat(80), 30);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.chars().count() <= 30, "{text}");
+    assert!(text.starts_with("  Name x"), "{text}");
+}
+
+/// A-14: with `NO_COLOR` set the screen is monochrome whatever theme is
+/// configured, so Setup says so instead of naming a theme it is not drawing.
+/// The configured theme is still named, because it returns once `NO_COLOR`
+/// is unset.
+#[test]
+fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
+    assert_eq!(
+        schema::theme_report("Midnight", true),
+        "Monochrome (NO_COLOR; configured: Midnight)"
+    );
+    assert_eq!(schema::theme_report("Midnight", false), "Midnight");
+    // The override is the one the renderer applies.
+    assert_eq!(
+        theme::theme_for(theme::UiTheme::Midnight, true),
+        theme::UiTheme::Mono
+    );
+}
+
+/// With the reviewer on Auto, the first page says so, and visiting Code
+/// Review does not change what the row says. Launch campaign finding C-5.
+#[test]
+fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
+    let mut configured = config();
+    configured.review.enabled = true;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config = configured.clone();
+    dashboard.mode = Mode::Setup(SetupDialog::new(&configured));
+    let row = |dashboard: &mut DashboardState| {
+        drawn(dashboard, 140, 40)
+            .into_iter()
+            .find(|line| line.contains("Code Review"))
+            .expect("a Code Review row")
+    };
+    let before = row(&mut dashboard);
+    assert!(before.contains("Quick · Auto · picks by quota"), "{before}");
+    assert!(!before.contains("no reviewer"), "{before}");
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(row(&mut dashboard), before);
+}
+
+/// The first page describes the draft, not the saved file, and a limit put
+/// back to its default still shows the limit. Launch campaign finding C-22.
+#[test]
+fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
+    let mut dialog = SetupDialog::new(&config());
+    edit_field(&mut dialog, "sessionwiki", "archive_after_days", "30");
+    dialog.apply_editor(false).unwrap();
+    edit_field(&mut dialog, "subagents", "max_concurrent", "4");
+    dialog.apply_editor(false).unwrap();
+    let summary = |dialog: &SetupDialog, key: &str| {
+        row_summary(&[], key, &dialog.draft[key], &dialog.draft, None)
+    };
+    assert_eq!(summary(&dialog, "sessionwiki"), "Archives after 30 days");
+    assert_eq!(summary(&dialog, "subagents"), "On · up to 4");
+
+    edit_field(&mut dialog, "subagents", "max_concurrent", "");
+    dialog.apply_editor(true).unwrap();
+    assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
+}
+
+/// A long save error is shown whole: the notice grows to fit it instead of
+/// stopping after three lines. Launch campaign finding C-20.
+#[test]
+fn a_long_save_error_is_shown_whole() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let error = format!(
+        "Could not save: {} closing words",
+        "Setup would change the project that a running session uses. ".repeat(5)
+    );
+    setup_dialog_mut(&mut dashboard.mode).unwrap().notice = Some(error);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("closing words")),
+        "{}",
+        lines.join("\n")
+    );
+    // The footer's controls are still drawn below it.
+    assert!(
+        lines.iter().any(|line| line.contains("Save")),
+        "{}",
+        lines.join("\n")
+    );
+}
+
+/// Leaving an edited field asks about that field's change, by its name, and
+/// says the rest of the draft is kept. Launch campaign finding C-15.
+#[test]
+fn discarding_a_field_edit_names_the_field() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("phone", None);
+    choose(&mut dashboard, "bind");
+    dashboard.handle_key(key(KeyCode::Char('9')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.dialog_confirmation_open());
+    let text = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(
+        text.contains("Listen address and port"),
+        "the prompt names the field:\n{text}"
+    );
+    assert!(text.contains("rest of the Settings draft"), "{text}");
+}
+
+/// An open dropdown shows its value once on the row, in the dropdown.
+/// Launch campaign finding C-16.
+#[test]
+fn an_open_dropdown_draws_its_value_once() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("notify", None);
+    choose(&mut dashboard, "mode");
+    let lines = drawn(&mut dashboard, 140, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Notify through"))
+        .unwrap_or_else(|| panic!("no Notify through row:\n{}", lines.join("\n")));
+    assert_eq!(row.matches("terminal").count(), 1, "{row}");
+}
+
+/// Every description fits the two rows above a page at the narrowest width
+/// Settings takes, so none stops mid-sentence. Launch campaign finding C-18.
+#[test]
+fn every_setting_description_fits_its_two_rows() {
+    let paths: &[&[&str]] = &[
+        &["interface", "prefix"],
+        &["theme"],
+        &["profiles"],
+        &["profiles", "p", "home"],
+        &["machines"],
+        &["targets"],
+        &["targets", "t", "machine"],
+        &["phone"],
+        &["advanced"],
+        &["notify"],
+        &["notify", "mode"],
+        &["notify", "bell"],
+        &["notify", "delay_seconds"],
+        &["notify", "title"],
+        &["advanced", "detailed_activity_clocks"],
+        &["advanced", "show_stopped_sessions"],
+        &["advanced", "session_order"],
+        &["advanced", "symbols"],
+        &["bundles"],
+        &["bundles", "b", "repositories"],
+        &["review"],
+        &["continuation"],
+        &["sessionwiki"],
+        &["sessionwiki", "archive_after_days"],
+        &["subagents"],
+        &["subagents", "eligible_profiles"],
+        &["build_cache"],
+        &["machines", "m", "build_cache", "directory"],
+        &["machines", "m", "build_cache", "max_size"],
+        &["targets", "t", "memory"],
+        &["targets", "t", "pull_policy"],
+        &["profiles", "p", "context_window_bytes"],
+        &["profiles", "p", "guardian_review_model"],
+        &[],
+        &["other"],
+    ];
+    // The dialog is at least 64 columns wide, less its border and margin.
+    let width = 60;
+    let overflowing = paths
+        .iter()
+        .map(|path| path.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>())
+        .filter(|path| {
+            ratatui::widgets::Paragraph::new(schema::help(path))
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                > 2
+        })
+        .map(|path| path.join("."))
+        .collect::<Vec<_>>();
+    assert!(overflowing.is_empty(), "{overflowing:#?}");
+}
+
+/// A new SSH machine keeps its workspaces under Mjolnir's own directory, not
+/// the product's former name. Launch campaign finding C-17.
+#[test]
+fn a_new_ssh_machine_keeps_workspaces_under_the_mjolnir_directory() {
+    let machine = schema::defaults(
+        &["machines".to_owned(), "box".to_owned()],
+        &json!({"kind": "ssh"}),
+    );
+    assert_eq!(
+        machine["workspace_prefix"],
+        ".local/share/mjolnir/workspaces"
+    );
+}
+
+/// A page lists its settings in one fixed order, whichever of them the file
+/// happens to store and in whatever order. Launch campaign finding C-24.
+#[test]
+fn a_page_lists_its_settings_in_a_fixed_order() {
+    let order = |draft: serde_json::Value, path: &[&str]| {
+        let mut draft = draft;
+        schema::expand(&mut draft, &mut Vec::new());
+        let path = path.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+        visible_keys(&path, draft.pointer(&pointer(&path)).unwrap())
+    };
+    assert_eq!(
+        order(json!({"phone": {"tailscale_detect": false}}), &["phone"]),
+        order(json!({"phone": {}}), &["phone"]),
+    );
+    assert_eq!(
+        order(
+            json!({"machines": {"local": {"kind": "local", "build_cache": {"max_size": "20GB", "enabled": false}}}}),
+            &["machines", "local", "build_cache"],
+        ),
+        ["enabled", "directory", "max_size"],
+    );
+    assert_eq!(
+        order(
+            json!({"machines": {"box": {"workspace_prefix": "w", "host": "h", "kind": "ssh"}}}),
+            &["machines", "box"],
+        ),
+        order(
+            json!({"machines": {"box": {"kind": "ssh"}}}),
+            &["machines", "box"]
+        ),
+    );
+}
+
+/// Opens the field `key` on the page `section` and types `text` into it.
+fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
+    dialog.path = vec![section.to_owned()];
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|candidate| candidate == key)
+        .unwrap_or_else(|| panic!("{section} has no {key}"));
+    dialog.open_selected();
+    dialog.editor.as_mut().expect("a text editor").input = EditorInput::Text(TextInput::from(text));
+}
+
+fn saved_config(dialog: &mut SetupDialog) -> Config {
+    let action = dialog.save();
+    dialog.saving = false;
+    match action {
+        DashboardAction::SaveSetup { updated, .. } => serde_json::from_str(&updated).unwrap(),
+        other => panic!("save refused: {other:?}, notice {:?}", dialog.notice),
+    }
+}
+
+/// The numeric settings are edited as text but saved as numbers, "Use
+/// default" puts the default back, and text that is not a number is refused
+/// under the field without losing the draft. Launch campaign finding C-23.
+#[test]
+fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
+    type Read = fn(&Config) -> u64;
+    let fields: [(&str, &str, Read, u64); 3] = [
+        ("notify", "delay_seconds", |c| c.notify.delay_seconds, 2),
+        (
+            "sessionwiki",
+            "archive_after_days",
+            |c| c.sessionwiki.archive_after_days.map_or(0, u64::from),
+            0,
+        ),
+        (
+            "subagents",
+            "max_concurrent",
+            |c| u64::try_from(c.subagents.max_concurrent).unwrap(),
+            6,
+        ),
+    ];
+    for (section, key, read, default) in fields {
+        let mut dialog = SetupDialog::new(&config());
+        edit_field(&mut dialog, section, key, "5");
+        dialog.apply_editor(false).unwrap();
+        assert_eq!(dialog.draft[section][key], 5, "{section}.{key}");
+        assert_eq!(read(&saved_config(&mut dialog)), 5, "{section}.{key}");
+
+        edit_field(&mut dialog, section, key, "5");
+        dialog.apply_editor(true).unwrap();
+        assert_eq!(read(&saved_config(&mut dialog)), default, "{section}.{key}");
+
+        edit_field(&mut dialog, section, key, "five");
+        let error = dialog.apply_editor(false).unwrap_err();
+        assert!(error.starts_with("Enter a whole number"), "{error}");
+        assert!(
+            dialog.editor.is_some(),
+            "{section}.{key}: the field stays open"
+        );
+    }
 }

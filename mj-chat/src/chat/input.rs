@@ -52,6 +52,15 @@ impl ChatState {
             // Terminals signal non-text clipboard content (such as images)
             // with an empty bracketed paste. Respect the same modal routing
             // as Ctrl-V and let the background clipboard reader retrieve it.
+            // An agent without image support cannot use that content, so
+            // say so instead of reading the clipboard.
+            if !self.prompt_images_supported
+                && self.elicitation.is_none()
+                && self.clipboard_target() == super::input_state::ClipboardTarget::Composer
+            {
+                self.set_notice(super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE);
+                return ChatAction::None;
+            }
             return self.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
         }
         self.handle_paste(pasted);

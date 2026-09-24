@@ -39,6 +39,11 @@ pub struct WaitObservation {
     /// next action or transition for the session succeeds, so it always refers
     /// to a close nobody has recovered from.
     pub close_failure: Option<String>,
+    /// The session cannot take a prompt yet: it is still provisioning, a
+    /// lifecycle operation owns it, or its worker is not attached. A wait with
+    /// no target turn keeps waiting, because "finished" would invite a prompt
+    /// that is then refused.
+    pub cannot_take_prompt: bool,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
     /// Why the launch failed, when a reason was recorded.
@@ -148,7 +153,8 @@ impl WaitDecision {
 ///    else the turn a create-with-prompt call submitted, else "the newest
 ///    one", which additionally requires the session to be idle with an empty
 ///    queue — with queued prompts, "idle" alone would return an earlier
-///    prompt's outcome.
+///    prompt's outcome — and able to take a prompt, so a session that is
+///    still provisioning or reattaching is not reported as finished.
 /// 4. A completed turn under server assessment or with a retry armed is not an
 ///    ending: the worker may submit the retry itself, so the wait keeps waiting.
 ///
@@ -292,6 +298,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         }
         None => {
             if observation.checking_continuation
+                || observation.cannot_take_prompt
                 || observation.execution != MaterializedExecutionState::Idle
                 || observation.active_turn.is_some()
                 || observation.queued > 0

@@ -15,6 +15,7 @@
 //! * `ui` -- terminal appearance settings.
 //! * `loading` -- instance names, directories, and atomic file writes.
 
+mod document;
 mod harness;
 mod keys;
 mod loading;
@@ -50,8 +51,26 @@ pub fn raw_project_context_id(project_directory: &str) -> String {
     format!("remote-project-{suffix}")
 }
 
+/// Ports a named instance's viewer may default to. The default instance keeps
+/// 3765; each named instance hashes its name into this range so a test build
+/// beside the live one does not collide with it, and so its viewer URL (and
+/// the bookmarked QR login) stays the same across daemon restarts.
+pub const INSTANCE_VIEWER_PORTS: std::ops::RangeInclusive<u16> = 38000..=38999;
+
 fn default_phone_bind() -> String {
-    "127.0.0.1:3765".to_owned()
+    default_phone_bind_for(instance_name().as_deref())
+}
+
+/// The default `[phone] bind` for the default instance (`None`) or a named one.
+pub fn default_phone_bind_for(instance: Option<&str>) -> String {
+    let Some(name) = instance else {
+        return "127.0.0.1:3765".to_owned();
+    };
+    let digest = Sha256::digest(name.as_bytes());
+    let span = u32::from(INSTANCE_VIEWER_PORTS.end() - INSTANCE_VIEWER_PORTS.start()) + 1;
+    let offset = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % span;
+    let port = u32::from(*INSTANCE_VIEWER_PORTS.start()) + offset;
+    format!("127.0.0.1:{port}")
 }
 
 const fn default_true() -> bool {
@@ -894,7 +913,17 @@ impl Config {
         Self::ensure_writable(path)?;
         self.validate()?;
         let body = toml::to_string_pretty(self).context("serialize Mjolnir config")?;
+        let body = Self::edited_file(path, &body).unwrap_or(body);
         atomic_write(path, body.as_bytes())
+    }
+
+    /// The file at `path` edited in place to hold `body`, keeping its
+    /// comments and layout. `None` when there is no file to keep, or it
+    /// cannot be edited in place.
+    fn edited_file(path: &Path, body: &str) -> Option<String> {
+        let existing = fs::read_to_string(path).ok()?;
+        let loaded = toml::to_string_pretty(&Self::load_from(path).ok()?).ok()?;
+        document::edit_in_place(&existing, &loaded, body)
     }
 
     /// Refuse to overwrite a file that a newer Mjolnir wrote after this

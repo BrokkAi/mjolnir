@@ -34,6 +34,10 @@ pub(crate) fn render_new_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let mut form = wizard.form.borrow_mut();
+    // Read focus before the frame starts: `begin_frame` hides last frame's
+    // registrations, so `is_focused` is false for a control drawn before it
+    // registers again, as the recent-directory rows are.
+    let focused_before_frame = form.focused();
     let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
@@ -148,7 +152,7 @@ pub(crate) fn render_new_wizard(
                             },
                             directory.display()
                         ),
-                        if form.is_focused(WizardControl::RecentProject(index)) {
+                        if focused_before_frame == Some(WizardControl::RecentProject(index)) {
                             theme::selection(true)
                         } else if index == wizard.project_history_index {
                             Style::default().fg(theme::palette().text)
@@ -655,8 +659,8 @@ pub(crate) fn render_review_wizard(
             Span::styled(format!(" ({})", target_label(target)), theme::muted()),
         ]),
         Line::from(vec![
-            Span::styled("Compute:", theme::muted()),
-            Span::raw(resource_allocation_label(allocation, None)),
+            Span::styled("Compute: ", theme::muted()),
+            Span::raw(resource_allocation_description(allocation)),
         ]),
     ];
     if moving && source_unavailable {
@@ -1517,10 +1521,24 @@ pub(crate) fn render_resume_wizard(
                     }
                 })
                 .collect();
-            let mut help = vec![
-                picker_help("↑/↓ select · Tab moves focus · Enter activates"),
-                picker_help("Lossy: text only; tool calls + reasoning dropped."),
-            ];
+            // Only a change of harness hands over a text transcript. The
+            // footnote describes the selected profile, so a same-harness
+            // resume is not warned about a loss it does not have.
+            let selected_is_lossy = profiles.get(wizard.profile).is_some_and(|(_, harness)| {
+                session_harness.is_some_and(|current| current != *harness)
+            });
+            let mut help = vec![picker_help(
+                "↑/↓ select · Tab moves focus · Enter activates",
+            )];
+            if selected_is_lossy {
+                help.push(picker_help(
+                    "Lossy: text only; tool calls + reasoning dropped.",
+                ));
+            } else if session_harness.is_some() {
+                help.push(picker_help(
+                    "Same agent: the conversation continues natively.",
+                ));
+            }
             if profiles
                 .iter()
                 .any(|(_, harness)| needs_guardian_warning(*harness))

@@ -95,9 +95,10 @@ must be completely clean, including staged, unstaged, and untracked files.
 Uncheck it to use the selected directory directly. The choice survives stop
 and resume. Plain directories are used directly with the checkbox disabled.
 
-Although the controller and viewer support macOS, current local bare worker
-launch requires Linux. Use Apple Container or a remote target for sessions from
-a macOS controller.
+Local bare runs on a Linux or macOS controller. It uses the native
+`mj-worker` installed beside `mj`, so on macOS no Linux worker is needed for
+it. Container and remote targets still need a static Linux worker; see
+[Install](/install/).
 
 There is no process, filesystem, or network isolation between the harness and
 your controller account. The harness also uses the configured profile home

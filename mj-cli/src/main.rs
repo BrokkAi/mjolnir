@@ -63,8 +63,9 @@ struct Cli {
         value_name = "NAME"
     )]
     instance: Option<String>,
-    /// Select a workspace by name for workspace-scoped commands.
-    #[arg(long, global = true)]
+    /// Open the dashboard in this workspace, by name. Given before a command,
+    /// it applies to that command when the command works in a workspace.
+    #[arg(long, value_name = "NAME")]
     workspace: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -89,7 +90,6 @@ enum Command {
     DaemonRun,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
-    #[command(hide = true)]
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
@@ -143,6 +143,49 @@ enum Command {
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
+    /// Removed; kept so the old name says what replaced it.
+    #[command(hide = true)]
+    Close(RemovedCommandArgs),
+    /// Removed; kept so the old name says what replaced it.
+    #[command(hide = true)]
+    CancelTurn(RemovedCommandArgs),
+}
+
+/// `--workspace` for the commands that work in a workspace. It was a global
+/// option, so `--help` showed it on every command, including the many where
+/// it did nothing (F-16).
+#[derive(Debug, Clone, Default, Args)]
+pub(crate) struct WorkspaceName {
+    /// Workspace to work in, by name. Needed when the instance has more than
+    /// one.
+    #[arg(long = "workspace", id = "workspace_name", value_name = "NAME")]
+    pub(crate) name: Option<String>,
+}
+
+impl WorkspaceName {
+    /// The name given with the command, or else the one given before it.
+    pub(crate) fn or(&self, before_command: Option<String>) -> Option<String> {
+        self.name.clone().or(before_command)
+    }
+}
+
+/// Whatever was passed to a removed command. It is accepted only so the
+/// command can name its replacement instead of failing on its arguments.
+#[derive(Debug, Args)]
+struct RemovedCommandArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    rest: Vec<String>,
+}
+
+/// What a removed command was replaced by, for a command that was removed.
+fn replacement_notice(command: Option<&Command>) -> Option<&'static str> {
+    match command {
+        Some(Command::Close(_)) => Some("`mj close` was replaced by `mj suspend` and `mj destroy`"),
+        Some(Command::CancelTurn(_)) => {
+            Some("`mj cancel-turn` was replaced by `mj interrupt-turn`")
+        }
+        _ => None,
+    }
 }
 
 /// `mj workspaces` on its own opens the workspace manager in the dashboard, as
@@ -179,6 +222,7 @@ enum DaemonCommand {
 
 #[derive(Debug, Args)]
 struct CheckpointArgs {
+    /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
 }
@@ -250,6 +294,7 @@ struct RecoverArgs {
 enum RecoverCommand {
     /// List managed worker resources not present in controller state.
     Scan {
+        /// Print the response as JSON instead of text.
         #[arg(long)]
         json: bool,
         /// Also list workers created by other Mjolnir instances, or by builds
@@ -259,8 +304,10 @@ enum RecoverCommand {
     },
     /// Probe a managed worker and add it back to controller state.
     Adopt {
+        /// Session id of the worker, as `mj recover scan` lists it.
         #[arg(long)]
         session: String,
+        /// Target the worker runs on, as `mj recover scan` lists it.
         #[arg(long)]
         target: String,
         /// Required only for current-v1 workers created before ownership markers.
@@ -276,10 +323,13 @@ enum RecoverCommand {
     },
     /// Destroy an untracked managed resource after exact-ID confirmation.
     Destroy {
+        /// Session id of the worker, as `mj recover scan` lists it.
         #[arg(long)]
         session: String,
+        /// Target the worker runs on, as `mj recover scan` lists it.
         #[arg(long)]
         target: String,
+        /// The session id again, to confirm the destruction.
         #[arg(long)]
         confirm: String,
         /// Allow destroying a worker another instance created, or one with no
@@ -309,6 +359,7 @@ struct SetupArgs {
 enum SetupCommand {
     /// Print coding-agent instructions for preparing a host.
     Instructions {
+        /// Platform to prepare.
         #[arg(long, value_enum)]
         platform: SetupPlatform,
     },
@@ -323,6 +374,11 @@ enum SetupPlatform {
 fn main() -> Result<()> {
     mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
+    if let Some(notice) = replacement_notice(cli.command.as_ref()) {
+        // Exit 2, the status clap uses for a usage error, which this is.
+        eprintln!("error: {notice}");
+        std::process::exit(2);
+    }
     // Apply before logging, daemon startup, or any path lookup: everything
     // derives its directories from the instance environment, and the daemon
     // child inherits it. This also covers `daemon-run`, which is this same
@@ -443,6 +499,8 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
+        Some(Command::Close(_)) => "close",
+        Some(Command::CancelTurn(_)) => "cancel-turn",
     }
 }
 
@@ -496,11 +554,18 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Acp(args)) => acp::serve(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Acp(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            acp::serve(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => doctor(args).map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => setup(args).map(|()| DashboardExit::Normal),
         Some(Command::Import(args)) => {
-            let workspace_id = resolve_store_workspace(requested_workspace.as_deref()).await?;
+            let workspace_id =
+                resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
+                    .await?;
             tokio::task::spawn_blocking(move || import(args, &workspace_id))
                 .await
                 .context("import task panicked")??;
@@ -520,9 +585,12 @@ async fn run_command(
         }
         Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
-        Some(Command::New(args)) => api_commands::new_session(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::New(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::new_session(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Prompt(args)) => api_commands::prompt(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -538,9 +606,12 @@ async fn run_command(
         Some(Command::Respond(args)) => api_commands::respond(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Events(args)) => api_commands::events(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Events(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::events(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Usage(args)) => api_commands::usage(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -553,18 +624,24 @@ async fn run_command(
         Some(Command::Export(args)) => api_commands::export(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Sessions(args)) => api_commands::sessions(args, requested_workspace)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Sessions(args)) => {
+            let workspace = args.workspace.or(requested_workspace);
+            api_commands::sessions(args, workspace)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::Suspend(args)) => api_commands::suspend(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Resume(args)) => api_commands::resume(args)
-            .await
-            .map(|()| DashboardExit::Normal),
+        Some(Command::Resume(mut args)) => {
+            args.workspace.name = args.workspace.or(requested_workspace);
+            api_commands::resume(args)
+                .await
+                .map(|()| DashboardExit::Normal)
+        }
         Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
             .await
             .map(|()| DashboardExit::Normal),
@@ -577,6 +654,10 @@ async fn run_command(
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)
             .await
             .map(|()| DashboardExit::Normal),
+        // Answered in `main` before anything starts.
+        Some(command @ (Command::Close(_) | Command::CancelTurn(_))) => {
+            bail!("{}", replacement_notice(Some(&command)).unwrap_or_default())
+        }
     }
 }
 
@@ -1065,9 +1146,20 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Status => {
-            let mut daemon = daemon::connect_management()
-                .await
-                .context("Mjolnir daemon is not running")?;
+            let mut daemon = match daemon::connect_management().await {
+                Ok(daemon) => daemon,
+                // No endpoint file is the ordinary stopped state.
+                Err(error) => {
+                    if let Some(stopped) = daemon::daemon_not_running(&error) {
+                        println!(
+                            "Mjolnir daemon is stopped (no {}).",
+                            stopped.metadata_path.display()
+                        );
+                        return Ok(());
+                    }
+                    return Err(error.context("Mjolnir daemon is not answering"));
+                }
+            };
             let status = daemon.status().await?;
             println!(
                 "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
@@ -1108,9 +1200,14 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             }
         }
         DaemonCommand::Stop => {
-            let daemon = daemon::connect_management()
-                .await
-                .context("Mjolnir daemon is not running")?;
+            let daemon = match daemon::connect_management().await {
+                Ok(daemon) => daemon,
+                Err(error) if daemon::daemon_not_running(&error).is_some() => {
+                    println!("Mjolnir daemon is already stopped.");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
+            };
             daemon.stop_and_wait().await?;
             println!("Mjolnir daemon stopped; detached workers remain active.");
         }
@@ -1172,6 +1269,7 @@ async fn login(args: LoginArgs) -> Result<()> {
         .envs(&environment)
         .status()
         .await
+        .map_err(|error| login_spawn_error(error, &program, profile.kind, &profile_id))
         .with_context(|| {
             format!(
                 "run `{program} {}` for profile {profile_id}",
@@ -1191,6 +1289,32 @@ async fn login(args: LoginArgs) -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Say which program is missing and how to get it, rather than the bare
+/// "No such file or directory" the operating system reports.
+fn login_spawn_error(
+    error: io::Error,
+    program: &str,
+    kind: mj_core::config::HarnessKind,
+    profile_id: &str,
+) -> anyhow::Error {
+    if error.kind() != io::ErrorKind::NotFound {
+        return error.into();
+    }
+    let install = match kind {
+        mj_core::config::HarnessKind::Codex => {
+            " Install it with `npm install -g @openai/codex` (Node.js 22 or newer),".to_owned()
+        }
+        mj_core::config::HarnessKind::Claude => {
+            " Install it with `npm install -g @anthropic-ai/claude-code`,".to_owned()
+        }
+        other => format!(" Install the {} CLI,", other.display_name()),
+    };
+    anyhow::anyhow!(
+        "`{program}` is not installed or is not on PATH, so the {} login cannot run.{install} then run `mj login --profile {profile_id}` again.",
+        kind.display_name()
+    )
 }
 
 /// Mint a long-lived Claude subscription token and store it for the profile.
@@ -1362,6 +1486,14 @@ async fn recover(args: RecoverArgs) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&scan)?);
             } else {
+                // An empty scan printed nothing, which reads the same as a
+                // command that did not run (F-16).
+                if scan.candidates.is_empty() {
+                    match scan.hidden_other_instances {
+                        0 => println!("nothing to recover"),
+                        _ => println!("nothing to recover for this instance"),
+                    }
+                }
                 for candidate in &scan.candidates {
                     let instance = match candidate.instance_id.as_deref() {
                         Some(instance) if instance == scan.instance_id => {
@@ -1458,14 +1590,20 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     if mj_controller::doctor::all_ready(&checks) {
         Ok(())
     } else {
-        Err(doctor_failure())
+        Err(doctor_failure(args.json))
     }
 }
 
-fn doctor_failure() -> anyhow::Error {
-    anyhow::anyhow!(
-        "Mjolnir has fixable prerequisites; run `mj doctor --json` and follow its remediations."
-    )
+fn doctor_failure(json: bool) -> anyhow::Error {
+    if json {
+        anyhow::anyhow!(
+            "Mjolnir has fixable prerequisites; follow the `remediation` of each `fixable` check."
+        )
+    } else {
+        anyhow::anyhow!(
+            "Mjolnir has fixable prerequisites; follow the remediation lines under each `fixable` check above."
+        )
+    }
 }
 
 /// The prefix every message uses when it names a session, so notices stay
@@ -1589,6 +1727,131 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use mj_core::state::{SessionRecord, SessionState, State};
+
+    /// F-16: `--session`, `--json`, and other flags had no description in
+    /// `--help`. Every visible argument of every command now says what it is.
+    #[test]
+    fn every_visible_argument_is_described_in_help() {
+        fn undescribed(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.is_hide_set() || ["help", "version"].contains(&arg.get_id().as_str()) {
+                    continue;
+                }
+                if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                    missing.push(format!("{path} --{}", arg.get_id()));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                if subcommand.is_hide_set() {
+                    continue;
+                }
+                undescribed(
+                    subcommand,
+                    &format!("{path} {}", subcommand.get_name()),
+                    missing,
+                );
+            }
+        }
+        let mut missing = Vec::new();
+        undescribed(
+            &<Cli as clap::CommandFactory>::command(),
+            "mj",
+            &mut missing,
+        );
+        assert!(missing.is_empty(), "undescribed arguments: {missing:#?}");
+    }
+
+    /// F-16: `--workspace` was global, so every command's help offered it.
+    #[test]
+    fn workspace_is_offered_only_where_it_selects_something() {
+        for argv in [
+            vec!["mj", "new", "--workspace", "w", "--project-directory", "/p"],
+            vec!["mj", "sessions", "--workspace", "w"],
+            vec!["mj", "events", "--workspace", "w"],
+            vec!["mj", "resume", "--wiki", "x", "--workspace", "w"],
+            vec!["mj", "import", "codex", "--latest", "--workspace", "w"],
+            vec!["mj", "acp", "--workspace", "w"],
+            vec!["mj", "--workspace", "w", "new", "--project-directory", "/p"],
+            vec!["mj", "--workspace", "w"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+        for argv in [
+            vec!["mj", "prompt", "--session", "s", "hi", "--workspace", "w"],
+            vec!["mj", "wait", "--session", "s", "--workspace", "w"],
+            vec!["mj", "doctor", "--workspace", "w"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["mj", "sessions", "--workspace", "w"]).unwrap();
+        let Some(Command::Sessions(args)) = cli.command else {
+            panic!("expected the sessions command");
+        };
+        assert_eq!(args.workspace.or(None).as_deref(), Some("w"));
+    }
+
+    /// F-16: `mj acp` is documented, so `mj --help` lists it.
+    #[test]
+    fn acp_is_listed_in_help() {
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        assert!(help.contains("acp"), "{help}");
+    }
+
+    /// F-10: the removed names got clap's generic "unrecognized subcommand".
+    #[test]
+    fn a_removed_command_names_its_replacement_whatever_it_was_given() {
+        for (argv, replacement) in [
+            (
+                vec!["mj", "close", "--session", "s1"],
+                "`mj suspend` and `mj destroy`",
+            ),
+            (vec!["mj", "close"], "`mj suspend` and `mj destroy`"),
+            (
+                vec!["mj", "cancel-turn", "--session", "s1"],
+                "`mj interrupt-turn`",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("the old name still parses");
+            let notice = replacement_notice(cli.command.as_ref()).expect("a notice");
+            assert!(notice.contains(replacement), "{argv:?}: {notice}");
+        }
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        assert!(
+            !help.contains("cancel-turn"),
+            "the old names stay out of --help"
+        );
+    }
+
+    /// `mj login` for a harness whose CLI is not installed names the missing
+    /// program and how to install it, instead of a bare ENOENT.
+    #[test]
+    fn a_missing_login_program_is_named_with_how_to_install_it() {
+        let error = login_spawn_error(
+            io::Error::from(io::ErrorKind::NotFound),
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "codex",
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("`codex` is not installed"), "{message}");
+        assert!(
+            message.contains("npm install -g @openai/codex"),
+            "{message}"
+        );
+        assert!(message.contains("mj login --profile codex"), "{message}");
+
+        let other = login_spawn_error(
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            "codex",
+            mj_core::config::HarnessKind::Codex,
+            "codex",
+        );
+        assert!(!format!("{other:#}").contains("not installed"));
+    }
 
     #[test]
     fn the_verification_reads_which_credential_claude_code_actually_used() {
@@ -1792,10 +2055,21 @@ mod tests {
 
     #[test]
     fn doctor_failure_uses_mjolnir_product_wording() {
-        let message = doctor_failure().to_string();
-        assert!(message.contains("Mjolnir"));
-        assert!(!message.contains("Hel"));
-        assert!(message.contains("mj doctor --json"));
+        for json in [false, true] {
+            let message = doctor_failure(json).to_string();
+            assert!(message.contains("Mjolnir"));
+            assert!(!message.contains("Hel"));
+        }
+    }
+
+    /// The human report already prints every fix, so its closing line must
+    /// point at them rather than send the user to `--json` for the same text.
+    #[test]
+    fn human_doctor_failure_points_at_the_printed_fixes() {
+        let human = doctor_failure(false).to_string();
+        assert!(!human.contains("--json"), "{human}");
+        assert!(human.contains("remediation"), "{human}");
+        assert!(doctor_failure(true).to_string().contains("remediation"));
     }
 
     #[test]

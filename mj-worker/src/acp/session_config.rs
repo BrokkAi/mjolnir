@@ -169,7 +169,7 @@ pub(super) async fn resolve_session_config_recovery(
         )
         .await
         {
-            Ok(()) => {
+            Ok(value) => {
                 spec.accepted_config
                     .lock()
                     .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
@@ -213,22 +213,80 @@ pub(super) async fn apply_session_selector(
     harness: HarnessKind,
     key: &str,
     value: &str,
-) -> Result<()> {
+) -> Result<String> {
     // Muse advertises its default model as the first choice while reporting an
     // empty current value. Sending that same choice back through its legacy
     // `session/setModel` path is rejected as `invalid_target`; leaving it alone
     // is the only operation needed to select the advertised default.
     if harness == HarnessKind::Muse && key == "model" && muse_implicit_default(options, value) {
-        return Ok(());
+        return Ok(value.to_owned());
     }
     match grok_models.as_mut() {
         Some(state) if grok::handles_config_key(key) => {
             grok::apply_model_change(connection, session_id, state, key, value)
                 .await
                 .inspect(|()| grok::merge_config_options(options, state))
+                .map(|()| value.to_owned())
         }
-        _ => set_session_config(connection, session_id, options, key, value).await,
+        _ => set_session_config(connection, session_id, options, harness, key, value).await,
     }
+}
+
+/// The value to send for a requested selector change, or `None` when the
+/// harness should resolve the request itself.
+///
+/// A listed value is sent as is. A value that matches a listed value or its
+/// display name without regard to case selects that value, so `/model` takes
+/// what the picker shows. Claude's bridge also resolves full model ids such as
+/// `claude-opus-5-5` to the advertised value that runs them (its
+/// `resolveModelPreference`), and it advertises no ids of its own to match
+/// against, so an unlisted Claude model is left to the bridge, which refuses
+/// what it cannot resolve. Any other unlisted value is refused here with the
+/// values the harness does accept.
+pub(super) fn resolve_selector_value(
+    options: &[SessionConfigOption],
+    harness: HarnessKind,
+    key: &str,
+    value: &str,
+) -> Result<Option<String>> {
+    let option = find_session_config_option(options, key)
+        .with_context(|| mj_core::acp::missing_config_selector_refusal(key))?;
+    if select_contains(&option.kind, value) {
+        return Ok(Some(value.to_owned()));
+    }
+    let choices = session_config_choices(options, key);
+    let wanted = value.trim();
+    if let Some(choice) = choices.iter().find(|choice| {
+        choice.value.eq_ignore_ascii_case(wanted) || choice.name.eq_ignore_ascii_case(wanted)
+    }) {
+        return Ok(Some(choice.value.clone()));
+    }
+    if harness == HarnessKind::Claude && key == "model" && !wanted.is_empty() {
+        return Ok(None);
+    }
+    Err(anyhow!(
+        "{value:?} is not an available {key} value; {}",
+        accepted_values_sentence(options, key)
+    ))
+}
+
+fn accepted_values_sentence(options: &[SessionConfigOption], key: &str) -> String {
+    let choices = session_config_choices(options, key);
+    if choices.is_empty() {
+        return "the agent lists no values".to_owned();
+    }
+    let listed = choices
+        .iter()
+        .map(|choice| {
+            if choice.name.is_empty() || choice.name == choice.value {
+                format!("{:?}", choice.value)
+            } else {
+                format!("{:?} ({})", choice.value, choice.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("choose one of {listed}")
 }
 
 pub(super) fn muse_implicit_default(options: &[SessionConfigOption], value: &str) -> bool {
@@ -244,38 +302,63 @@ pub(super) fn muse_implicit_default(options: &[SessionConfigOption], value: &str
             .is_some_and(|choice| choice.value == value)
 }
 
+/// Apply one selector change and return the value the session now uses.
 pub(super) async fn set_session_config(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
     options: &mut Vec<SessionConfigOption>,
+    harness: HarnessKind,
     key: &str,
     value: &str,
-) -> Result<()> {
+) -> Result<String> {
+    let resolved = resolve_selector_value(options, harness, key, value)?;
     let option = find_session_config_option(options, key)
         .with_context(|| mj_core::acp::missing_config_selector_refusal(key))?;
-    ensure!(
-        select_contains(&option.kind, value),
-        "{value:?} is not an available {key} value"
-    );
     let option_id = option.id.clone();
     let previous = selector_current_value(&option.kind);
-    let response = connection
+    let sent = resolved.clone().unwrap_or_else(|| value.to_owned());
+    let response = match connection
         .send_request(SetSessionConfigOptionRequest::new(
             session_id.clone(),
             option_id.clone(),
-            SessionConfigValueId::new(value.to_owned()),
+            SessionConfigValueId::new(sent.clone()),
         ))
         .block_task()
         .await
-        .with_context(|| format!("set session {key} to {value}"))?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let error = anyhow::Error::from(error).context(format!("set session {key} to {value}"));
+            // The harness refused a value it was left to resolve: say what
+            // it does accept, as a value refused locally would.
+            return Err(if resolved.is_none() {
+                error.context(format!(
+                    "{value:?} is not an available {key} value; {}",
+                    accepted_values_sentence(options, key)
+                ))
+            } else {
+                error
+            });
+        }
+    };
     // An answer with no configuration at all says nothing about the session.
     // Adopting it would drop every selector the harness advertises, which is
     // worse than a stale value, so the catalogue in hand stays.
     if !response.config_options.is_empty() {
         *options = response.config_options;
     }
-    adopt_requested_value(options, &option_id, previous.as_deref(), value);
-    Ok(())
+    adopt_requested_value(options, &option_id, previous.as_deref(), &sent);
+    // A value the harness resolved itself is recorded as the one it now
+    // reports, so a restart replays an advertised value and not the alias.
+    Ok(match resolved {
+        Some(resolved) => resolved,
+        None => options
+            .iter()
+            .find(|option| option.id == option_id)
+            .and_then(|option| selector_current_value(&option.kind))
+            .filter(|current| !current.trim().is_empty())
+            .unwrap_or(sent),
+    })
 }
 
 fn selector_current_value(kind: &SessionConfigKind) -> Option<String> {

@@ -2,9 +2,9 @@ use super::*;
 
 /// Registry commands shared by pane and composer footers, retaining their identities.
 ///
-/// The chord group's first hint carries the prefix itself — `ctrl+b then: c
-/// create` — so the reader always sees which key starts the chord before the
-/// letters that follow it.
+/// The chord group comes back without the prefix: the fitter puts
+/// [`chord_prefix`] on the first chord that survives — `ctrl+b then c
+/// create` — so the reader always sees which key starts the chord.
 pub(crate) fn footer_commands(
     dashboard: &DashboardState,
     group: crate::actions::FooterGroup,
@@ -22,21 +22,19 @@ pub(crate) fn footer_commands(
         })
         .collect::<Vec<_>>();
     hints.sort_by_key(|(rank, _, _)| *rank);
-    let mut hints = hints
-        .into_iter()
-        .map(|(_, id, text)| (id, text))
-        .collect::<Vec<_>>();
-    if group == crate::actions::FooterGroup::Chord
-        && let Some((_, text)) = hints.first_mut()
-    {
-        *text = format!("{} then: {text}", dashboard.keybinds().prefix_label());
-    }
-    hints
+    hints.into_iter().map(|(_, id, text)| (id, text)).collect()
+}
+
+/// The words that lead the chord group: `ctrl+b then `. No colon follows
+/// "then", because the palette's own chord key is `:` and `then: : palette`
+/// reads as a doubled colon.
+pub(crate) fn chord_prefix(dashboard: &DashboardState) -> String {
+    format!("{} then ", dashboard.keybinds().prefix_label())
 }
 
 /// The footer hints that survive longest when the row runs out of width: a
 /// narrow terminal must still say how to reach everything it left out.
-fn protected_hint((id, _): &(crate::CommandId, String)) -> bool {
+pub(crate) fn protected_hint(id: &crate::CommandId) -> bool {
     matches!(id, crate::CommandId::Palette | crate::CommandId::Help)
 }
 
@@ -51,38 +49,18 @@ fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>
     ]
 }
 
-/// The groups that fit in `width`, with the prefix still named.
-///
-/// The prefix label rides on the chord group's first hint, and that hint is
-/// the first unprotected chord the fitter drops. Once it is gone the survivors
-/// would read `: palette · ? keys`, as if `:` alone opened the palette. So
-/// when the labeled hint did not survive, the label moves to the first hint
-/// that did, and the fit runs again so the label's width is paid for.
+/// The groups that fit in `width`, with the prefix still named on the first
+/// chord that survived (see [`theme::fit_prefixed_footer_items`]).
 fn fitted_footer_groups(
     dashboard: &DashboardState,
     width: u16,
 ) -> [Vec<(crate::CommandId, String)>; 3] {
-    let groups = footer_groups(dashboard);
-    let labeled = groups[1].first().map(|(id, _)| *id);
-    let fitted = theme::fit_footer_items(groups, width, |(_, text)| text.as_str(), protected_hint);
-    let survivor = fitted[1].first().map(|(id, _)| *id);
-    if survivor.is_none() || survivor == labeled {
-        return fitted;
-    }
-    let mut relabeled = fitted.clone();
-    if let Some((_, text)) = relabeled[1].first_mut() {
-        *text = format!("{} then: {text}", dashboard.keybinds().prefix_label());
-    }
-    let relabeled =
-        theme::fit_footer_items(relabeled, width, |(_, text)| text.as_str(), protected_hint);
-    // A row too narrow for the label and the palette together keeps the
-    // palette: below the dashboard's own floor, a reachable key beats a
-    // complete sentence.
-    if relabeled[1].first().map(|(id, _)| *id) == survivor {
-        relabeled
-    } else {
-        fitted
-    }
+    theme::fit_prefixed_footer_items(
+        footer_groups(dashboard),
+        width,
+        &chord_prefix(dashboard),
+        protected_hint,
+    )
 }
 
 /// The hotkey hints for whatever applies right now.

@@ -1047,6 +1047,11 @@ impl DurableRelay {
             .collect();
         ownerless_barriers.sort();
         for (_, command_id) in ownerless_barriers {
+            // The transcript does not show this; the log and the journal do.
+            tracing::info!(
+                %command_id,
+                "relay restarted without the controller that owned the checkpoint barrier"
+            );
             self.record_command_interrupted(
                 &command_id,
                 "relay restarted without the controller that owned the checkpoint barrier",

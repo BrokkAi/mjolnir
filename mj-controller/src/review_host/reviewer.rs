@@ -102,6 +102,19 @@ pub(super) async fn prepare(
     tier: ReviewTier,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Prepared, StartRefusal> {
+    // A sub-agent's changes are reviewed through its parent's turn. Asking
+    // its worker for reviewer state would also race the parent's lifecycle
+    // operations on the child and surface their internal refusals.
+    let child = {
+        let environment = environment.clone();
+        let session = session_id.to_owned();
+        tokio::task::spawn_blocking(move || environment.is_subagent(&session))
+            .await
+            .unwrap_or(false)
+    };
+    if child {
+        return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
+    }
     // Mutual exclusion with a plan-review second opinion: they share the
     // default reviewer role, and the running one keeps the slot. Checked
     // against the worker rather than against any UI's state, because the
@@ -214,6 +227,28 @@ pub(super) async fn prepare_recovery(
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
     }))
+}
+
+/// Why a sub-agent session is not reviewed on its own. An automatic review
+/// skips it without a notice; a manual request gets this sentence.
+pub(super) const SUBAGENT_REFUSAL: &str =
+    "a sub-agent's changes are reviewed with its parent's turn";
+
+/// The transcript line a review that could not start leaves behind. The
+/// refusal alone ("session is reserved for a lifecycle operation") did not say
+/// that it was about the review, or what happens to the change (I1-14).
+#[must_use]
+pub fn start_refusal_notice(reason: &str) -> String {
+    // Internal lifecycle refusals name the actor's mechanism, not anything a
+    // person did (I1-14, I2-9).
+    let reason = if reason.contains("session is reserved for a lifecycle operation")
+        || reason.contains("cancelled for session lifecycle change")
+    {
+        "another operation was using the session"
+    } else {
+        reason
+    };
+    format!("Turn review did not start: {reason}. The next review covers these changes.")
 }
 
 /// The transcript line a resolution leaves behind, on every surface.

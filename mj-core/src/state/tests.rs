@@ -1030,6 +1030,29 @@ fn project_directory_history_is_recent_and_isolated_per_remote_host() {
     );
 }
 
+/// A refused Setup change names the running session and what it uses the
+/// way the screen names them, and only what the change touches. Launch
+/// campaign finding C-20.
+#[test]
+fn a_refused_setup_change_names_the_session_and_setting_by_display_name() {
+    let mut state = sample_state();
+    let before = sample_config();
+    let session = state.sessions.values_mut().next().unwrap();
+    session.session_title_override = Some("Fix the login page".into());
+    let project = session.project_name(&before);
+    let mut after = before.clone();
+    after.bundles.remove("hel");
+    let error = state
+        .validate_setup_update(&before, &after)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("\"Fix the login page\""), "{error}");
+    assert!(error.contains(&format!("project \"{project}\"")), "{error}");
+    assert!(!error.contains("0123456789abcdef"), "{error}");
+    assert!(!error.contains("codex-1"), "{error}");
+    assert!(!error.contains("podman"), "{error}");
+}
+
 #[test]
 fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults() {
     let state = sample_state();
@@ -1053,7 +1076,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
                 .validate_setup_update(&before, &after)
                 .unwrap_err()
                 .to_string()
-                .contains("active session")
+                .contains("running session")
         );
         // Restoring a removed entry is always permitted.
         state.validate_setup_update(&after, &before).unwrap();

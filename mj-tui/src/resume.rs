@@ -472,7 +472,7 @@ impl ResumeDialog {
                 brief
                     .lines()
                     .skip(1)
-                    .map(|line| Line::raw(line.to_owned()))
+                    .map(|line| Line::raw(localize_brief_date(line, &chrono::Local)))
                     .collect(),
                 Vec::new(),
             ));
@@ -497,6 +497,31 @@ impl ResumeDialog {
             })
             .collect()
     }
+}
+
+/// The briefing's metadata line with its date moved to `zone`. SessionWiki
+/// writes `- Tool: … | Date: YYYY-MM-DD HH:MM` in UTC, while every other time
+/// on screen is local. Any other line comes back unchanged.
+fn localize_brief_date<Tz: chrono::TimeZone>(line: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    const MARKER: &str = " | Date: ";
+    const FORMAT: &str = "%Y-%m-%d %H:%M";
+    if !line.starts_with("- Tool: ") {
+        return line.to_owned();
+    }
+    let Some(start) = line.rfind(MARKER).map(|at| at + MARKER.len()) else {
+        return line.to_owned();
+    };
+    let Some(stamp) = line.get(start..start + 16) else {
+        return line.to_owned();
+    };
+    let Ok(utc) = chrono::NaiveDateTime::parse_from_str(stamp, FORMAT) else {
+        return line.to_owned();
+    };
+    let local = utc.and_utc().with_timezone(zone).format(FORMAT);
+    format!("{}{local}{}", &line[..start], &line[start + 16..])
 }
 
 /// The row the dialog points at, clamped to the list it actually has. A state
@@ -752,19 +777,33 @@ fn snippet_text(hit: &WikiRow) -> Option<String> {
 /// it the way the live session summary does. Without one there is nothing to go
 /// on but the project path, which is shown as a local origin.
 fn archive_origin_of(config: &Config, hit: &WikiRow) -> String {
+    let project = source_project_path(std::path::Path::new(&hit.project));
     let Some(target_id) = hit.target.as_deref() else {
-        return archive_origin(&hit.project);
+        return archive_origin(&project);
     };
-    let project = std::path::Path::new(&hit.project);
     mj_core::state::target_label(
         config,
         target_id,
-        (!hit.project.trim().is_empty()).then_some(project),
+        (!hit.project.trim().is_empty()).then_some(project.as_path()),
     )
 }
 
-fn archive_origin(project: &str) -> String {
-    std::path::Path::new(project).file_name().map_or_else(
+/// The project a recorded directory stands for. A managed worktree lives at
+/// `<repository>/.mj/worktrees/<session id>/<relative>`; the project it works
+/// on is `<repository>/<relative>`, which is what the other tabs name.
+fn source_project_path(path: &std::path::Path) -> std::path::PathBuf {
+    let parts: Vec<_> = path.components().collect();
+    let marker = parts
+        .windows(3)
+        .position(|window| window[0].as_os_str() == ".mj" && window[1].as_os_str() == "worktrees");
+    let Some(index) = marker else {
+        return path.to_path_buf();
+    };
+    parts[..index].iter().chain(&parts[index + 3..]).collect()
+}
+
+fn archive_origin(project: &std::path::Path) -> String {
+    project.file_name().map_or_else(
         || LOCAL_ORIGIN.to_owned(),
         |project| format!("{LOCAL_ORIGIN}/{}", project.to_string_lossy()),
     )
@@ -884,7 +923,15 @@ impl DashboardState {
                     title: session.display_title().to_owned(),
                     origin: workspace.to_owned(),
                     details: session.project_name(&self.config),
-                    last_activity_ms: timestamp_ms(&session.updated_at).unwrap_or_default(),
+                    // The session record's `updated_at` changes only with the
+                    // record, so for a running session it is often the
+                    // creation time. The projection's last activity is what
+                    // the Sessions pane orders by (I1-16).
+                    last_activity_ms: self
+                        .session_activity_at_ms(&session.id)
+                        .and_then(|at| i64::try_from(at).ok())
+                        .or_else(|| timestamp_ms(&session.updated_at))
+                        .unwrap_or_default(),
                     status: ResumeRowStatus::Running,
                     natively_archived: false,
                     unavailable_reason: None,
@@ -1670,7 +1717,18 @@ impl DashboardState {
                 self.select_resume_row(index);
                 return self.next_wiki_preview();
             }
-            Some(Interaction::Activate(Search | Tabs)) => {
+            // Enter on a query acts on its selected match, the same as Enter on
+            // the list. With nothing matched it only hands the list the focus.
+            Some(Interaction::Activate(Search)) => {
+                if let Some(row) = self.selected_resume_row() {
+                    return self.activate_selected_resume_row(Some(row));
+                }
+                let Mode::ResumeDialog(dialog) = &mut self.mode else {
+                    return DashboardAction::None;
+                };
+                dialog.form.get_mut().focus(Sessions);
+            }
+            Some(Interaction::Activate(Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
             }
             Some(Interaction::Activate(Sessions | Open)) => {
@@ -1795,22 +1853,34 @@ struct RowLayout {
     activity: usize,
 }
 
+/// Room for a short title and the longest status mark, `  [unavailable]`.
+const MIN_TITLE_CELLS: usize = 20;
+
 fn row_layout(width: u16, tab: ResumeTab) -> RowLayout {
     let width = usize::from(width);
     // The Live tab has no profile column, so the title also gets back the
     // two-space gap that would have separated it from the origin cell.
-    let profile = if tab == ResumeTab::Live {
+    let mut profile = if tab == ResumeTab::Live {
         0
     } else {
         14.min(width / 5).max(6)
     };
-    let origin = 24.min(width / 3).max(8);
-    let activity = 14.min(width / 4).max(8);
-    let reserved = if profile == 0 {
-        origin + activity + 6
-    } else {
-        profile + origin + activity + 8
-    };
+    let mut origin = 24.min(width / 3).max(8);
+    let mut activity = 14.min(width / 4).max(8);
+    let gaps = if profile == 0 { 6 } else { 8 };
+    // The title keeps room for a status mark such as "[unavailable]". On a
+    // narrow list the other columns give up cells for it, down to their
+    // minimums, instead of pushing the mark past the list's edge.
+    let mut short = (profile + origin + activity + gaps + MIN_TITLE_CELLS).saturating_sub(width);
+    for (column, minimum) in [(&mut origin, 8), (&mut profile, 6), (&mut activity, 8)] {
+        if *column == 0 {
+            continue;
+        }
+        let give = short.min(column.saturating_sub(minimum));
+        *column -= give;
+        short -= give;
+    }
+    let reserved = profile + origin + activity + gaps;
     RowLayout {
         title: width.saturating_sub(reserved).max(10),
         profile,
@@ -1973,7 +2043,11 @@ pub(crate) fn render_resume_dialog(
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
             (ResumeTab::Import, true, _) => "Scanning native sessions…".to_owned(),
-            (ResumeTab::Live, _, true) => "No running sessions".to_owned(),
+            // Under a state filter the filter emptied the list, so say which.
+            (ResumeTab::Live, _, true) => match dialog.live_state {
+                Some(state) => format!("No {} sessions", state.label()),
+                None => "No running sessions".to_owned(),
+            },
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
             (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
             (ResumeTab::Archive, _, true) => "No archived sessions".to_owned(),
@@ -2524,7 +2598,13 @@ where
     ));
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+        // The marks are ASCII. The title gives up their cells so they always
+        // show in full.
+        truncate_to_cells(
+            &row.title,
+            layout.title.saturating_sub(marks.len()),
+            Truncate::SUMMARY,
+        ),
         title_style,
     ));
     spans.push(Span::styled(

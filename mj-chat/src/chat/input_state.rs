@@ -1,5 +1,22 @@
 use super::*;
 
+/// The command name when `text` is shaped like a slash command: a slash
+/// followed by a word of letters, digits, `-`, `_`, `:` or `.`. A path such as
+/// `/tmp/log is empty` is not a command.
+fn slash_command_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    let name = rest.split(char::is_whitespace).next()?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+    .then_some(name)
+}
+
+pub(super) const ATTACH_UNSUPPORTED_NOTICE: &str =
+    "/attach adds image files only, and this agent does not accept images";
+pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
+    "This agent does not accept images; only text can be pasted";
 pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +52,7 @@ impl ChatState {
         self.autocomplete = None;
         self.anchor = TranscriptAnchor::Bottom;
         self.reveal_latest_agent_on_draw = true;
+        self.revealed_anchor = None;
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
         self.transcript_scrollbar.clear();
@@ -445,6 +463,40 @@ impl ChatState {
     }
 
     pub(crate) fn submit_input(&mut self) -> ChatAction {
+        let draft = self.input.clone();
+        let command = slash_command_name(draft.trim()).map(str::to_owned);
+        let action = self.submit_draft();
+        // A slash command the chat refused leaves nothing for the user to
+        // edit: keeping it in the draft only makes the next command append
+        // to it ("/model/effort high"). Clear it, keep it in history, and
+        // name the command in the notice. /clear keeps its own handling, and
+        // a draft holding images or waiting for a session is kept.
+        let Some(command) = command else {
+            return action;
+        };
+        if !matches!(action, ChatAction::None)
+            || command == "clear"
+            || self.standby
+            || !self.input_images.is_empty()
+            || self.input != draft
+        {
+            return action;
+        }
+        let Some(notice) = self.notice() else {
+            return action;
+        };
+        self.record_prompt_history(draft.trim());
+        self.clear_input();
+        let named = format!("/{command}");
+        if notice.contains(&named) {
+            self.set_notice(notice);
+        } else {
+            self.set_notice(format!("{named}: {notice}"));
+        }
+        action
+    }
+
+    fn submit_draft(&mut self) -> ChatAction {
         if !self.input_images.is_empty() && !self.prompt_images_supported {
             self.set_notice(IMAGE_CAPABILITY_NOTICE);
             return ChatAction::None;
@@ -705,6 +757,10 @@ impl ChatState {
                     };
                 }
                 LocalCommand::Attach => {
+                    if !self.prompt_images_supported {
+                        self.set_notice(ATTACH_UNSUPPORTED_NOTICE);
+                        return ChatAction::None;
+                    }
                     if !self.allow_image_attachment() {
                         return ChatAction::None;
                     }
@@ -788,6 +844,21 @@ impl ChatState {
                     }
                 }
             };
+        }
+        if let Some(name) = slash_command_name(&command_input)
+            && !self.command_choices.iter().any(|choice| {
+                choice.name.eq_ignore_ascii_case(name)
+                    || choice
+                        .name
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|first| first.eq_ignore_ascii_case(name))
+            })
+        {
+            self.set_notice(format!(
+                "/{name} is not a Mjolnir or agent command; it was not sent"
+            ));
+            return ChatAction::None;
         }
         self.submit_prompt(prompt)
     }

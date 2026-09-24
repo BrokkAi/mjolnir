@@ -75,6 +75,7 @@ impl DashboardState {
             remote_preflight_error: None,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+        self.mount_history_refresh_pending = true;
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -134,6 +135,7 @@ impl DashboardState {
             discard_queue: false,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+        self.mount_history_refresh_pending = true;
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -189,6 +191,7 @@ impl DashboardState {
             discard_queue: false,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+        self.mount_history_refresh_pending = true;
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -249,6 +252,7 @@ impl DashboardState {
             discard_queue: true,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+        self.mount_history_refresh_pending = true;
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -344,5 +348,20 @@ impl DashboardState {
                 target_template_ids,
             }
         }
+    }
+
+    /// Asks once per wizard open for the stored mount and project history,
+    /// which sessions created after startup add to. The dashboard loop polls
+    /// this after every event, as it does `take_prerequisite_check`, and runs
+    /// the read on a worker.
+    pub fn take_mount_history_refresh(&mut self) -> Option<DashboardAction> {
+        std::mem::take(&mut self.mount_history_refresh_pending)
+            .then_some(DashboardAction::LoadMountHistory)
+    }
+
+    /// Replaces the remembered mount and project history with what the
+    /// database holds now.
+    pub fn apply_mount_history(&mut self, history: BTreeMap<String, Vec<std::path::PathBuf>>) {
+        self.state.mount_history = history;
     }
 }

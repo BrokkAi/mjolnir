@@ -95,7 +95,7 @@ pub(crate) fn capacity_table_rows(
             }
             CapacityTableRow {
                 host: detail.target.host.clone(),
-                targets: capacity_target_labels(&detail.target.target_ids, &dashboard.config),
+                targets: capacity_target_labels(&detail.target.target_ids, dashboard),
                 in_use: Line::from(in_use),
             }
         })

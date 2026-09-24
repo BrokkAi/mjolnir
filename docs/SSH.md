@@ -44,7 +44,10 @@ variable is set (`default` for the default instance), and in
 `<data dir>/ssh/` otherwise. Each instance has its own directory, so two
 daemons never share a master. A socket is named `<hash>-<shard>`, where the
 hash covers the destination and your `extra_args`, and the shard number counts
-the masters for that host from 0. Mjolnir creates the directory with mode
+the masters for that host from 0. A `<hash>-<shard>.lock` file beside each
+socket makes processes of the same instance (for example the old and new
+daemon during a restart) take turns checking and opening that master, so
+they never open two. Mjolnir creates the directory with mode
 `0700`. If it cannot, or if the socket path would be too long for a unix socket
 address, every command opens its own connection instead. Commands that share
 a master also share its fate: if the underlying connection drops, every
@@ -55,9 +58,17 @@ target validation probes (including the `mj doctor` connectivity probe) and
 remote Tab completion. They set a short `ConnectTimeout` and a one-miss
 keepalive so they fail fast instead of hanging the interface, and a master
 holding those settings would drop every later session on it after a stall of
-a couple of seconds. They carry `ControlMaster=no` and the path of the host's
-first master, so they join it when it is up and otherwise open their own
-direct connection.
+a couple of seconds. They carry `ControlMaster=no` and the path of a master,
+so they join it when it is up and otherwise open their own direct
+connection. In the daemon, a validation probe counts as one of the 8 sessions
+on the master it joins, so probes for new sessions cannot push a master past
+`MaxSessions`. `mj doctor` and Tab completion run in other processes and use
+the two spare sessions.
+
+If the server refuses a session anyway, the command never started, so Mjolnir
+retries it. The daemon log names this case "refused another session on a
+shared connection (MaxSessions)", which is different from a connection
+closed before authentication (`MaxStartups`).
 
 If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
 `-S`, Mjolnir adds no sharing options at all for that target and leaves
@@ -96,9 +107,26 @@ to opening masters, and to every command when sharing is off.
   pseudo-terminal and does not prompt for a password or passphrase, so the
   target user must already accept your key without interaction (an unlocked
   key, `ssh-agent`, or a passphrase-free key).
-- **The host key already trusted.** Add the remote host to `known_hosts` (or
-  otherwise satisfy your SSH host-key policy) before pointing a target at it;
-  Mjolnir does not manage `known_hosts` for you.
+- **A host-key policy you have chosen.** By default Mjolnir passes
+  `-o StrictHostKeyChecking=accept-new`: `ssh` trusts a host key it has never
+  seen and records it in `known_hosts`, and refuses a key that has changed.
+  Mjolnir does not otherwise manage `known_hosts`. To require that the key
+  already be in `known_hosts`, add the option to the machine's `extra_args`:
+
+  ```toml
+  [machines.builder]
+  kind = "ssh"
+  host = "builder"
+  extra_args = ["-o", "StrictHostKeyChecking=yes"]
+  ```
+
+  OpenSSH uses the first value it sees for an option, and Mjolnir puts
+  `extra_args` before its own defaults, so this setting wins. The same holds
+  for `UserKnownHostsFile` and any other option. Setting
+  `StrictHostKeyChecking yes` in `~/.ssh/config` is not enough: options on
+  the command line override the config file. Add the host key first, for
+  example with `ssh-keyscan <host> >> ~/.ssh/known_hosts` after you have
+  checked the key's fingerprint.
 - For a bare runtime: **an existing remote Git project with a valid `HEAD`.** The
   SSH user must be able to create a branch and `.mj/worktrees/` below the
   repository. If you select its primary checkout, that checkout must be fully
@@ -119,7 +147,7 @@ machine. The machine's keys are:
 | `host` | yes | SSH destination: hostname, IP, or an alias from your SSH config. |
 | `user` | no | SSH login user; omit to use your SSH config / default. |
 | `identity_file` | no | Path to the private key. |
-| `extra_args` | no | Extra arguments appended to every `ssh` invocation for this machine. |
+| `extra_args` | no | Extra arguments for every `ssh` invocation for this machine. They come before Mjolnir's own options, so they override Mjolnir's defaults. |
 | `workspace_prefix` | no | Per-session lifecycle path recorded for cleanup as `<prefix>/<session-id>`. It does not select or relocate the Git project. Defaults to `.local/share/hel/workspaces` relative to the login home. |
 
 A `bare` runtime on the machine also takes:

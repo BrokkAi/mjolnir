@@ -705,6 +705,26 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
 }
 
 #[test]
+fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(!screen.contains("Subagents"), "{screen}");
+
+    chat.set_subagents_enabled(true);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · none yet"), "{screen}");
+    assert!(
+        chat.subagent_control_area.is_none(),
+        "the dimmed entry is not clickable"
+    );
+
+    chat.set_subagent_count(1);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · 0 working"), "{screen}");
+    assert!(chat.subagent_control_area.is_some());
+}
+
+#[test]
 fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("keep this draft".into());
@@ -1519,10 +1539,10 @@ fn fast_stays_local_when_the_active_model_does_not_support_it() {
     chat.input = "/fast".into();
 
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.input, "/fast");
+    assert!(chat.input.is_empty());
     assert_eq!(
         chat.notice().as_deref(),
-        Some("Fast mode is unavailable for the active Codex model")
+        Some("/fast: Fast mode is unavailable for the active Codex model")
     );
 }
 
@@ -1554,7 +1574,7 @@ fn config_commands_are_queued_while_the_agent_is_busy() {
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
         chat.feedback.current().as_deref(),
-        Some("The worker is closing; this configuration change was not sent")
+        Some("/model: The worker is closing; this configuration change was not sent")
     );
 }
 
@@ -1856,7 +1876,7 @@ fn plan_is_kept_local_without_a_compatible_mode_surface() {
     chat.set_input("/plan".into());
 
     assert_eq!(chat.submit_input(), ChatAction::None);
-    assert_eq!(chat.input, "/plan");
+    assert!(chat.input.is_empty());
     assert!(chat.feedback.current().unwrap().contains("does not expose"));
 }
 
@@ -1930,7 +1950,7 @@ fn a_harness_without_plan_mode_rejects_plan_and_implement_locally() {
     for command in ["/plan design it", "/implement"] {
         chat.set_input(command.into());
         assert_eq!(chat.submit_input(), ChatAction::None);
-        assert_eq!(chat.input, command);
+        assert!(chat.input.is_empty());
         assert!(
             chat.feedback
                 .current()
@@ -2040,6 +2060,31 @@ fn config_slash_command_without_value_shows_usage() {
         chat.notice().as_deref(),
         Some("The agent does not advertise model values; usage: /model <value>")
     );
+}
+
+#[test]
+fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.input = "/model".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.input.is_empty(), "draft kept: {:?}", chat.input);
+    assert!(chat.notice().unwrap().contains("/model"));
+}
+
+#[test]
+fn an_unknown_slash_command_is_not_sent_to_the_agent() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.input = "/bogus thing".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.input.is_empty());
+    assert!(chat.notice().unwrap().contains("/bogus"));
+
+    // A path is a prompt, not a command.
+    chat.input = "/tmp/log is empty".into();
+    assert!(matches!(
+        chat.handle_key(key(KeyCode::Enter)),
+        ChatAction::Prompt(_)
+    ));
 }
 
 #[test]
@@ -2585,11 +2630,28 @@ fn saved_image_drafts_require_current_capability_without_losing_content() {
 }
 
 #[test]
-fn attach_requires_capability_and_preserves_the_command_on_refusal() {
+fn attaching_a_text_file_says_attach_takes_images_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "plain text").unwrap();
+    let error = super::attachments::install_path("attach-text", &path).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("/attach adds image files only"),
+        "{message}"
+    );
+    assert!(!message.contains("marker"), "{message}");
+}
+
+#[test]
+fn attach_requires_capability_and_clears_the_command_on_refusal() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("/attach picture.png".into());
     assert_eq!(chat.submit_input(), ChatAction::None);
-    assert_eq!(chat.input, "/attach picture.png");
+    assert!(chat.input.is_empty());
+    let notice = chat.notice().unwrap();
+    assert_eq!(notice, super::input_state::ATTACH_UNSUPPORTED_NOTICE);
+    assert!(!notice.contains("marker"));
     assert!(!chat.reserve_attachment(1));
     assert!(chat.input_images.is_empty());
 }

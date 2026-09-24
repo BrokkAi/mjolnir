@@ -305,7 +305,12 @@ pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardIma
     if bytes.len() > 64 * 1024 * 1024 {
         bail!("image attachment exceeds the 64 MiB input limit");
     }
-    install_image_bytes(session_id, &bytes)
+    install_image_bytes(session_id, &bytes).with_context(|| {
+        format!(
+            "{} could not be read as an image; /attach adds image files only",
+            path.display()
+        )
+    })
 }
 
 fn install_image_bytes(session_id: &str, bytes: &[u8]) -> Result<ClipboardImage> {
