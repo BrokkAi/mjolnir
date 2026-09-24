@@ -2027,3 +2027,176 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
         crate::doctor::review_residue_repositories([project.clone()], &[&running_worktree]);
     assert!(repositories.is_empty(), "{repositories:?}");
 }
+
+fn doctor_profile(kind: HarnessKind, home: PathBuf) -> HarnessProfile {
+    HarnessProfile {
+        // Disabled, so the check reports the profile without probing its
+        // login: the summary sentence is the subject here.
+        enabled: false,
+        kind,
+        home,
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    }
+}
+
+fn subagent_config(eligible: &[&str], profiles: &[&str]) -> Config {
+    Config {
+        profiles: profiles
+            .iter()
+            .map(|id| {
+                (
+                    (*id).to_owned(),
+                    HarnessProfile {
+                        enabled: true,
+                        ..doctor_profile(HarnessKind::Codex, PathBuf::from("/nonexistent").join(id))
+                    },
+                )
+            })
+            .collect(),
+        subagents: mj_core::config::SubagentConfig {
+            eligible_profiles: eligible.iter().map(|id| ((*id).to_owned(), true)).collect(),
+            ..Default::default()
+        },
+        ..Config::default()
+    }
+}
+
+#[test]
+fn the_subagent_policy_names_how_many_children_and_which_profiles() {
+    let config = subagent_config(&["codex2", "deepseek"], &["codex", "codex2", "deepseek"]);
+    let checks = subagent_eligibility_checks(Ok(&config));
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(checks[0].id, "subagents.policy");
+    assert_eq!(checks[0].status, CheckStatus::Ready);
+    assert_eq!(
+        checks[0].detail,
+        "On for Claude and Codex sessions, up to 6 sub-agents at once per session. A session's \
+         sub-agents may use its own profile and: codex2, deepseek."
+    );
+
+    let alone = subagent_config(&[], &["codex"]);
+    assert!(
+        subagent_eligibility_checks(Ok(&alone))[0]
+            .detail
+            .ends_with("its own profile and: no other profile."),
+    );
+
+    let mut off = subagent_config(&["codex"], &["codex"]);
+    off.subagents.enabled = false;
+    assert_eq!(
+        subagent_eligibility_checks(Ok(&off))[0].detail,
+        "Off; sessions get no sub-agent tools."
+    );
+}
+
+/// An eligible id that names no profile is a configuration error, not a
+/// warning: the file fails to load, and doctor's configuration check says so.
+#[test]
+fn an_eligible_id_that_names_no_profile_fails_the_configuration_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n\n[subagents.eligible_profiles]\ncodx = true\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+
+    let checks = run_with_config_path(
+        &path,
+        &AlwaysFailingExecutor,
+        ApplePlatform::Linux,
+        DoctorOptions { smoke: false },
+    );
+
+    let config = checks
+        .iter()
+        .find(|check| check.id == "config")
+        .expect("the configuration is checked");
+    assert_eq!(config.status, CheckStatus::Fixable);
+    assert!(
+        config.detail.contains("\"codx\" is not defined"),
+        "{}",
+        config.detail
+    );
+}
+
+#[test]
+fn each_profile_line_says_where_its_quota_comes_from_and_who_may_delegate_to_it() {
+    let homes = tempfile::tempdir().unwrap();
+    let chatgpt = homes.path().join("codex");
+    let deepseek = homes.path().join("deepseek");
+    let keyless = homes.path().join("keyless");
+    for home in [&chatgpt, &deepseek, &keyless] {
+        std::fs::create_dir_all(home).unwrap();
+    }
+    let provider = "model_provider = \"deepseek\"\n\n[model_providers.deepseek]\n\
+                    base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n\
+                    env_key = \"DEEPSEEK_API_KEY\"\n";
+    std::fs::write(deepseek.join("config.toml"), provider).unwrap();
+    std::fs::write(keyless.join("config.toml"), provider).unwrap();
+    let mut deepseek_profile = doctor_profile(HarnessKind::Codex, deepseek);
+    deepseek_profile
+        .environment
+        .insert("DEEPSEEK_API_KEY".into(), "sk-test".into());
+    let config = Config {
+        profiles: [
+            ("codex", doctor_profile(HarnessKind::Codex, chatgpt)),
+            ("deepseek", deepseek_profile),
+            ("keyless", doctor_profile(HarnessKind::Codex, keyless)),
+            (
+                "claude",
+                doctor_profile(HarnessKind::Claude, homes.path().join("claude")),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, profile)| (id.to_owned(), profile))
+        .collect(),
+        subagents: mj_core::config::SubagentConfig {
+            eligible_profiles: [("codex".to_owned(), true), ("deepseek".to_owned(), true)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+
+    let checks = harness_checks(Ok(&config), &AlwaysFailingExecutor);
+    let detail = |id: &str| {
+        checks
+            .iter()
+            .find(|check| check.id == format!("harness.{id}"))
+            .unwrap_or_else(|| panic!("{id} is reported"))
+            .detail
+            .clone()
+    };
+    assert_eq!(
+        detail("codex"),
+        "Codex; ChatGPT subscription quota; any session's sub-agents may use it. Profile is \
+         disabled; home and authentication checks were skipped."
+    );
+    assert!(
+        detail("deepseek").starts_with(
+            "Codex; pay-per-use through api.deepseek.com, counted as 100% left when choosing a \
+             sub-agent's profile; any session's sub-agents may use it."
+        ),
+        "{}",
+        detail("deepseek")
+    );
+    assert!(
+        detail("keyless").contains("custom provider \"deepseek\" has no API key"),
+        "{}",
+        detail("keyless")
+    );
+    assert!(
+        detail("claude").starts_with(
+            "Claude Code; Claude subscription quota; only its own sessions' sub-agents may use it."
+        ),
+        "{}",
+        detail("claude")
+    );
+}

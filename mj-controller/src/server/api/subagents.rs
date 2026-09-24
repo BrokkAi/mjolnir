@@ -1,5 +1,7 @@
 use super::*;
 
+use mj_core::subagent::CURRENT_MODEL;
+
 pub(super) const MAX_SUBAGENT_CONTEXT_BYTES: usize = 256 * 1024;
 
 pub(super) async fn spawn_subagent(
@@ -21,37 +23,15 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
-    let profile_id = request
-        .profile_id
-        .clone()
-        .unwrap_or_else(|| parent.profile_id.clone());
-    let mut selected_model = request.model.clone();
-    let mut selected_effort = request.effort.clone();
-    if profile_id == parent.profile_id
-        && (selected_model.is_none() || selected_effort.is_none())
-        && let Some(handle) = backend.session_handle(parent_session_id.clone()).await?
-        && let Some(snapshot) = handle.view().snapshot
-    {
-        selected_model =
-            selected_model.or_else(|| snapshot.operational.config.get("model").cloned());
-        selected_effort =
-            selected_effort.or_else(|| snapshot.operational.config.get("effort").cloned());
-    }
-    // Checked against the warm catalogue only. Discovering a profile launches
-    // a harness, which takes tens of seconds, and the caller is a model
-    // waiting on its tool call. A selector the catalogue could not check is
-    // validated by the start follow-up against the child's live harness; an
-    // unsupported one fails the child's start and is reported to the parent as
-    // that child's error through `wait` and `list_agents`.
-    if (selected_model.is_some() || selected_effort.is_some())
-        && let Some(choices) = backend.published_profile_config(&profile_id)
-    {
-        validate_selectors(
-            &choices,
-            selected_model.as_deref(),
-            selected_effort.as_deref(),
-        )?;
-    }
+    let selection = resolve_subagent_selection(
+        &backend,
+        &parent_session_id,
+        &parent.profile_id,
+        request.profile_id.as_deref(),
+        request.model.as_deref(),
+        request.effort.as_deref(),
+    )
+    .await?;
 
     let initial_prompt = build_subagent_prompt(
         &backend,
@@ -65,9 +45,9 @@ pub(super) async fn spawn_subagent(
         .start_subagent(crate::controller::RegisterSubagentRequest {
             parent_session_id: parent_session_id.clone(),
             task_name: request.task_name,
-            profile_id,
-            model: selected_model.clone(),
-            effort: selected_effort.clone(),
+            profile_id: selection.profile_id,
+            model: Some(selection.model.clone()),
+            effort: selection.effort.clone(),
             working_directory: request.working_directory.unwrap_or_default(),
             initial_prompt,
             // Every request is its own spawn; the key only lets Mjolnir
@@ -82,8 +62,8 @@ pub(super) async fn spawn_subagent(
             // Registration completes the first prompt (it names the handback
             // tool when the child gets one), so send what it kept.
             StartFollowup {
-                model: selected_model,
-                effort: selected_effort,
+                model: Some(selection.model),
+                effort: selection.effort,
                 prompt: Some(relation.initial_prompt.clone()),
             },
         )
@@ -97,6 +77,207 @@ pub(super) async fn spawn_subagent(
             session,
         }),
     ))
+}
+
+/// The profile, model and effort a spawn runs its child with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubagentSelection {
+    pub profile_id: String,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+/// Settle a spawn's profile, model and effort; both spawn paths use this.
+///
+/// The model is required, and [`CURRENT_MODEL`] names the parent's own. Unless
+/// the caller pins a profile, the child runs on the eligible profile that
+/// offers the model and has the most quota left, so a parent whose own login
+/// is nearly spent does not give its child the same empty allowance. An
+/// omitted effort follows the parent's when the chosen profile offers it.
+pub(crate) async fn resolve_subagent_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_session_id: &str,
+    parent_profile: &str,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
+    let model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            ApiFailure::bad_request(format!(
+                "spawn needs a model: name one from list_profiles, or \"{CURRENT_MODEL}\" for \
+                 this session's own model"
+            ))
+        })?;
+    let parent_config = if model == CURRENT_MODEL || effort.is_none() {
+        backend
+            .session_handle(parent_session_id.to_owned())
+            .await?
+            .and_then(|handle| handle.view().snapshot)
+            .map(|snapshot| snapshot.operational.config.clone())
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let model = if model == CURRENT_MODEL {
+        parent_config.get("model").cloned().ok_or_else(|| {
+            ApiFailure::conflict(format!(
+                "this session's current model is unknown; name a model from list_profiles \
+                 instead of \"{CURRENT_MODEL}\""
+            ))
+        })?
+    } else {
+        model.to_owned()
+    };
+    let candidates = backend
+        .subagent_candidates(parent_profile.to_owned())
+        .await?;
+    let chosen = choose_subagent_profile(candidates, profile_id, parent_profile, &model)?;
+    let effort = match effort {
+        Some(effort) => {
+            validate_selectors(&chosen.choices, None, Some(effort))?;
+            Some(effort.to_owned())
+        }
+        None => parent_config.get("effort").cloned().filter(|effort| {
+            chosen
+                .choices
+                .efforts
+                .iter()
+                .any(|choice| &choice.value == effort)
+        }),
+    };
+    Ok(SubagentSelection {
+        profile_id: chosen.profile_id,
+        model,
+        effort,
+    })
+}
+
+/// The profile a child runs on. A pinned profile must be a candidate that
+/// offers the model; otherwise the best-ranked candidate that offers it wins.
+pub(crate) fn choose_subagent_profile(
+    candidates: SubagentCandidates,
+    requested_profile: Option<&str>,
+    parent_profile: &str,
+    model: &str,
+) -> Result<SubagentCandidate, ApiFailure> {
+    let SubagentCandidates {
+        mut offered,
+        unavailable,
+    } = candidates;
+    if let Some(requested) = requested_profile {
+        if let Some((_, reason)) = unavailable.iter().find(|(id, _)| id == requested) {
+            return Err(ApiFailure::conflict(format!(
+                "profile {requested:?} is unavailable: {reason}"
+            )));
+        }
+        let chosen = offered
+            .into_iter()
+            .find(|candidate| candidate.profile_id == requested)
+            .ok_or_else(|| {
+                ApiFailure::bad_request(format!(
+                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                ))
+            })?;
+        validate_selectors(&chosen.choices, Some(model), None)?;
+        return Ok(chosen);
+    }
+    rank_candidates(&mut offered, parent_profile);
+    match offered
+        .iter()
+        .position(|candidate| offers_model(candidate, model))
+    {
+        Some(index) => Ok(offered.swap_remove(index)),
+        None => Err(ApiFailure::bad_request(no_profile_offers(
+            model,
+            &offered,
+            &unavailable,
+        ))),
+    }
+}
+
+/// Order candidates best first: the most quota left, with unknown quota last;
+/// then the parent's own profile; then profile id, so the order never depends
+/// on how the configuration happens to list them.
+pub(crate) fn rank_candidates(candidates: &mut [SubagentCandidate], parent_profile: &str) {
+    candidates.sort_by(|left, right| {
+        right
+            .remaining_percent
+            .cmp(&left.remaining_percent)
+            .then_with(|| {
+                (left.profile_id != parent_profile).cmp(&(right.profile_id != parent_profile))
+            })
+            .then_with(|| left.profile_id.cmp(&right.profile_id))
+    });
+}
+
+/// The candidates `list_profiles` shows: ranked, with profiles of one harness
+/// that offer exactly the same models merged into the best-ranked of them.
+/// Several logins of one account type become one entry, and a profile that
+/// offers different models is never hidden behind another.
+pub(crate) fn merge_same_models(
+    mut candidates: Vec<SubagentCandidate>,
+    parent_profile: &str,
+) -> Vec<SubagentCandidate> {
+    rank_candidates(&mut candidates, parent_profile);
+    let mut seen = std::collections::BTreeSet::new();
+    candidates.retain(|candidate| {
+        let mut models = candidate
+            .choices
+            .models
+            .iter()
+            .map(|choice| choice.value.clone())
+            .collect::<Vec<_>>();
+        models.sort_unstable();
+        seen.insert((candidate.harness, models))
+    });
+    candidates
+}
+
+fn offers_model(candidate: &SubagentCandidate, model: &str) -> bool {
+    candidate
+        .choices
+        .models
+        .iter()
+        .any(|choice| choice.value == model)
+}
+
+/// A refusal the parent can act on: which models each eligible profile does
+/// offer, and which profiles could not be checked.
+fn no_profile_offers(
+    model: &str,
+    offered: &[SubagentCandidate],
+    unavailable: &[(String, String)],
+) -> String {
+    let mut message = format!("no eligible profile offers model {model:?}.");
+    if !offered.is_empty() {
+        let offers = offered
+            .iter()
+            .map(|candidate| {
+                let models = candidate
+                    .choices
+                    .models
+                    .iter()
+                    .map(|choice| choice.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} ({models})", candidate.profile_id)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        message.push_str(&format!(" Offered: {offers}."));
+    }
+    if !unavailable.is_empty() {
+        let skipped = unavailable
+            .iter()
+            .map(|(id, reason)| format!("{id} ({reason})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        message.push_str(&format!(" Could not check: {skipped}."));
+    }
+    message
 }
 
 /// How long a just-created session is waited for in the viewer snapshot.
@@ -245,4 +426,126 @@ pub(crate) async fn build_subagent_prompt(
         )));
     }
     Ok(prompt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(profile_id: &str, remaining: Option<u8>, models: &[&str]) -> SubagentCandidate {
+        SubagentCandidate {
+            profile_id: profile_id.to_owned(),
+            harness: mj_core::config::HarnessKind::Codex,
+            choices: mj_core::worker_launch::ProfileConfig {
+                model: models.first().map(|model| (*model).to_owned()),
+                models: models
+                    .iter()
+                    .map(|model| mj_core::acp::SessionConfigChoice {
+                        value: (*model).to_owned(),
+                        name: (*model).to_owned(),
+                        description: None,
+                    })
+                    .collect(),
+                efforts: Vec::new(),
+                observed_at: 1,
+            },
+            remaining_percent: remaining,
+        }
+    }
+
+    fn ids(candidates: &[SubagentCandidate]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.profile_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn ranking_puts_most_quota_first_unknown_last_and_ties_to_the_parent() {
+        let mut candidates = vec![
+            candidate("unknown", None, &["luna"]),
+            candidate("b-other", Some(40), &["luna"]),
+            candidate("parent", Some(40), &["luna"]),
+            candidate("a-other", Some(40), &["luna"]),
+            candidate("high", Some(90), &["luna"]),
+            candidate("empty", Some(0), &["luna"]),
+        ];
+        rank_candidates(&mut candidates, "parent");
+        assert_eq!(
+            ids(&candidates),
+            vec!["high", "parent", "a-other", "b-other", "empty", "unknown"]
+        );
+    }
+
+    #[test]
+    fn a_model_no_profile_offers_is_refused_with_what_is_offered() {
+        let failure = choose_subagent_profile(
+            SubagentCandidates {
+                offered: vec![
+                    candidate("codex", Some(50), &["luna", "nova"]),
+                    candidate("deepseek", Some(100), &["flash"]),
+                ],
+                unavailable: vec![("glm".to_owned(), "not signed in".to_owned())],
+            },
+            None,
+            "codex",
+            "sol",
+        )
+        .unwrap_err();
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            failure.message,
+            "no eligible profile offers model \"sol\". Offered: deepseek (flash); \
+             codex (luna, nova). Could not check: glm (not signed in)."
+        );
+    }
+
+    #[test]
+    fn a_pinned_profile_must_be_eligible_and_offer_the_model() {
+        let candidates = || SubagentCandidates {
+            offered: vec![candidate("codex", Some(5), &["luna"])],
+            unavailable: vec![("glm".to_owned(), "not signed in".to_owned())],
+        };
+        assert_eq!(
+            choose_subagent_profile(candidates(), Some("codex"), "codex", "luna")
+                .unwrap()
+                .profile_id,
+            "codex"
+        );
+        let not_offered =
+            choose_subagent_profile(candidates(), Some("codex"), "codex", "sol").unwrap_err();
+        assert!(
+            not_offered.message.contains("does not offer \"sol\""),
+            "{}",
+            not_offered.message
+        );
+        let ineligible =
+            choose_subagent_profile(candidates(), Some("kimi"), "codex", "luna").unwrap_err();
+        assert!(
+            ineligible.message.contains("not eligible"),
+            "{}",
+            ineligible.message
+        );
+        let broken =
+            choose_subagent_profile(candidates(), Some("glm"), "codex", "luna").unwrap_err();
+        assert!(
+            broken.message.contains("not signed in"),
+            "{}",
+            broken.message
+        );
+    }
+
+    #[test]
+    fn merging_keeps_the_best_of_each_same_model_group() {
+        let merged = merge_same_models(
+            vec![
+                candidate("codex2", Some(3), &["nova", "luna"]),
+                candidate("codex4", Some(60), &["luna", "nova"]),
+                candidate("deepseek", Some(100), &["flash"]),
+                candidate("codex3", Some(20), &["luna"]),
+            ],
+            "codex2",
+        );
+        assert_eq!(ids(&merged), vec!["deepseek", "codex4", "codex3"]);
+    }
 }

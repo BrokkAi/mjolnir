@@ -445,10 +445,14 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
     let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
     let default_wait = mj_core::subagent::DEFAULT_WAIT_SECONDS.min(ceiling);
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
+    let current = mj_core::subagent::CURRENT_MODEL;
+    let model = format!(
+        "A model value from list_profiles, or \"{current}\" for this session's own model. Unless profile_id is given, Mjolnir runs the child on the eligible profile that offers this model and has the most quota left (the lower of its 5-hour and weekly remaining)."
+    );
     vec![
         tool(
             "list_profiles",
-            "List eligible sub-agent profiles and their available model selectors.",
+            "List eligible sub-agent profiles and the models and efforts each offers. Profiles that offer the same models are listed once, as the one with the most quota left.",
             json!({"type":"object","additionalProperties":false}),
         ),
         tool(
@@ -458,11 +462,11 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
                 "type":"object",
                 "properties":{
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
-                    "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
+                    "profile_id":{"type":"string","description":"Only to pin one profile; normally omit it and let the model choose the profile."},"model":{"type":"string","description":model},"effort":{"type":"string","description":"An effort the chosen profile offers. Omitted, the child uses this session's effort when the chosen profile offers it, otherwise the harness default."},
                     "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},
                     "files":{"type":"array","description":"Source excerpts to include in the child's first prompt, grouped by file. Each entry names one relative file and a list of one or more one-based, inclusive line ranges to pull from it.","items":{"type":"object","properties":{"file":{"type":"string"},"ranges":{"type":"array","minItems":1,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["start","end"],"additionalProperties":false}}},"required":["file","ranges"],"additionalProperties":false}}
                 },
-                "required":["task_name","instructions"],"additionalProperties":false
+                "required":["task_name","instructions","model"],"additionalProperties":false
             }),
         ),
         tool(

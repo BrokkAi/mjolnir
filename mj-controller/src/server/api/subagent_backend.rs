@@ -51,16 +51,15 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
-    /// What the daemon's background-warmed profile catalogue already holds for
-    /// a profile. It never launches a harness and never waits, so a caller a
-    /// model is blocked on can check a selector without paying for discovery.
-    /// `None` means the catalogue cannot answer yet, not that the profile is
-    /// unusable.
-    fn published_profile_config(
+    /// The profiles a parent running on `parent_profile` may start a sub-agent
+    /// on, each with its discovered choices and remaining quota. It waits for
+    /// a discovery the daemon has not finished; a profile whose discovery
+    /// fails is reported as unavailable rather than failing the whole answer.
+    fn subagent_candidates(
         &self,
-        _profile: &str,
-    ) -> Option<mj_core::worker_launch::ProfileConfig> {
-        None
+        _parent_profile: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async { anyhow::bail!("sub-agent profiles are unavailable") })
     }
     fn start_subagent(
         &self,

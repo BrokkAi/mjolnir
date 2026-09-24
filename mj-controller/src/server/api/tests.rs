@@ -580,6 +580,27 @@ impl SubagentBackend for FakeBackend {
         })
     }
 
+    /// The parent's own profile, offering what `profile_config` reports.
+    fn subagent_candidates(
+        &self,
+        parent_profile: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async move {
+            let choices = self
+                .profile_config(parent_profile.clone(), None, false)
+                .await?;
+            Ok(SubagentCandidates {
+                offered: vec![SubagentCandidate {
+                    profile_id: parent_profile,
+                    harness: mj_core::config::HarnessKind::Codex,
+                    choices,
+                    remaining_percent: None,
+                }],
+                unavailable: Vec::new(),
+            })
+        })
+    }
+
     fn session_handle(
         &self,
         session_id: String,
@@ -3327,7 +3348,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready"}"#,
+                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3"}"#,
             ))
             .unwrap(),
         )
@@ -3340,6 +3361,36 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     assert_eq!(body["session"]["id"], SPAWNED_CHILD);
     assert_eq!(body["task_name"], "probe");
     assert!(body.get("request_key").is_none(), "{body}");
+}
+
+/// A child's model is the one thing a spawn must state: without it there is
+/// nothing to choose a profile by.
+#[tokio::test]
+async fn a_spawn_without_a_model_is_refused() {
+    let (app, _actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].harness_kind = "codex".to_owned();
+        });
+    let parent = {
+        let snapshot = snapshot_tx.borrow();
+        snapshot.sessions[0].id.clone()
+    };
+    let response = app
+        .oneshot(
+            bearer(Request::post(format!(
+                "/api/v1/sessions/{parent}/subagents"
+            )))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_name":"probe","instructions":"say ready"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(body.to_string().contains("spawn needs a model"), "{body}");
 }
 
 /// The caller-chosen key is gone, as it is from session creation: a request
@@ -3361,7 +3412,7 @@ async fn a_spawn_naming_a_request_key_is_refused() {
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready","request_key":"probe-1"}"#,
+                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3","request_key":"probe-1"}"#,
             ))
             .unwrap(),
         )

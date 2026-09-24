@@ -10,6 +10,9 @@ pub const MAX_WAIT_SECONDS: u64 = 3_600;
 /// How long a `wait` call blocks when the caller gives no timeout.
 pub const DEFAULT_WAIT_SECONDS: u64 = 300;
 
+/// The `spawn` model value that means "the model the parent is running now".
+pub const CURRENT_MODEL: &str = "current";
+
 /// `status` when every named child finished its turn before the deadline.
 pub const WAIT_STATUS_COMPLETE: &str = "complete";
 

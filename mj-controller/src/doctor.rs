@@ -571,65 +571,129 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let title = format!("Harness profile {id}");
-            if !profile.enabled {
-                return DoctorCheck::ready(
-                    format!("harness.{id}"),
-                    title,
-                    "Profile is disabled; home and authentication checks were skipped.",
-                );
-            }
-            if let Some(default_home) = unscopable_home_is_ignored(config, profile) {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!(
-                        "{} is ignored by a session on this machine: {} on macOS reads {} \
-                         whatever {} says",
-                        profile.home.display(),
-                        profile.kind.display_name(),
-                        default_home.display(),
-                        profile.kind.home_env(),
-                    ),
-                    format!(
-                        "Set this profile's home to {}, or use it only on container and SSH \
-                         targets, where the home is still scoped.",
-                        default_home.display()
-                    ),
-                );
-            }
-            if !profile.home.is_dir() {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!("{} does not exist", profile.home.display()),
-                    format!(
-                        "{} If this profile should use an existing installation, select its home in Setup.",
-                        harness_login_remediation(id, profile)
-                    ),
-                );
-            }
-            if !harness_is_authenticated_with_executor(profile, executor) {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!(
-                        "No usable authentication was detected for {}",
-                        profile.home.display()
-                    ),
-                    harness_login_remediation(id, profile),
-                );
-            }
-            DoctorCheck::ready(
-                format!("harness.{id}"),
-                title,
-                format!(
-                    "{} is present and authentication is available",
-                    profile.home.display()
-                ),
-            )
+            let mut check = harness_profile_check(config, id, profile, executor);
+            check.detail = format!("{} {}", profile_summary(config, id, profile), check.detail);
+            check
         })
         .collect()
+}
+
+/// The readiness of one profile: its home, and whether it can authenticate.
+fn harness_profile_check(
+    config: &Config,
+    id: &str,
+    profile: &HarnessProfile,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let title = format!("Harness profile {id}");
+    if !profile.enabled {
+        return DoctorCheck::ready(
+            format!("harness.{id}"),
+            title,
+            "Profile is disabled; home and authentication checks were skipped.",
+        );
+    }
+    if let Some(default_home) = unscopable_home_is_ignored(config, profile) {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!(
+                "{} is ignored by a session on this machine: {} on macOS reads {} \
+                         whatever {} says",
+                profile.home.display(),
+                profile.kind.display_name(),
+                default_home.display(),
+                profile.kind.home_env(),
+            ),
+            format!(
+                "Set this profile's home to {}, or use it only on container and SSH \
+                         targets, where the home is still scoped.",
+                default_home.display()
+            ),
+        );
+    }
+    if !profile.home.is_dir() {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!("{} does not exist", profile.home.display()),
+            format!(
+                "{} If this profile should use an existing installation, select its home in Setup.",
+                harness_login_remediation(id, profile)
+            ),
+        );
+    }
+    if !harness_is_authenticated_with_executor(profile, executor) {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!(
+                "No usable authentication was detected for {}",
+                profile.home.display()
+            ),
+            harness_login_remediation(id, profile),
+        );
+    }
+    DoctorCheck::ready(
+        format!("harness.{id}"),
+        title,
+        format!(
+            "{} is present and authentication is available",
+            profile.home.display()
+        ),
+    )
+}
+
+/// One sentence saying what a profile is: its harness, where its quota comes
+/// from, and whether other sessions' sub-agents may use it. Quota ranking and
+/// delegation both depend on these, and none of them shows in the profile's
+/// own table in config.toml.
+fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> String {
+    let delegation = if !config.subagents.enabled {
+        "sub-agents are off"
+    } else if config
+        .subagents
+        .eligible_profiles
+        .get(id)
+        .copied()
+        .unwrap_or(false)
+    {
+        "any session's sub-agents may use it"
+    } else {
+        "only its own sessions' sub-agents may use it"
+    };
+    format!(
+        "{}; {}; {delegation}.",
+        profile.kind.display_name(),
+        profile_quota_source(profile)
+    )
+}
+
+/// Where a profile's quota report comes from, in the terms the quota refresh
+/// uses: a Codex profile is read through its custom provider only when that
+/// provider's API key is in the profile's environment.
+fn profile_quota_source(profile: &HarnessProfile) -> String {
+    match profile.kind {
+        HarnessKind::Claude => "Claude subscription quota".to_owned(),
+        HarnessKind::Codex => match crate::quota::provider_credential(profile) {
+            Some(provider) if crate::zai_usage::serves_quota(&provider.host) => {
+                format!("quota from {}", provider.host)
+            }
+            Some(provider) => format!(
+                "pay-per-use through {}, counted as 100% left when choosing a sub-agent's profile",
+                provider.host
+            ),
+            None => match profile.codex_provider() {
+                Ok(None) => "ChatGPT subscription quota".to_owned(),
+                Ok(Some(provider)) => format!(
+                    "no quota report, because custom provider {:?} has no API key in this profile's environment",
+                    provider.id
+                ),
+                Err(error) => format!("its Codex config.toml could not be read ({error:#})"),
+            },
+        },
+        kind => format!("quota as {} reports it", kind.display_name()),
+    }
 }
 
 /// The harness's own default home, for a profile whose configured home this
@@ -660,26 +724,28 @@ fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Opti
     (profile.home != default_home).then_some(default_home)
 }
 
-/// Warn about a profile that is both listed for sub-agent use and disabled.
+/// The sub-agent policy in one line, then a warning for each profile that is
+/// both listed for sub-agent use and disabled.
 ///
-/// The daemon keeps running and simply does not offer such a profile to a
-/// parent, because the delegation candidates and the spawn gate both require an
-/// enabled profile. This surfaces the contradiction so the eligible list and
-/// the profile's `enabled` flag can be reconciled, rather than leaving a profile
-/// the user meant to use silently unavailable.
+/// The daemon keeps running with such a profile and simply does not offer it
+/// to a parent, because the delegation candidates and the spawn gate both
+/// require an enabled profile. This surfaces the contradiction so the eligible
+/// list and the profile's `enabled` flag can be reconciled. An eligible id
+/// that names no profile never reaches here: the configuration fails to load,
+/// and the configuration check reports it.
 fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
     };
-    config
-        .subagents
-        .eligible_profiles
-        .iter()
-        .filter(|(_, eligible)| **eligible)
-        .filter_map(|(id, _)| {
-            let profile = config.profiles.get(id)?;
-            (!profile.enabled).then(|| {
-                DoctorCheck::warning(
+    let mut checks = vec![subagent_policy_check(config)];
+    checks.extend(
+        config
+            .subagents
+            .eligible_profiles
+            .iter()
+            .filter(|(_, eligible)| **eligible)
+            .filter_map(|(id, _)| match config.profiles.get(id) {
+                Some(profile) if !profile.enabled => Some(DoctorCheck::warning(
                     format!("subagents.{id}"),
                     format!("Sub-agent profile {id}"),
                     format!(
@@ -688,10 +754,36 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                     format!(
                         "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
                     ),
-                )
-            })
-        })
-        .collect()
+                )),
+                _ => None,
+            }),
+    );
+    checks
+}
+
+/// Who may start sub-agents, how many, and on which profiles.
+fn subagent_policy_check(config: &Config) -> DoctorCheck {
+    let subagents = &config.subagents;
+    let detail = if subagents.enabled {
+        let eligible = subagents
+            .eligible_profiles
+            .iter()
+            .filter(|(_, eligible)| **eligible)
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        let others = if eligible.is_empty() {
+            "no other profile".to_owned()
+        } else {
+            eligible.join(", ")
+        };
+        format!(
+            "On for Claude and Codex sessions, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+            subagents.max_concurrent
+        )
+    } else {
+        "Off; sessions get no sub-agent tools.".to_owned()
+    };
+    DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
 }
 
 /// Point an unauthenticated profile at `mj login`, which already knows how to

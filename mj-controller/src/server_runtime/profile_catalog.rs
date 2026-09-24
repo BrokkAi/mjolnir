@@ -1,4 +1,5 @@
-//! A background-warmed catalogue of what `list_profiles` can answer with.
+//! A background-warmed catalogue of what `list_profiles` answers with and
+//! `spawn` chooses a child's profile from.
 //!
 //! The sub-agent `list_profiles` tool is called by a model in the middle of a
 //! turn, so everything it waits for shows up as a stalled tool call. Its answer
@@ -220,21 +221,6 @@ impl ProfileCatalog {
         Ok(inner.adopted()?.candidates(parent))
     }
 
-    /// What the catalogue already holds for one profile, without waiting and
-    /// without starting a discovery. `None` means the answer is not there to
-    /// be had cheaply: nothing has been adopted, the adopted configuration has
-    /// no such profile, or its discovery is still in flight. A caller that
-    /// cannot afford a harness launch — `spawn`, which a model waits on —
-    /// treats `None` as "not checked here" rather than as a failure.
-    pub(crate) fn published(&self, profile: &str) -> Option<ProfileConfig> {
-        let inner = self.lock();
-        inner.key.as_ref()?;
-        match inner.entries.get(profile) {
-            Some(Entry::Ready(config)) => Some(config.clone()),
-            _ => None,
-        }
-    }
-
     /// The capabilities of the named candidate profiles, in the order given.
     /// Waits on the discovery the background pass is running wherever it has
     /// not published one yet, and keeps a discovery it waited for so the next
@@ -280,7 +266,7 @@ impl ProfileCatalog {
         let results = tokio::select! {
             _ = self.cancellation.cancelled() => bail!(
                 "the server stopped before the profile catalogue discovered what \
-                 list_profiles needs"
+                 the sub-agent tools need"
             ),
             results = join_all(discoveries) => results,
         };
@@ -814,62 +800,6 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "the discovery the call waited for is kept"
-        );
-    }
-
-    /// What `spawn` depends on: a lookup that answers only from what the pass
-    /// has already published, never starting a discovery and never waiting.
-    #[tokio::test]
-    async fn published_answers_only_from_what_the_pass_has_already_published() {
-        let calls = calls();
-        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
-        let (release, gate) = tokio::sync::watch::channel(false);
-        let catalog = ProfileCatalog::with_probe(gated_probe(calls.clone(), started_tx, gate));
-        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
-
-        assert!(
-            catalog.published("parent").is_none(),
-            "nothing has been adopted yet"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "the lookup must not start a discovery"
-        );
-
-        catalog.sync(&config);
-        started.recv().await.expect("the pass starts its probe");
-        assert!(
-            catalog.published("parent").is_none(),
-            "the discovery is still in flight, so there is nothing to answer with"
-        );
-        assert!(
-            catalog.published("unknown").is_none(),
-            "the adopted configuration holds no such profile"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "neither lookup started a discovery of its own"
-        );
-
-        release.send(true).expect("the gate is held by the test");
-        catalog
-            .capabilities(&["parent".to_owned()])
-            .await
-            .expect("the discovery lands");
-        assert_eq!(
-            catalog
-                .published("parent")
-                .expect("the discovery is published now")
-                .model
-                .as_deref(),
-            Some("parent-model")
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "the published answer costs no discovery"
         );
     }
 
