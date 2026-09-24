@@ -808,19 +808,19 @@ pub(super) async fn serve_session(
                                 }
                                 Err(error) => {
                                     grok_usage.clear();
-                                    diagnostic = Some(mj_core::diagnostic::TurnDiagnostic::from_acp(&error));
+                                    // The raw error, JSON data and all, goes to
+                                    // the log; the conversation gets one line.
+                                    tracing::warn!(harness = ?spec.harness, error = %error, "prompt failed");
+                                    let failed = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
+                                    let (stop_reason, warning) =
+                                        prompt_error_outcome(spec.harness, &error, &failed);
+                                    diagnostic = Some(failed);
                                     emit_runtime_event(
                                         events,
-                                        RuntimeEvent::Warning {
-                                            message: prompt_failure_warning(&error),
-                                        },
+                                        RuntimeEvent::Warning { message: warning },
                                     )
                                     .await?;
-                                    if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
-                                        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
-                                    } else {
-                                        PROMPT_ERROR_STOP_REASON.to_owned()
-                                    }
+                                    stop_reason
                                 }
                             };
                             emit_runtime_event(

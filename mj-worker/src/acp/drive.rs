@@ -1246,12 +1246,67 @@ fn turn_stall_transcript_message(harness: HarnessKind, reason: &str) -> String {
     )
 }
 
-pub(super) fn prompt_failure_warning(error: &agent_client_protocol::Error) -> String {
-    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
-        format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}")
+/// The stop reason and the conversation warning for a prompt the harness
+/// failed with a JSON-RPC error.
+///
+/// An exhausted usage limit ends the turn as `QuotaLimit`, the stop reason
+/// that puts the session in the quota-blocked state with its notice, for Kimi
+/// and for Codex, whose bridge reports it as an internal error naming
+/// `usageLimitExceeded` (launch finding J-25).
+pub(super) fn prompt_error_outcome(
+    harness: HarnessKind,
+    error: &agent_client_protocol::Error,
+    diagnostic: &mj_core::diagnostic::TurnDiagnostic,
+) -> (String, String) {
+    let stop_reason = if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex)
+        && diagnostic.is_usage_limit()
+    {
+        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
     } else {
-        format!("prompt failed: {error}")
+        PROMPT_ERROR_STOP_REASON.to_owned()
+    };
+    (stop_reason, prompt_failure_warning(harness, error))
+}
+
+/// The warning a failed prompt leaves in the conversation.
+///
+/// A bridge that puts its own sentence in the error's data (Codex does, with
+/// `message` and `codexErrorInfo`) gets that sentence on one line rather than
+/// "Internal error: " and the pretty-printed JSON; the caller logs the raw
+/// error. An error whose text carries an authentication code keeps that
+/// text, because credential sync reads the code from this warning.
+pub(super) fn prompt_failure_warning(
+    harness: HarnessKind,
+    error: &agent_client_protocol::Error,
+) -> String {
+    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+        return format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}");
     }
+    let raw = error.to_string();
+    if mj_core::credentials::auth_failure_signature(harness, &raw) {
+        return format!("prompt failed: {raw}");
+    }
+    match readable_prompt_error(error) {
+        Some(line) => format!("prompt failed: {line}"),
+        None => format!("prompt failed: {raw}"),
+    }
+}
+
+/// One line for an error whose data says what went wrong: its `message`, or
+/// the error's own message with the Codex error kind. `None` when the data
+/// says nothing readable.
+fn readable_prompt_error(error: &agent_client_protocol::Error) -> Option<String> {
+    let data = error.data.as_ref()?;
+    let line = match data.get("message").and_then(serde_json::Value::as_str) {
+        Some(message) => message.to_owned(),
+        None => format!(
+            "{} ({})",
+            error.message,
+            mj_core::diagnostic::codex_error_kind(data)?
+        ),
+    };
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// How much the agent has produced by working, over one ACP connection.

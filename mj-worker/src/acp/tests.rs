@@ -1092,16 +1092,70 @@ fn adapter_chatter_never_becomes_error_context() {
     assert_eq!(actionable_stderr_tail("   "), None);
 }
 
+/// Launch finding J-25: a Codex quota error showed in the system row as
+/// `warning: prompt failed: Internal error: { "message": ..., "codexErrorInfo":
+/// "usageLimitExceeded" }`. The warning is the provider's sentence on one
+/// line, and the turn ends as a quota stop, as Kimi's limit already does.
+#[test]
+fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
+    let error = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits\nor try again at Sep 29th, 2026 10:20 PM.",
+        "codexErrorInfo": "usageLimitExceeded"
+    }));
+    let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
+    let (stop_reason, warning) = prompt_error_outcome(HarnessKind::Codex, &error, &diagnostic);
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+    assert_eq!(
+        warning,
+        "prompt failed: You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:20 PM."
+    );
+
+    // Another Codex error names its kind when it has no sentence of its own.
+    let bare = agent_client_protocol::Error::internal_error()
+        .data(serde_json::json!({"codexErrorInfo": "responseStreamDisconnected"}));
+    let (stop_reason, warning) = prompt_error_outcome(
+        HarnessKind::Codex,
+        &bare,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&bare),
+    );
+    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
+    assert_eq!(
+        warning,
+        "prompt failed: Internal error (responseStreamDisconnected)"
+    );
+
+    // An error whose data carries an authentication code keeps its text:
+    // credential sync reads that code from the warning.
+    let auth = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "Request failed", "type": "authentication_error"
+    }));
+    let (_, warning) = prompt_error_outcome(
+        HarnessKind::Claude,
+        &auth,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&auth),
+    );
+    assert!(
+        mj_core::credentials::auth_failure_signature(HarnessKind::Claude, &warning),
+        "{warning}"
+    );
+}
+
 #[test]
 fn an_auth_required_prompt_failure_carries_the_credential_marker() {
-    let auth = prompt_failure_warning(&agent_client_protocol::Error::auth_required());
+    let auth = prompt_failure_warning(
+        HarnessKind::Claude,
+        &agent_client_protocol::Error::auth_required(),
+    );
     assert!(auth.contains("prompt failed"), "{auth}");
     assert!(mj_core::credentials::auth_failure_signature(
         HarnessKind::Claude,
         &auth
     ));
 
-    let other = prompt_failure_warning(&agent_client_protocol::Error::internal_error());
+    let other = prompt_failure_warning(
+        HarnessKind::Claude,
+        &agent_client_protocol::Error::internal_error(),
+    );
     assert!(other.contains("prompt failed"), "{other}");
     assert!(!mj_core::credentials::auth_failure_signature(
         HarnessKind::Claude,

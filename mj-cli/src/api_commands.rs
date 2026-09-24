@@ -745,12 +745,17 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
     }
     lines.push(summary);
+    // The wait's message, the diagnostic and the agent's last message are
+    // often one sentence (a Codex quota error was printed three times,
+    // J-25), so each is printed only when it says something new.
+    let said = |lines: &[String], text: &str| lines.iter().any(|line| line.trim() == text.trim());
     if let Some(message) = &response.message {
         lines.push(message.clone());
     }
     // Why the turn ended, when the worker recorded a reason.
     if let Some(diagnostic) = &response.diagnostic
         && response.outcome != WaitOutcome::Finished
+        && !said(&lines, &diagnostic.message)
     {
         lines.push(diagnostic.message.clone());
     }
@@ -778,7 +783,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         }
         lines.push(line);
     }
-    if let Some(final_message) = &response.final_message {
+    if let Some(final_message) = &response.final_message
+        && !said(&lines, final_message)
+    {
         lines.push(String::new());
         lines.push(final_message.clone());
     }
@@ -1480,6 +1487,34 @@ mod tests {
     /// A turn the worker failed for going quiet has to say why, where a script
     /// waiting on it can see it. Before this the reason lived only in the
     /// transcript and `mj wait` printed the bare word "error" (#1020).
+    /// Launch finding J-25: `mj prompt --wait` printed the Codex quota
+    /// sentence three times, as the wait's message, the diagnostic, and the
+    /// agent's final message. Each distinct line is printed once.
+    #[test]
+    fn a_reason_repeated_in_the_final_message_is_printed_once() {
+        let sentence = "You’ve hit your usage limit. Try again at Sep 29th, 2026 10:20 PM.";
+        let response = wait_response(
+            "quota_limit",
+            serde_json::json!({
+                "stop_reason": "QuotaLimit",
+                "turn_id": 8,
+                "message": sentence,
+                "diagnostic": {"message": sentence, "code": "usageLimitExceeded"},
+                "final_message": format!("{sentence}\n"),
+            }),
+        );
+        let lines = wait_report_lines(&response);
+        assert_eq!(lines[0], "quota_limit (QuotaLimit) turn 8");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("usage limit"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+    }
+
     #[test]
     fn a_failed_turn_reports_the_reason_the_worker_recorded() {
         let response = wait_response(
