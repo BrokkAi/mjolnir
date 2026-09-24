@@ -68,6 +68,60 @@ fn interrupted_source_stop_message(recovered: &str, in_place: bool) -> String {
     }
 }
 
+/// Whether the persisted record shows a source that has finished stopping with
+/// a verified checkpoint to restore.
+///
+/// Only `Stopped` proves the source stop finished. Resume also admits recovery
+/// states, but those do not establish that the source is already stopped.
+fn source_stopped_with_verified_checkpoint(record: &mj_core::state::SessionRecord) -> bool {
+    record.state == SessionState::Stopped && record.checkpoint.is_some()
+}
+
+/// The recovery guidance for a failed Move whose source is already stopped with
+/// a verified checkpoint.
+///
+/// Resume restores the retained checkpoint on the destination profile and
+/// target the Move selected.
+fn stopped_source_recovery(
+    session_id: &str,
+    destination_profile: Option<&str>,
+    destination_target: Option<&str>,
+) -> String {
+    let flag = |name: &str, value: Option<&str>| {
+        value
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" --{name} {value}"))
+            .unwrap_or_default()
+    };
+    format!(
+        "Source is stopped with a verified checkpoint. Bring it back with \
+         `mj resume --session {session_id}{}{} --queue start`.",
+        flag("profile", destination_profile),
+        flag("target", destination_target),
+    )
+}
+
+/// The recovery guidance a failed or cancelled Move shows, from its persisted
+/// state.
+fn failed_move_recovery(
+    operation: &MoveOperation,
+    record: Option<&mj_core::state::SessionRecord>,
+) -> String {
+    if operation.queue_admission_started {
+        return "Destination is live; retry queue admission on this same destination. Already accepted work may have effects.".to_owned();
+    }
+    match record {
+        Some(record) if source_stopped_with_verified_checkpoint(record) => {
+            stopped_source_recovery(
+                &operation.selection.session_id,
+                operation.selection.profile_id.as_deref(),
+                operation.selection.target_template_id.as_deref(),
+            )
+        }
+        _ => "Source or partial destination is retained. Retry move after resolving the reported error.".to_owned(),
+    }
+}
+
 pub struct MoveMutationGuard(String);
 
 impl MoveMutationGuard {
@@ -720,24 +774,16 @@ impl Controller {
                     MovePhase::Failed
                 };
                 operation.cancellation_requested = cancelled;
-                let recovery = if operation.queue_admission_started {
-                    "Destination is live; retry queue admission on this same destination. Already accepted work may have effects."
-                } else if self
-                    .state
-                    .sessions
-                    .get(&operation.selection.session_id)
-                    .is_some_and(|s| s.state == SessionState::Stopped)
-                {
-                    "Session is stopped with a verified checkpoint. Retry move or Resume with previous settings."
-                } else {
-                    "Source or partial destination is retained. Retry move after resolving the reported error."
-                };
+                let recovery = failed_move_recovery(
+                    operation,
+                    self.state.sessions.get(&operation.selection.session_id),
+                );
                 let error = format!("{error:#}");
                 operation.error = Some(error.clone());
                 (
                     if cancelled { "cancelled" } else { "failed" },
                     Some(error),
-                    Some(recovery.to_owned()),
+                    Some(recovery),
                 )
             }
         };

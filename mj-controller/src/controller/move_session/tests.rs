@@ -1872,7 +1872,8 @@ fn in_place_cross_harness_move_installs_the_handoff_without_provisioning() {
 
 /// An in-place swap is never retried in place. A failure releases the
 /// environment and leaves the session stopped with its verified checkpoint,
-/// which is what an ordinary Resume or a retried Move starts from.
+/// and the recovery guidance names the Resume command that restores it rather
+/// than offering a retried Move that would rebuild a fresh destination.
 #[cfg(unix)]
 #[test]
 fn in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint() {
@@ -1915,7 +1916,9 @@ fn in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint() {
     assert_eq!(
         outcome.recovery.as_deref(),
         Some(
-            "Session is stopped with a verified checkpoint. Retry move or Resume with previous settings."
+            "Source is stopped with a verified checkpoint. Bring it back with \
+             `mj resume --session 018f9dd2-a3b4-7c8d-9000-0123456789ab --profile \
+             claude-destination --target local-bare --queue start`."
         )
     );
 
