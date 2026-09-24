@@ -69,6 +69,10 @@ async fn run_relay_coordinator_with_verdict(
                 .replied_verdict_is_current(*generation)
         });
         if let Some(generation) = invalidated_generation {
+            let mut locked = relay.lock().expect("relay state lock poisoned");
+            let assessment = locked.retry_assessment_identity();
+            locked.resolve_retry_assessment(assessment, false)?;
+            drop(locked);
             tracing::info!(target: "mj_jev", generation, phase = "replied",
                 session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
                 reason = "evidence_or_lifecycle_changed", outcome = "cancelled", "Jev request invalidated");
@@ -79,7 +83,7 @@ async fn run_relay_coordinator_with_verdict(
             .lock()
             .expect("relay state lock poisoned")
             .pending_replied_verdict();
-        if let Some((generation, evidence)) = pending {
+        if let Some((generation, evidence, assessment)) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
                 verdict_generation = Some(generation);
@@ -92,13 +96,15 @@ async fn run_relay_coordinator_with_verdict(
                     async move {
                         let (attempt, answer) =
                             client.ask_logged(&session, generation, &evidence).await;
-                        (generation, attempt, answer)
+                        (generation, assessment, attempt, answer)
                     }
                     .with_current_subscriber(),
                 );
             } else {
+                let mut relay = relay.lock().expect("relay state lock poisoned");
+                relay.resolve_retry_assessment(assessment, false)?;
                 tracing::info!(target: "mj_jev", generation, phase = "replied", outcome = "skipped",
-                    session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
+                    session = %relay.turn_context().session_id(),
                     reason = "classifier_unavailable", "Jev classification skipped");
             }
         }
@@ -201,18 +207,23 @@ async fn run_relay_coordinator_with_verdict(
             _ = verdict_poll.tick(), if verdict.is_some() => {}
             result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() => {
                 match result {
-                    Some(Ok((generation, mut attempt, answer))) => {
+                    Some(Ok((generation, assessment, mut attempt, answer))) => {
                         use mj_core::activity::verdict::{Decision, TurnPhase, decide};
                         if verdict_generation == Some(generation) {
                             verdict_generation = None;
                         }
                         let mut relay = relay.lock().expect("relay state lock poisoned");
                         if !relay.replied_verdict_is_current(generation) {
+                            relay.resolve_retry_assessment(assessment, false)?;
                             attempt.finish("discarded", "activity_or_generation_changed");
                             continue;
                         }
                         match answer {
                             Ok(answer) => {
+                                if relay.resolve_retry_assessment(assessment, answer.should_retry_server_error())? {
+                                    attempt.finish("applied", "server_retry_armed");
+                                    continue;
+                                }
                                 let decision = decide(TurnPhase::Replied, &answer);
                                 let reason = match relay.apply_replied_decision(generation, decision, mj_core::clock::epoch_millis()) {
                                     Ok(reason) => reason,
@@ -227,6 +238,7 @@ async fn run_relay_coordinator_with_verdict(
                                 }
                             }
                             Err(_) => {
+                                relay.resolve_retry_assessment(assessment, false)?;
                                 attempt.finish("unchanged", "request_failed");
                                 relay.retry_replied_verdict(generation);
                             }
@@ -235,7 +247,10 @@ async fn run_relay_coordinator_with_verdict(
                     Some(Err(error)) if !error.is_cancelled() => {
                         tracing::warn!(target: "mj_jev", %error, "completed-turn classifier task failed");
                         if let Some(generation) = verdict_generation.take() {
-                            relay.lock().expect("relay state lock poisoned").retry_replied_verdict(generation);
+                            let mut relay = relay.lock().expect("relay state lock poisoned");
+                            let assessment = relay.retry_assessment_identity();
+                            relay.resolve_retry_assessment(assessment, false)?;
+                            relay.retry_replied_verdict(generation);
                         }
                     }
                     _ => {}

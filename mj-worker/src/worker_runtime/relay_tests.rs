@@ -5495,9 +5495,46 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     state.set_background_work_policy(crate::relay::BackgroundWorkPolicy::CodexExecCards);
+    state.set_turn_verdict_harness(HarnessKind::Codex);
+    state
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit(&mut state, "capacity-original", prompt("work"));
+    assert_eq!(
+        state.claim_pending_commands(true).unwrap()[0].command_id,
+        "capacity-original"
+    );
+    state
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Provider temporarily unavailable" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    state
+        .record_command_completed(
+            "capacity-original",
+            crate::relay::RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "error".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    let assessment = state.retry_assessment_identity();
+    assert!(state.resolve_retry_assessment(assessment, true).unwrap());
+    let retry = state.operational_state().capacity_retry.unwrap();
+    let mut facts = state.activity_facts();
+    facts.capacity_retry_armed = false;
+    assert!(mj_core::activity::is_quiet(&facts), "{facts:?}");
+    let configured_ordinal = state.latest_ordinal();
     let relay = Arc::new(Mutex::new(state));
     let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
     let coordinator = tokio::spawn(unix::run_relay_coordinator(
         relay.clone(),
@@ -5510,41 +5547,15 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
             config_options: Vec::new(),
         })
         .unwrap();
-    submit(
-        &mut relay.lock().unwrap(),
-        "capacity-original",
-        prompt("work"),
-    );
-    unix::wake_dispatch(&relay, &wake_tx).unwrap();
-    assert_prompt(
-        next_command(&mut command_rx).await,
-        "capacity-original",
-        "work",
-    );
-    event_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({
-        "sessionUpdate": "agent_message_chunk",
-        "content": { "type": "text", "text": "Selected model is at capacity. Please try a different model.\n\n" }
-    }) }).unwrap();
-    event_tx
-        .send(RuntimeEvent::PromptFinished {
-            diagnostic: None,
-            request_id: "capacity-original".into(),
-            stop_reason: "EndTurn".into(),
-            usage: None,
-        })
-        .unwrap();
-    for _ in 0..20 {
+    let configured_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while relay.lock().unwrap().latest_ordinal() <= configured_ordinal {
+        assert!(
+            std::time::Instant::now() < configured_deadline,
+            "the relay coordinator did not configure the resumed session"
+        );
         tokio::task::yield_now().await;
     }
-    let retry = relay
-        .lock()
-        .unwrap()
-        .operational_state()
-        .capacity_retry
-        .clone()
-        .unwrap();
     // No controller wake or connected frontend is needed to drive the timer.
-    drop(wake_tx);
     tokio::time::advance(std::time::Duration::from_secs(59)).await;
     tokio::task::yield_now().await;
     assert!(command_rx.try_recv().is_err());

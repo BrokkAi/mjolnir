@@ -737,7 +737,7 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     }
     if let Some(retry) = &response.capacity_retry {
         lines.push(format!(
-            "a capacity retry is armed (attempt {}); do not send another prompt yet",
+            "a server retry is armed (attempt {}); do not send another prompt yet",
             retry.attempt
         ));
     }

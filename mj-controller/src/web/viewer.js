@@ -1086,8 +1086,9 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   }
   if (session.capacity_retry) {
     const seconds = Math.max(0, Math.ceil((session.capacity_retry.retry_at_ms - now) / 1000));
-    return `Model at capacity · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+    return `Provider unavailable · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
   }
+  if (session.retry_assessment_pending) return 'Checking response';
   const details = session.activity_details || {};
   const kind = details.kind;
   const turnStarted = epochMs(details.turn_started_at_ms);

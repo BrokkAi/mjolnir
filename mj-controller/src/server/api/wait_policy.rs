@@ -53,6 +53,7 @@ pub struct WaitObservation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     pub queued: usize,
     pub capacity_retry: Option<CapacityRetry>,
+    pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub start_status: Option<StartStatus>,
 }
@@ -154,8 +155,8 @@ impl WaitDecision {
 ///    queue — with queued prompts, "idle" alone would return an earlier
 ///    prompt's outcome — and able to take a prompt, so a session that is
 ///    still provisioning or reattaching is not reported as finished.
-/// 4. A capacity outcome with a retry armed is not an ending: the worker will
-///    submit the retry itself, so the wait keeps waiting.
+/// 4. A completed turn under server assessment or with a retry armed is not an
+///    ending: the worker may submit the retry itself, so the wait keeps waiting.
 ///
 /// A turn that really did fail still reports `error`: a rejected or interrupted
 /// turn, and an unrecognized stop reason, all come back through the turn record
@@ -229,13 +230,11 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         ));
     }
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
-        observation.quota_recovery.as_ref().is_some_and(|r| {
-            r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id
-        }) || observation.capacity_retry.is_some()
-            && matches!(
-                &outcome.outcome,
-                TurnOutcomeKind::Completed { stop_reason } if is_capacity_stop_reason(stop_reason)
-            )
+        observation.retry_assessment_pending
+            || observation.capacity_retry.is_some()
+            || observation.quota_recovery.as_ref().is_some_and(|r| {
+                r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id
+            })
     };
     if let Some(recovery) = &observation.quota_recovery
         && recovery.retry_at_ms.is_none()

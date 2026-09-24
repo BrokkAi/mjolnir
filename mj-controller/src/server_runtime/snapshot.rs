@@ -658,6 +658,7 @@ pub(super) fn viewer_snapshot(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
+            session.retry_assessment_pending = state.retry_assessment_pending;
             session.quota_recovery = state
                 .continuation
                 .quota_recovery

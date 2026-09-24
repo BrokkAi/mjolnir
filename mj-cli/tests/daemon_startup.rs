@@ -216,6 +216,8 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     let mut old = OldDaemon(
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            // 2.18.0 has the atomic handoff gate this test exercises; the
+            // database fixture below still has the 2.15.0 schema.
             .env("MJ_TEST_OLD_DAEMON_VERSION", "2.18.0")
             .env(
                 "MJ_TEST_OLD_PROTOCOL",

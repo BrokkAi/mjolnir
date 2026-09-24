@@ -707,6 +707,8 @@ pub(super) fn project_observation(
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closed);
         }
+        RelayObservation::RetryAssessmentStarted { .. }
+        | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
     Ok(())
 }

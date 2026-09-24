@@ -1460,8 +1460,8 @@ fn embedded_viewer_displays_capacity_retry_deadlines() {
     let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
     let checks = r#"
 const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
-if (sessionActivityLabel(session, 60000) !== 'Model at capacity · retrying in 1m00s') throw Error('missing retry countdown');
-if (sessionActivityLabel(session, 121000) !== 'Model at capacity · retrying in 0m00s') throw Error('negative retry countdown');
+if (sessionActivityLabel(session, 60000) !== 'Provider unavailable · retrying in 1m00s') throw Error('missing retry countdown');
+if (sessionActivityLabel(session, 121000) !== 'Provider unavailable · retrying in 0m00s') throw Error('negative retry countdown');
 "#;
     run_viewer_script("capacity-retry", &format!("{setup}\n{source}\n{checks}"));
 }

@@ -149,6 +149,8 @@ impl NativeHistoryEvidence {
             | RelayObservation::UserShellOutput { .. }
             | RelayObservation::TerminalOutput { .. }
             | RelayObservation::SteeringUnconfirmed { .. }
+            | RelayObservation::RetryAssessmentStarted { .. }
+            | RelayObservation::RetryAssessmentResolved { .. }
             | RelayObservation::HarnessTurnSettled { .. }
             | RelayObservation::Closing
             | RelayObservation::Closed => {}

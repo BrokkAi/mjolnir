@@ -137,6 +137,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
+        retry_assessment_pending: false,
         store_id: None,
         idle_since_ms: None,
         session_id: session_id.to_owned(),

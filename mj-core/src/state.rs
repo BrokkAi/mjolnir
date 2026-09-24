@@ -202,7 +202,6 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
         "awaitinginput" => PromptCompletion::InputRequired,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
-        _ if crate::relay::is_capacity_stop_reason(stop_reason) => PromptCompletion::QuotaLimit,
         _ => PromptCompletion::Error,
     }
 }

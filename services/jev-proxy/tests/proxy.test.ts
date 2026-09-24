@@ -205,7 +205,7 @@ test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", a
 });
 
 test("v3 assesses input and work independently using the direct client's shared questions", async t => {
-  const { default: questionsV3 } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { default: questionsV3 } = await import("../../../mj-core/src/activity/verdict_questions_v3.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, transcript_summary: "Assistant: Approve deployment? The independent heap task continues.", background_commands: 1 };
   const result = { answers: {
@@ -232,4 +232,41 @@ test("v3 assesses input and work independently using the direct client's shared 
     assert.equal(bad.callCount(), 1);
     bad.restore();
   }
+});
+
+test("v4 supplies completion diagnostics and requires a typed server retry answer", async t => {
+  const { default: questionsV4 } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { recent_tools: _old, ...rest } = base;
+  const state = { ...rest, phase: "replied", transcript_summary: "User: Continue the task.",
+    assistant_text_tail: "Provider temporarily unavailable", completion: {
+      stop_reason: "error", diagnostic: { message: "failed", code: "server_overloaded", http_status: 503 },
+    } };
+  const result = { answers: {
+    needs_user_input: { type: "noul", noul: 0.01 },
+    work_state: { type: "choice", choice: "unclear", confidence: 0.82 },
+    retryable_server_error: { type: "noul", noul: 0.98 },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: questionsV4 });
+    return Response.json({ ...result, debug: "private-test-key" });
+  });
+  const v4 = (body: unknown) => new Request("https://proxy.example/v4/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body),
+  });
+  const response = await proxy.fetch(v4(state), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+  assert.equal(calls.callCount(), 1);
+  calls.restore();
+  for (const bad of [{ ...state, completion: { stop_reason: "error" } },
+    { ...state, completion: { ...state.completion, diagnostic: { message: "failed", secret: "x" } } },
+    { ...state, completion: { ...state.completion, stop_reason: "x".repeat(129) } },
+    { ...state, phase: "running" }]) {
+    await expectError(await proxy.fetch(v4(bad), environment()), 400, "invalid_evidence");
+  }
+  const bad = upstream(t, async () => Response.json({ answers: {
+    ...result.answers, retryable_server_error: { type: "noul", noul: 1.01 },
+  } }));
+  await expectError(await proxy.fetch(v4(state), environment()), 502, "invalid_upstream_response");
+  assert.equal(bad.callCount(), 1);
 });

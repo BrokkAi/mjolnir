@@ -281,6 +281,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             )
             .unwrap(),
             capacity_retry: None,
+            retry_assessment_pending: false,
             activity_turn_started_at_ms: None,
             checkpoint_only: false,
             acp_ready: None,

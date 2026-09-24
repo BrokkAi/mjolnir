@@ -438,6 +438,7 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
             "run_mode": "checkpoint_only", "session_id": "018f9dd2-a3b4-7c8d-9000-123456789abc", "harness": "codex",
             "bridge_command": "/missing-harness", "bridge_args": [],
             "environment": {"CODEX_HOME": root.path().join("profile")},
+            "target_environment": {"MJ_INSTANCE": "qa-empty-recovery-1063"},
             "cwd": root.path(), "execution_policy": "configured_approvals"
         }))
         .unwrap(),
@@ -457,6 +458,9 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
     command
         .env
         .insert("SHELL".into(), "/missing-parent-shell".into());
+    command
+        .env
+        .insert("MJ_INSTANCE".into(), "wrong-launcher-instance".into());
     let worker = std::thread::spawn(move || {
         BoundedProcessExecutor::new(Duration::from_secs(15)).execute(&command)
     });
@@ -474,6 +478,17 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
             output.status == 0 && output.stdout == b"alive\n",
             "re-executed worker lost its lifecycle identity"
         );
+        #[cfg(target_os = "linux")]
+        {
+            let pid = std::fs::read_to_string(worker_root.join(mj_core::relay::WORKER_PID_FILE))?;
+            let environment = std::fs::read(format!("/proc/{}/environ", pid.trim()))?;
+            ensure!(
+                environment
+                    .split(|byte| *byte == 0)
+                    .any(|entry| entry == b"MJ_INSTANCE=qa-empty-recovery-1063"),
+                "worker environment did not contain its configured instance"
+            );
+        }
         Ok(())
     })();
     // Always stop/join before dropping the worker's files, even if observation

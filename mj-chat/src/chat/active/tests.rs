@@ -106,6 +106,7 @@ fn capture_chat_preview() {
     chat.set_current_step_start(Some(mj_core::clock::epoch_millis().saturating_sub(7_000)));
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         execution: Some(mj_core::relay::RelayExecutionState::Running),
         ..Default::default()
     });
@@ -290,6 +291,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 goal: Default::default(),
 
                 capacity_retry: None,
+                retry_assessment_pending: false,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -1935,6 +1937,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -1957,6 +1960,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -2092,6 +2096,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,

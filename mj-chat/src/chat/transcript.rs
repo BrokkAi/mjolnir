@@ -27,7 +27,9 @@ use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::components::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
+use crate::components::{
+    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_scrollbar, scrollbar_geometry,
+};
 use crate::theme;
 use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent};
 pub use mj_client::transcript::TAIL_SEED_ITEMS;
@@ -73,9 +75,7 @@ const SCROLLBAR_DEFAULT_ENTRY_ROWS: usize = 4;
 
 #[derive(Debug)]
 pub(super) struct TranscriptScrollbarState {
-    geometry: Option<ScrollbarGeometry>,
-    dragging: bool,
-    grab_offset: u16,
+    pointer: ScrollbarDrag,
     metric_width: u16,
     metric_mode: TranscriptRenderMode,
     metric_generation: u64,
@@ -85,9 +85,7 @@ pub(super) struct TranscriptScrollbarState {
 impl Default for TranscriptScrollbarState {
     fn default() -> Self {
         Self {
-            geometry: None,
-            dragging: false,
-            grab_offset: 0,
+            pointer: ScrollbarDrag::default(),
             metric_width: 0,
             metric_mode: TranscriptRenderMode::Rich,
             metric_generation: 0,
@@ -98,9 +96,7 @@ impl Default for TranscriptScrollbarState {
 
 impl TranscriptScrollbarState {
     fn clear_geometry(&mut self) {
-        self.geometry = None;
-        self.dragging = false;
-        self.grab_offset = 0;
+        self.pointer.clear();
     }
 
     pub(super) fn clear(&mut self) {
@@ -506,7 +502,7 @@ impl ChatState {
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
     pub fn transcript_scrollbar_dragging(&self) -> bool {
-        self.transcript_scrollbar.dragging && !self.transcript_scrollbar_covered()
+        self.transcript_scrollbar.pointer.is_dragging() && !self.transcript_scrollbar_covered()
     }
 
     fn transcript_scrollbar_covered(&self) -> bool {
@@ -524,84 +520,22 @@ impl ChatState {
         mouse: crossterm::event::MouseEvent,
     ) -> bool {
         if self.transcript_scrollbar_covered() {
-            let was_dragging = self.transcript_scrollbar.dragging;
+            let was_dragging = self.transcript_scrollbar.pointer.is_dragging();
             self.transcript_scrollbar.clear_geometry();
             return was_dragging;
         }
-
-        if self.transcript_scrollbar.dragging {
-            match mouse.kind {
-                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                    self.move_transcript_scrollbar(mouse.row);
-                    return true;
-                }
-                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                    self.transcript_scrollbar.dragging = false;
-                    return true;
-                }
-                crossterm::event::MouseEventKind::Down(_) => {
-                    self.transcript_scrollbar.dragging = false;
-                }
-                // A held thumb owns the mouse until release. This also keeps
-                // a wheel event from changing the anchor behind the drag.
-                _ => return true,
+        match self.transcript_scrollbar.pointer.handle_mouse(mouse) {
+            ScrollbarPointer::Ignored => false,
+            ScrollbarPointer::Consumed => true,
+            ScrollbarPointer::ScrollTo(target) => {
+                self.set_transcript_scrollbar_target(target);
+                true
             }
         }
-
-        if mouse.kind != crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-        {
-            return false;
-        }
-        let Some(geometry) = self.transcript_scrollbar.geometry else {
-            return false;
-        };
-        if geometry.max_scroll == 0 || mouse.column != geometry.track.x {
-            return false;
-        }
-        let position = i32::from(mouse.row);
-        let track_start = i32::from(geometry.track.y);
-        let track_end = i32::from(geometry.track.bottom());
-        if position < track_start || position >= track_end {
-            return false;
-        }
-        let thumb_start = i32::from(geometry.thumb.y);
-        let thumb_end = i32::from(geometry.thumb.bottom());
-        self.transcript_scrollbar.grab_offset = if position >= thumb_start && position < thumb_end {
-            u16::try_from(position - thumb_start).unwrap_or_default()
-        } else {
-            geometry.thumb.height / 2
-        };
-        self.transcript_scrollbar.dragging = true;
-        if position < thumb_start || position >= thumb_end {
-            self.move_transcript_scrollbar(mouse.row);
-        }
-        true
-    }
-
-    fn move_transcript_scrollbar(&mut self, pointer_row: u16) {
-        let Some(geometry) = self.transcript_scrollbar.geometry else {
-            self.transcript_scrollbar.dragging = false;
-            return;
-        };
-        let track_start = i32::from(geometry.track.y);
-        let travel = i32::from(geometry.track.height.saturating_sub(geometry.thumb.height));
-        let requested =
-            i32::from(pointer_row).saturating_sub(i32::from(self.transcript_scrollbar.grab_offset));
-        let thumb_top = requested.clamp(track_start, track_start.saturating_add(travel));
-        let target_scroll = if travel == 0 {
-            0
-        } else {
-            let numerator = i64::from(thumb_top.saturating_sub(track_start))
-                .saturating_mul(i64::try_from(geometry.max_scroll).unwrap_or(i64::MAX));
-            usize::try_from((numerator + i64::from(travel) / 2) / i64::from(travel))
-                .unwrap_or(geometry.max_scroll)
-                .min(geometry.max_scroll)
-        };
-        self.set_transcript_scrollbar_target(target_scroll);
     }
 
     fn set_transcript_scrollbar_target(&mut self, target_scroll: usize) {
-        let Some(geometry) = self.transcript_scrollbar.geometry else {
+        let Some(geometry) = self.transcript_scrollbar.pointer.geometry() else {
             return;
         };
         if target_scroll >= geometry.max_scroll {
@@ -636,7 +570,7 @@ impl ChatState {
         if key_changed {
             state.clear_geometry();
         }
-        if state.dragging {
+        if state.pointer.is_dragging() {
             // Newly rendered entries must not move the thumb under a held pointer.
             return;
         }
@@ -697,12 +631,14 @@ impl ChatState {
             self.transcript_scrollbar.clear_geometry();
             return None;
         }
-        let old_track = self
+        if self
             .transcript_scrollbar
-            .geometry
-            .map(|geometry| geometry.track);
-        if self.transcript_scrollbar.dragging && old_track != Some(track) {
-            self.transcript_scrollbar.dragging = false;
+            .pointer
+            .geometry()
+            .map(|geometry| geometry.track)
+            != Some(track)
+        {
+            self.transcript_scrollbar.pointer.set_geometry(None);
         }
         self.prepare_transcript_scrollbar_metrics(width);
         let viewport_rows = viewport_rows.max(1);
@@ -720,7 +656,9 @@ impl ChatState {
             raw_scroll.min(max_scroll)
         };
         let geometry = scrollbar_geometry(track, total_rows, scroll, viewport_rows)?;
-        self.transcript_scrollbar.geometry = Some(geometry);
+        self.transcript_scrollbar
+            .pointer
+            .set_geometry(Some(geometry));
         Some(geometry)
     }
 

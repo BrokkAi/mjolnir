@@ -108,6 +108,8 @@ pub(super) async fn wait(
                     turn_number: None,
                     elapsed_ms: None,
                     capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    server_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    retry_assessment_pending: observation.retry_assessment_pending,
                     quota_recovery: observation.quota_recovery.clone(),
                     relay,
                     session: ApiSession::from(session),
@@ -193,6 +195,7 @@ pub(super) fn build_observation(
         observation
             .capacity_retry
             .clone_from(&snapshot.operational.capacity_retry);
+        observation.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
         observation.quota_recovery = snapshot
             .operational
             .continuation
@@ -286,6 +289,11 @@ pub(super) async fn finish_wait(
             .capacity_retry
             .as_ref()
             .map(WaitCapacityRetry::from),
+        server_retry: observation
+            .capacity_retry
+            .as_ref()
+            .map(WaitCapacityRetry::from),
+        retry_assessment_pending: observation.retry_assessment_pending,
         relay,
         session,
     })
