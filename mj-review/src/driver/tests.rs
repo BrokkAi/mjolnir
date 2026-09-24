@@ -329,7 +329,9 @@ fn a_clean_report_after_a_failed_analysis_fails_the_review() {
     let (mut driver, command_id) = running();
     assert!(
         driver
-            .analysis_completed(Err("bifrost exited with 1: Unknown tool: analyze_diff".into()))
+            .analysis_completed(Err(
+                "bifrost exited with 1: Unknown tool: analyze_diff".into()
+            ))
             .is_empty()
     );
     let requests = driver.role_turn_completed(&command_id, "No findings.");
