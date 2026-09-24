@@ -1632,6 +1632,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
             // needs no ACP harness behind it.
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1769,6 +1770,7 @@ fn in_place_move_never_removes_a_shared_local_profile_home() {
             .env("MJ_MOVE_IN_PLACE_SHARED_HOME_CHILD", "1")
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1819,6 +1821,7 @@ fn in_place_cross_harness_move_installs_the_handoff_without_provisioning() {
             .env("MJ_MOVE_IN_PLACE_CROSS_CHILD", "1")
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1885,6 +1888,7 @@ fn in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint() {
             .env("MJ_MOVE_IN_PLACE_FAILURE_CHILD", "1")
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1951,6 +1955,7 @@ fn in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped() {
         IsolatedTest::new(name)
             .env("MJ_MOVE_IN_PLACE_SWAP_RESTART_CHILD", "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -2028,6 +2033,7 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
             .env("MJ_MOVE_IN_PLACE_CLOSE_RESTART_CHILD", "1")
             .env(LATCH_CHECKPOINT_ONLY, "1")
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .env(mj_core::test_hooks::ACCEPT_UNSTAMPED_WORKER, "1")
             .isolated_store(directory.path())
             .run();
         return;

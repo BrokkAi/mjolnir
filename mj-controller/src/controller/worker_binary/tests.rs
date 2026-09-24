@@ -760,6 +760,17 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
     }
 }
 
+/// The bytes of a worker built for another `mj`. Assembled at run time: a
+/// literal marker would land in this test binary, which other tests install
+/// as their worker.
+fn older_worker_bytes(prefix: &str) -> String {
+    format!(
+        "{prefix}{}2.6.0+0123abcd{}",
+        mj_core::worker_build::MARKER_PREFIX,
+        mj_core::worker_build::MARKER_SUFFIX
+    )
+}
+
 /// A worker file built for another `mj`, as its stamp reports it.
 fn older_build() -> WorkerBuild {
     WorkerBuild {
@@ -840,7 +851,7 @@ fn a_stale_worker_binary_override_is_refused() {
     if std::env::var_os(STALE_WORKER_OVERRIDE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("mj-worker");
-        std::fs::write(&worker, b"\x7fELF MJ-WORKER-BUILD:2.6.0+0123abcd:END").unwrap();
+        std::fs::write(&worker, older_worker_bytes("\x7fELF ")).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
             "a_stale_worker_binary_override_is_refused",
@@ -3401,7 +3412,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
     // A worker built for another mj is refused just the same (#1138): the old
     // worker and its launch config stay paired and nothing restarts.
     let source = std::env::var_os("MJ_WORKER_BINARY").unwrap();
-    std::fs::write(&source, b"stale worker MJ-WORKER-BUILD:2.6.0+0123abcd:END").unwrap();
+    std::fs::write(&source, older_worker_bytes("stale worker ")).unwrap();
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
         false,
