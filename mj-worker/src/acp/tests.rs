@@ -1163,6 +1163,29 @@ fn an_auth_required_prompt_failure_carries_the_credential_marker() {
     ));
 }
 
+/// R4-7: Kimi fails a prompt past its weekly limit with ACP `auth_required`
+/// and a 403 usage-limit message (`cli/1136-11-prompt.txt`). The turn ended
+/// as QuotaLimit, but the conversation said "prompt failed (ACP
+/// auth_required)", which also reads as a sign-in failure.
+#[test]
+fn a_usage_limit_sent_as_auth_required_is_labelled_a_usage_limit() {
+    let mut error = agent_client_protocol::Error::auth_required();
+    error.message = "Authentication required: 403 You've reached your weekly (7-day) usage \
+        limit. Your quota will reset when the current 7-day window ends. To continue now, \
+        purchase extra usage or upgrade your plan: \
+        https://www.kimi.com/membership/subscription?tab=quota"
+        .into();
+    let label = prompt_failure_warning(HarnessKind::Kimi, &error);
+    assert!(
+        label.starts_with("prompt failed (usage limit reached): Authentication required: 403"),
+        "{label}"
+    );
+    assert!(
+        !mj_core::credentials::auth_failure_signature(HarnessKind::Kimi, &label),
+        "a usage limit is not a sign-in failure: {label}"
+    );
+}
+
 #[test]
 fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
     assert!(prompt_returned_without_updates(&StopReason::EndTurn, 7, 7));
