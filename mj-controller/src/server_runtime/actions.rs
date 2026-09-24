@@ -165,12 +165,11 @@ pub(super) async fn apply_phone_action(
             // have derived, so a session started from either surface reads the
             // same way in both.
             let title = title.unwrap_or_else(|| {
-                let project = project_directory
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| bundle_id.clone());
-                format!("{project} via {profile_id}")
+                mj_core::state::default_session_title(
+                    project_directory.as_deref(),
+                    &bundle_id,
+                    &profile_id,
+                )
             });
             let session_title_override = Some(title.clone());
             let (published, publication) = tokio::sync::oneshot::channel();

@@ -856,11 +856,7 @@ pub const LAUNCHING_STATE: &str = "launching";
 /// otherwise be named by its id, which every listing already prints beside
 /// it (F-12); the title it was created with says more.
 fn public_title(session: &mj_core::state::SessionRecord) -> String {
-    let display = session.display_title();
-    if display == session.id && !session.title.trim().is_empty() {
-        return session.title.clone();
-    }
-    display.to_owned()
+    session.listed_title().to_owned()
 }
 
 impl ViewerLifecycleCategory {
