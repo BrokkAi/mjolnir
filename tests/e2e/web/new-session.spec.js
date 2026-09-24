@@ -44,12 +44,15 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       const request = route.request().postDataJSON();
       state.preflights.push(request);
       const bare = state.snapshot.targets.find(target => target.id === request.target_id)?.requires_project_directory === true;
+      const repositories = state.snapshot.bundles.find(bundle => bundle.id === request.bundle_id)?.repositories || [];
       if (state.holdPreflight) await state.holdPreflight;
       if (state.preflightError) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: state.preflightError }) });
       return json({
         remote_repairs: state.remoteRepairs,
         project_directory: bare ? state.resolvedDirectory : null,
-        remote_repositories: bare ? [] : [{ id: request.bundle_id, fetch_url: 'https://github.com/example/repo.git', default_branch: 'main', push_urls: ['https://github.com/example/repo.git'] }],
+        remote_repositories: bare ? [] : repositories.length ? repositories.map(repository => ({
+          id: repository.id, fetch_url: `https://github.com/${repository.github}.git`, default_branch: 'main', push_urls: [],
+        })) : [{ id: request.bundle_id, fetch_url: 'https://github.com/example/repo.git', default_branch: 'main', push_urls: ['https://github.com/example/repo.git'] }],
         local_changes_excluded: !bare,
         managed_worktree: bare ? state.worktreeOptions : { available: false, default_create: false },
       });
@@ -61,10 +64,14 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       return json({ candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false });
     }
     if (pathname === '/api/bundles') {
-      state.creates.push(route.request().postDataJSON());
+      const request = route.request().postDataJSON();
+      state.creates.push(request);
       if (state.holdCreate) await state.holdCreate;
       if (state.rejectCreate) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Repository source is invalid' }) });
-      state.snapshot.bundles.push({ id: 'created', repositories: [] });
+      const repositories = (request.sources || [request.source]).map((source, index) => ({
+        id: `repo-${index + 1}`, github: source, destination: `repo-${index + 1}`,
+      }));
+      state.snapshot.bundles.push({ id: 'created', primary_repository: 'repo-1', repositories });
       return json({ bundle_id: 'created' });
     }
     if (pathname === '/api/actions') {
@@ -217,6 +224,110 @@ test('an isolated session can use a recent local project without entering a sour
   expect(state.creates).toHaveLength(1);
 });
 
+test('multiple repositories survive refresh, Back, and a failed preparation before launching together', async ({ page }) => {
+  const state = await mount(page, { bundles: [] });
+  await projectStep(page);
+  const source = page.locator('#new-project-source');
+  const add = page.getByRole('button', { name: 'Add repository', exact: true });
+  await source.fill('example/app');
+  await add.click();
+  await expect(source).toBeFocused();
+  await expect(source).toHaveValue('');
+  await expect(page.locator('.project-repositories')).toContainText('example/app · Primary');
+  await source.fill('example/api');
+  const original = await source.elementHandle();
+  await refresh(page, state);
+  expect(await original.evaluate(node => node.isConnected)).toBe(true);
+  await expect(source).toBeFocused();
+  await expect(source).toHaveValue('example/api');
+  await page.locator('#new-back').click();
+  await page.locator('#new-next').click();
+  await expect(page.locator('.project-repositories')).toContainText('example/app · Primary');
+  await expect(source).toHaveValue('example/api');
+  state.rejectCreate = true;
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-error')).toContainText('Repository source is invalid');
+  await expect(page.locator('.project-repositories')).toContainText('example/app');
+  await expect(source).toHaveValue('example/api');
+  state.rejectCreate = false;
+  await source.fill('example/service');
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.creates).toEqual([
+    { sources: ['example/app', 'example/api'] },
+    { sources: ['example/app', 'example/service'] },
+  ]);
+  await expect(page.locator('#new-step')).toContainText('https://github.com/example/app.git');
+  await expect(page.locator('#new-step')).toContainText('https://github.com/example/service.git');
+  await expect(page.locator('#new-step')).not.toContainText(/bundle/i);
+  await page.locator('#new-back').click();
+  await expect(page.getByRole('radio', { name: /created.*2 repositories/ })).toBeChecked();
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.creates).toHaveLength(2);
+  await page.locator('#new-next').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toMatchObject({ action: 'new', bundle_id: 'created' });
+});
+
+test('removing the primary repository promotes the next and Next uses the staged list', async ({ page }) => {
+  const state = await mount(page, { bundles: [] });
+  await projectStep(page);
+  const source = page.locator('#new-project-source');
+  const add = page.getByRole('button', { name: 'Add repository', exact: true });
+  for (const repository of ['example/app', 'example/api', 'example/shared']) {
+    await source.fill(repository);
+    await add.click();
+  }
+  await page.getByRole('button', { name: 'Remove example/app', exact: true }).click();
+  await expect(page.locator('.project-repositories li')).toHaveCount(2);
+  await expect(page.locator('.project-repositories li').first()).toContainText('example/api · Primary');
+  await expect(source).toHaveValue('');
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.creates).toEqual([{ sources: ['example/api', 'example/shared'] }]);
+});
+
+test('duplicate repositories stay editable and choosing a saved project replaces the draft group', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page);
+  const source = page.locator('#new-project-source');
+  const add = page.getByRole('button', { name: 'Add repository', exact: true });
+  await source.fill('example/app');
+  await add.click();
+  await source.fill(' example/app ');
+  await add.click();
+  await expect(page.locator('#new-error')).toContainText('already in the project');
+  await expect(page.locator('.project-repositories li')).toHaveCount(1);
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-error')).toContainText('Remove the duplicate');
+  expect(state.creates).toHaveLength(0);
+  await page.getByRole('radio', { name: 'existing', exact: true }).check();
+  await expect(page.locator('.project-repositories')).toHaveCount(0);
+  await expect(source).toHaveValue('');
+  await expect(page.locator('#new-error')).toBeEmpty();
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.preflights.at(-1)).toMatchObject({ bundle_id: 'existing' });
+  expect(state.creates).toHaveLength(0);
+});
+
+test('folder browsing can add a repository to a group without typing its path', async ({ page }) => {
+  const state = await mount(page, { bundles: [] });
+  state.directoryEntries = { '~/': ['~/projects/'], '~/projects/': ['~/projects/app/'] };
+  await projectStep(page);
+  await page.getByRole('button', { name: 'Browse folders', exact: true }).click();
+  await page.getByRole('option', { name: '~/projects/', exact: true }).click();
+  await page.getByRole('option', { name: '~/projects/app/', exact: true }).click();
+  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await expect(page.locator('.project-repositories')).toContainText('~/projects/app/ · Primary');
+  await page.locator('#new-project-source').fill('example/api');
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.creates).toEqual([{ sources: ['~/projects/app/', 'example/api'] }]);
+  expect(state.completions.every(request => request.target_id === null)).toBe(true);
+});
+
 test('folder browsing navigates and selects a project without typing a path', async ({ page }) => {
   const state = await mount(page, { bundles: [] });
   state.directoryEntries = { '~/': ['~/projects/'], '~/projects/': ['~/projects/app/'] };
@@ -366,10 +477,14 @@ test('project preparation stays single-flight and a late result cannot alter a r
   await projectStep(page);
   let release;
   state.holdCreate = new Promise(resolve => { release = resolve; });
+  await page.locator('#new-project-source').fill('example/primary');
+  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
   await page.locator('#new-project-source').fill('example/created');
   await page.locator('#new-next').click();
   await expect.poll(() => state.creates.length).toBe(1);
   await expect(page.locator('#new-next')).toHaveText('Preparing project…');
+  await expect(page.getByRole('button', { name: 'Add repository', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Remove example/primary', exact: true })).toBeDisabled();
   await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   expect(state.creates).toHaveLength(1);
   await expect(page.locator('#new-next')).toBeDisabled();

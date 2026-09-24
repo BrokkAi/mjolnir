@@ -608,15 +608,15 @@ impl RuntimeState {
     /// controller helper also takes the cross-process config lock, so a TUI
     /// transaction cannot race this one while the daemon's other config
     /// writers are excluded by this mutex.
-    pub async fn create_quick_bundle(
+    pub async fn create_bundle_from_sources(
         &self,
-        source: String,
+        sources: Vec<String>,
     ) -> std::result::Result<
         crate::controller::QuickBundleCreation,
         crate::controller::QuickBundleFailure,
     > {
         let _mutation = self.config_mutation.lock().await;
-        tokio::task::spawn_blocking(move || crate::controller::create_quick_bundle(&source))
+        tokio::task::spawn_blocking(move || crate::controller::create_bundle_from_sources(&sources))
             .await
             .map_err(|error| {
                 crate::controller::QuickBundleFailure::Persistence(anyhow!(

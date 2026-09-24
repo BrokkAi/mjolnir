@@ -232,7 +232,7 @@ test('commit refuses unready, pending, or failed preflight even when called dire
 
 test('entering Review does not wait for project preflight', async () => {
   let complete;
-  const draft = { step: 0, bundleId: 'project', bundleSource: '' };
+  const draft = { step: 0, bundleId: 'project', bundleSource: '', bundleSources: [] };
   const context = vm.createContext({
     newDraft: draft, pendingNewPreflight: null,
     visibleSteps: () => [{ key: 'project' }, { key: 'review' }],

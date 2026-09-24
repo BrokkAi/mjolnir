@@ -152,8 +152,11 @@ repository link; **Next** prepares it and continues directly to review.
 primary.
 
 In the browser, choose a project or recent local folder, use **Browse folders**,
-or paste a repository link, then select **Next**. Folder browsing lists the
-controller's filesystem for isolated sessions and the selected host's filesystem
+or paste a repository link, then select **Next**. To open several repositories
+together, choose a folder or link and select **Add repository** for each one.
+The first repository is primary; **Remove** takes a repository out of the list.
+**Next** includes any repository still in the input and continues to review.
+Folder browsing lists the controller's filesystem for isolated sessions and the selected host's filesystem
 for bare sessions. It does not select files on your phone or browser device.
 
 Isolated sessions clone network remotes; review shows the source and explains

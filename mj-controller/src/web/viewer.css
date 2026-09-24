@@ -1196,6 +1196,18 @@ details.block-fold > pre {
   overflow-wrap: anywhere;
 }
 
+.project-repositories {
+  padding-left: 1.5rem;
+}
+.project-repositories li {
+  margin-bottom: 0.75rem;
+}
+.project-repositories li > span {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-bottom: 0.25rem;
+}
+
 .field-inline {
   display: flex;
   gap: 10px;

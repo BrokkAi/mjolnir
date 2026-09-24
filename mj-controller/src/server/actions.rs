@@ -272,13 +272,14 @@ pub struct ControllerRequest {
     pub reply: tokio::sync::oneshot::Sender<ActionOutcome>,
 }
 
-/// A phone request to create or reuse a quick project bundle. This has its
+/// A phone request to create or reuse a project bundle. This has its
 /// own channel because bundle creation returns a durable id and must publish a
 /// config snapshot before the HTTP request can succeed; [`ControllerAction`]
 /// intentionally carries only action admission outcomes.
 #[derive(Debug)]
 pub struct BundleRequest {
-    pub source: String,
+    /// Ordered sources, with the primary repository first.
+    pub sources: Vec<String>,
     pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
 }
 

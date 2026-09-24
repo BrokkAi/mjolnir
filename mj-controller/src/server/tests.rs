@@ -832,7 +832,7 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
         }
     });
     let request = bundles.recv().await.expect("bundle request forwarded");
-    assert_eq!(request.source, "example/app");
+    assert_eq!(request.sources, ["example/app"]);
     request.reply.send(Ok("app".into())).unwrap();
     let response = response.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -841,8 +841,38 @@ async fn bundle_endpoint_authenticates_and_forwards_the_source() {
 }
 
 #[tokio::test]
+async fn bundle_endpoint_forwards_all_repositories_in_primary_order() {
+    let (app, mut bundles) = app_with_bundle_receiver();
+    let cookie = login_cookie(&app).await;
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/bundles")
+                .header(CONTENT_TYPE, "application/json")
+                .header(COOKIE, cookie)
+                .body(Body::from(r#"{"sources":["example/app","other/api"]}"#))
+                .unwrap(),
+        ),
+    );
+    let request = bundles.recv().await.expect("bundle request forwarded");
+    assert_eq!(request.sources, ["example/app", "other/api"]);
+    request.reply.send(Ok("app".into())).unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), br#"{"bundle_id":"app"}"#);
+}
+
+#[tokio::test]
 async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
-    for source in [String::new(), "x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)] {
+    for payload in [
+        serde_json::json!({"source": ""}),
+        serde_json::json!({"source": "x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)}),
+        serde_json::json!({"sources": []}),
+        serde_json::json!({"sources": ["example/app", " "]}),
+        serde_json::json!({"sources": ["example/app", "x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)]}),
+        serde_json::json!({"source": "example/app", "sources": ["other/api"]}),
+        serde_json::json!({}),
+    ] {
         let (app, mut bundles) = app_with_bundle_receiver();
         let cookie = login_cookie(&app).await;
         let response = app
@@ -850,14 +880,12 @@ async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
                 Request::post("/api/bundles")
                     .header(CONTENT_TYPE, "application/json")
                     .header(COOKIE, cookie)
-                    .body(Body::from(
-                        serde_json::to_string(&serde_json::json!({"source": source})).unwrap(),
-                    ))
+                    .body(Body::from(payload.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
         assert!(bundles.try_recv().is_err());
     }
 }

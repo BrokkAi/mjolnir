@@ -1390,6 +1390,7 @@ function freshDraft() {
     mjolnirSubagents: snapshot?.subagents_enabled === true,
     worktreeSelection: null,
     bundleSource: '',
+    bundleSources: [],
     creatingBundle: false,
     projectChoice: snapshot?.bundles[0]?.id ? `bundle:${snapshot.bundles[0].id}` : '',
     projectDirectories: {},
@@ -1440,7 +1441,7 @@ function renderNewForm() {
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
-    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, snapshot.local_project_directories] : null,
+    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, snapshot.local_project_directories, newDraft.bundleSources] : null,
     remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
@@ -1538,13 +1539,37 @@ function renderNewForm() {
             newDraft.projectChoice = value;
             newDraft.bundleId = value.startsWith('bundle:') ? value.slice(7) : '';
             newDraft.bundleSource = value.startsWith('source:') ? value.slice(7) : '';
+            newDraft.bundleSources = [];
             newDraft.preflighted = false;
             newDraft.remoteRepositories = [];
             newDraft.localChangesExcluded = false;
             newDraft.preflightError = '';
             document.querySelector('#new-project-source').value = newDraft.bundleSource;
+            newError.textContent = '';
+            renderNewForm();
           }),
         );
+        if (newDraft.bundleSources.length) {
+          body.append(el('p', 'dim', 'Repositories to open together. The primary repository is where the agent starts.'));
+          const repositories = el('ol', 'project-repositories');
+          for (const [index, source] of newDraft.bundleSources.entries()) {
+            const row = el('li');
+            row.append(el('span', '', `${source}${index === 0 ? ' · Primary' : ''}`));
+            const remove = el('button', 'secondary', 'Remove');
+            remove.type = 'button';
+            remove.setAttribute('aria-label', `Remove ${source}`);
+            remove.onclick = () => {
+              newDraft.bundleSources.splice(index, 1);
+              newDraft.preflighted = false;
+              newError.textContent = '';
+              renderNewForm();
+              document.querySelector('#new-project-source')?.focus();
+            };
+            row.append(remove);
+            repositories.append(row);
+          }
+          body.append(repositories);
+        }
         body.append(pathField(
           'Repository link or folder',
           'new-project-source',
@@ -1559,7 +1584,26 @@ function renderNewForm() {
           { host: () => null, kind: 'directories', applies: looksLikePath, browse: true },
         ));
         body.append(el('p', 'dim', 'Browse folders on the machine running Mjolnir, or paste a GitHub repository link.'));
-
+        const add = el('button', 'secondary', 'Add repository');
+        add.type = 'button';
+        add.onclick = () => {
+          const source = newDraft.bundleSource.trim();
+          if (!source) {
+            newError.textContent = 'Browse a folder or enter a repository link to add.';
+          } else if (newDraft.bundleSources.includes(source)) {
+            newError.textContent = 'This repository is already in the project.';
+          } else {
+            newDraft.bundleSources.push(source);
+            newDraft.bundleSource = '';
+            newDraft.bundleId = '';
+            newDraft.projectChoice = '';
+            newDraft.preflighted = false;
+            newError.textContent = '';
+            renderNewForm();
+          }
+          document.querySelector('#new-project-source')?.focus();
+        };
+        body.append(add);
       }
       body.append(
         textField('Title (optional)', 'new-title', newDraft.title, value => {
@@ -1661,21 +1705,28 @@ async function prepareNewProject() {
   const draft = newDraft;
   if (!draft || draft.creatingBundle) return false;
   const source = draft.bundleSource.trim();
-  if (!source) {
+  const sources = [...draft.bundleSources, ...(source ? [source] : [])];
+  if (!sources.length) {
     newError.textContent = 'Choose a project, browse a folder, or paste a repository link.';
+    return false;
+  }
+  if (new Set(sources).size !== sources.length) {
+    newError.textContent = 'This repository is already in the project. Remove the duplicate before continuing.';
     return false;
   }
   draft.creatingBundle = true;
   newError.textContent = '';
   renderNewForm();
   try {
-    const result = await request('/api/bundles', { method: 'POST', body: JSON.stringify({ source }) });
+    const payload = sources.length === 1 ? { source: sources[0] } : { sources };
+    const result = await request('/api/bundles', { method: 'POST', body: JSON.stringify(payload) });
     if (newDraft !== draft) return false;
     await refresh();
     if (newDraft !== draft) return false;
     draft.bundleId = result.bundle_id;
     draft.projectChoice = `bundle:${result.bundle_id}`;
     draft.bundleSource = '';
+    draft.bundleSources = [];
     draft.preflighted = false;
     draft.remoteRepositories = [];
     draft.localChangesExcluded = false;
@@ -1955,7 +2006,7 @@ async function advanceNew() {
 
   if (step.key === 'project') {
     if (!targetIsBare(newDraft.targetId)) {
-      if (newDraft.bundleSource.trim()) {
+      if (newDraft.bundleSources.length || newDraft.bundleSource.trim()) {
         if (!await prepareNewProject()) return;
       } else if (!snapshot.bundles.some(b => b.id === newDraft.bundleId)) {
         newError.textContent = 'Choose a project, browse a folder, or paste a repository link.';

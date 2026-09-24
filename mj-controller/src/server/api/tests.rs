@@ -1522,7 +1522,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
     )));
 
     let bundle = bundles.recv().await.unwrap();
-    assert_eq!(bundle.source, "/work/hel");
+    assert_eq!(bundle.sources, ["/work/hel"]);
     bundle.reply.send(Ok("hel".to_owned())).unwrap();
 
     let request = actions.recv().await.unwrap();

@@ -214,7 +214,8 @@ pub(super) const MAX_BUNDLE_SOURCE_CHARS: usize = 1024;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateBundleRequest {
-    pub(super) source: String,
+    pub(super) source: Option<String>,
+    pub(super) sources: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,7 +223,7 @@ pub(super) struct CreateBundleResponse {
     pub(super) bundle_id: String,
 }
 
-/// Create a quick bundle through the controller's dedicated persistence path.
+/// Prepare a repository group through the controller's dedicated persistence path.
 /// The control loop publishes the resulting config before resolving `reply`,
 /// so a successful response can immediately use the returned bundle id in the
 /// next new-session request.
@@ -230,12 +231,17 @@ pub(super) async fn create_bundle(
     State(state): State<ServerState>,
     Json(request): Json<CreateBundleRequest>,
 ) -> Result<Json<CreateBundleResponse>, ApiError> {
+    let sources = match (request.source, request.sources) {
+        (Some(source), None) => vec![source],
+        (None, Some(sources)) => sources,
+        _ => return Err(ApiError::bad_request("provide either source or sources")),
+    };
     Ok(Json(CreateBundleResponse {
-        bundle_id: create_quick_bundle(&state, request.source).await?,
+        bundle_id: create_project_bundle(&state, sources).await?,
     }))
 }
 
-/// Create or reuse the quick bundle for one repository source.
+/// Create or reuse an exact single-repository bundle.
 ///
 /// Both the viewer's `/api/bundles` route and the documented API's session
 /// creation need this, and a caller that supplies a project directory instead
@@ -244,18 +250,36 @@ pub(super) async fn create_quick_bundle(
     state: &ServerState,
     source: String,
 ) -> Result<String, ApiError> {
-    if source.trim().is_empty() {
-        return Err(ApiError::bad_request("repository source cannot be empty"));
-    }
-    if source.chars().count() > MAX_BUNDLE_SOURCE_CHARS {
+    create_project_bundle(state, vec![source]).await
+}
+
+async fn create_project_bundle(
+    state: &ServerState,
+    sources: Vec<String>,
+) -> Result<String, ApiError> {
+    if sources.is_empty() {
         return Err(ApiError::bad_request(
-            "repository source must contain 1024 characters or fewer",
+            "at least one repository source is required",
         ));
+    }
+    for (index, source) in sources.iter().enumerate() {
+        if source.trim().is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "repository {} source cannot be empty",
+                index + 1
+            )));
+        }
+        if source.chars().count() > MAX_BUNDLE_SOURCE_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "repository {} source must contain 1024 characters or fewer",
+                index + 1
+            )));
+        }
     }
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .bundle_tx
-        .send(BundleRequest { source, reply })
+        .send(BundleRequest { sources, reply })
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     result
@@ -263,7 +287,7 @@ pub(super) async fn create_quick_bundle(
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|failure| match failure {
             BundleFailure::InvalidSource => ApiError::bad_request(
-                "use a GitHub owner/repository or an existing Git checkout on the controller host",
+                "use distinct GitHub owner/repository sources or existing Git checkouts on the controller host",
             ),
             BundleFailure::Controller => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
