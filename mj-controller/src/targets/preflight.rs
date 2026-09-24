@@ -305,6 +305,14 @@ impl PodmanProbe {
             Self::UidMap => PodmanPostcondition::UidMap,
         }
     }
+
+    /// What running this probe checks, in words that follow "to check".
+    fn checks(self) -> &'static str {
+        match self {
+            Self::Version => "that Podman 4.3.0 or newer is installed",
+            Self::UidMap => "that rootless Podman maps container UIDs 0 and 1",
+        }
+    }
 }
 
 /// Whether `podman unshare` refused to run because Podman is rootful
@@ -442,10 +450,30 @@ pub(super) fn execute_podman_probe(
     let output = match executor.execute(&command) {
         Ok(output) => output,
         Err(error) => {
-            return Err(podman_probe_run_failure(host, probe, &error.to_string()));
+            return Err(podman_probe_run_failure(
+                host,
+                probe,
+                &probe_run_reason(&error),
+            ));
         }
     };
     check_podman_probe_status(host, probe, output)
+}
+
+/// Why a probe command could not be started: a missing `podman` in plain
+/// words, else the whole error chain, whose outer layer ("run podman for
+/// check Podman version") says nothing on its own.
+fn probe_run_reason(error: &anyhow::Error) -> String {
+    let missing = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if missing {
+        "`podman` is not installed or not on PATH".to_owned()
+    } else {
+        format!("{error:#}")
+    }
 }
 
 /// Failure for a probe that could not be run at all.
@@ -460,9 +488,10 @@ pub(super) fn podman_probe_run_failure(
             host,
             probe.postcondition(),
             format!(
-                "{}: {} could not be checked: {reported}.",
+                "{}: could not run `{}` to check {}: {reported}.",
                 host.failure(),
-                probe.postcondition().statement(),
+                probe.args().join(" "),
+                probe.checks(),
             ),
         ),
     }

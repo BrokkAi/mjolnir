@@ -179,6 +179,41 @@ fn podman_preflight_requires_supported_rootless_uid_mapped_runtime() {
     assert_eq!(seen[1].args, ["unshare", "cat", "/proc/self/uid_map"]);
 }
 
+/// Launch finding R3-11: with no `podman` on PATH, Setup said "Postcondition
+/// `podman --version` succeeds with Podman 4.3.0 or newer could not be
+/// checked: run podman for check Podman version". It now says, in plain
+/// words, which command could not run, what it would have checked, and why.
+#[test]
+fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
+    struct NoPodman;
+    impl CommandExecutor for NoPodman {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            Err(anyhow::Error::new(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )))
+            .with_context(|| format!("run {} for {}", command.program, command.purpose))
+        }
+    }
+    let error = verify_local_podman(&NoPodman).unwrap_err();
+    assert_eq!(
+        failed_podman_postcondition(&error),
+        Some(PodmanPostcondition::Version)
+    );
+    let error = error.to_string();
+    assert!(!error.contains("Postcondition"), "{error}");
+    assert!(!error.contains("run podman for"), "{error}");
+    assert!(
+        error.contains(
+            "could not run `podman --version` to check that Podman 4.3.0 or newer is installed"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.contains("`podman` is not installed or not on PATH"),
+        "{error}"
+    );
+}
+
 /// `podman unshare` refuses to run for rootful or remote Podman, so its
 /// refusal is reported with the rootless fix rather than the UID-map one.
 #[test]
