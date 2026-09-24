@@ -85,12 +85,13 @@ kind = "bare"
 `machine` defaults to `local`, so it is omitted.
 
 The directory must exist locally. For a Git project, the final review offers
-**Create managed worktree**. It is checked by default for a primary checkout
+**Create isolated checkout**. It is checked by default for a primary checkout
 and unchecked for an existing linked worktree; you can change either choice.
 When checked, Mjolnir creates a separate checkout under
-`.mj/worktrees/<session-id>` on branch `mj/<session-id>`, starting at the selected
-checkout's `HEAD` and preserving the selected subdirectory. The source checkout
-must be completely clean, including staged, unstaged, and untracked files.
+`.mj/clones/<session-id>` as an independent clone, starting on the remote default
+branch (or the source's current branch without a remote) and preserving the selected
+subdirectory. Its commits and branch changes do not move refs in the source checkout.
+Uncommitted source changes stay in the source checkout.
 
 Uncheck it to use the selected directory directly. The choice survives stop
 and resume. Plain directories are used directly with the checkbox disabled.
@@ -120,9 +121,8 @@ permissions = "guardian"
 ```
 
 The wizard validates an existing Git directory on the remote host. The same
-**Create managed worktree** choice and defaults apply on that host. Creating
-a worktree requires a completely clean source checkout, including untracked
-files. The remote machine persists across sessions. Mjolnir-created worktrees and worker/profile staging
+**Create isolated checkout** choice and defaults apply on that host. The remote
+machine persists across sessions. Mjolnir-created clones and worker/profile staging
 areas are lifecycle-managed; a linked worktree you selected yourself remains
 yours. `workspace_prefix` controls a separate per-session lifecycle/cleanup
 path, not the selected project or its linked-worktree location.

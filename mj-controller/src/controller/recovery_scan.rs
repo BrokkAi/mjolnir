@@ -512,6 +512,8 @@ fn adopted_session_record(
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         mjolnir_subagents: None,
         // The adopting caller probes the running container for this.

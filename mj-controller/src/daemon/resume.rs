@@ -207,6 +207,45 @@ impl RuntimeState {
     /// its cause, and says so.
     pub(crate) async fn discard_lost_session(self: &Arc<Self>, session_id: String) {
         let short = mj_core::state::short_id(&session_id).to_owned();
+        let owned_clone = blocking({
+            let session_id = session_id.clone();
+            move || {
+                let controller = Controller::load()?;
+                let Some(checkout) = controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.managed_worktree.as_ref())
+                    .filter(|checkout| checkout.kind == mj_core::state::ManagedCheckoutKind::Clone)
+                else {
+                    return Ok(None);
+                };
+                if crate::controller::path_exists_on_managed_target(
+                    &crate::targets::ProcessExecutor,
+                    &checkout.target,
+                    &checkout.worktree_root,
+                )? {
+                    Ok(Some(checkout.worktree_root.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+        })
+        .await;
+        match owned_clone {
+            Ok(Some(path)) => {
+                self.push_notice(&session_id, format!(
+                    "Session {short} lost its target, but its owned clone remains at {}; keeping the record for inspection",
+                    path.display(),
+                ));
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%session_id, error = %format!("{error:#}"), "could not inspect owned clone before lost-session cleanup");
+                return;
+            }
+            Ok(None) => {}
+        }
         match self
             .tear_down_stopped_session(
                 session_id.clone(),
@@ -257,6 +296,66 @@ impl RuntimeState {
             .sync_now(true)
             .await
             .context("sync SessionWiki before archiving stopped sessions")?;
+        // Recheck a small bounded batch of older clone checkpoints. A remote
+        // that was offline during suspension may now prove its saved refs.
+        let refreshable = blocking(move || {
+            let controller = Controller::load()?;
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(older_than_days));
+            let mut sessions = controller
+                .state
+                .sessions
+                .values()
+                .filter(|session| session.state == SessionState::Stopped)
+                .filter(|session| {
+                    chrono::DateTime::parse_from_rfc3339(&session.updated_at)
+                        .is_ok_and(|time| time.with_timezone(&chrono::Utc) <= cutoff)
+                })
+                .filter(|session| {
+                    session.managed_worktree.as_ref().is_some_and(|owned| {
+                        owned.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    })
+                })
+                .filter(|session| {
+                    session.publication.as_ref().is_none_or(|evidence| {
+                        evidence.state != mj_core::state::PublicationState::Published
+                            && !evidence.dirty
+                            && !evidence.stashed
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            sessions.sort_by(|a, b| {
+                a.publication
+                    .as_ref()
+                    .map(|e| &e.checked_at)
+                    .cmp(&b.publication.as_ref().map(|e| &e.checked_at))
+            });
+            sessions.truncate(4);
+            Ok(sessions)
+        })
+        .await?;
+        let mut checks = tokio::task::JoinSet::new();
+        for session in refreshable {
+            checks.spawn_blocking(move || {
+                let assessment =
+                    crate::controller::publication::refresh_stopped_clone_publication(&session);
+                (session.id, assessment)
+            });
+        }
+        let mut refreshed = false;
+        while let Some(done) = checks.join_next().await {
+            let (id, assessment) = done.context("publication refresh task failed")?;
+            if let Some(assessment) = assessment {
+                refreshed |= blocking(move || {
+                    crate::database::set_publication_assessment_if_current(&id, &assessment)
+                })
+                .await?;
+            }
+        }
+        if refreshed {
+            self.reload_controller().await?;
+            self.publish_revision();
+        }
         let candidates = blocking(move || {
             let controller = Controller::load()?;
             Ok(crate::sessionwiki::sessions_ready_to_archive(

@@ -119,6 +119,8 @@ impl Controller {
         let session = SessionRecord {
             target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
             launch_base: None,
+            launch_branch: None,
+            publication: None,
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.
             build_cache: parent.build_cache.clone(),

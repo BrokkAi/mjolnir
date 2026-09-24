@@ -345,6 +345,8 @@ pub struct CreateSessionRequest {
     /// Git revision the session starts at, as the caller typed it.
     #[serde(default)]
     pub launch_base: Option<String>,
+    #[serde(default)]
+    pub launch_branch: Option<String>,
     /// None follows the global `[subagents] enabled` setting at launch time.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
@@ -604,6 +606,8 @@ pub enum DaemonAction {
     },
     SuspendSession {
         session_id: String,
+        #[serde(default)]
+        acknowledge_unpublished_work: bool,
     },
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
@@ -1655,8 +1659,19 @@ impl DaemonClient {
     }
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
+        self.suspend_session_with_ack(session_id, false).await
+    }
+
+    pub async fn suspend_session_with_ack(
+        &mut self,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::SuspendSession { session_id })
+            .request(DaemonAction::SuspendSession {
+                session_id,
+                acknowledge_unpublished_work,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),

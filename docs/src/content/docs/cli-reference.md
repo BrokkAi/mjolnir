@@ -165,7 +165,7 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
-       [--base <revision>] [--workspace-id <id>] [--title <text>]
+       [--branch <name>] [--base <revision>] [--workspace-id <id>] [--title <text>]
        [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
@@ -175,7 +175,7 @@ mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
-mj suspend --session <id> [--json]
+mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>]
@@ -184,13 +184,12 @@ mj interrupt-turn --session <id>
 mj api-info [--json]
 ```
 
-`mj new --base <revision>` starts the session at that Git revision instead of
-HEAD (managed worktree) or the remote default branch (bundle session), and
-records it as the session's launch base, so `mj diff` compares against it. A
-managed-worktree session resolves the revision in the project's repository; a
-bundle session resolves it in the fresh clone, where only what the remote sent
-exists, so name a commit SHA, a tag, or `origin/<branch>`. A base cannot be
-combined with a session that runs in the selected directory without a worktree.
+`mj new --branch <name>` selects the branch checked out in a new isolated clone;
+otherwise the clone starts on the remote default branch. `--base <revision>`
+records a separate launch base for `mj diff`; it does not change the selected
+branch. A local clone resolves the base in the source repository, while a
+network clone resolves it from fetched Git history. A base cannot be combined
+with a session that runs directly in the selected directory.
 
 `mj diff` compares against the recorded launch base by default. Use `--base`
 to compare against an explicit Git commit or revision, for example after
@@ -259,13 +258,15 @@ session that should continue elsewhere.
 
 `mj suspend` saves a verified recovery copy and releases the environment. It
 reports acceptance; follow it with `mj wait --session <id>` to observe completion
-or a reported failure. `mj interrupt-turn` interrupts only the current turn and
+or a reported failure. For an independent clone whose work may be unpublished,
+pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
+still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
 keeps the session available for another prompt.
 
 `mj destroy` permanently removes the session, environment, and recovery archive.
-It keeps the managed branch in the source repository unless `--delete-branch` is
-specified. Keeping that branch does not preserve work held only in the destroyed
-environment. These commands replace `mj close` and its destructive `--force`
+New managed clones have no branch in the source repository. For older linked
+worktree sessions, the managed branch remains unless `--delete-branch` is
+specified. These commands replace `mj close` and its destructive `--force`
 flag; the old command is no longer accepted.
 
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file

@@ -1470,7 +1470,7 @@ function renderNewForm() {
     }
     case 'project': {
       if (targetIsBare(newDraft.targetId)) {
-        body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create a managed worktree before launching.'));
+        body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create an isolated clone before launching.'));
         const recents = snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories || [];
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
@@ -1590,10 +1590,10 @@ function renderNewForm() {
         newDraft.createManagedWorktree = checkbox.checked;
         renderNewForm();
       };
-      worktree.append(checkbox, document.createTextNode('Create managed worktree'));
+      worktree.append(checkbox, document.createTextNode('Create isolated checkout'));
       body.append(worktree, el('p', 'dim', !targetIsBare(newDraft.targetId)
         ? 'The target provides its own isolated workspace.'
-        : checkbox.checked ? 'Create a separate session-owned checkout from the selected checkout’s HEAD.'
+        : checkbox.checked ? 'Create a separate session-owned clone on the selected or default branch.'
           : 'Use the selected directory directly.'));
       if (subagentChoiceApplies()) {
         const subagents = el('label', 'field-inline');
@@ -2038,8 +2038,10 @@ function resumeRow(session) {
   const row = button('', 'resume-session-row session', { resumeSession: session.id });
   row.type = 'button';
   row.dataset.sessionId = session.id;
+  const publicationMarker = session.publication_state === 'unpublished' ? '↑ '
+    : session.publication_state === 'unknown' ? '? ' : '';
   row.append(
-    el('span', 'resume-session-title', session.title || session.id),
+    el('span', 'resume-session-title', publicationMarker + (session.title || session.id)),
     el('span', 'resume-session-meta', [
       session.display_location || session.project_label || session.target_id || '',
       session.profile_id || '',
@@ -2047,7 +2049,7 @@ function resumeRow(session) {
     el('span', 'resume-session-recent', resumeRecencyLabel(session)),
     el('span', 'resume-session-snippet hidden'),
   );
-  row.setAttribute('aria-label', `Resume ${session.title || session.id}`);
+  row.setAttribute('aria-label', `Resume ${session.title || session.id}${publicationMarker ? `, ${session.publication_state} publication status` : ''}`);
   row.onclick = () => {
     const state = resumeListState(session.workspace_id);
     state.focusSessionId = session.id;
@@ -3405,8 +3407,10 @@ function confirmSessionDestruction(session) {
     const branch = el('input');
     branch.type = 'checkbox';
     branch.checked = false;
-    label.append(branch, document.createTextNode(' Also delete the managed branch'));
-    dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
+    if (session.managed_checkout_kind === 'worktree') {
+      label.append(branch, document.createTextNode(' Also delete the managed branch'));
+      dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
+    }
     const controls = el('div', 'row');
     const cancel = button('Cancel', 'secondary');
     const destroy = button('Destroy session', 'danger');
@@ -6005,6 +6009,7 @@ async function runSessionAction(dataset, errorNode, extra) {
       .map(id => snapshot.sessions.find(item => item.id === id))
       .filter(child => child && ['live', 'starting', 'suspending'].includes(child.lifecycle));
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
+      + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
       + (activeChildren.length ? `\n\nThis also suspends ${activeChildren.length} active sub-agent(s) first.` : '');
     if (!confirm(question)) return false;
@@ -6045,7 +6050,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (lifecycle) {
       await request(`/api/v1/sessions/${dataset.id}/${dataset.action}`, {
         method: 'POST', body: JSON.stringify(dataset.action === 'suspend'
-          ? { acknowledge_active_subagents: true } : { delete_branch: extra.delete_branch }),
+          ? { acknowledge_active_subagents: true, acknowledge_unpublished_work: true } : { delete_branch: extra.delete_branch }),
       });
     } else {
       await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });

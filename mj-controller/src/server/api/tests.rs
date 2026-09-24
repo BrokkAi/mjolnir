@@ -1136,6 +1136,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         request.action,
         ControllerAction::New {
             launch_base: None,
+            launch_branch: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1366,6 +1367,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
         request.action,
         ControllerAction::New {
             launch_base: None,
+            launch_branch: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1475,6 +1477,7 @@ async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
             "/api/v1/sessions/session-1/suspend",
             ControllerAction::Suspend {
                 session_id: "session-1".into(),
+                acknowledge_unpublished_work: false,
             },
         ),
         (

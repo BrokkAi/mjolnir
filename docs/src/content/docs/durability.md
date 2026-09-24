@@ -207,12 +207,11 @@ archive and record. Force-destroy can tear down an active target without a new
 checkpoint and removes every Mjolnir-owned recovery artifact; it is the
 explicit data-loss escape hatch.
 
-Destroying a session does not delete the git branch of its managed worktree.
-The checkout goes, the branch stays in the source repository, so committed
-work survives and you can check it out or recreate a worktree from it. Both
-destroy confirmations offer a third button, **Yes, delete branch**, which
-deletes the branch as well. That is the only way Mjolnir removes a branch you
-have worked in.
+An independent managed clone owns its own branches. Suspension verifies a
+checkpoint before deleting the clone, and Resume recreates it from the source
+and saved Git work. Destroy removes that recovery copy and can discard work
+which has not been pushed. Older linked-worktree sessions retain their branch
+in the source repository; their destroy dialog can also delete that branch.
 
 A **force stop** is narrower: it requires an existing verified archive, skips
 the fresh checkpoint, tears down the current target, and leaves the session

@@ -409,6 +409,8 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         container_workspace: None,

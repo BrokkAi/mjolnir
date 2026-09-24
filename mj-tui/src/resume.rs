@@ -29,7 +29,7 @@ use mj_client::daemon::{
     WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
 };
 use mj_core::config::{Config, HarnessKind};
-use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
+use mj_core::state::{MoveOperation, PublicationState, SessionRecord, SessionState, State};
 
 use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use mj_chat::text_input::TextInput;
@@ -200,6 +200,7 @@ pub(crate) struct ResumeRow {
     pub(crate) details: String,
     pub(crate) last_activity_ms: i64,
     pub(crate) status: ResumeRowStatus,
+    pub(crate) publication: Option<PublicationState>,
     /// Reported by the native harness. This metadata is informational only;
     /// it does not affect visibility or dispatch a provider write.
     pub(crate) natively_archived: bool,
@@ -605,11 +606,18 @@ pub(crate) fn merged_resume_rows(
             .unwrap_or(0);
         let status = hel_row_status(session);
         let project = session.project_name(config);
-        let details = match (&session.checkpoint, status.explanation()) {
+        let mut details = match (&session.checkpoint, status.explanation()) {
             (_, Some(reason)) => format!("{reason} · {project}"),
             (None, None) => format!("no checkpoint · {project}"),
             (Some(_), None) => project,
         };
+        match session.publication_state() {
+            Some(PublicationState::Unpublished) => {
+                details.push_str(" · Unpublished work in recovery copy")
+            }
+            Some(PublicationState::Unknown) => details.push_str(" · Publication status unknown"),
+            _ => {}
+        }
         rows.push(ResumeRow {
             key: ResumeRowKey::Hel(session.id.clone()),
             profile_id: session.last_profile.clone(),
@@ -618,6 +626,7 @@ pub(crate) fn merged_resume_rows(
             details,
             last_activity_ms,
             status,
+            publication: session.publication_state(),
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
@@ -641,6 +650,7 @@ pub(crate) fn merged_resume_rows(
                 details: native.details.clone(),
                 last_activity_ms: native.last_activity_ms,
                 status: ResumeRowStatus::Importable,
+                publication: None,
                 natively_archived: native.natively_archived,
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
@@ -698,6 +708,7 @@ pub(crate) fn merged_resume_rows(
                 .and_then(timestamp_ms)
                 .unwrap_or_default(),
             status: ResumeRowStatus::Restorable,
+            publication: None,
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
@@ -866,9 +877,18 @@ impl DashboardState {
                     profile_id: session.last_profile.clone(),
                     title: session.display_title().to_owned(),
                     origin: workspace.to_owned(),
-                    details: session.project_name(&self.config),
+                    details: format!(
+                        "{}{}",
+                        session.project_name(&self.config),
+                        if session.publication_state().is_some() {
+                            " · Publication status unknown"
+                        } else {
+                            ""
+                        }
+                    ),
                     last_activity_ms: timestamp_ms(&session.updated_at).unwrap_or_default(),
                     status: ResumeRowStatus::Running,
+                    publication: session.publication_state(),
                     natively_archived: false,
                     unavailable_reason: None,
                     move_recovery: None,
@@ -1662,8 +1682,15 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
         };
+        let delete_branch_available = self
+            .state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.managed_worktree.as_ref())
+            .is_some_and(|owned| owned.kind == mj_core::state::ManagedCheckoutKind::Worktree);
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
             session_id,
+            delete_branch_available,
             reopen: Some(Box::new(dialog)),
         }));
         self.rebuild_resume_rows();
@@ -2441,8 +2468,23 @@ where
         Style::default().fg(theme::palette().muted),
     ));
     spans.push(Span::raw("  "));
+    let marker = match row.publication {
+        Some(PublicationState::Unpublished) => "↑ ",
+        Some(PublicationState::Unknown) => "? ",
+        _ => "",
+    };
+    if !marker.is_empty() {
+        spans.push(Span::styled(
+            marker.to_owned(),
+            Style::default().fg(theme::palette().warning),
+        ));
+    }
     spans.push(Span::styled(
-        truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+        truncate_to_cells(
+            &row.title,
+            layout.title.saturating_sub(marker.chars().count()),
+            Truncate::SUMMARY,
+        ),
         title_style,
     ));
     spans.push(Span::styled(

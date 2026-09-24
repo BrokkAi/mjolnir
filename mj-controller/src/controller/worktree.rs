@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, ProjectBundle, TargetTemplate};
 use mj_core::local_git::canonical_repository;
 use mj_core::state::{
-    ManagedWorktree, ManagedWorktreeOptions, ManagedWorktreeTarget, ProjectSourceIdentity,
-    SessionRecord,
+    ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeOptions, ManagedWorktreeTarget,
+    ProjectSourceIdentity, SessionRecord,
 };
 
 use crate::targets::{
@@ -215,6 +215,7 @@ impl Controller {
         self.validate_project_directory(target_id, source, executor)
             .context("this session's repository is unavailable")?;
         let mut worktree = ManagedWorktree {
+            kind: Default::default(),
             source_project_directory: source.to_path_buf(),
             source_repository: source.to_path_buf(),
             worktree_root: source.join(".mj").join("worktrees").join(&session.id),
@@ -229,12 +230,34 @@ impl Controller {
         };
         let reuse_existing_branch =
             retained_managed_worktree_branch_available(executor, &worktree)?;
-        // A fresh branch starts at the repository's HEAD, so that is what an
-        // export diffs against. A retained branch already carries the session's
-        // commits; its own creation point is what its reflog names.
         if !reuse_existing_branch {
-            worktree.base_commit =
-                Some(read_checkout_position(executor, &worktree.target, source)?.head_commit);
+            let (branch, remote_branch) = managed_clone_starting_branch(
+                executor,
+                &worktree.target,
+                source,
+                session.launch_branch.as_deref(),
+            )?;
+            worktree.kind = ManagedCheckoutKind::Clone;
+            worktree.worktree_root = source.join(".mj").join("clones").join(&session.id);
+            worktree.branch = branch.clone();
+            worktree.base_commit = Some(managed_git_stdout(
+                executor,
+                &worktree.target,
+                source,
+                [
+                    "rev-parse",
+                    "--verify",
+                    &format!(
+                        "{}^{{commit}}",
+                        if remote_branch {
+                            format!("refs/remotes/origin/{branch}")
+                        } else {
+                            format!("refs/heads/{branch}")
+                        }
+                    ),
+                ],
+                "resolve converted checkout source commit",
+            )?);
         }
         if !reuse_existing_branch {
             ensure_managed_worktree_available(executor, &worktree)?;
@@ -301,11 +324,17 @@ impl Controller {
         let worktree_root = inspection
             .source_repository
             .join(".mj")
-            .join("worktrees")
+            .join("clones")
             .join(session_id);
         // The worktree branch is created from the repository's HEAD, or from
         // the requested launch base, so record that commit as the session base
         // rather than rediscovering it later.
+        let (branch, remote_branch) = managed_clone_starting_branch(
+            executor,
+            &target,
+            &inspection.source_repository,
+            session.launch_branch.as_deref(),
+        )?;
         let base_commit = match session.launch_base.as_deref() {
             Some(revision) => managed_git_stdout(
                 executor,
@@ -321,16 +350,31 @@ impl Controller {
             )?
             .trim()
             .to_owned(),
-            None => {
-                read_checkout_position(executor, &target, &inspection.source_repository)?
-                    .head_commit
-            }
+            None => managed_git_stdout(
+                executor,
+                &target,
+                &inspection.source_repository,
+                [
+                    "rev-parse",
+                    "--verify",
+                    &format!(
+                        "{}^{{commit}}",
+                        if remote_branch {
+                            format!("refs/remotes/origin/{branch}")
+                        } else {
+                            format!("refs/heads/{branch}")
+                        }
+                    ),
+                ],
+                "resolve selected branch tip",
+            )?,
         };
         let managed = ManagedWorktree {
+            kind: ManagedCheckoutKind::Clone,
             source_project_directory: inspection.source_project_directory,
             source_repository: inspection.source_repository,
             worktree_root: worktree_root.clone(),
-            branch: format!("mj/{session_id}"),
+            branch,
             target,
             base_commit: Some(base_commit),
         };
@@ -416,6 +460,121 @@ struct RawProjectInspection {
     upstream: Option<String>,
 }
 
+fn managed_clone_starting_branch(
+    executor: &impl CommandExecutor,
+    target: &ManagedWorktreeTarget,
+    repository: &Path,
+    selected: Option<&str>,
+) -> Result<(String, bool)> {
+    if let Some(branch) = selected {
+        let format = executor.execute(&managed_git_command(
+            target,
+            repository,
+            ["check-ref-format", "--branch", branch],
+            "validate selected branch",
+        ))?;
+        ensure!(format.status == 0, "invalid selected Git branch {branch:?}");
+        for (reference, remote) in [
+            (format!("refs/heads/{branch}"), false),
+            (format!("refs/remotes/origin/{branch}"), true),
+        ] {
+            let present = executor.execute(&managed_git_command(
+                target,
+                repository,
+                ["show-ref", "--verify", "--quiet", &reference],
+                "find selected branch",
+            ))?;
+            match present.status {
+                0 => return Ok((branch.to_owned(), remote)),
+                1 => {}
+                status => bail!("find selected branch failed with status {status}"),
+            }
+        }
+        bail!("selected branch {branch:?} is unavailable in the source repository");
+    }
+    let remote_head = managed_git_command(
+        target,
+        repository,
+        [
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+        "resolve origin default branch",
+    );
+    let output = executor.execute(&remote_head)?;
+    match output.status {
+        0 => {
+            let reference = String::from_utf8(output.stdout)?;
+            let branch = reference
+                .trim()
+                .strip_prefix("origin/")
+                .context("origin/HEAD does not name an origin branch")?;
+            ensure!(!branch.is_empty(), "origin/HEAD has no branch");
+            Ok((branch.to_owned(), true))
+        }
+        1 => {
+            let origin = executor.execute(&managed_git_command(
+                target,
+                repository,
+                ["config", "--get", "remote.origin.url"],
+                "inspect origin remote",
+            ))?;
+            if origin.status == 0 {
+                let remote = managed_git_stdout(
+                    executor,
+                    target,
+                    repository,
+                    ["ls-remote", "--symref", "origin", "HEAD"],
+                    "resolve remote default branch",
+                )?;
+                let branch = remote
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("ref: refs/heads/")?
+                            .strip_suffix("\tHEAD")
+                    })
+                    .context("origin did not advertise a default branch")?;
+                let cached = executor.execute(&managed_git_command(
+                    target,
+                    repository,
+                    [
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/origin/{branch}"),
+                    ],
+                    "find remote default branch in source",
+                ))?;
+                ensure!(
+                    cached.status == 0,
+                    "origin default branch {branch:?} is not in the source repository; fetch it before starting a session"
+                );
+                return Ok((branch.to_owned(), true));
+            }
+            ensure!(
+                origin.status == 1,
+                "inspect origin remote failed with status {}",
+                origin.status
+            );
+            managed_git_stdout(
+                executor,
+                target,
+                repository,
+                ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                "resolve source checkout branch",
+            )
+            .map(|branch| (branch, false))
+            .context("source checkout is detached; select a starting branch explicitly")
+        }
+        status => bail!(
+            "resolve origin default branch failed with status {status}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
 fn managed_target_ssh(target: &ManagedWorktreeTarget) -> Option<SshTarget> {
     match target {
         ManagedWorktreeTarget::Local => None,
@@ -448,7 +607,7 @@ fn managed_target_command(
     }
 }
 
-fn managed_git_command(
+pub(super) fn managed_git_command(
     target: &ManagedWorktreeTarget,
     directory: &Path,
     args: impl IntoIterator<Item = impl AsRef<str>>,
@@ -775,19 +934,30 @@ pub(super) fn raw_checkout_snapshot(
     source: &mj_core::remote_git::NetworkGitSource,
     destination: &Path,
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    managed_clone: bool,
 ) -> Result<mj_checkpoint::archive::RepositorySnapshot> {
     // Bundling "everything not on origin" only works when origin refs exist:
     // every bundle prerequisite then sits on the remote the container clones.
     mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, RAW_CONVERSION_REPOSITORY_ID)?;
     mj_checkpoint::checkpoint::reject_dirty_submodules(git, checkout)
         .with_context(|| format!("checkout {}", checkout.display()))?;
+    let boundary = origin_boundary_commit(git, checkout)?;
+    let history = if managed_clone {
+        mj_checkpoint::archive::GitHistoryMode::CloneFrom(
+            boundary
+                .clone()
+                .context("managed clone has no origin boundary commit")?,
+        )
+    } else {
+        mj_checkpoint::archive::GitHistoryMode::SessionDelta
+    };
     let mut snapshot = mj_checkpoint::archive::collect_git_snapshot(
         git,
         checkout,
         &mj_checkpoint::archive::GitCollectionSpec {
             id: RAW_CONVERSION_REPOSITORY_ID.to_owned(),
             relative_destination: destination.to_path_buf(),
-            history: mj_checkpoint::archive::GitHistoryMode::SessionDelta,
+            history,
             origin_override: None,
         },
     )
@@ -802,8 +972,8 @@ pub(super) fn raw_checkout_snapshot(
         .map(|url| mj_checkpoint::archive::redact_origin_credentials(url))
         .collect::<Result<Vec<_>>>()?;
     snapshot.metadata.remote_workspace = true;
-    snapshot.metadata.base_commit = origin_boundary_commit(git, checkout)?
-        .unwrap_or_else(|| snapshot.metadata.head_commit.clone());
+    snapshot.metadata.base_commit =
+        boundary.unwrap_or_else(|| snapshot.metadata.head_commit.clone());
     Ok(snapshot)
 }
 
@@ -1297,17 +1467,16 @@ fn ensure_managed_worktree_excluded(
     executor: &impl CommandExecutor,
     target: &ManagedWorktreeTarget,
     repository: &Path,
+    kind: ManagedCheckoutKind,
 ) -> Result<()> {
+    let (path, entry) = match kind {
+        ManagedCheckoutKind::Worktree => (".mj/worktrees/", "/.mj/worktrees/"),
+        ManagedCheckoutKind::Clone => (".mj/clones/", "/.mj/clones/"),
+    };
     let check = managed_git_command(
         target,
         repository,
-        [
-            "check-ignore",
-            "--quiet",
-            "--no-index",
-            "--",
-            ".mj/worktrees/",
-        ],
+        ["check-ignore", "--quiet", "--no-index", "--", path],
         "check managed worktree exclusion",
     );
     let output = executor.execute(&check)?;
@@ -1331,7 +1500,6 @@ fn ensure_managed_worktree_excluded(
         ],
         "resolve repository-local exclude file",
     )?);
-    const ENTRY: &str = "/.mj/worktrees/";
     match target {
         ManagedWorktreeTarget::Local => {
             use std::io::Write;
@@ -1340,7 +1508,7 @@ fn ensure_managed_worktree_excluded(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(error) => return Err(error.into()),
             };
-            if existing.lines().any(|line| line.trim() == ENTRY) {
+            if existing.lines().any(|line| line.trim() == entry) {
                 return Ok(());
             }
             if let Some(parent) = exclude_path.parent() {
@@ -1354,7 +1522,7 @@ fn ensure_managed_worktree_excluded(
             if !existing.is_empty() && !existing.ends_with('\n') {
                 writeln!(file)?;
             }
-            writeln!(file, "# Hel managed worktrees\n{ENTRY}")?;
+            writeln!(file, "# Mjolnir managed checkouts\n{entry}")?;
         }
         ManagedWorktreeTarget::Ssh { .. } => {
             const SCRIPT: &str = "set -eu\nexclude=$1\nentry=$2\nmkdir -p \"$(dirname \"$exclude\")\"\ntouch \"$exclude\"\nif ! grep -Fqx \"$entry\" \"$exclude\"; then\n  if [ -s \"$exclude\" ] && [ \"$(tail -c 1 \"$exclude\" | wc -l)\" -eq 0 ]; then printf '\\n' >>\"$exclude\"; fi\n  printf '# Hel managed worktrees\\n%s\\n' \"$entry\" >>\"$exclude\"\nfi";
@@ -1366,7 +1534,7 @@ fn ensure_managed_worktree_excluded(
                     SCRIPT,
                     "hel-exclude",
                     &exclude_path.to_string_lossy(),
-                    ENTRY,
+                    entry,
                 ],
             )
             .purpose("update remote repository-local exclude file");
@@ -1448,7 +1616,15 @@ pub(super) fn create_managed_worktree(
     upstream: Option<&str>,
     requirement: PrimaryCheckoutRequirement,
 ) -> Result<()> {
-    ensure_managed_worktree_excluded(executor, &worktree.target, &worktree.source_repository)?;
+    ensure_managed_worktree_excluded(
+        executor,
+        &worktree.target,
+        &worktree.source_repository,
+        worktree.kind,
+    )?;
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        return create_managed_clone(executor, worktree);
+    }
     if requirement == PrimaryCheckoutRequirement::Clean {
         let status = managed_git_stdout(
             executor,
@@ -1503,6 +1679,319 @@ pub(super) fn create_managed_worktree(
     Ok(())
 }
 
+fn create_managed_clone(executor: &impl CommandExecutor, checkout: &ManagedWorktree) -> Result<()> {
+    let parent = checkout
+        .worktree_root
+        .parent()
+        .context("managed clone has no parent")?;
+    let staging = checkout.worktree_root.with_extension("provisioning");
+    ensure!(
+        !path_exists_on_managed_target(executor, &checkout.target, &staging)?
+            && !path_exists_on_managed_target(executor, &checkout.target, &checkout.worktree_root)?,
+        "managed clone path is already occupied: {}",
+        checkout.worktree_root.display()
+    );
+    execute_checked(
+        executor,
+        managed_target_command(&checkout.target, "mkdir", ["-p", &parent.to_string_lossy()])
+            .purpose("create managed clone parent"),
+    )?;
+    let create = (|| -> Result<()> {
+        execute_checked(
+            executor,
+            managed_target_command(
+                &checkout.target,
+                "git",
+                [
+                    "clone",
+                    "--local",
+                    "--dissociate",
+                    "--no-checkout",
+                    "--",
+                    &checkout.source_repository.to_string_lossy(),
+                    &staging.to_string_lossy(),
+                ],
+            )
+            .purpose("seed independent managed clone"),
+        )?;
+        let origin = executor.execute(&managed_git_command(
+            &checkout.target,
+            &checkout.source_repository,
+            ["config", "--get", "remote.origin.url"],
+            "read source origin URL",
+        ))?;
+        execute_checked(
+            executor,
+            managed_git_command(
+                &checkout.target,
+                &staging,
+                ["remote", "remove", "origin"],
+                "discard local seed as clone remote",
+            ),
+        )?;
+        match origin.status {
+            0 => {
+                let url = String::from_utf8(origin.stdout)?;
+                execute_checked(
+                    executor,
+                    managed_git_command(
+                        &checkout.target,
+                        &staging,
+                        ["remote", "add", "origin", url.trim()],
+                        "set clone fetch and push remote",
+                    ),
+                )?;
+                copy_clone_push_configuration(executor, checkout, &staging)?;
+                copy_source_origin_refs(executor, checkout, &staging)?;
+            }
+            1 => {}
+            status => bail!(
+                "read source origin URL failed with status {status}: {}",
+                String::from_utf8_lossy(&origin.stderr).trim()
+            ),
+        }
+        copy_clone_local_git_preferences(executor, checkout, &staging)?;
+        execute_checked(
+            executor,
+            managed_git_command(
+                &checkout.target,
+                &staging,
+                [
+                    "switch",
+                    "--no-track",
+                    "-C",
+                    &checkout.branch,
+                    checkout
+                        .base_commit
+                        .as_deref()
+                        .context("managed clone has no launch commit")?,
+                ],
+                "select managed clone starting branch",
+            ),
+        )?;
+        if origin.status == 0 {
+            execute_checked(
+                executor,
+                managed_git_command(
+                    &checkout.target,
+                    &staging,
+                    [
+                        "config",
+                        "--local",
+                        &format!("branch.{}.remote", checkout.branch),
+                        "origin",
+                    ],
+                    "set clone branch push remote",
+                ),
+            )?;
+            execute_checked(
+                executor,
+                managed_git_command(
+                    &checkout.target,
+                    &staging,
+                    [
+                        "config",
+                        "--local",
+                        &format!("branch.{}.merge", checkout.branch),
+                        &format!("refs/heads/{}", checkout.branch),
+                    ],
+                    "set clone branch tracking name",
+                ),
+            )?;
+        }
+        execute_checked(
+            executor,
+            managed_target_command(
+                &checkout.target,
+                "mv",
+                [
+                    "--",
+                    &staging.to_string_lossy(),
+                    &checkout.worktree_root.to_string_lossy(),
+                ],
+            )
+            .purpose("publish managed clone checkout"),
+        )?;
+        Ok(())
+    })();
+    if create.is_err() && path_exists_on_managed_target(executor, &checkout.target, &staging)? {
+        execute_checked(
+            executor,
+            managed_target_command(
+                &checkout.target,
+                "rm",
+                ["-rf", "--", &staging.to_string_lossy()],
+            )
+            .purpose("remove failed managed clone staging directory"),
+        )?;
+    }
+    create
+}
+
+fn copy_clone_push_configuration(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    staging: &Path,
+) -> Result<()> {
+    let output = executor.execute(&managed_git_command(
+        &checkout.target,
+        &checkout.source_repository,
+        ["config", "--local", "--get-all", "remote.origin.pushurl"],
+        "read source push destinations",
+    ))?;
+    match output.status {
+        0 => {
+            for url in String::from_utf8(output.stdout)?
+                .lines()
+                .filter(|line| !line.is_empty())
+            {
+                execute_checked(
+                    executor,
+                    managed_git_command(
+                        &checkout.target,
+                        staging,
+                        ["remote", "set-url", "--push", "--add", "origin", url],
+                        "preserve clone push destination",
+                    ),
+                )?;
+            }
+        }
+        1 => {}
+        status => bail!("read source push destinations failed with status {status}"),
+    }
+    Ok(())
+}
+
+fn copy_source_origin_refs(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    staging: &Path,
+) -> Result<()> {
+    let refs = managed_git_stdout(
+        executor,
+        &checkout.target,
+        &checkout.source_repository,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/remotes/origin",
+        ],
+        "read cached origin branches",
+    )?;
+    for line in refs.lines() {
+        let (name, oid) = line
+            .split_once(' ')
+            .context("malformed source remote ref")?;
+        if name == "refs/remotes/origin/HEAD" {
+            continue;
+        }
+        execute_checked(
+            executor,
+            managed_git_command(
+                &checkout.target,
+                staging,
+                ["update-ref", name, oid],
+                "preserve cached origin branch",
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn copy_clone_local_git_preferences(
+    executor: &impl CommandExecutor,
+    checkout: &ManagedWorktree,
+    staging: &Path,
+) -> Result<()> {
+    let config = executor.execute(&managed_git_command(
+        &checkout.target,
+        &checkout.source_repository,
+        ["config", "--local", "--null", "--list"],
+        "read source Git preferences",
+    ))?;
+    ensure!(
+        config.status == 0,
+        "read source Git preferences failed with status {}",
+        config.status
+    );
+    for entry in config
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some(split) = entry.iter().position(|byte| *byte == b'\n') else {
+            bail!("source Git configuration contains a malformed entry");
+        };
+        let key = std::str::from_utf8(&entry[..split])?;
+        if !clone_local_preference(key) {
+            continue;
+        }
+        let value = std::str::from_utf8(&entry[split + 1..])?;
+        execute_checked(
+            executor,
+            managed_git_command(
+                &checkout.target,
+                staging,
+                ["config", "--local", "--add", key, value],
+                "preserve Git identity and local preferences",
+            ),
+        )?;
+    }
+    let source_exclude = PathBuf::from(managed_git_stdout(
+        executor,
+        &checkout.target,
+        &checkout.source_repository,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+        "locate source Git exclusions",
+    )?);
+    if path_exists_on_managed_target(executor, &checkout.target, &source_exclude)? {
+        let clone_exclude = PathBuf::from(managed_git_stdout(
+            executor,
+            &checkout.target,
+            staging,
+            [
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "info/exclude",
+            ],
+            "locate clone Git exclusions",
+        )?);
+        execute_checked(
+            executor,
+            managed_target_command(
+                &checkout.target,
+                "cp",
+                [
+                    "--",
+                    &source_exclude.to_string_lossy(),
+                    &clone_exclude.to_string_lossy(),
+                ],
+            )
+            .purpose("preserve source Git exclusions"),
+        )?;
+    }
+    Ok(())
+}
+
+fn clone_local_preference(key: &str) -> bool {
+    key.starts_with("user.")
+        || key.starts_with("commit.")
+        || key.starts_with("gpg.")
+        || key.starts_with("credential.")
+        || key.starts_with("url.")
+        || key.starts_with("push.")
+        || matches!(
+            key,
+            "core.hookspath" | "core.excludesfile" | "core.attributesfile" | "core.sshcommand"
+        )
+}
+
 /// Recreate a retired checkout from the session branch. Returns whether this
 /// call created it, so a failed resume can put the session back into its
 /// stopped, checkout-free state.
@@ -1512,6 +2001,10 @@ pub(super) fn restore_managed_worktree(
 ) -> Result<bool> {
     if managed_worktree_checkout_exists(executor, worktree)? {
         return Ok(false);
+    }
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        create_managed_worktree(executor, worktree, None, PrimaryCheckoutRequirement::Any)?;
+        return Ok(true);
     }
     ensure!(
         path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?,
@@ -1584,6 +2077,9 @@ fn ensure_managed_worktree_available(
             "managed worktree path already exists: {}",
             worktree.worktree_root.display()
         );
+    }
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        return Ok(());
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
@@ -1725,6 +2221,21 @@ pub(super) fn retire_managed_worktree(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        let base = worktree
+            .base_commit
+            .as_deref()
+            .context("managed clone has no source commit")?;
+        execute_checked(
+            executor,
+            managed_git_command(
+                &worktree.target,
+                &worktree.source_repository,
+                ["cat-file", "-e", &format!("{base}^{{commit}}")],
+                "verify clone recovery prerequisite in source repository",
+            ),
+        )?;
+    }
     cleanup_managed_worktree(executor, worktree, BranchDisposition::Keep)
 }
 
@@ -1736,6 +2247,20 @@ fn remove_managed_worktree_checkout(
 ) -> Result<bool> {
     if !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
         return Ok(false);
+    }
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+            execute_checked(
+                executor,
+                managed_target_command(
+                    &worktree.target,
+                    "rm",
+                    ["-rf", "--", &worktree.worktree_root.to_string_lossy()],
+                )
+                .purpose("remove managed clone after its worker stopped"),
+            )?;
+        }
+        return Ok(true);
     }
     if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
         execute_checked(
@@ -1818,6 +2343,9 @@ pub(super) fn cleanup_managed_worktree(
     if !remove_managed_worktree_checkout(executor, worktree)? {
         return Ok(());
     }
+    if worktree.kind == ManagedCheckoutKind::Clone {
+        return remove_empty_managed_worktree_directories(executor, worktree);
+    }
     if branch == BranchDisposition::Keep {
         return remove_empty_managed_worktree_directories(executor, worktree);
     }
@@ -1874,7 +2402,13 @@ fn remove_empty_managed_worktree_directories(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
-    let worktrees = worktree.source_repository.join(".mj").join("worktrees");
+    let worktrees = worktree
+        .source_repository
+        .join(".mj")
+        .join(match worktree.kind {
+            ManagedCheckoutKind::Worktree => "worktrees",
+            ManagedCheckoutKind::Clone => "clones",
+        });
     let hel = worktree.source_repository.join(".mj");
     match &worktree.target {
         ManagedWorktreeTarget::Local => {

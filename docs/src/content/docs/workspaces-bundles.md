@@ -151,9 +151,8 @@ Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a
 configured bundle.
 When the selected path is a primary checkout, Mjolnir creates a session-specific
-linked worktree under the repository's `.mj/worktrees/` tree so the primary
-checkout is not used directly. Before it can do that, the primary checkout must
-be completely clean: no staged, unstaged, or untracked files. Selecting an
+clone under the repository's `.mj/clones/` tree so the primary
+checkout is not used directly. Source working-tree changes stay there. Selecting an
 existing linked worktree keeps that worktree. See
 [Targets](/targets/#bare-runtimes).
 
@@ -179,9 +178,8 @@ with their containers.
 ## Local paths and network remotes
 
 A `local` bundle member is a controller-side path used to resolve its network
-fetch and push configuration. Mjolnir creates an independent target clone from
-the fetch remote's advertised default branch, then creates the session branch
-`mj/<session-id>`. The target's `origin` keeps the fetch URL and the configured
+fetch and push configuration. Mjolnir creates an independent target clone on
+the fetch remote's advertised default branch. The target's `origin` keeps the fetch URL and the configured
 push destination(s), including a separate push repository when one is set.
 
 The source checkout is never mounted or copied into the target, and Mjolnir does

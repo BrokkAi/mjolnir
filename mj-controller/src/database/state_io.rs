@@ -18,7 +18,8 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents,
-                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json
+                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
+                s.launch_branch, s.publication_json
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
@@ -48,6 +49,15 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             harness_kind,
             create_managed_worktree: row.get(23)?,
             launch_base: row.get(27)?,
+            launch_branch: row.get(29)?,
+            publication: row
+                .get::<_, Option<String>>(30)?
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(30, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?,
             mjolnir_subagents: row.get(24)?,
             container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
             build_cache: row
@@ -556,8 +566,9 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
-             mjolnir_subagents, container_workspace, build_cache_json, launch_base, target_runtime_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+             mjolnir_subagents, container_workspace, build_cache_json, launch_base,
+             target_runtime_json, launch_branch, publication_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -585,7 +596,9 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_workspace = excluded.container_workspace,
              build_cache_json = excluded.build_cache_json,
              launch_base = excluded.launch_base,
-             target_runtime_json = excluded.target_runtime_json",
+             target_runtime_json = excluded.target_runtime_json,
+             launch_branch = excluded.launch_branch,
+             publication_json = excluded.publication_json",
         params![
             session.id,
             session.title,
@@ -631,6 +644,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
                 .transpose()?,
             session.launch_base,
             session.target_runtime.as_ref().map(serde_json::to_string).transpose()?,
+            session.launch_branch,
+            session.publication.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     tx.execute(
@@ -674,6 +689,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         bundle_id: _,
         create_managed_worktree: _,
         launch_base: _,
+        launch_branch: _,
+        publication: _,
         mjolnir_subagents: _,
         additional_mounts: _,
         container_cpus: _,

@@ -1485,9 +1485,11 @@ impl DashboardState {
                         .count();
                     let interrupting =
                         self.attention_level(&session.id) == crate::AttentionLevel::Working;
-                    if !interrupting && active_children == 0 {
+                    let unverified_clone = session.publication_state().is_some();
+                    if !interrupting && active_children == 0 && !unverified_clone {
                         return DashboardAction::Suspend {
                             session_id: session.id.clone(),
+                            acknowledge_unpublished_work: false,
                         };
                     }
                     self.mode =
@@ -1495,6 +1497,7 @@ impl DashboardState {
                             session_id: session.id.clone(),
                             active_children,
                             interrupting,
+                            unverified_clone,
                         }));
                 }
                 DashboardAction::None
@@ -1552,6 +1555,12 @@ impl DashboardState {
                 };
                 self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
                     session_id,
+                    delete_branch_available: self
+                        .selected_session()
+                        .and_then(|session| session.managed_worktree.as_ref())
+                        .is_some_and(|owned| {
+                            owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                        }),
                 }));
                 DashboardAction::None
             }

@@ -188,6 +188,8 @@ fn sample_state() -> State {
     let session = SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
@@ -336,6 +338,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     let mut parent = sample_session();
     parent.id = "parent-session".into();
     parent.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/worktrees/parent-session"),
@@ -475,6 +478,7 @@ fn project_name_prefers_a_worktree_source_then_a_project_directory_then_the_bund
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
     session.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/home/test/Projects/source/.mj/worktrees/0123456789abcdef"),
@@ -637,6 +641,7 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
     session.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source/crate"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/home/test/Projects/source/.mj/worktrees/0123456789abcdef"),

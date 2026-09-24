@@ -304,6 +304,7 @@ pub(crate) enum Confirmation {
         session_id: String,
         active_children: usize,
         interrupting: bool,
+        unverified_clone: bool,
     },
     DiscardSinceCheckpoint {
         session_id: String,
@@ -312,15 +313,14 @@ pub(crate) enum Confirmation {
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
-    InterruptWork {
-        session_id: String,
-        restart: bool,
-    },
+    InterruptWork { session_id: String, restart: bool },
     ForceDestroy {
         session_id: String,
+        delete_branch_available: bool,
     },
     DestroyStopped {
         session_id: String,
+        delete_branch_available: bool,
         /// The resume dialog to restore afterwards, so confirming or
         /// cancelling destruction leaves the user where they were.
         reopen: Option<Box<crate::resume::ResumeDialog>>,
@@ -347,9 +347,7 @@ pub(crate) enum Confirmation {
     /// A Move left a verified checkpoint or a ready destination that needs an
     /// explicit same-destination retry. Resume with the source settings is
     /// deliberately hidden while queue admission may already have run.
-    RecoverMove {
-        operation: Box<MoveOperation>,
-    },
+    RecoverMove { operation: Box<MoveOperation> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1482,14 +1480,27 @@ impl DashboardState {
             }
             // Button 1 destroys the session and leaves its branch alone;
             // button 2 is the explicit opt-in to delete the branch too.
-            (Confirmation::ForceDestroy { session_id }, index @ (1 | 2)) => {
+            (
+                Confirmation::ForceDestroy {
+                    session_id,
+                    delete_branch_available,
+                },
+                index @ (1 | 2),
+            ) if index == 1 || delete_branch_available => {
                 self.cancel_modal();
                 DashboardAction::ForceDestroy {
                     session_id,
                     delete_branch: index == 2,
                 }
             }
-            (Confirmation::DestroyStopped { session_id, reopen }, index @ (1 | 2)) => {
+            (
+                Confirmation::DestroyStopped {
+                    session_id,
+                    reopen,
+                    delete_branch_available,
+                },
+                index @ (1 | 2),
+            ) if index == 1 || delete_branch_available => {
                 self.restore_after_confirmation(reopen);
                 DashboardAction::DestroyStopped {
                     session_id,
@@ -1556,11 +1567,17 @@ impl DashboardState {
                 1,
             ) => {
                 self.cancel_modal();
-                DashboardAction::Suspend { session_id }
+                DashboardAction::Suspend {
+                    session_id,
+                    acknowledge_unpublished_work: true,
+                }
             }
             (Confirmation::SuspendSession { session_id, .. }, 1) => {
                 self.cancel_modal();
-                DashboardAction::Suspend { session_id }
+                DashboardAction::Suspend {
+                    session_id,
+                    acknowledge_unpublished_work: true,
+                }
             }
             (
                 Confirmation::InterruptWork {
@@ -1573,7 +1590,10 @@ impl DashboardState {
                 if restart {
                     DashboardAction::RestartSession { session_id }
                 } else {
-                    DashboardAction::Suspend { session_id }
+                    DashboardAction::Suspend {
+                        session_id,
+                        acknowledge_unpublished_work: true,
+                    }
                 }
             }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {

@@ -13,6 +13,50 @@ use crate::{DashboardState, Focus};
 /// it sorts above the Hel record.
 const NEWER_THAN_THE_CHECKPOINT: i64 = 4_000_000_000_000;
 
+#[test]
+fn managed_clone_resume_row_marks_unpublished_checkpoint_work() {
+    let mut session = stopped_session();
+    let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
+    session.project_directory = Some(root.clone());
+    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: "/srv/project".into(),
+        source_repository: "/srv/project".into(),
+        worktree_root: root,
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: Some("1".repeat(40)),
+    });
+    session.publication = Some(mj_core::state::PublicationAssessment {
+        checkpoint_sha256: "a".repeat(64),
+        state: PublicationState::Unpublished,
+        dirty: false,
+        stashed: false,
+        saved_commits: vec!["2".repeat(40)],
+        destinations: Vec::new(),
+        checked_at: "2026-08-09T01:00:00Z".into(),
+        reason: Some("master contains an unpublished commit".into()),
+    });
+    let rows = merged_resume_rows(&config(), &state_with(vec![session]), &[], &[]);
+    let row = rows
+        .iter()
+        .find(|row| matches!(row.key, ResumeRowKey::Hel(_)))
+        .unwrap();
+    assert_eq!(row.publication, Some(PublicationState::Unpublished));
+    assert!(row.details.contains("Unpublished work"));
+    let line = resume_row_line(
+        row,
+        &RowLayout {
+            profile: 12,
+            origin: 16,
+            activity: 12,
+            title: 40,
+        },
+        &chrono::Utc::now(),
+    );
+    assert!(line.to_string().contains("↑ "));
+}
+
 fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionOption {
     crate::ImportSessionOption {
         native_session_id: id.into(),

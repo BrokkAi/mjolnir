@@ -536,6 +536,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         launch_base: None,
+        launch_branch: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,

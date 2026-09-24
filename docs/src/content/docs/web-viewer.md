@@ -37,7 +37,7 @@ The viewer can:
 - queue prompts while an agent is busy, **Interrupt turn** without releasing the environment, and cancel shell work;
 - suspend a session, resume it from its checkpoint, and browse all suspended resume
   candidates, including records previously archived by a provider;
-- **Destroy session…** from a live session menu or retained-session detail, with a separate confirmation and an unchecked option to delete its managed branch;
+- **Destroy session…** from a live session menu or retained-session detail, with a separate confirmation; older linked-worktree sessions also offer an option to delete their managed branch;
 - search the SessionWiki index, list archived sessions, read one's briefing, and
   restore it into a new session, matching the terminal's Archived tab (see
   [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions));

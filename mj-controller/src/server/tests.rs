@@ -160,6 +160,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 target_runtime: None,
                 launch_base: None,
+                launch_branch: None,
+                publication: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -3219,6 +3221,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
         action.action,
         ControllerAction::New {
             launch_base: None,
+            launch_branch: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -3243,6 +3246,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         launch_base: None,
+        launch_branch: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -3362,6 +3366,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     let error = validate_action(
         &ControllerAction::Suspend {
             session_id: "not-managed".into(),
+            acknowledge_unpublished_work: false,
         },
         &snapshot,
     )

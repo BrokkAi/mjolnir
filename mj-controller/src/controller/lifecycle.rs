@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::session_manager::{SessionManagerControl, new_command_id};
-use mj_core::state::{CheckpointMetadata, SessionRecord, SessionState};
+use mj_core::state::{CheckpointMetadata, ManagedCheckoutKind, SessionRecord, SessionState};
 
 use crate::targets::{self, CommandExecutor, ProcessExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::{RelayCommand, RelayExecutionState};
@@ -83,6 +83,7 @@ impl Controller {
                 None,
                 None,
                 SourceTargetDisposition::Destroy,
+                true,
             )
             .await?
         {
@@ -96,6 +97,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        acknowledge_unpublished_work: bool,
     ) -> Result<bool> {
         self.suspend_session_controlled_with_manager(
             session_id,
@@ -103,6 +105,7 @@ impl Controller {
             Some(manager),
             None,
             SourceTargetDisposition::Destroy,
+            acknowledge_unpublished_work,
         )
         .await
     }
@@ -124,6 +127,7 @@ impl Controller {
             Some(manager),
             Some((operation, preparation)),
             disposition,
+            true,
         )
         .await
     }
@@ -138,6 +142,7 @@ impl Controller {
             Option<&mj_core::state::MovePreparation>,
         )>,
         disposition: SourceTargetDisposition,
+        acknowledge_unpublished_work: bool,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -182,10 +187,45 @@ impl Controller {
         };
 
         let artifact = latched.artifact.clone();
+        let publication = match previous.managed_worktree.as_ref().map(|owned| owned.kind) {
+            Some(ManagedCheckoutKind::Clone) => Some(super::publication::assess_clone_checkpoint(
+                &previous,
+                &artifact.metadata,
+            )),
+            Some(ManagedCheckoutKind::Worktree) => None,
+            None if previous.project_directory.is_none() => {
+                Some(super::publication::assess_network_checkpoint(
+                    &previous,
+                    &artifact.metadata,
+                    &self.config,
+                ))
+            }
+            None => None,
+        };
+        if !acknowledge_unpublished_work
+            && publication
+                .as_ref()
+                .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)
+        {
+            latched.relay.cancel_abandoned_barrier().await?;
+            self.state
+                .sessions
+                .insert(session_id.to_owned(), previous.clone());
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "restore session after unpublished-work preflight",
+            )?;
+            let _ = std::fs::remove_file(&artifact.metadata.archive_path);
+            return Err(mj_core::refusal::Refusal::precondition(
+                "the checkout has unpublished or unverified work; confirm suspension with acknowledge_unpublished_work=true",
+            ).into());
+        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
         record.checkpoint = Some(artifact.metadata.clone());
+        record.publication = publication;
         record.updated_at = now();
         record.last_error = None;
         record.last_checkpoint_error = None;
@@ -333,6 +373,7 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
+                        true,
                     )
                     .await;
             }
@@ -861,8 +902,10 @@ impl Controller {
         let mut retained_checkout = None;
         if let Some(worktree) = &session.managed_worktree {
             let keep = checkout == CheckoutDisposition::KeepWhenDirty
-                && managed_worktree_checkout_is_dirty(executor, worktree)
-                    .context("check the managed raw-session worktree for uncommitted changes")?;
+                && (worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    || managed_worktree_checkout_is_dirty(executor, worktree).context(
+                        "check the managed raw-session worktree for uncommitted changes",
+                    )?);
             if keep {
                 // Keeping the checkout keeps its branch with it: the commits
                 // the working tree is based on are the only way back to this

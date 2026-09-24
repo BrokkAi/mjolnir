@@ -131,7 +131,7 @@ Claude Remote Control or claude.ai connectors.
 
 A bundle repository declared with `local = "/absolute/path"` supplies its
 configured default network fetch and push destinations. Mjolnir clones the
-fetch remote's default branch into the target and creates `mj/<session-id>`.
+fetch remote's default branch into the target and starts on that branch.
 The target has no Git connection back to the controller checkout.
 
 Local unpublished commits and staged, unstaged, or untracked files are not

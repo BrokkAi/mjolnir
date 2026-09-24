@@ -1306,7 +1306,7 @@ pub async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    if let ControllerAction::Suspend { session_id } = &request.action {
+                    if let ControllerAction::Suspend { session_id, .. } = &request.action {
                         if !closing_actions.contains_key(session_id) {
                             request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         }
@@ -1347,7 +1347,7 @@ pub async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
-                    if let ControllerAction::Suspend { session_id } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
+                    if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()
@@ -1391,7 +1391,7 @@ pub async fn run_server(
                             let _upgrade_blocking = upgrade_blocking;
                             let mut suspension_reply = suspension_reply;
                             let result = (|| -> Result<()> {
-                                if let ControllerAction::Suspend { session_id } = &action {
+                                if let ControllerAction::Suspend { session_id, .. } = &action {
                                     mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
                                     if let Some(reply) = suspension_reply.take() {
                                         let _ = reply.send(ActionOutcome::accepted());

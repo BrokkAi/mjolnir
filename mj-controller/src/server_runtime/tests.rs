@@ -858,6 +858,7 @@ fn prompt_action() -> ControllerAction {
 fn new_action() -> ControllerAction {
     ControllerAction::New {
         launch_base: None,
+        launch_branch: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -874,6 +875,8 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -1051,6 +1054,7 @@ fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
     let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
+        acknowledge_unpublished_work: false,
     };
     assert_eq!(
         admit_phone_action(&close, MAX_CONCURRENT_PHONE_ACTIONS, &mut active),

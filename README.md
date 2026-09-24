@@ -149,7 +149,7 @@ for new projects. `mj go --setup` opens that setup directly.
 
 The context banner identifies the source folder and the selected session's
 actual working directory, branch, account, and target. Local bare sessions
-share the selected folder unless you enable a separate worktree in setup.
+share the selected folder unless you enable a separate clone in setup.
 Container and other isolated targets use the existing repository-clone flow:
 they start from the remote default branch, not uncommitted local changes.
 SSH bare targets ask once for the remote folder. Repository choices, remote

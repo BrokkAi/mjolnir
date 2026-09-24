@@ -100,7 +100,7 @@ to opening masters, and to every command when sharing is off.
   otherwise satisfy your SSH host-key policy) before pointing a target at it;
   Mjolnir does not manage `known_hosts` for you.
 - For a bare runtime: **an existing remote Git project with a valid `HEAD`.** The
-  SSH user must be able to create a branch and `.mj/worktrees/` below the
+  SSH user must be able to create `.mj/clones/` below the
   repository. If you select its primary checkout, that checkout must be fully
   clean, including staged, unstaged, and untracked files.
 - For a Podman runtime: **rootless Podman on the remote host**, meeting the same
@@ -146,10 +146,9 @@ The new-session wizard asks for an existing absolute Git directory on the SSH
 host. Mjolnir validates that path remotely; it does not clone a configured
 bundle into it.
 
-If the path belongs to the repository's primary checkout, Mjolnir requires the
-whole checkout to be clean and creates branch `mj/<session-id>` in a linked
-worktree at `<repository>/.mj/worktrees/<session-id>`. “Clean” includes
-untracked files; `git stash` without `--include-untracked` is not enough. If you
+If the path belongs to the repository's primary checkout, Mjolnir creates an
+independent clone at `<repository>/.mj/clones/<session-id>` on the default
+branch. Changes in the source checkout stay there. If you
 select an existing linked worktree, Mjolnir uses that checkout directly instead
 of creating another one.
 

@@ -749,7 +749,7 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             if checked && available {
-                "Create a separate session-owned checkout from the selected checkout's HEAD."
+                "Create a separate session-owned clone on the selected or default branch."
             } else {
                 "Use the selected directory directly."
             },
@@ -867,7 +867,7 @@ pub(crate) fn render_review_wizard(
         Checkbox::render(
             frame,
             viewport.row(row, 1),
-            "Create managed worktree",
+            "Create isolated checkout",
             checked && available,
             available,
             form,

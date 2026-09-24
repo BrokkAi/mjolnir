@@ -22,9 +22,11 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             ..
         } => &["Keep importing", "Cancel import"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
-        Confirmation::DestroyStopped { .. } => {
-            &["Cancel", "Destroy session", "Destroy and delete branch"]
-        }
+        Confirmation::DestroyStopped {
+            delete_branch_available: true,
+            ..
+        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
+        Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy session"],
         Confirmation::CloseFailed {
             can_discard: false, ..
         } => &["Cancel", "Retry suspension"],
@@ -54,9 +56,11 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             "Retry move",
             "Resume previous settings",
         ],
-        Confirmation::ForceDestroy { .. } => {
-            &["Cancel", "Destroy session", "Destroy and delete branch"]
-        }
+        Confirmation::ForceDestroy {
+            delete_branch_available: true,
+            ..
+        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
+        Confirmation::ForceDestroy { .. } => &["Cancel", "Destroy session"],
     }
 }
 
@@ -1179,7 +1183,11 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             }
             (" Move this checkout into the target? ", lines)
         }
-        Confirmation::DestroyStopped { session_id, .. } => (
+        Confirmation::DestroyStopped {
+            session_id,
+            delete_branch_available,
+            ..
+        } => (
             " Destroy suspended session? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
@@ -1187,10 +1195,11 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(
                     "Mjolnir will permanently destroy the recovery archive and session record.",
                 ),
-                Line::raw(
-                    "Any Mjolnir-managed worktree will also be removed. Its git branch stays \
-                     in the repository unless you choose to delete it.",
-                ),
+                Line::raw(if *delete_branch_available {
+                    "The legacy worktree is removed. Its branch stays unless you choose to delete it."
+                } else {
+                    "The managed clone and any unpublished work in its recovery copy will be removed."
+                }),
             ],
         ),
         Confirmation::CloseFailed {
@@ -1233,6 +1242,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             session_id,
             active_children,
             interrupting,
+            unverified_clone,
         } => {
             let mut lines = vec![
                 Line::raw(format!("Session: {session_id}")),
@@ -1241,6 +1251,12 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             ];
             if *interrupting {
                 lines.push(Line::raw("The current turn will be interrupted."));
+            }
+            if *unverified_clone {
+                lines.push(Line::styled(
+                    "Publication status is unverified; the recovery copy will keep any unpublished Git work.",
+                    Style::default().fg(theme::palette().warning),
+                ));
             }
             if *active_children > 0 {
                 lines.push(Line::raw(format!(
@@ -1346,7 +1362,10 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             }
             (" Move recovery ", lines)
         }
-        Confirmation::ForceDestroy { session_id } => (
+        Confirmation::ForceDestroy {
+            session_id,
+            delete_branch_available,
+        } => (
             " Destroy session? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
@@ -1354,9 +1373,11 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(
                     "Permanently destroy this session, its environment, and its recovery archive?",
                 ),
-                Line::raw(
-                    "Its managed branch is kept unless explicitly deleted. Work only in the environment is lost.",
-                ),
+                Line::raw(if *delete_branch_available {
+                    "Its legacy managed branch is kept unless explicitly deleted. Work only in the environment is lost."
+                } else {
+                    "The managed clone and any unpublished work in its recovery copy will be removed."
+                }),
             ],
         ),
     }

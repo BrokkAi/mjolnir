@@ -61,10 +61,9 @@ hand.
 
 ## A bare session says the primary checkout is dirty
 
-When **Create managed worktree** is checked for a new bare session, on this
-machine or on an SSH machine, Mjolnir creates a linked worktree from the selected checkout’s `HEAD`.
-It refuses to do that while source changes would be left behind, including staged,
-unstaged, and untracked files.
+When **Create isolated checkout** is checked for a new bare session, Mjolnir
+creates an independent clone. Source changes do not enter that clone. If you
+expected to see uncommitted files from the selected directory, inspect them there:
 
 Inspect the selected checkout on the local or remote target:
 
@@ -72,10 +71,8 @@ Inspect the selected checkout on the local or remote target:
 git -C <project-directory> status --short --untracked-files=all
 ```
 
-Commit the listed work, remove files you do not need, or stash everything with
-`git stash push --include-untracked`. Then retry the launch. This requirement
-applies when creating a managed worktree. To work directly in the selected
-directory with its current changes, uncheck **Create managed worktree** on the
+Commit the listed work before launch if the clone should begin with it. To work directly in the selected
+directory with its current changes, uncheck **Create isolated checkout** on the
 final review. See [Targets](/targets/#bare-runtimes)
 and [Workspaces and bundles](/workspaces-bundles/).
 

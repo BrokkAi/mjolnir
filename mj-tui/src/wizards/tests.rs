@@ -3179,7 +3179,7 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let isolated = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(!isolated.contains("Create managed worktree"), "{isolated}");
+    assert!(!isolated.contains("Create isolated checkout"), "{isolated}");
     assert!(
         !isolated.contains("isolated workspace"),
         "the checkbox and its explanation are gone together: {isolated}"
@@ -3213,7 +3213,7 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let bare = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(bare.contains("Create managed worktree"), "{bare}");
+    assert!(bare.contains("Create isolated checkout"), "{bare}");
 }
 
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they

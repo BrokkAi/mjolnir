@@ -544,6 +544,8 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
     const NATIVE: &str = "01a00c3a-553f-71e0-95ab-aa04396d3ad7";
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
             origin: "owner/app".into(),
@@ -780,6 +782,8 @@ fn claude_project_slug_matches_captured_local_rollout_fixtures() {
 fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
             origin: "owner/app".into(),
@@ -819,6 +823,8 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
 fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     let repositories = vec![crate::archive::RepositoryManifest {
         metadata: crate::archive::RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
             origin: "owner/app".into(),

@@ -10,6 +10,31 @@ pub fn save_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Update publication evidence only while the exact stopped checkpoint is
+/// still current. An age scan may race a user's Resume or a new checkpoint.
+pub fn set_publication_assessment_if_current(
+    session_id: &str,
+    assessment: &mj_core::state::PublicationAssessment,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let assessment = assessment.clone();
+    submit_database_write("set_publication_assessment_if_current", move |_| {
+        let connection = open(&database_path())?;
+        let updated = connection.execute(
+            "UPDATE sessions SET publication_json = ?2
+             WHERE session_id = ?1 AND state = 'stopped'
+               AND EXISTS (SELECT 1 FROM session_checkpoints c
+                           WHERE c.session_id = ?1 AND c.sha256 = ?3)",
+            params![
+                session_id,
+                serde_json::to_string(&assessment)?,
+                assessment.checkpoint_sha256
+            ],
+        )?;
+        Ok(updated == 1)
+    })
+}
+
 /// Persist a borrowed-target child and its parent relationship atomically.
 pub fn save_subagent_session(
     session: &SessionRecord,

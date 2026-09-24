@@ -87,6 +87,7 @@ impl RuntimeState {
                 SessionLaunchOptions {
                     create_managed_worktree: request.create_managed_worktree,
                     launch_base: request.launch_base,
+                    launch_branch: request.launch_branch,
                     mjolnir_subagents: request.mjolnir_subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,

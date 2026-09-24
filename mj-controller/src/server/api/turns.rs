@@ -184,8 +184,38 @@ pub(super) async fn suspend(
             "session has {active_children} sub-agent(s); retry with acknowledge_active_subagents=true to suspend children first"
         )));
     }
+    if !request
+        .as_ref()
+        .is_some_and(|r| r.acknowledge_unpublished_work)
+    {
+        let check_id = session_id.clone();
+        let needs_confirmation = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let controller = crate::controller::Controller::load()?;
+            Ok(controller
+                .state
+                .sessions
+                .get(&check_id)
+                .is_some_and(|session| session.publication_state().is_some()))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("publication preflight failed: {error}"))??;
+        if needs_confirmation {
+            return Err(ApiFailure::conflict(
+                "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
+            ));
+        }
+    }
     backend(&state)?.cancel_start(session_id.clone()).await?;
-    send_action(&state, ControllerAction::Suspend { session_id }).await
+    send_action(
+        &state,
+        ControllerAction::Suspend {
+            session_id,
+            acknowledge_unpublished_work: request
+                .as_ref()
+                .is_some_and(|r| r.acknowledge_unpublished_work),
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -193,6 +223,8 @@ pub(super) async fn suspend(
 pub(super) struct SuspendRequest {
     #[serde(default)]
     pub(super) acknowledge_active_subagents: bool,
+    #[serde(default)]
+    pub(super) acknowledge_unpublished_work: bool,
 }
 
 pub(super) async fn destroy(

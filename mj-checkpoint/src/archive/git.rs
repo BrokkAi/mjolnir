@@ -71,6 +71,8 @@ pub enum GitHistoryMode {
     /// Bundle commits reachable from HEAD but from no `refs/remotes/origin/*`
     /// ref. Errors when the repository has no origin refs at all.
     SessionDelta,
+    /// Preserve every local ref and stash entry beyond a recorded source commit.
+    CloneFrom(String),
     /// Bundle commits since `merge-base(HEAD, rev)`. Errors when the revision
     /// or the merge base cannot be resolved.
     DeltaFrom(String),
@@ -115,8 +117,15 @@ pub fn collect_git_snapshot_with_progress(
     validate_archive_relative_path(&spec.relative_destination)?;
 
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
-    let history = select_git_history(runner, repository, &spec.history, &identity.head_commit)?;
-    collect_git_contents(
+    let clone_state = match &spec.history {
+        GitHistoryMode::CloneFrom(base) => Some(collect_clone_refs(runner, repository, base)?),
+        _ => None,
+    };
+    let history = match &clone_state {
+        Some(state) => state.history.clone(),
+        None => select_git_history(runner, repository, &spec.history, &identity.head_commit)?,
+    };
+    let result = collect_git_contents(
         runner,
         repository,
         spec,
@@ -124,7 +133,17 @@ pub fn collect_git_snapshot_with_progress(
         history,
         include_untracked,
         progress,
-    )
+    );
+    if let Some(state) = clone_state {
+        let cleanup = remove_temporary_stash_refs(runner, repository, &state.temporary_refs);
+        let mut snapshot = result?;
+        cleanup?;
+        snapshot.metadata.saved_refs = state.saved_refs;
+        snapshot.metadata.stash_stack = state.stash_stack;
+        Ok(snapshot)
+    } else {
+        result
+    }
 }
 
 /// Collect only enough Git identity to associate native harness state with an
@@ -139,6 +158,8 @@ pub fn collect_git_metadata_snapshot(
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             origin: identity.origin,
@@ -606,11 +627,183 @@ pub fn diff_between_trees(
     Ok(String::from_utf8_lossy(&patch).into_owned())
 }
 
+#[derive(Clone)]
 struct GitHistorySelection {
     /// Informational only; an empty string for session deltas.
     base_commit: String,
     /// Arguments for the bundle command, or None when nothing has to be sent.
     bundle_arguments: Option<Vec<String>>,
+}
+
+struct CloneRefState {
+    history: GitHistorySelection,
+    saved_refs: std::collections::BTreeMap<String, String>,
+    stash_stack: Vec<mj_core::archive::SavedStashEntry>,
+    temporary_refs: Vec<String>,
+}
+
+fn collect_clone_refs(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+) -> Result<CloneRefState> {
+    let unmerged = git_bytes(
+        runner,
+        repository,
+        ["ls-files", "--unmerged", "-z"],
+        &[],
+        "inspect clone merge conflicts",
+    )?;
+    ensure!(
+        unmerged.is_empty(),
+        "cannot checkpoint a clone with unresolved Git conflicts"
+    );
+    for operation in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "REBASE_HEAD",
+        "BISECT_START",
+    ] {
+        let present = run_git(
+            runner,
+            repository,
+            ["rev-parse", "--verify", "--quiet", operation],
+            &[],
+        )?;
+        ensure!(
+            matches!(present.status, 0 | 1),
+            "{}",
+            git_failure("inspect Git operation state", &present)
+        );
+        ensure!(
+            present.status != 0,
+            "cannot checkpoint a clone during Git operation {operation}"
+        );
+    }
+    git_text(
+        runner,
+        repository,
+        ["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )
+    .context("managed clone source commit is unavailable")?;
+    let lines = git_text(
+        runner,
+        repository,
+        [
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+            "refs/tags",
+            "refs/notes",
+        ],
+    )?;
+    let mut saved_refs = std::collections::BTreeMap::new();
+    for line in lines.lines() {
+        let (name, oid) = line.split_once(' ').context("malformed saved Git ref")?;
+        ensure!(!oid.is_empty(), "saved Git ref {name} has no object");
+        saved_refs.insert(name.to_owned(), oid.to_owned());
+    }
+    let stash_present = run_git(
+        runner,
+        repository,
+        ["show-ref", "--verify", "--quiet", "refs/stash"],
+        &[],
+    )?;
+    let stash_stack = match stash_present.status {
+        0 => git_text(
+            runner,
+            repository,
+            ["reflog", "show", "--format=%H%x09%gs", "refs/stash"],
+        )?
+        .lines()
+        .map(|line| {
+            let (commit, message) = line.split_once('\t').context("malformed stash reflog")?;
+            Ok(mj_core::archive::SavedStashEntry {
+                commit: commit.to_owned(),
+                message: message.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?,
+        1 => Vec::new(),
+        _ => return Err(git_failure("inspect clone stash", &stash_present)),
+    };
+    let mut temporary_refs = Vec::new();
+    let capture_id = mj_core::state::new_session_id()?;
+    let staged = (|| -> Result<GitHistorySelection> {
+        for (index, entry) in stash_stack.iter().enumerate() {
+            let name = format!("refs/mj/checkpoint/{capture_id}/stash/{index:08}");
+            git_bytes(
+                runner,
+                repository,
+                ["update-ref", &name, &entry.commit],
+                &[],
+                "preserve stash entry for checkpoint bundle",
+            )?;
+            temporary_refs.push(name);
+        }
+        let mut tips = vec!["HEAD".to_owned()];
+        tips.extend(saved_refs.keys().cloned());
+        tips.extend(temporary_refs.iter().cloned());
+        let mut count_args = vec!["rev-list".to_owned(), "--count".to_owned()];
+        count_args.extend(tips.iter().cloned());
+        count_args.push(format!("^{base}"));
+        let count = String::from_utf8(git_bytes_owned(
+            runner,
+            repository,
+            &count_args,
+            "count clone-owned commits",
+        )?)?
+        .trim()
+        .parse::<u64>()
+        .context("count clone-owned commits")?;
+        let annotated_tag = saved_refs
+            .iter()
+            .filter(|(name, _)| name.starts_with("refs/tags/"))
+            .map(|(_, oid)| git_text(runner, repository, ["cat-file", "-t", oid]))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .any(|kind| kind == "tag");
+        let bundle_arguments = (count > 0 || annotated_tag).then(|| {
+            let mut args = vec!["bundle".to_owned(), "create".to_owned(), "-".to_owned()];
+            args.extend(tips);
+            args.push(format!("^{base}"));
+            args
+        });
+        Ok(GitHistorySelection {
+            base_commit: base.to_owned(),
+            bundle_arguments,
+        })
+    })();
+    match staged {
+        Ok(history) => Ok(CloneRefState {
+            history,
+            saved_refs,
+            stash_stack,
+            temporary_refs,
+        }),
+        Err(error) => {
+            remove_temporary_stash_refs(runner, repository, &temporary_refs)?;
+            Err(error)
+        }
+    }
+}
+
+fn remove_temporary_stash_refs(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    names: &[String],
+) -> Result<()> {
+    for name in names {
+        git_bytes(
+            runner,
+            repository,
+            ["update-ref", "-d", name],
+            &[],
+            "remove temporary stash checkpoint ref",
+        )?;
+    }
+    Ok(())
 }
 
 fn select_git_history(
@@ -620,6 +813,7 @@ fn select_git_history(
     head_commit: &str,
 ) -> Result<GitHistorySelection> {
     match mode {
+        GitHistoryMode::CloneFrom(_) => unreachable!("clone history has a separate ref collector"),
         GitHistoryMode::SessionDelta => {
             // Collection stays side-effect free; callers repair missing origin
             // refs before asking for a session delta.
@@ -747,6 +941,8 @@ fn collect_git_contents(
 
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
             origin: identity.origin,
@@ -785,18 +981,84 @@ pub fn restore_git_snapshot(
             .context("write temporary Git bundle")?;
         bundle.flush().context("flush temporary Git bundle")?;
         let bundle_path = bundle.path().as_os_str().to_os_string();
+        let clone_refs =
+            !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
         git_success(
             runner,
             repository,
             GitCommand {
-                arguments: vec![OsString::from("fetch"), bundle_path, OsString::from("HEAD")],
+                arguments: if clone_refs {
+                    vec![
+                        OsString::from("bundle"),
+                        OsString::from("unbundle"),
+                        bundle_path,
+                    ]
+                } else {
+                    vec![OsString::from("fetch"), bundle_path, OsString::from("HEAD")]
+                },
                 stdin: Vec::new(),
                 env: Vec::new(),
             },
-            "fetch committed delta bundle",
+            "import committed delta bundle",
         )?;
     }
-    let checkout_target = if snapshot.committed_bundle.is_empty() {
+    let clone_refs =
+        !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
+    if clone_refs {
+        for (name, oid) in &snapshot.metadata.saved_refs {
+            ensure!(
+                name.starts_with("refs/heads/")
+                    || name.starts_with("refs/tags/")
+                    || name.starts_with("refs/notes/"),
+                "saved Git ref has an unsupported namespace: {name}"
+            );
+            git_bytes(
+                runner,
+                repository,
+                ["check-ref-format", name],
+                &[],
+                "validate saved Git ref",
+            )?;
+            git_bytes(
+                runner,
+                repository,
+                ["cat-file", "-e", oid],
+                &[],
+                "verify saved Git ref object",
+            )?;
+            git_bytes(
+                runner,
+                repository,
+                ["update-ref", name, oid],
+                &[],
+                "restore saved Git ref",
+            )?;
+        }
+        for entry in snapshot.metadata.stash_stack.iter().rev() {
+            git_bytes(
+                runner,
+                repository,
+                ["cat-file", "-e", &entry.commit],
+                &[],
+                "verify saved stash commit",
+            )?;
+            git_bytes(
+                runner,
+                repository,
+                [
+                    "update-ref",
+                    "--create-reflog",
+                    "-m",
+                    &entry.message,
+                    "refs/stash",
+                    &entry.commit,
+                ],
+                &[],
+                "restore saved stash entry",
+            )?;
+        }
+    }
+    let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
         snapshot.metadata.head_commit.as_str()
     } else {
         "FETCH_HEAD"

@@ -15,7 +15,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         ControllerAction::Prompt { session_id, .. }
         | ControllerAction::RunShell { session_id, .. }
         | ControllerAction::CancelShell { session_id, .. }
-        | ControllerAction::Suspend { session_id }
+        | ControllerAction::Suspend { session_id, .. }
         | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }

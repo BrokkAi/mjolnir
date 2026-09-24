@@ -470,11 +470,18 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
-    pub(crate) async fn suspend(&self, session_id: &str) -> Result<()> {
+    pub(crate) async fn suspend(
+        &self,
+        session_id: &str,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         self.send(
             self.http
                 .post(self.url(&format!("/sessions/{session_id}/suspend")))
-                .json(&serde_json::json!({"acknowledge_active_subagents": true}))
+                .json(&serde_json::json!({
+                    "acknowledge_active_subagents": true,
+                    "acknowledge_unpublished_work": acknowledge_unpublished_work,
+                }))
                 .timeout(REQUEST_TIMEOUT),
         )
         .await

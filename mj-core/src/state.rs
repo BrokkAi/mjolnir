@@ -786,6 +786,9 @@ pub struct ManagedWorktreeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedWorktree {
+    /// Old records are linked worktrees. New isolated raw sessions own a clone.
+    #[serde(default, skip_serializing_if = "ManagedCheckoutKind::is_worktree")]
+    pub kind: ManagedCheckoutKind,
     pub source_project_directory: PathBuf,
     pub source_repository: PathBuf,
     pub worktree_root: PathBuf,
@@ -796,6 +799,20 @@ pub struct ManagedWorktree {
     /// fall back to the branch reflog, which expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedCheckoutKind {
+    #[default]
+    Worktree,
+    Clone,
+}
+
+impl ManagedCheckoutKind {
+    fn is_worktree(&self) -> bool {
+        matches!(self, Self::Worktree)
+    }
 }
 
 impl ManagedWorktree {
@@ -818,13 +835,19 @@ impl ManagedWorktree {
         let expected_root = self
             .source_repository
             .join(".mj")
-            .join("worktrees")
+            .join(match self.kind {
+                ManagedCheckoutKind::Worktree => "worktrees",
+                ManagedCheckoutKind::Clone => "clones",
+            })
             .join(session_id);
         if self.worktree_root != expected_root {
             bail!("managed worktree root does not match the session-owned path");
         }
-        if self.branch != format!("mj/{session_id}") {
+        if self.kind == ManagedCheckoutKind::Worktree && self.branch != format!("mj/{session_id}") {
             bail!("managed worktree branch does not match the session id");
+        }
+        if self.kind == ManagedCheckoutKind::Clone && self.branch.trim().is_empty() {
+            bail!("managed clone has no starting branch");
         }
         let relative = self
             .source_project_directory
@@ -954,6 +977,28 @@ pub struct CheckpointMetadata {
     pub sha256: String,
     pub created_at: String,
     pub event_frontier: u64,
+}
+
+/// Whether every saved Git change has a verified durable copy outside mj.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationState {
+    Published,
+    Unpublished,
+    Unknown,
+}
+
+/// Evidence for one exact checkpoint. A newer checkpoint invalidates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationAssessment {
+    pub checkpoint_sha256: String,
+    pub state: PublicationState,
+    pub dirty: bool,
+    pub stashed: bool,
+    pub saved_commits: Vec<String>,
+    pub destinations: Vec<String>,
+    pub checked_at: String,
+    pub reason: Option<String>,
 }
 
 impl CheckpointMetadata {
@@ -1106,6 +1151,12 @@ pub struct SessionRecord {
     /// `managed_worktree.base_commit` or in the clone's `mj.baseCommit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_base: Option<String>,
+    /// Branch selected for a new isolated checkout, independently of its base commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_branch: Option<String>,
+    /// Last verified publication verdict, tied to its checkpoint digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationAssessment>,
     /// None follows the global `[subagents] enabled` setting at launch time;
     /// Some(true) and Some(false) are explicit per-session choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1231,6 +1282,37 @@ pub fn target_label(config: &Config, target_id: &str, project: Option<&Path>) ->
 }
 
 impl SessionRecord {
+    /// Cached verdict for an independent clone. Active checkouts are unknown
+    /// until a new checkpoint binds an assessment to their exact contents.
+    pub fn publication_state(&self) -> Option<PublicationState> {
+        let independent_clone = self
+            .managed_worktree
+            .as_ref()
+            .is_some_and(|owned| owned.kind == ManagedCheckoutKind::Clone)
+            || (self.managed_worktree.is_none() && self.project_directory.is_none());
+        if !independent_clone {
+            return None;
+        }
+        if self.state.is_active() {
+            return Some(PublicationState::Unknown);
+        }
+        Some(
+            self.checkpoint
+                .as_ref()
+                .zip(self.publication.as_ref())
+                .filter(|(checkpoint, assessment)| {
+                    assessment.checkpoint_sha256 == checkpoint.sha256
+                })
+                .map_or(PublicationState::Unknown, |(_, assessment)| {
+                    if assessment.dirty || assessment.stashed {
+                        PublicationState::Unpublished
+                    } else {
+                        assessment.state
+                    }
+                }),
+        )
+    }
+
     pub fn target_runtime_settings<'a>(
         &'a self,
         config: &Config,

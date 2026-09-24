@@ -1293,14 +1293,17 @@ mod tests {
 
     #[test]
     fn palette_suspends_an_idle_session_without_confirmation() {
-        let mut dashboard = dashboard_with_session(running_session());
+        let mut session = running_session();
+        session.project_directory = Some("/srv/project".into());
+        let mut dashboard = dashboard_with_session(session);
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
         type_query(&mut dashboard, "suspend");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::Suspend {
-                session_id: "session-1".into()
+                session_id: "session-1".into(),
+                acknowledge_unpublished_work: false,
             }
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));

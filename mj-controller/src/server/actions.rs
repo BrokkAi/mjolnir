@@ -18,6 +18,8 @@ pub enum ControllerAction {
         /// Git revision the session starts at, as the caller typed it.
         #[serde(default)]
         launch_base: Option<String>,
+        #[serde(default)]
+        launch_branch: Option<String>,
         /// None follows the global `[subagents] enabled` setting.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,
@@ -118,6 +120,8 @@ pub enum ControllerAction {
     },
     Suspend {
         session_id: String,
+        #[serde(default)]
+        acknowledge_unpublished_work: bool,
     },
     /// Destroy a session without checkpointing it: the live target is torn
     /// down, the recovery archive is removed, and sub-agent children are
