@@ -16,14 +16,14 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - Step 2 (macOS CI test) is done: origin's `e8afa5c9` already asserts `invalid peer certificate`; no user "go" was needed.
 - `bin-fixed/` rebuilt from `d501dcf9`: `mj` `dc00467d`, `mj-worker` `2463f5c0`, musl worker `328b7498` (`bin-fixed/SHA256SUMS-d501dcf9.txt`).
 - #1136 closed by its commit; `agent-in-progress` removed.
-- R2 (F/G/H re-verification) is running as the one subagent; its mission text is saved at `evidence/reverify-2-mission.md` under the campaign root.
+- R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7) is running as the one subagent in an isolated worktree; R2-B (R2-1, R2-2, R2-11) is next. R3 and R4 mission texts are ready at `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
 ## Next steps, in order
 
 1. ~~Merge origin/master~~ done (`d501dcf9`).
 2. ~~macOS CI test fix~~ landed upstream in `e8afa5c9`.
 3. ~~Rebuild `bin-fixed/`~~ done.
-4. **R2 re-verification** (one subagent): re-run the reproductions of every fixed F, G, H finding against `bin-fixed`. Findings files: `evidence/luna-manual-seed-3206-340978/track-f/findings.md`, `…3207-341010/track-g/findings.md`, `…3208-2579821/track-h/findings.md`. Model the prompt on R1 (results in `evidence/luna-manual-seed-3301-2541214/reverify-1/notes.md`). Note for Track G: the lab needs `phone_tls=True` for a QR URL; Web dialog is `prefix+u`. For H, download old releases into `evidence/releases/`, never `target/`.
+4. ~~R2 re-verification~~ done; cherry-pick fix waves R2-A and R2-B, validate, push, rebuild `bin-fixed/`. Original: (one subagent): re-run the reproductions of every fixed F, G, H finding against `bin-fixed`. Findings files: `evidence/luna-manual-seed-3206-340978/track-f/findings.md`, `…3207-341010/track-g/findings.md`, `…3208-2579821/track-h/findings.md`. Model the prompt on R1 (results in `evidence/luna-manual-seed-3301-2541214/reverify-1/notes.md`). Note for Track G: the lab needs `phone_tls=True` for a QR URL; Web dialog is `prefix+u`. For H, download old releases into `evidence/releases/`, never `target/`.
 5. **R3 re-verification** for J (needs one EC2 host; `tests/e2e/ssh_docker_lab.py`, back up the ledger right after `create`, cleanup by run tag if lost) and the new-in-group-16 behaviors (mandatory `--workspace`, Jev switch off).
 6. **Real-harness re-check** (one subagent, isolated instance with `[phone] bind` on its own port, `version = 13`): the items flagged "needs live check": I1-3 `/model claude-opus-5-5`, I1-6 same-profile resume keeps model, I1-11/I1-13 `/clear` incl. after resume, I1-15 review failure reported, I1-17 interrupted marker, I2-7 never-prompted Codex resume, I2-15 Kimi Esc closes permission form, I2-5 command in permission form, #1136 Kimi on a container target, J-19/J-17/J-21 on SSH.
 7. **Close the runbook**: fill the Run 2 section's I2 line and the re-verification results, list what stays open, commit, push. Close #1136 if its commit didn't (`Fixes #1136`), remove `agent-in-progress`.
@@ -33,7 +33,8 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - I2-1 Codex session title comes from the injected project-memory block (design choice: move the block or prefer Mjolnir's title).
 - I2-10 review "Preparing reviewer…" before discovering no files changed (capture-first refactor breaks six host tests' order).
 - I2-14 Muse question delayed ~3 min (needs logs for the window).
-- J-24 container mount source not validated; J-25 Codex quota error shown raw (was in progress when group 11 hit the session limit); J-22 docs for the `mj move` refusal off SSH-bare.
+- J-24 container mount source not validated; J-25 Codex quota error shown raw (was in progress when group 11 hit the session limit). J-22 docs done (`5bf82223`).
+- R2-12 (open 2.19 `mj wait` fails with 503 during an upgrade; accepted trade-off of the H-2 fix), R2-13 (viewer `/api/snapshot` bursts; harm unknown).
 - A-4/E-9 dictation chord gives no feedback without a microphone.
 - D-14 narrow pinned pane not following new replies after restart (may be covered by `bf09b3d6`; re-verify).
 - B-11 Enter half of the workspace dialog issue still reproduces (R1 capture 015).
