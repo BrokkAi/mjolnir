@@ -735,6 +735,18 @@ impl ChatState {
         true
     }
 
+    /// Whether the view still rests where the opening reveal put it, which
+    /// the reader did not choose: no scroll has moved it since.
+    pub(super) fn rests_on_opening_reveal(&self) -> bool {
+        self.revealed_anchor.is_some_and(|(revealed, _)| {
+            matches!(
+                self.anchor,
+                TranscriptAnchor::Row { entry, row: 0 }
+                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
+            )
+        })
+    }
+
     fn viewport(&mut self, width: u16, height: usize) -> TranscriptViewport {
         let trailing = self.trailing_entries();
         prepare_render_cache(
@@ -756,13 +768,8 @@ impl ChatState {
         // reader did not scroll there. Once something newer arrives, follow
         // the tail again. Any scroll by the reader moves the anchor off the
         // revealed row and ends this.
-        if let Some((revealed, last)) = self.revealed_anchor {
-            let still_revealed = matches!(
-                self.anchor,
-                TranscriptAnchor::Row { entry, row: 0 }
-                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
-            );
-            if !still_revealed {
+        if let Some((_, last)) = self.revealed_anchor {
+            if !self.rests_on_opening_reveal() {
                 self.revealed_anchor = None;
             } else if self.entries.last().map(|entry| entry.start_seq) != Some(last) {
                 self.anchor = TranscriptAnchor::Bottom;

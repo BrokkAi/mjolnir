@@ -2470,6 +2470,63 @@ fn new_content_does_not_move_a_reader_who_scrolled_up() {
     assert!(!shows(&rows, "late reply"));
 }
 
+/// D-14: a narrow pinned pane opened on the reveal of an earlier reply, the
+/// dashboard switched away and back (a relaunch did this through the
+/// workspace it opened first), and the pane came back parked on that reply
+/// while the new reply landed below it. The saved position was the reveal's
+/// anchor, which the reopened view took for a reader's own scroll.
+#[test]
+fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::Agent, "earlier reply"));
+    chat.entries.push(ChatEntry::plain(
+        2,
+        ChatRole::User,
+        format!("detach probe\n{}", "wrapped line\n".repeat(30)),
+    ));
+    let opened = drawn_transcript(&mut chat, 31, 12);
+    assert!(
+        shows(&opened, "earlier reply"),
+        "the reveal parks on the earlier reply: {opened:?}"
+    );
+    let position = chat.transcript_position();
+
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.entries = chat.entries.clone();
+    reopened
+        .entries
+        .push(ChatEntry::plain(3, ChatRole::Agent, "reply to the probe"));
+    reopened.restore_transcript_position(position);
+    let rows = drawn_transcript(&mut reopened, 31, 12);
+
+    assert!(shows(&rows, "reply to the probe"), "{rows:?}");
+}
+
+/// A reader who scrolled up keeps that place across the same reopening.
+#[test]
+fn a_view_reopened_after_a_reader_scrolled_up_keeps_its_place() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend(
+        (0..40).map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("line {index}"))),
+    );
+    drawn_transcript(&mut chat, 60, 24);
+    chat.handle_key(key(KeyCode::PageUp));
+    drawn_transcript(&mut chat, 60, 24);
+    let position = chat.transcript_position();
+
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.entries = chat.entries.clone();
+    reopened
+        .entries
+        .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
+    reopened.restore_transcript_position(position);
+    let rows = drawn_transcript(&mut reopened, 60, 24);
+
+    assert!(shows(&rows, "End to follow"), "{rows:?}");
+    assert!(!shows(&rows, "late reply"));
+}
+
 #[test]
 fn mouse_wheel_reaches_the_tail_across_a_large_collapsed_tool_run() {
     let mut chat = ChatState::new(&snapshot(), &[]);
