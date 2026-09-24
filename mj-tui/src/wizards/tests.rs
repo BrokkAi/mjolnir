@@ -3959,6 +3959,26 @@ fn the_local_project_starts_as_the_repository_mj_was_started_in() {
     };
     assert_eq!(wizard.step, WizardStep::ProjectDirectory);
     assert_eq!(wizard.project_directory, "/home/me/demo");
+    // Launch finding R1-1: the step says where the path came from, so a
+    // plain Enter is a visible choice of that repository.
+    let draw = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(140, 36)).unwrap();
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        buffer_lines(terminal.backend().buffer()).join("\n")
+    };
+    let step = draw(&mut dashboard);
+    assert!(
+        step.contains("Filled in with the repository mj was started in"),
+        "{step}"
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    dashboard.apply_project_directory_validation("/home/me/demo", Ok(()));
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Review));
+    let review = draw(&mut dashboard);
+    assert!(
+        review.contains("/home/me/demo  (the repository mj was started in)"),
+        "{review}"
+    );
 }
 
 /// The step pre-fills a remembered directory, so it has to draw it with the
