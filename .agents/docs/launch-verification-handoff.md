@@ -19,7 +19,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A landed in full (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7; `c69618f4..aa89c000`), validated (controller, cli, core, tui tests; clippy; fmt), pushed; master = origin = `526ab788`. `bin-fixed/` rebuilt from `dd9e55ce` after R2-B (`SHA256SUMS-dd9e55ce.txt`; all three stamped `2.20.0+dd9e55ce…`).
 - Fix wave R2-B landed (R2-2 `5f732831`, R2-1 `5dafd135`), validated, pushed; master = origin = `dd9e55ce`. R2-11 cause confirmed, fix deferred (see the runbook's R2 fix waves paragraph and the open list). Its worktree `agent-ab36fc8a205e13311` is still locked by the agent; remove it when unlocked. #1144 filed for the suspend handler's `Controller::load()` and the test that reads the real store.
 - Stale agent worktrees and branches from the 09-23 fix waves were pruned on 09-24 at the user's request. The J-25 work in progress from the Track J worktree is saved as `evidence/track-j/j25-codex-quota-error-wip.patch`. Branch `worktree-agent-aa0dbae3ef12d579e` (pre-campaign "WIP: partial ACP 2.0 upgrade") was left for the user.
-- R3 done: `evidence/reverify-3/notes.md` (EC2 cleaned up; the ledger directories keep the tool-generated key for a key pair that no longer exists). R4 (real harnesses) is running as the one subagent. Fix wave R3 (mission `evidence/fix-wave-r3-mission.md`) is next after R4. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
+- R3 done: `evidence/reverify-3/notes.md` (EC2 cleaned up; the ledger directories keep the tool-generated key for a key pair that no longer exists). R4 done: `evidence/reverify-4/notes.md`. Fix wave R4 (`evidence/fix-wave-r4-mission.md`: R4-2/R4-3 blockers, R4-1, R4-4, I2-7, R4-5, R4-10, R4-6, R4-7, R4-9, R4-11, R4-12, R4-13) runs first; fix wave R3 (`evidence/fix-wave-r3-mission.md`) after it; then a final re-verification of both waves on fresh labs, then close. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
 ## Next steps, in order
 
@@ -34,6 +34,10 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 ## Still open (not fixed; decide or schedule)
 
 - **Public install path unverified** (R3 runbook error 1): the harness refused `curl … install.sh | bash` and the installer's PATH prompt for the subagent. Either grant that permission for one run or run the README install on a fresh Ubuntu 24.04 host by hand and read the first-run path; the R3 notes say what to look for.
+- R4-14: `TYPESAFE_API_KEY` reaches the ACP bridge environment (inside containers too), so the agent's own tools can read Mjolnir's Jev key; the Jev-off switch removes it, but with Jev on it is exposed. Decide whether the worker should keep the key to itself.
+- R4-8: `~/.claude/skills/tufte-viz/demos/sunspot-pretty.html` (2.2 MB) exceeds the 1 MiB skills_state limit and every worker logs a failure per minute; a user-environment issue, but the product should log it once, not per minute.
+- R4-15: Mjolnir-run Codex sessions keep state under the user's real `~/.codex/projects/`; the Import tab lists a native sub-agent thread. Decide whether that is intended.
+- The Codex account (`codex`) is over its limit until 2026-09-26 12:42 and Kimi's weekly quota is spent; the Codex halves of I1-11/I1-17, I2-9 and I2-15 wait on that.
 - R3-4 / J-16: every SSH-bare session uploads its own worker copy (139 MB, ~7 min per create under load); needs a shared per-host worker cache keyed by build stamp. Design work, not a wording fix.
 
 - I2-1 Codex session title comes from the injected project-memory block (design choice: move the block or prefer Mjolnir's title).
