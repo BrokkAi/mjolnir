@@ -85,7 +85,10 @@ impl QuotaRefreshRequest {
     }
 }
 
-fn provider_credential(profile: &HarnessProfile) -> Option<ProviderCredential> {
+/// The provider credential a Codex profile's quota is read with, or `None`
+/// when the profile uses ChatGPT's own login. `mj doctor` reads the same
+/// answer to say where each profile's quota comes from.
+pub(crate) fn provider_credential(profile: &HarnessProfile) -> Option<ProviderCredential> {
     let provider = profile.codex_provider().ok().flatten()?;
     let env_key = provider.env_key.as_deref()?;
     let api_key = profile.environment.get(env_key)?;

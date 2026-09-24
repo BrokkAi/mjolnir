@@ -14,7 +14,7 @@ To see it working: in an isolated instance with two Codex profiles offering the 
 
 - [x] (2026-09-24 20:19Z) User's live config: `[subagents.eligible_profiles]` set to codex, codex2, codex3, codex4, deepseek (backup `~/.config/mjolnir/config.toml.bak-20260924T201850`); installed `mj doctor --json` reports the file valid.
 - [x] (2026-09-24 21:05Z) Milestone 1: shared selection for `spawn` (HTTP route and MCP tool), `list_profiles` merge, tool text. `ProfileCatalog::published` and `SubagentBackend::published_profile_config` removed (no callers left). `cargo test -p brokk-mj-controller --lib -- server_runtime::api server::api profile_catalog`: 132 passed; worker `subagent_mcp`: 17 passed.
-- [ ] Milestone 2: `mj doctor` profile summary, sub-agent policy line, unknown eligible id warning.
+- [x] (2026-09-24 21:30Z) Milestone 2: `mj doctor` profile summary, sub-agent policy line, unknown eligible id warning. `cargo test -p brokk-mj-controller --lib -- doctor`: 82 passed; `-- setup`: 49 passed.
 - [ ] Milestone 3: documentation, full test and clippy run, isolated-instance check, push.
 
 ## Surprises & Discoveries
@@ -23,6 +23,9 @@ To see it working: in an isolated instance with two Codex profiles offering the 
   Evidence: `select_profile_per_harness` in `mj-controller/src/server_runtime/api.rs` sorted by harness and `profile_remaining_percent`, then `dedup_by` harness; `profile_remaining_percent` returns 100 for `is_usage_priced()`.
 - Observation: `mj doctor` silently skipped an `eligible_profiles` entry naming no profile.
   Evidence: `subagent_eligibility_checks` in `mj-controller/src/doctor.rs` used `config.profiles.get(id)?` inside `filter_map`.
+
+- Observation: a Codex profile's quota is read through its custom provider only when the provider's `env_key` names a variable set in the profile's `[profiles.<id>.environment]`. A provider whose key is inline (`experimental_bearer_token`) or missing falls through to the ChatGPT quota query, which fails, so the profile has no usable report and ranks last for sub-agents.
+  Evidence: `provider_credential` in `mj-controller/src/quota.rs` returns `None` without `env_key` and a matching environment entry; `refresh_profile` then takes the `HarnessKind::Codex` ChatGPT arm. `mj doctor` now says "no quota report, because custom provider … has no API key in this profile's environment" for that case, reusing `provider_credential` so the two cannot disagree.
 
 ## Decision Log
 
