@@ -984,3 +984,44 @@ fn apple_container_preflight_failures_recommend_doctor() {
         assert!(error.contains(stderr));
     }
 }
+
+/// F-7: an executor that behaves like a host without Docker. Running the
+/// program fails the way `std::process::Command` does when it is not on PATH.
+struct NoDockerExecutor;
+
+impl CommandExecutor for NoDockerExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.program == "docker" {
+            return Err(
+                anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound)).context(
+                    format!("run {} for {}", command.program, "check Docker daemon"),
+                ),
+            );
+        }
+        Ok(CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"engine stopped".to_vec(),
+        })
+    }
+}
+
+#[test]
+fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() {
+    assert_eq!(
+        local_engine_readiness("local-docker", &NoDockerExecutor),
+        Some(LocalEngineReadiness::NotInstalled)
+    );
+    assert_eq!(
+        local_engine_readiness("apple-container", &NoDockerExecutor),
+        Some(LocalEngineReadiness::NotReady)
+    );
+    assert_eq!(
+        local_engine_readiness("local-bare", &NoDockerExecutor),
+        None
+    );
+    assert_eq!(
+        local_engine_readiness("ssh-docker", &NoDockerExecutor),
+        None
+    );
+}

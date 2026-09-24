@@ -112,6 +112,9 @@ mod config;
 pub(crate) use config::*;
 mod options;
 use options::*;
+pub(crate) use options::LocalEngineChecks;
+#[cfg(test)]
+pub(crate) use options::EngineProbe;
 mod sessions;
 use sessions::*;
 mod subagents;
