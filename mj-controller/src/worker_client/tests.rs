@@ -87,7 +87,7 @@ fi
 IFS= read -r hello
 id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
 printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
-sh -c 'while :; do sleep 30; done'
+while IFS= read -r request; do :; done
 "#,
         counter = counter.display(),
         session = SESSION_ID
@@ -212,7 +212,7 @@ IFS= read -r hello
 id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
 printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{data}}}}}
 ' "$id" "$1"
-sh -c 'while :; do sleep 30; done'
+while IFS= read -r request; do :; done
 "#
         )
     };
