@@ -1049,7 +1049,15 @@ impl TabStrip {
         scroll = scroll.min(selected_start);
 
         let mut regions = Vec::with_capacity(tabs.len());
-        frame.render_widget(Paragraph::new(""), area);
+        // The strip owns its row: blank it, so text drawn there before (the
+        // turn review's role strip spaces its labels more widely) cannot show
+        // through between or after the tabs (R4-13, "General done Verdictt").
+        // Spaces keep the row's existing style, unlike `Clear`.
+        let blank = " ".repeat(usize::from(area.width));
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(blank); usize::from(area.height)]),
+            area,
+        );
         for (index, tab) in tabs.iter().enumerate() {
             let tab_start = starts[index];
             let tab_end = tab_start.saturating_add(tab.width());
