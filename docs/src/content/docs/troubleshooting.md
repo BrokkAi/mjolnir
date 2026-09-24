@@ -53,7 +53,7 @@ an existing Git project directory instead.
 
 For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See
-the [Configuration reference](/configuration/) for every version 2 field.
+the [Configuration reference](/configuration/) for every field.
 
 An older Mjolnir refuses to load a configuration last written by a newer build.
 Update Mjolnir, or use the newer build; do not lower the `version` value by
@@ -61,10 +61,9 @@ hand.
 
 ## A bare session says the primary checkout is dirty
 
-When **Create managed worktree** is checked for a new bare session, on this
-machine or on an SSH machine, Mjolnir creates a linked worktree from the selected checkout’s `HEAD`.
-It refuses to do that while source changes would be left behind, including staged,
-unstaged, and untracked files.
+When **Create isolated checkout** is checked for a new bare session, Mjolnir
+creates an independent clone. Source changes do not enter that clone. If you
+expected to see uncommitted files from the selected directory, inspect them there:
 
 Inspect the selected checkout on the local or remote target:
 
@@ -72,10 +71,8 @@ Inspect the selected checkout on the local or remote target:
 git -C <project-directory> status --short --untracked-files=all
 ```
 
-Commit the listed work, remove files you do not need, or stash everything with
-`git stash push --include-untracked`. Then retry the launch. This requirement
-applies when creating a managed worktree. To work directly in the selected
-directory with its current changes, uncheck **Create managed worktree** on the
+Commit the listed work before launch if the clone should begin with it. To work directly in the selected
+directory with its current changes, uncheck **Create isolated checkout** on the
 final review. See [Targets](/targets/#bare-runtimes)
 and [Workspaces and bundles](/workspaces-bundles/).
 
@@ -282,10 +279,10 @@ visible response. Once all work ends, the recovery and upgrade coordinators
 observe the idle state automatically. Read
 [Durability and recovery](/durability/) for the exact guarantees.
 
-## Stop failed or a session needs recovery
+## Suspension failed or a session needs recovery
 
-A normal Stop will not destroy a target unless its recovery archive passes the
-checksum and frontier gates. A stop failure is therefore normally
+A normal suspension will not destroy a target unless its recovery archive
+passes the checksum and frontier gates. A suspension failure is therefore normally
 non-destructive: read the exact checkpoint or target error, repair the storage
 or connection problem, and try a manual checkpoint:
 
@@ -293,11 +290,12 @@ or connection problem, and try a manual checkpoint:
 mj checkpoint --session <session-id>
 ```
 
-Then retry Stop from the session command palette. If a fresh checkpoint remains
-impossible but an older verified archive exists, the failure dialog can force
-stop. That removes the live target without a new archive and can lose every
-change after the older checkpoint, but leaves the session resumable. Force
-destroy is different: it removes the target, archive, and record permanently.
+Then choose **Retry suspension** in the failure dialog, or run **Suspend
+session…** again from the command palette. If a fresh checkpoint remains
+impossible but an older verified archive exists, the failure dialog also offers
+**Discard changes since checkpoint…**. That removes the live target without a new archive and can lose every
+change after the older checkpoint, but leaves the session resumable. **Destroy session…** is different: it removes the target, archive, and record
+permanently.
 
 If a managed target is still running but has disappeared from controller
 state, scan without changing it:

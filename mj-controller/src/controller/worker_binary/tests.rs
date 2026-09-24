@@ -2271,7 +2271,7 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         &locator,
         session_id,
         Some(&workspace),
-        &template,
+        &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap()
     .0;
@@ -2293,7 +2293,7 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         &locator,
         session_id,
         Some(&workspace),
-        &template,
+        &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap()
     .0;
@@ -2352,7 +2352,7 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
             backend,
             session_id,
             Some(&workspace),
-            template,
+            &mj_core::state::TargetRuntimeSettings::from(template),
         )
         .unwrap()
         .0;
@@ -2477,7 +2477,7 @@ fn a_child_opens_its_parents_container_workspace() {
         &locator,
         parent_id,
         Some(&parent_workspace),
-        &template,
+        &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap();
 
@@ -2514,7 +2514,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         },
         &session.id,
         None,
-        &mj_core::config::TargetTemplate::LocalBare,
+        &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
     )
     .unwrap();
 
@@ -2569,7 +2569,7 @@ fn raw_local_muse_launches_unconstrained() {
         },
         &session.id,
         None,
-        &mj_core::config::TargetTemplate::LocalBare,
+        &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
     )
     .unwrap();
 

@@ -798,8 +798,9 @@ impl DashboardState {
     }
 
     /// The visible live sessions whose checkout has not been read in the last
-    /// minute, oldest reading first. The host reads a few of these per tick.
-    pub fn git_probe_candidates(&mut self, now: Instant) -> Vec<String> {
+    /// minute, oldest reading first, at most `limit` of them: the host reads
+    /// every one returned, and each is recorded as read.
+    pub fn git_probe_candidates(&mut self, now: Instant, limit: usize) -> Vec<String> {
         const REFRESH: Duration = Duration::from_secs(60);
         let mut due = self
             .ordered_sessions()
@@ -816,6 +817,9 @@ impl DashboardState {
             .filter(|(probed, _)| probed.is_none_or(|probed| now.duration_since(probed) >= REFRESH))
             .collect::<Vec<_>>();
         due.sort();
+        // Only what the host will read this pass counts as read. The rest
+        // stay due, so the next pass reaches them.
+        due.truncate(limit);
         for (_, id) in &due {
             self.git_probe_at.insert(id.clone(), now);
         }

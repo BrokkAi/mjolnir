@@ -37,7 +37,7 @@ use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_di
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
-    managed_worktree_checkout_exists, plan_raw_to_workspace,
+    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
     raw_checkout_position, raw_checkout_snapshot, raw_conversion_preview, restore_managed_worktree,
     resume_compatibility, retire_managed_worktree,
@@ -1125,7 +1125,7 @@ impl Controller {
             resource_allocation,
             discard_queue,
         } = options;
-        let previous = self
+        let mut previous = self
             .state
             .sessions
             .get(session_id)
@@ -1193,6 +1193,14 @@ impl Controller {
         );
         let plan = resume_compatibility(&previous, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        // A worktree that stays put is reached with the machine's current ssh
+        // options; only its location had to match (J-21).
+        if plan == ResumePlan::InPlace
+            && let Some(worktree) = previous.managed_worktree.as_mut()
+            && let Ok(current) = managed_worktree_target(&target_template)
+        {
+            worktree.target = current;
+        }
         // A converting resume writes its own archive below, from the host
         // checkout's own network remote, and provisioning reads that one. Every
         // other isolated resume clones what its stored archive already names.
@@ -1384,6 +1392,13 @@ impl Controller {
         record.harness_kind = profile.kind;
         record.last_profile = profile_id.to_string();
         record.target_template_id = target_id.to_string();
+        record.target_runtime = Some(
+            self.config
+                .targets
+                .get(target_id)
+                .context("resume target disappeared")?
+                .into(),
+        );
         record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.target = None;
@@ -1399,7 +1414,14 @@ impl Controller {
             Some(ResumeConversion::WorkspaceToRaw(conversion)) => {
                 apply_workspace_to_raw(record, conversion);
             }
-            None => {}
+            None => {
+                if let (Some(worktree), Some(refreshed)) = (
+                    record.managed_worktree.as_mut(),
+                    previous.managed_worktree.as_ref(),
+                ) {
+                    worktree.target = refreshed.target.clone();
+                }
+            }
         }
         let resumed_project_directory = record.project_directory.clone();
         let resumed_container_workspace = record.container_workspace.clone();
@@ -1438,13 +1460,15 @@ impl Controller {
             if let Some(worktree) = previous.managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
-                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                        &archive_path,
-                        &worktree.worktree_root,
-                        &worktree.branch,
-                        &SystemGit,
-                    )
-                    .context("restore the retired checkout before moving it into a target")?;
+                    if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                        mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                            &archive_path, &worktree.worktree_root, &SystemGit,
+                        )?;
+                    } else {
+                        mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                            &archive_path, &worktree.worktree_root, &worktree.branch, &SystemGit,
+                        )?;
+                    }
                 }
             }
             // The record already names the worktree, so a failure here rolls
@@ -1468,13 +1492,18 @@ impl Controller {
                         PrimaryCheckoutRequirement::Any,
                     )?;
                 }
-                mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
-                    &archive_path,
-                    &conversion.worktree.worktree_root,
-                    &conversion.worktree.branch,
-                    &SystemGit,
-                )
-                .context("restore this session's checkout")?;
+                if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                    mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
+                        &archive_path, &conversion.worktree.worktree_root, &SystemGit,
+                    )?;
+                } else {
+                    mj_checkpoint::checkpoint::restore_single_repository_onto_branch(
+                        &archive_path,
+                        &conversion.worktree.worktree_root,
+                        &conversion.worktree.branch,
+                        &SystemGit,
+                    )?;
+                }
             }
             // A local checkout becomes an isolated workspace by being
             // re-snapshotted into a new archive whose provenance is the
@@ -1497,6 +1526,9 @@ impl Controller {
                     &conversion.source,
                     &destination,
                     &SystemGit,
+                    conversion.retire.as_ref().is_some_and(|checkout| {
+                        checkout.kind == mj_core::state::ManagedCheckoutKind::Clone
+                    }),
                 )
                 .context("snapshot the host checkout for its new target")?;
                 resume_notices.push(conversion_notice(

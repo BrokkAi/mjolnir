@@ -93,10 +93,16 @@ impl ViewerSnapshot {
                     active_prompt_id: None,
                     cancelling_prompt_id: None,
                     capacity_retry: None,
+                    retry_assessment_pending: false,
                     quota_recovery: None,
                     id: session.id.clone(),
+                    publication_state: session.publication_state(),
+                    managed_checkout_kind: session
+                        .managed_worktree
+                        .as_ref()
+                        .map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
-                    title: session.display_title().to_owned(),
+                    title: public_title(session),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
                     subagent_session_ids,
@@ -286,9 +292,15 @@ pub struct ViewerSession {
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    #[serde(default)]
+    pub retry_assessment_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_state: Option<mj_core::state::PublicationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_checkout_kind: Option<mj_core::state::ManagedCheckoutKind>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
     pub title: String,
@@ -832,6 +844,23 @@ pub enum ViewerLifecycleCategory {
     Suspending,
     Suspended,
     Failed,
+}
+
+/// The published state of a session that has been provisioned and whose
+/// start is still connecting its worker. Its record says disconnected, which
+/// reads as a fault while it is only launching (F-12).
+pub const LAUNCHING_STATE: &str = "launching";
+
+/// The name a published session goes by. It is the display title, except
+/// that a session the harness has not named yet and nobody renamed would
+/// otherwise be named by its id, which every listing already prints beside
+/// it (F-12); the title it was created with says more.
+fn public_title(session: &mj_core::state::SessionRecord) -> String {
+    let display = session.display_title();
+    if display == session.id && !session.title.trim().is_empty() {
+        return session.title.clone();
+    }
+    display.to_owned()
 }
 
 impl ViewerLifecycleCategory {

@@ -22,9 +22,11 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             ..
         } => &["Keep importing", "Cancel import"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
-        Confirmation::DestroyStopped { .. } => {
-            &["Cancel", "Destroy session", "Destroy and delete branch"]
-        }
+        Confirmation::DestroyStopped {
+            delete_branch_available: true,
+            ..
+        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
+        Confirmation::DestroyStopped { .. } => &["Cancel", "Destroy session"],
         Confirmation::CloseFailed {
             can_discard: false, ..
         } => &["Cancel", "Retry suspension"],
@@ -54,9 +56,11 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             "Retry move",
             "Resume previous settings",
         ],
-        Confirmation::ForceDestroy { .. } => {
-            &["Cancel", "Destroy session", "Destroy and delete branch"]
-        }
+        Confirmation::ForceDestroy {
+            delete_branch_available: true,
+            ..
+        } => &["Cancel", "Destroy session", "Destroy and delete branch"],
+        Confirmation::ForceDestroy { .. } => &["Cancel", "Destroy session"],
     }
 }
 
@@ -406,6 +410,24 @@ fn render_text_prompt(
     form.end_frame(DialogControl::Field);
 }
 
+/// The age column of the notice log, one cell per age in seconds: each
+/// "… ago" right-aligned to the widest one and followed by a space, so the
+/// messages start in the same column whether an age reads "44s" or "1m17s".
+pub(crate) fn notice_log_ages(ages: &[u64]) -> Vec<String> {
+    let ages = ages
+        .iter()
+        .map(|&secs| format!("{} ago", mj_client::usage_format::format_clock(secs)))
+        .collect::<Vec<_>>();
+    let width = ages
+        .iter()
+        .map(|age| age.chars().count())
+        .max()
+        .unwrap_or(0);
+    ages.into_iter()
+        .map(|age| format!("{age:>width$} "))
+        .collect()
+}
+
 /// The notice log: one row per remembered notice, newest first, with how
 /// long ago it was reported.
 pub(crate) fn render_notice_log(
@@ -450,27 +472,27 @@ pub(crate) fn render_notice_log(
         );
     } else {
         let now = std::time::Instant::now();
-        let age_width = 8;
+        let ages = notice_log_ages(
+            &history
+                .iter()
+                .map(|record| now.saturating_duration_since(record.at).as_secs())
+                .collect::<Vec<_>>(),
+        );
         // Every message is kept whole: a long failure wraps after its age
         // column rather than losing its tail, which is the part that says
         // what went wrong. The widget wraps by cell, so an unbroken path or
         // token still wraps instead of running off the edge.
         let lines = history
             .iter()
-            .map(|record| {
-                let age = mj_client::usage_format::format_clock(
-                    now.saturating_duration_since(record.at).as_secs(),
-                );
+            .zip(ages)
+            .map(|(record, age)| {
                 let style = if record.failure {
                     Style::default().fg(theme::palette().warning)
                 } else {
                     Style::default().fg(theme::palette().text)
                 };
                 Line::from(vec![
-                    Span::styled(
-                        format!("{:>age_width$} ", format!("{age} ago")),
-                        theme::muted(),
-                    ),
+                    Span::styled(age, theme::muted()),
                     Span::styled(record.text.clone(), style),
                 ])
             })
@@ -647,7 +669,7 @@ pub(crate) fn render_rename_editor(
         area,
         &editor.form,
         &editor.title,
-        &format!("Session: {}", editor.session_id),
+        &format!("Session: {}", editor.session_name),
         "Rename session",
         surfaces,
     );
@@ -1092,11 +1114,23 @@ pub(crate) fn render_repository_origin(
     form.end_frame(DialogControl::Field);
 }
 
+/// The line that says which session a dialog is about: its name when the
+/// caller knows one, else its id.
+fn session_line(session_id: &str, session_name: Option<&str>) -> Line<'static> {
+    let name = session_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(session_id);
+    Line::raw(format!("Session: {name}"))
+}
+
 /// Title and body of one confirmation, without its buttons.
 ///
 /// Split out so the wording a dialog shows can be asserted without
 /// rendering a frame and reading cells back.
-pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'static>>) {
+pub(crate) fn confirmation_body(
+    confirmation: &Confirmation,
+    session_name: Option<&str>,
+) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { repairs, .. } => (
             "Repair Git tracking?",
@@ -1179,18 +1213,23 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             }
             (" Move this checkout into the target? ", lines)
         }
-        Confirmation::DestroyStopped { session_id, .. } => (
+        Confirmation::DestroyStopped {
+            session_id,
+            delete_branch_available,
+            ..
+        } => (
             " Destroy suspended session? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::raw(
                     "Mjolnir will permanently destroy the recovery archive and session record.",
                 ),
-                Line::raw(
-                    "Any Mjolnir-managed worktree will also be removed. Its git branch stays \
-                     in the repository unless you choose to delete it.",
-                ),
+                Line::raw(if *delete_branch_available {
+                    "The legacy worktree is removed. Its branch stays unless you choose to delete it."
+                } else {
+                    "The managed clone and any unpublished work in its recovery copy will be removed."
+                }),
             ],
         ),
         Confirmation::CloseFailed {
@@ -1198,7 +1237,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         } => (
             " Suspension could not complete ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::styled(
                     format!("Suspension failed: {error}"),
@@ -1216,7 +1255,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 " Suspend while working? "
             },
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::styled(
                     "The agent is in the middle of a turn.",
@@ -1233,14 +1272,21 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             session_id,
             active_children,
             interrupting,
+            unverified_clone,
         } => {
             let mut lines = vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw("Save a recovery copy and release the environment."),
                 Line::raw("You can resume this session later."),
             ];
             if *interrupting {
                 lines.push(Line::raw("The current turn will be interrupted."));
+            }
+            if *unverified_clone {
+                lines.push(Line::styled(
+                    "Publication status is unverified; the recovery copy will keep any unpublished Git work.",
+                    Style::default().fg(theme::palette().warning),
+                ));
             }
             if *active_children > 0 {
                 lines.push(Line::raw(format!(
@@ -1255,7 +1301,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         } => (
             " Discard changes since checkpoint? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(format!("Recovery copy: {}", checkpoint.created_at)),
                 Line::raw("Release the environment using this older recovery copy."),
                 Line::raw("All work since that copy may be permanently lost."),
@@ -1267,7 +1313,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             error,
             recoverable,
         } => {
-            let mut lines = vec![Line::raw(format!("Session: {session_id}")), Line::raw("")];
+            let mut lines = vec![session_line(session_id, session_name), Line::raw("")];
             match error {
                 Some(error) => lines.push(Line::styled(
                     format!("Failed: {error}"),
@@ -1346,17 +1392,22 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             }
             (" Move recovery ", lines)
         }
-        Confirmation::ForceDestroy { session_id } => (
+        Confirmation::ForceDestroy {
+            session_id,
+            delete_branch_available,
+        } => (
             " Destroy session? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::raw(
                     "Permanently destroy this session, its environment, and its recovery archive?",
                 ),
-                Line::raw(
-                    "Its managed branch is kept unless explicitly deleted. Work only in the environment is lost.",
-                ),
+                Line::raw(if *delete_branch_available {
+                    "Its legacy managed branch is kept unless explicitly deleted. Work only in the environment is lost."
+                } else {
+                    "The managed clone and any unpublished work in its recovery copy will be removed."
+                }),
             ],
         ),
     }
@@ -1385,7 +1436,7 @@ pub(crate) fn render_confirmation(
         Confirmation::RecoverMove { .. } => 14,
         Confirmation::ForceDestroy { .. } => 11,
     };
-    let (title, mut lines) = confirmation_body(confirmation);
+    let (title, mut lines) = confirmation_body(confirmation, dialog.session_name.as_deref());
     let buttons = confirmation_buttons(confirmation);
     lines.push(Line::raw(""));
     lines.push(confirmation_key_line(buttons));

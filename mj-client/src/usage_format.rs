@@ -33,6 +33,7 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
     pub pursuing_goal: bool,
+    pub checking_response: bool,
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     /// Durable turn start retained through the background work it launched.
@@ -69,6 +70,7 @@ impl SessionActivity {
     pub fn of(operational: &mj_core::relay::RelayOperationalState) -> Self {
         Self {
             pursuing_goal: operational.goal.active(),
+            checking_response: operational.retry_assessment_pending,
             capacity_retry: operational.capacity_retry.clone(),
             quota_recovery: operational
                 .continuation
@@ -148,6 +150,9 @@ impl SessionActivity {
         if let Some(retry) = &self.capacity_retry {
             return retry
                 .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
+        }
+        if self.checking_response {
+            return "Checking response".into();
         }
         let kind = self.kind(current_turn_started_at);
         if kind == SessionActivityKind::CheckingContinuation {
@@ -476,6 +481,9 @@ pub fn format_activity_columns(
             retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
         ];
     }
+    if activity.checking_response {
+        return vec!["Checking response".into()];
+    }
     // A third column only when the harness has gone quiet for long enough to
     // be worth saying. It is a fact beside the other clocks, not a warning:
     // Mjolnir does not end a turn for silence, so the reader decides whether a
@@ -535,6 +543,9 @@ pub fn format_activity_clock(
     }
     if let Some(retry) = &activity.capacity_retry {
         return retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
+    }
+    if activity.checking_response {
+        return "Checking response".into();
     }
     match activity.kind(current_turn_started_at) {
         SessionActivityKind::Turn => {
@@ -728,6 +739,7 @@ mod tests {
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
             pursuing_goal: false,
+            checking_response: false,
             quota_recovery: None,
             capacity_retry: None,
             execution: None,

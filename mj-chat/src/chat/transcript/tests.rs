@@ -387,6 +387,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -418,6 +419,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     let previous_activity = chat.session_activity().clone();
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         foreground_tool_started_at_ms: Some(19_988_000),
         background_commands: Vec::new(),
         ..previous_activity
@@ -476,7 +478,7 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, 0, false);
+            render_transcript(frame, frame.area(), &mut chat, false, 0, 0, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -505,7 +507,7 @@ fn the_transcript_border_follows_the_hosts_pane_focus() {
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                render_transcript(frame, frame.area(), &mut chat, false, 0, pane_focused);
+                render_transcript(frame, frame.area(), &mut chat, false, 0, 0, pane_focused);
             })
             .expect("render conversation");
         terminal.backend().buffer()[(0, 0)].fg
@@ -527,7 +529,7 @@ fn a_long_title_stops_short_of_the_columns_the_host_reserved() {
     let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, reserve, false);
+            render_transcript(frame, frame.area(), &mut chat, false, reserve, 0, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -555,7 +557,7 @@ fn long_conversation_titles_use_the_header_width_while_working() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_transcript(frame, area, &mut chat, false, 0, false);
+                render_transcript(frame, area, &mut chat, false, 0, 0, false);
             })
             .expect("render conversation");
         let buffer = terminal.backend().buffer();
@@ -2413,6 +2415,61 @@ fn opening_reveals_the_dashboard_agent_excerpt_above_later_terminal_output() {
     assert!(!shows(&tail, "End to follow"));
 }
 
+/// I1-7: after a resume the pane opened on the revealed reply ("message 7 of
+/// N") and stayed there when a new reply arrived. The reveal is not a user
+/// scroll, so new content brings the view back to the tail.
+#[test]
+fn new_content_after_the_opening_reveal_follows_the_tail() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "response advertised on the dashboard",
+    ));
+    for index in 0..8 {
+        chat.entries.push(ChatEntry::plain(
+            index + 2,
+            ChatRole::System,
+            format!("terminal failure {index}\n{}", "output\n".repeat(12)),
+        ));
+    }
+    let opened = drawn_transcript(&mut chat, 60, 24);
+    assert!(
+        shows(&opened, "End to follow"),
+        "the reveal opens mid-history"
+    );
+
+    chat.entries.push(ChatEntry::plain(
+        20,
+        ChatRole::Agent,
+        "the reply after resume",
+    ));
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    assert!(shows(&rows, "the reply after resume"));
+    assert!(!shows(&rows, "End to follow"));
+}
+
+#[test]
+fn new_content_does_not_move_a_reader_who_scrolled_up() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend(
+        (0..40).map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("line {index}"))),
+    );
+    drawn_transcript(&mut chat, 60, 24);
+    chat.handle_key(key(KeyCode::PageUp));
+    let scrolled = drawn_transcript(&mut chat, 60, 24);
+    assert!(shows(&scrolled, "End to follow"));
+
+    chat.entries
+        .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    assert!(
+        shows(&rows, "End to follow"),
+        "a reader's scroll position is kept"
+    );
+    assert!(!shows(&rows, "late reply"));
+}
+
 #[test]
 fn mouse_wheel_reaches_the_tail_across_a_large_collapsed_tool_run() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -3527,7 +3584,7 @@ fn scrollbar_mouse(chat: &mut ChatState, kind: MouseEventKind, column: u16, row:
 fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
     use crossterm::event::MouseButton::Left;
     let mut chat = scrollbar_chat();
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(geometry.max_scroll > 0);
     scrollbar_mouse(
         &mut chat,
@@ -3555,7 +3612,7 @@ fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
 fn scrollbar_track_click_seeks_and_does_not_select_text() {
     use crossterm::event::MouseButton::Left;
     let mut chat = scrollbar_chat();
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(
         chat.frame_surfaces()
             .surface_at(geometry.track.x, geometry.track.y)
@@ -3590,7 +3647,7 @@ fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
     chat.invalidate_render_cache();
     chat.anchor = TranscriptAnchor::Bottom;
     drawn_transcript(&mut chat, 60, 24);
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     assert!(geometry.thumb.height > 1);
     let grab_row = geometry.thumb.bottom() - 1;
     scrollbar_mouse(
@@ -3608,7 +3665,7 @@ fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
     );
     assert!(matches!(chat.anchor, TranscriptAnchor::Row { .. }));
     assert_eq!(
-        chat.transcript_scrollbar.grab_offset,
+        chat.transcript_scrollbar.pointer.grab_offset(),
         geometry.thumb.height - 1
     );
 }
@@ -3629,7 +3686,7 @@ fn scrollbar_keeps_unseen_history_lazy_and_cancels_drag_on_resize() {
             .count()
             < 30
     );
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     scrollbar_mouse(
         &mut chat,
         MouseEventKind::Down(Left),
@@ -3664,7 +3721,7 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
         .map(|i| ChatEntry::plain(i, ChatRole::User, "long message\n".repeat(20)))
         .collect();
     drawn_transcript(&mut chat, 60, 24);
-    let geometry = chat.transcript_scrollbar.geometry.unwrap();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
     scrollbar_mouse(
         &mut chat,
         MouseEventKind::Down(Left),
@@ -3687,10 +3744,10 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
 }
 
 #[test]
-fn capacity_retry_prompt_is_labelled_automatic_without_changing_its_text() {
+fn server_retry_prompt_is_labelled_automatic_without_changing_its_text() {
     let mut entry = ChatEntry::plain(42, ChatRole::User, "Continue");
     entry.source = TranscriptSource(Some(std::sync::Arc::new(TranscriptItem {
-        stable_id: "user:capacity-retry-41".into(),
+        stable_id: "user:server-retry-41".into(),
         position: 42,
         latest_content_event_ordinal: None,
         created_at_ms: 1000,
@@ -3699,8 +3756,8 @@ fn capacity_retry_prompt_is_labelled_automatic_without_changing_its_text() {
             content: vec![serde_json::json!({"type": "text", "text": "Continue"})],
         },
     })));
-    assert_eq!(entry_visual(&entry).label, "Automatic · capacity retry");
-    assert_eq!(browser_entry(&entry).label, "Automatic · capacity retry");
+    assert_eq!(entry_visual(&entry).label, "Automatic · server retry");
+    assert_eq!(browser_entry(&entry).label, "Automatic · server retry");
     assert_eq!(entry.text, "Continue");
 }
 

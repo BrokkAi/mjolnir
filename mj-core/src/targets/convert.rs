@@ -13,7 +13,9 @@
 use std::path::Path;
 
 use crate::config::{ContainerTemplate, PodmanWorkspaceStorage, SshConnection, TargetTemplate};
-use crate::state::{PodmanWorkspaceLocator, TargetLocator};
+use crate::state::{
+    PodmanWorkspaceLocator, TargetConnection, TargetLocator, TargetRuntimeSettings,
+};
 use crate::targets;
 
 /// The single place path text crosses into an execution plan.
@@ -28,13 +30,21 @@ fn path_text(path: &Path) -> String {
 /// disagreed rather than collapsing into one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetConversionError {
+    RecordedKindMismatch {
+        locator: &'static str,
+        recorded: String,
+    },
+    InvalidRecordedConnection,
     /// The locator's target kind is not the template's target kind.
     KindMismatch {
         locator: &'static str,
         template: &'static str,
     },
     /// Both sides are SSH targets of the same kind, but name different hosts.
-    SshHostMismatch { locator: String, template: String },
+    SshHostMismatch {
+        locator: String,
+        template: String,
+    },
     /// An EC2 locator was stored before its instance reported an address.
     MissingAwsAddress,
 }
@@ -42,6 +52,13 @@ pub enum TargetConversionError {
 impl std::fmt::Display for TargetConversionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RecordedKindMismatch { locator, recorded } => write!(
+                formatter,
+                "session target kind {locator} differs from recorded kind {recorded}"
+            ),
+            Self::InvalidRecordedConnection => {
+                formatter.write_str("recorded target connection has the wrong kind")
+            }
             Self::KindMismatch { locator, template } => write!(
                 formatter,
                 "session locator/template mismatch: locator is {locator}, template is {template}"
@@ -63,17 +80,22 @@ impl std::error::Error for TargetConversionError {}
 /// the terminal and wedge provisioning. `BatchMode` fails fast instead of
 /// prompting, and `accept-new` trusts a first-seen host key (fresh EC2
 /// instances are always first-seen) while still rejecting changed keys.
-/// User-supplied arguments come last so they can override.
+///
+/// OpenSSH uses the first value it sees for an option, so the user's
+/// `extra_args` come first and override these defaults: a machine with
+/// `-o StrictHostKeyChecking=yes` gets strict checking. Settings in
+/// `ssh_config` cannot override them, because command-line options always
+/// win over the config file.
 pub fn ssh_args_with_identity(args: &[String], identity: Option<&Path>) -> Vec<String> {
-    let mut result = vec![
+    let mut result = args.to_vec();
+    result.extend([
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
         "StrictHostKeyChecking=accept-new".into(),
         "-o".into(),
         "ConnectTimeout=15".into(),
-    ];
-    result.extend(args.iter().cloned());
+    ]);
     if let Some(identity) = identity {
         result.push("-i".into());
         result.push(path_text(identity));
@@ -184,121 +206,137 @@ pub struct StoredTarget<'a> {
     pub session_id: &'a str,
 }
 
+/// A provisioned target paired with its durable access settings.
+pub struct RecordedTarget<'a> {
+    pub locator: &'a TargetLocator,
+    pub runtime: Option<&'a TargetRuntimeSettings>,
+    pub session_id: &'a str,
+}
+
 impl TryFrom<StoredTarget<'_>> for targets::TargetLocator {
     type Error = TargetConversionError;
-
     fn try_from(stored: StoredTarget<'_>) -> Result<Self, Self::Error> {
-        let StoredTarget {
+        if locator_kind_name(stored.locator) != stored.template.kind_name() {
+            return Err(TargetConversionError::KindMismatch {
+                locator: locator_kind_name(stored.locator),
+                template: stored.template.kind_name(),
+            });
+        }
+        Self::try_from(RecordedTarget {
+            locator: stored.locator,
+            runtime: Some(&TargetRuntimeSettings::from(stored.template)),
+            session_id: stored.session_id,
+        })
+    }
+}
+
+impl TryFrom<RecordedTarget<'_>> for targets::TargetLocator {
+    type Error = TargetConversionError;
+    fn try_from(stored: RecordedTarget<'_>) -> Result<Self, Self::Error> {
+        let RecordedTarget {
             locator,
-            template,
+            runtime,
             session_id,
         } = stored;
-        let mismatch = || TargetConversionError::KindMismatch {
-            locator: locator_kind_name(locator),
-            template: template.kind_name(),
+        if let Some(runtime) = runtime {
+            if locator_kind_name(locator) != runtime.kind {
+                return Err(TargetConversionError::RecordedKindMismatch {
+                    locator: locator_kind_name(locator),
+                    recorded: runtime.kind.clone(),
+                });
+            }
+            if !locator_needs_connection(locator) && runtime.connection != TargetConnection::Local {
+                return Err(TargetConversionError::InvalidRecordedConnection);
+            }
+        }
+        let ssh = |host: &str| -> Result<targets::SshTarget, TargetConversionError> {
+            let Some(TargetConnection::Ssh { ssh }) = runtime.map(|runtime| &runtime.connection)
+            else {
+                return Err(TargetConversionError::InvalidRecordedConnection);
+            };
+            if host != ssh.host {
+                return Err(TargetConversionError::SshHostMismatch {
+                    locator: host.into(),
+                    template: ssh.host.clone(),
+                });
+            }
+            Ok(ssh.into())
         };
         Ok(match locator {
-            TargetLocator::LocalBare { worker_root } => {
-                let TargetTemplate::LocalBare = template else {
-                    return Err(mismatch());
-                };
-                Self::LocalBare {
-                    worker_root: path_text(worker_root),
-                }
-            }
+            TargetLocator::LocalBare { worker_root } => Self::LocalBare {
+                worker_root: path_text(worker_root),
+            },
             TargetLocator::LocalPodman {
                 container_id,
                 workspace_storage,
                 borrowed_from,
             } => Self::LocalPodman {
-                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
                 workspace_storage: workspace_storage.into(),
+                borrowed_from: borrowed_from.clone(),
             },
             TargetLocator::LocalDocker {
                 container_id,
                 borrowed_from,
             } => Self::LocalDocker {
-                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
+                borrowed_from: borrowed_from.clone(),
             },
             TargetLocator::AppleContainer {
                 container_id,
                 borrowed_from,
             } => Self::AppleContainer {
-                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
+                borrowed_from: borrowed_from.clone(),
             },
             TargetLocator::SshBare {
+                host,
                 workspace,
                 worker_id,
-                ..
-            } => {
-                let TargetTemplate::SshBare { ssh, .. } = template else {
-                    return Err(mismatch());
-                };
-                Self::SshBare {
-                    ssh: ssh.into(),
-                    workspace: path_text(workspace),
-                    worker_id: worker_id.clone(),
-                }
-            }
+            } => Self::SshBare {
+                ssh: ssh(host)?,
+                workspace: path_text(workspace),
+                worker_id: worker_id.clone(),
+            },
             TargetLocator::SshPodman {
+                host,
                 container_id,
                 workspace_storage,
                 borrowed_from,
-                ..
-            } => {
-                let TargetTemplate::SshPodman { ssh, .. } = template else {
-                    return Err(mismatch());
-                };
-                Self::SshPodman {
-                    borrowed_from: borrowed_from.clone(),
-                    ssh: ssh.into(),
-                    container_id: container_id.clone(),
-                    workspace_storage: workspace_storage.into(),
-                }
-            }
+            } => Self::SshPodman {
+                ssh: ssh(host)?,
+                container_id: container_id.clone(),
+                workspace_storage: workspace_storage.into(),
+                borrowed_from: borrowed_from.clone(),
+            },
             TargetLocator::SshDocker {
                 host,
                 container_id,
                 borrowed_from,
-            } => {
-                let TargetTemplate::SshDocker { ssh, .. } = template else {
-                    return Err(mismatch());
-                };
-                if host != &ssh.host {
-                    return Err(TargetConversionError::SshHostMismatch {
-                        locator: host.clone(),
-                        template: ssh.host.clone(),
-                    });
-                }
-                Self::SshDocker {
-                    borrowed_from: borrowed_from.clone(),
-                    ssh: ssh.into(),
-                    container_id: container_id.clone(),
-                }
-            }
+            } => Self::SshDocker {
+                ssh: ssh(host)?,
+                container_id: container_id.clone(),
+                borrowed_from: borrowed_from.clone(),
+            },
             TargetLocator::AwsEc2 {
                 instance_id,
                 address,
             } => {
-                let TargetTemplate::AwsEc2 {
-                    aws_profile,
+                let Some(TargetConnection::Aws {
+                    profile,
                     region,
                     ssh_user,
                     identity_file,
                     ssh_args,
-                    ..
-                } = template
+                }) = runtime.map(|runtime| &runtime.connection)
                 else {
-                    return Err(mismatch());
+                    return Err(TargetConversionError::InvalidRecordedConnection);
                 };
                 let address = address
                     .as_deref()
                     .ok_or(TargetConversionError::MissingAwsAddress)?;
                 Self::AwsEc2 {
-                    profile: aws_profile.clone().unwrap_or_else(|| "default".into()),
+                    profile: profile.clone(),
                     region: region.clone(),
                     instance_id: instance_id.clone(),
                     ssh: targets::SshTarget {
@@ -324,5 +362,187 @@ const fn locator_kind_name(locator: &TargetLocator) -> &'static str {
         TargetLocator::SshBare { .. } => "ssh-bare",
         TargetLocator::SshPodman { .. } => "ssh-podman",
         TargetLocator::SshDocker { .. } => "ssh-docker",
+    }
+}
+
+/// Local resource locators contain everything needed to reach the resource.
+pub fn locator_needs_connection(locator: &TargetLocator) -> bool {
+    matches!(
+        locator,
+        TargetLocator::SshBare { .. }
+            | TargetLocator::SshPodman { .. }
+            | TargetLocator::SshDocker { .. }
+            | TargetLocator::AwsEc2 { .. }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_ssh_locator_checks_host_and_preserves_the_saved_connection() {
+        let connection = SshConnection {
+            host: "original.test".into(),
+            user: Some("builder".into()),
+            identity_file: Some("/keys/my key".into()),
+            extra_args: vec!["-p".into(), "2222".into()],
+        };
+        let locators = [
+            TargetLocator::SshBare {
+                host: connection.host.clone(),
+                workspace: "workspace".into(),
+                worker_id: None,
+            },
+            TargetLocator::SshPodman {
+                host: connection.host.clone(),
+                container_id: "podman-id".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: Some("owner".into()),
+            },
+            TargetLocator::SshDocker {
+                host: connection.host.clone(),
+                container_id: "docker-id".into(),
+                borrowed_from: None,
+            },
+        ];
+        for locator in locators {
+            let mut runtime = TargetRuntimeSettings::from(&TargetTemplate::LocalBare);
+            runtime.kind = locator_kind_name(&locator).into();
+            runtime.connection = TargetConnection::Ssh {
+                ssh: connection.clone(),
+            };
+            let backend = targets::TargetLocator::try_from(RecordedTarget {
+                locator: &locator,
+                runtime: Some(&runtime),
+                session_id: "session",
+            })
+            .unwrap();
+            let ssh = match backend {
+                targets::TargetLocator::SshBare { ssh, .. }
+                | targets::TargetLocator::SshPodman { ssh, .. }
+                | targets::TargetLocator::SshDocker { ssh, .. } => ssh,
+                _ => unreachable!(),
+            };
+            assert_eq!(ssh.destination, "builder@original.test");
+            assert!(
+                ssh.ssh_args
+                    .windows(2)
+                    .any(|args| args == ["-i", "/keys/my key"])
+            );
+            assert!(ssh.ssh_args.windows(2).any(|args| args == ["-p", "2222"]));
+            let TargetConnection::Ssh { ssh } = &mut runtime.connection else {
+                unreachable!()
+            };
+            ssh.host = "replacement.test".into();
+            assert!(matches!(
+                targets::TargetLocator::try_from(RecordedTarget {
+                    locator: &locator,
+                    runtime: Some(&runtime),
+                    session_id: "session"
+                }),
+                Err(TargetConversionError::SshHostMismatch { .. })
+            ));
+            runtime.kind = "local-bare".into();
+            assert!(matches!(
+                targets::TargetLocator::try_from(RecordedTarget {
+                    locator: &locator,
+                    runtime: Some(&runtime),
+                    session_id: "session"
+                }),
+                Err(TargetConversionError::RecordedKindMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn recorded_ec2_access_preserves_region_profile_and_identity_without_launch_template() {
+        let template: TargetTemplate = serde_json::from_value(serde_json::json!({
+            "kind":"aws-ec2", "aws_profile":"production", "region":"eu-west-1",
+            "launch_template":"creation-only", "ssh_user":"ubuntu", "identity_file":"/keys/ec2",
+            "ssh_args":["-p","2222"]
+        }))
+        .unwrap();
+        let runtime = TargetRuntimeSettings::from(&template);
+        let encoded = serde_json::to_string(&runtime).unwrap();
+        assert!(!encoded.contains("creation-only"));
+        let runtime = serde_json::from_str(&encoded).unwrap();
+        let locator = TargetLocator::AwsEc2 {
+            instance_id: "i-original".into(),
+            address: Some("10.0.0.1".into()),
+        };
+        let backend = targets::TargetLocator::try_from(RecordedTarget {
+            locator: &locator,
+            runtime: Some(&runtime),
+            session_id: "session",
+        })
+        .unwrap();
+        let targets::TargetLocator::AwsEc2 {
+            profile,
+            region,
+            instance_id,
+            ssh,
+            ..
+        } = backend
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (profile.as_str(), region.as_str(), instance_id.as_str()),
+            ("production", "eu-west-1", "i-original")
+        );
+        assert_eq!(ssh.destination, "ubuntu@10.0.0.1");
+        assert!(
+            ssh.ssh_args
+                .windows(2)
+                .any(|args| args == ["-i", "/keys/ec2"])
+        );
+        assert!(ssh.ssh_args.windows(2).any(|args| args == ["-p", "2222"]));
+    }
+
+    /// The value OpenSSH would use for `key`: the first `-o key=value` (or
+    /// `-okey=value`) on the command line wins, as `ssh -G` shows.
+    fn effective_ssh_option(args: &[String], key: &str) -> Option<String> {
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let option = if arg == "-o" {
+                args.next().cloned()
+            } else {
+                arg.strip_prefix("-o").map(str::to_owned)
+            };
+            let Some(option) = option else { continue };
+            let (name, value) = option.split_once(['=', ' ']).unwrap_or((&option, ""));
+            if name.trim().eq_ignore_ascii_case(key) {
+                return Some(value.trim().to_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn user_extra_args_can_require_strict_host_key_checking() {
+        let args = ssh_args_with_identity(&["-o".into(), "StrictHostKeyChecking=yes".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "StrictHostKeyChecking").as_deref(),
+            Some("yes")
+        );
+        let args = ssh_args_with_identity(&["-oUserKnownHostsFile=/k".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "UserKnownHostsFile").as_deref(),
+            Some("/k")
+        );
+    }
+
+    #[test]
+    fn mjolnir_ssh_defaults_apply_when_the_user_sets_nothing() {
+        let args = ssh_args_with_identity(&["-p".into(), "2222".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "StrictHostKeyChecking").as_deref(),
+            Some("accept-new")
+        );
+        assert_eq!(
+            effective_ssh_option(&args, "BatchMode").as_deref(),
+            Some("yes")
+        );
     }
 }

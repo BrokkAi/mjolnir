@@ -36,6 +36,7 @@ impl Controller {
                 session_id,
                 &directory,
                 session.launch_base.as_deref(),
+                session.launch_branch.as_deref(),
             )?;
         }
         Ok(())
@@ -69,6 +70,7 @@ fn initialize_workspace(
     session_id: &str,
     directory: &std::path::Path,
     launch_base: Option<&str>,
+    launch_branch: Option<&str>,
 ) -> Result<()> {
     let git = |arguments: &[&str]| -> Result<targets::CommandOutput> {
         let mut args = vec![
@@ -107,6 +109,23 @@ fn initialize_workspace(
         );
         return Ok(());
     }
+    let default_ref = checked(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .context("the network remote has no usable default branch")?;
+    let branch = match launch_branch {
+        Some(branch) => {
+            checked(&["check-ref-format", "--branch", branch])?;
+            branch.to_owned()
+        }
+        None => default_ref
+            .strip_prefix("refs/remotes/origin/")
+            .context("invalid default remote branch")?
+            .to_owned(),
+    };
+    let branch_tip = checked(&[
+        "rev-parse",
+        "--verify",
+        &format!("refs/remotes/origin/{branch}^{{commit}}"),
+    ])?;
     let base = match launch_base {
         // The clone holds only what the remote sent, so a host-only branch
         // name is not there to resolve. Say so rather than repeat Git's
@@ -125,22 +144,23 @@ fn initialize_workspace(
         // Clone obtains origin/HEAD from the server, independent of host HEAD
         // and init.defaultBranch. An empty or misconfigured remote cannot seed
         // work.
-        None => {
-            let default_ref = checked(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-                .context("the network remote has no usable default branch")?;
-            ensure!(
-                default_ref.starts_with("refs/remotes/origin/"),
-                "invalid default remote branch"
-            );
-            checked(&[
-                "rev-parse",
-                "--verify",
-                &format!("{default_ref}^{{commit}}"),
-            ])?
-        }
+        None => branch_tip.clone(),
     };
-    let branch = format!("mj/{session_id}");
-    checked(&["switch", "--no-track", "-c", &branch, &base])?;
+    let local_branch = git(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{branch}"),
+    ])?;
+    match local_branch.status {
+        0 => {
+            checked(&["switch", &branch])?;
+        }
+        1 => {
+            checked(&["switch", "--no-track", "-c", &branch, &branch_tip])?;
+        }
+        _ => anyhow::bail!("could not inspect the selected local branch"),
+    }
     for (key, value) in [
         ("push.default", "current"),
         ("push.autoSetupRemote", "true"),
@@ -302,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_base_pins_an_isolated_workspace_to_the_revision_it_names() {
+    fn a_launch_base_sets_diff_base_without_moving_selected_branch() {
         let host = committed_repository();
         let initial = test_git(host.path(), &["rev-parse", "HEAD"]);
         std::fs::write(host.path().join("nested/file.txt"), "later\n").unwrap();
@@ -324,8 +344,7 @@ mod tests {
             destination
         };
 
-        // A commit SHA is what the session starts at, and what its diff base
-        // becomes.
+        // A commit SHA becomes the diff base without moving the branch.
         let pinned = clone_into("11111111-1111-4111-8111-111111111111");
         initialize_workspace(
             &ProcessExecutor,
@@ -335,14 +354,12 @@ mod tests {
             "11111111-1111-4111-8111-111111111111",
             &pinned,
             Some(&initial),
+            None,
         )
         .unwrap();
-        assert_eq!(test_git(&pinned, &["rev-parse", "HEAD"]), initial);
+        assert_eq!(test_git(&pinned, &["rev-parse", "HEAD"]), later);
         assert_eq!(test_git(&pinned, &["config", "mj.baseCommit"]), initial);
-        assert_eq!(
-            test_git(&pinned, &["branch", "--show-current"]),
-            "mj/11111111-1111-4111-8111-111111111111"
-        );
+        assert_eq!(test_git(&pinned, &["branch", "--show-current"]), "master");
 
         // A remote-tracking branch names the same thing the clone knows about.
         let tracked = clone_into("22222222-2222-4222-8222-222222222222");
@@ -354,6 +371,7 @@ mod tests {
             "22222222-2222-4222-8222-222222222222",
             &tracked,
             Some("origin/master"),
+            None,
         )
         .unwrap();
         assert_eq!(test_git(&tracked, &["rev-parse", "HEAD"]), later);
@@ -371,6 +389,7 @@ mod tests {
             "33333333-3333-4333-8333-333333333333",
             &missing,
             Some("host-only"),
+            None,
         )
         .unwrap_err();
         assert!(
@@ -458,6 +477,7 @@ mod tests {
         )
         .unwrap();
         let executor = FixtureTransport { fetch, push };
+        let mut first_pushed_head = None;
         for session_id in [
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
@@ -487,11 +507,12 @@ mod tests {
             let backend = targets::TargetLocator::LocalBare {
                 worker_root: destination.to_string_lossy().into_owned(),
             };
-            initialize_workspace(&executor, &backend, session_id, &destination, None).unwrap();
+            initialize_workspace(&executor, &backend, session_id, &destination, None, None)
+                .unwrap();
             assert_eq!(test_git(&destination, &["rev-parse", "HEAD"]), initial);
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
-                format!("mj/{session_id}")
+                "trunk"
             );
             assert!(!destination.join("unpublished").exists());
             assert!(!destination.join("dirty").exists());
@@ -509,14 +530,32 @@ mod tests {
             std::fs::write(destination.join("session-work"), session_id.repeat(4096)).unwrap();
             test_git(&destination, &["add", "session-work"]);
             test_git(&destination, &["commit", "-m", "session work"]);
-            checked(&executor, &destination, &["push"]);
+            if first_pushed_head.is_none() {
+                checked(&executor, &destination, &["push"]);
+            } else {
+                let output = executor
+                    .execute(&CommandSpec::new(
+                        "git",
+                        [
+                            "-C".to_owned(),
+                            destination.to_string_lossy().into_owned(),
+                            "push".to_owned(),
+                        ],
+                    ))
+                    .unwrap();
+                assert_ne!(
+                    output.status, 0,
+                    "a concurrent clone must see a normal non-fast-forward push conflict"
+                );
+            }
             let head = test_git(&destination, &["rev-parse", "HEAD"]);
-            assert_eq!(
-                test_git(&executor.push, &["rev-parse", &format!("mj/{session_id}")]),
-                head
-            );
+            if first_pushed_head.is_none() {
+                assert_eq!(test_git(&executor.push, &["rev-parse", "trunk"]), head);
+                first_pushed_head = Some(head.clone());
+            }
             test_git(&destination, &["switch", "-c", "user-selected"]);
-            initialize_workspace(&executor, &backend, session_id, &destination, None).unwrap();
+            initialize_workspace(&executor, &backend, session_id, &destination, None, None)
+                .unwrap();
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
                 "user-selected"
@@ -538,6 +577,9 @@ mod tests {
             vec![b'x'; 128 * 1024]
         );
         assert_eq!(test_git(&executor.fetch, &["rev-parse", "trunk"]), initial);
-        assert_eq!(test_git(&executor.push, &["rev-parse", "trunk"]), initial);
+        assert_eq!(
+            test_git(&executor.push, &["rev-parse", "trunk"]),
+            first_pushed_head.unwrap()
+        );
     }
 }

@@ -86,6 +86,8 @@ pub struct CheckpointRepositorySpec {
 pub enum CheckpointRepositoryCapture {
     /// Bundle commits reachable from HEAD but from no origin ref.
     SessionDelta,
+    /// Save all clone-owned refs and stashes beyond the source launch commit.
+    ManagedClone { base_commit: String },
     /// Bundle the repository relative to an explicit commit.
     DeltaFrom { base_commit: String },
     /// Bundle a managed network workspace relative to its immutable launch

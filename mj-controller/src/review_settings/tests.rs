@@ -137,6 +137,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
+        retry_assessment_pending: false,
         store_id: None,
         idle_since_ms: None,
         session_id: session_id.to_owned(),
@@ -213,7 +214,10 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             (
                 (*session_id).to_owned(),
                 SessionRecord {
+                    target_runtime: None,
                     launch_base: None,
+                    launch_branch: None,
+                    publication: None,
                     build_cache: None,
                     container_workspace: None,
                     mjolnir_subagents: None,

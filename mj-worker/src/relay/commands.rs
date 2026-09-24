@@ -1,5 +1,11 @@
 use super::*;
 
+fn truncate_utf8(value: &mut String, maximum_bytes: usize) {
+    if value.len() > maximum_bytes {
+        value.truncate(value.floor_char_boundary(maximum_bytes));
+    }
+}
+
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -178,12 +184,7 @@ impl DurableRelay {
                 ordinal: accepted_ordinal,
             }));
         }
-        if self
-            .snapshot
-            .dispatches
-            .values()
-            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
-        {
+        if self.clear_context_in_progress() {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
                 "Context is being cleared; wait for the new conversation",
@@ -205,7 +206,7 @@ impl DurableRelay {
             }
             if self.snapshot.native_session_id.is_none()
                 || self.snapshot.execution != RelayExecutionState::Idle
-                || !self.snapshot.dispatches.is_empty()
+                || self.unfinished_dispatch()
                 || !self.snapshot.queued_prompts.is_empty()
                 || self.snapshot.goal.running()
                 || self.snapshot.goal.active()
@@ -346,6 +347,12 @@ impl DurableRelay {
                 None,
             )));
         }
+        // Stop is also accepted while Claude Code works on its own after a
+        // background task: the cancel interrupts the running cycle, and that
+        // cycle's result ends the turn (`claude_turn_result`). A Codex turn of
+        // this kind is a native goal, which has its own controls.
+        let claude_harness_turn = self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && self.snapshot.harness_turn.is_some();
         if let RelayCommand::Cancel = command
             && self
                 .snapshot
@@ -354,6 +361,7 @@ impl DurableRelay {
                 .as_ref()
                 .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
+            && !claude_harness_turn
             && self
                 .snapshot
                 .capacity_retry
@@ -874,12 +882,6 @@ impl DurableRelay {
             // An in-flight claim is not in the journal, so it is only durable
             // once the snapshot itself is.
             self.commit_snapshot(next_snapshot)?;
-            if claimed
-                .iter()
-                .any(|claim| claim.command.prompt_blocks().is_some())
-            {
-                self.capacity_response = CapacityResponse::default();
-            }
         }
         Ok(claimed)
     }
@@ -1183,7 +1185,6 @@ impl DurableRelay {
         let mut facts = self.activity_facts();
         facts.capacity_retry_armed = false;
         if retry.retry_at_ms > now_ms
-            || self.background_work != BackgroundWorkPolicy::CodexExecCards
             || !mj_core::activity::is_quiet(&facts)
             || self.pending_close_barrier_id().is_some()
         {
@@ -1210,24 +1211,60 @@ impl DurableRelay {
         ) {
             bail!("checkpoint barriers complete through record_checkpoint_ready");
         }
-        let mut outcome = outcome;
-        if let RelayCommandOutcome::Prompt { stop_reason, .. } = &mut outcome {
-            if self.background_work == BackgroundWorkPolicy::CodexExecCards
-                && matches!(
-                    stop_reason.as_str(),
-                    "EndTurn" | "end_turn" | "Error" | "error"
-                )
-                && self.capacity_response.at_capacity()
-            {
-                *stop_reason = CAPACITY_STOP_REASON.to_owned();
-            }
-            self.capacity_response = CapacityResponse::default();
-        }
         let awaiting_input = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if stop_reason == mj_core::acp::AWAITING_INPUT_STOP_REASON);
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
+        if let RelayCommandOutcome::Prompt {
+            stop_reason,
+            diagnostic,
+            ..
+        } = &outcome
+            && !matches!(
+                mj_core::state::classify_prompt_completion(stop_reason),
+                mj_core::state::PromptCompletion::Cancelled
+                    | mj_core::state::PromptCompletion::QuotaLimit
+                    | mj_core::state::PromptCompletion::InputRequired
+            )
+            && let Some(harness) = self.verdict_harness
+        {
+            let mut evidence = self.turn_context.evidence(
+                harness,
+                mj_core::activity::verdict::TurnPhase::Replied,
+                &self.activity_facts(),
+                mj_core::clock::epoch_millis(),
+            );
+            let mut bounded_stop_reason = stop_reason.clone();
+            truncate_utf8(&mut bounded_stop_reason, 128);
+            evidence.completion = Some(mj_core::activity::verdict::CompletionEvidence {
+                stop_reason: bounded_stop_reason,
+                diagnostic: diagnostic.as_ref().map(|source| {
+                    let mut value = source.clone();
+                    truncate_utf8(&mut value.message, 4096);
+                    if let Some(code) = &mut value.code {
+                        truncate_utf8(code, 128);
+                    }
+                    if let Some(reset) = &mut value.reset_at {
+                        truncate_utf8(reset, 256);
+                    }
+                    value
+                }),
+            });
+            while serde_json::to_vec(&evidence)?.len() > 60 * 1024 {
+                let end = evidence.transcript_summary.len() / 2;
+                evidence
+                    .transcript_summary
+                    .truncate(evidence.transcript_summary.floor_char_boundary(end));
+            }
+            self.append_relay_event(
+                Some(command_id),
+                RelayObservation::RetryAssessmentStarted {
+                    command_id: command_id.to_owned(),
+                    evidence: Box::new(evidence),
+                },
+            )?;
+        }
         // Report confirmed changes in the conversation on every surface.
         // The command identity makes retries of this append project only once.
         let notice = self
@@ -1268,7 +1305,8 @@ impl DurableRelay {
                 mj_core::clock::epoch_millis(),
             )?;
         }
-        self.replied_verdict_pending |= classify_reply && !awaiting_input;
+        self.replied_verdict_pending |=
+            (classify_reply && !awaiting_input) || self.snapshot.retry_assessment.is_some();
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1472,6 +1510,35 @@ impl DurableRelay {
     /// A promoted configuration change leaves execution idle while it reaches
     /// ACP, so the queue needs its own guard to stay sequential. Completion,
     /// rejection, and interruption all promote the next entry.
+    /// Whether any dispatch is still waiting or running. Terminal records stay
+    /// in the ledger until the daemon acknowledges their events, so they are
+    /// history, not work.
+    fn unfinished_dispatch(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            matches!(
+                dispatch.state,
+                RelayDispatchState::Queued
+                    | RelayDispatchState::Pending
+                    | RelayDispatchState::InFlight
+            )
+        })
+    }
+
+    /// Whether a `/clear` is still waiting or running. A rejected or
+    /// interrupted clear leaves the previous conversation in place, so it
+    /// must not hold later work back.
+    pub(crate) fn clear_context_in_progress(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            matches!(dispatch.command, RelayCommand::ClearContext)
+                && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued
+                        | RelayDispatchState::Pending
+                        | RelayDispatchState::InFlight
+                )
+        })
+    }
+
     fn promoted_config_in_progress(&self) -> bool {
         self.snapshot.dispatches.values().any(|dispatch| {
             matches!(dispatch.command, RelayCommand::SetConfig { .. })

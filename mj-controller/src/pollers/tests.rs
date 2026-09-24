@@ -100,7 +100,10 @@ fn podman_controller(state: SessionState) -> Controller {
     app_state.sessions.insert(
         session_id.into(),
         mj_core::state::SessionRecord {
+            target_runtime: None,
             launch_base: None,
+            launch_branch: None,
+            publication: None,
             build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,

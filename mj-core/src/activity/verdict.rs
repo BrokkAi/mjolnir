@@ -14,21 +14,22 @@ pub const IN_FLIGHT_TOOLS: usize = 16;
 /// Jev recommends high confidence for automation; weaker answers preserve current behavior.
 pub const ACT_CONFIDENCE: f32 = 0.85;
 pub const NO_INPUT_CONFIDENCE: f32 = 0.15;
+pub const SERVER_RETRY_CONFIDENCE: f32 = 0.90;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnPhase {
     Running,
     Replied,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ToolEvidence {
     pub title: String,
     pub running_s: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnEvidence {
     pub harness: HarnessKind,
     pub phase: TurnPhase,
@@ -39,6 +40,14 @@ pub struct TurnEvidence {
     pub queued_commands: usize,
     pub user_prompt_tail: String,
     pub assistant_text_tail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<CompletionEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct CompletionEvidence {
+    pub stop_reason: String,
+    pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 }
 
 pub fn questions() -> Value {
@@ -59,6 +68,7 @@ pub struct TurnVerdict {
     pub work_state: WorkState,
     pub work_state_confidence: f32,
     pub needs_user_input: f32,
+    pub retryable_server_error: Option<f32>,
 }
 
 impl TurnVerdict {
@@ -84,7 +94,19 @@ impl TurnVerdict {
             work_state,
             work_state_confidence: probability(&choice["confidence"])?,
             needs_user_input: probability(&answers["needs_user_input"]["noul"])?,
+            retryable_server_error: match answers.get("retryable_server_error") {
+                Some(answer) => {
+                    ensure!(answer["type"] == "noul", "invalid retry answer type");
+                    Some(probability(&answer["noul"])?)
+                }
+                None => None,
+            },
         })
+    }
+
+    pub fn should_retry_server_error(&self) -> bool {
+        self.retryable_server_error
+            .is_some_and(|score| score >= SERVER_RETRY_CONFIDENCE)
     }
 }
 
@@ -168,6 +190,7 @@ mod tests {
                             work_state,
                             work_state_confidence,
                             needs_user_input,
+                            retryable_server_error: None,
                         };
                         let expected = if !(0.0..=1.0).contains(&needs_user_input) {
                             Decision::KeepCurrent
@@ -214,6 +237,28 @@ mod tests {
             }
         }
         assert!(TurnVerdict::parse(&json!({})).is_err());
+    }
+
+    #[test]
+    fn server_retry_requires_a_confident_valid_probability() {
+        let mut response = json!({"answers": {
+            "work_state":{"type":"choice","choice":"unclear","confidence":0.5},
+            "needs_user_input":{"type":"noul","noul":0.01},
+            "retryable_server_error":{"type":"noul","noul":0.90}
+        }});
+        assert!(
+            TurnVerdict::parse(&response)
+                .unwrap()
+                .should_retry_server_error()
+        );
+        response["answers"]["retryable_server_error"]["noul"] = json!(0.89);
+        assert!(
+            !TurnVerdict::parse(&response)
+                .unwrap()
+                .should_retry_server_error()
+        );
+        response["answers"]["retryable_server_error"]["noul"] = json!(1.1);
+        assert!(TurnVerdict::parse(&response).is_err());
     }
 
     #[test]

@@ -51,6 +51,19 @@ pub fn restore_checkpoint_with_native_state(
         event_frontier: canonical_session.event_frontier,
         event_frontier_digest: canonical_session.event_frontier_digest,
         queued_prompts: canonical_session.queued_prompts,
+        // Selector values name one harness's catalogue, so they carry over
+        // only when the same native conversation continues.
+        accepted_config: if spec.restore_native {
+            ["model", "effort"]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = canonical_session.session.configuration.get(key)?.as_str()?;
+                    (!value.trim().is_empty()).then(|| (key.to_owned(), value.to_owned()))
+                })
+                .collect()
+        } else {
+            Default::default()
+        },
     };
     if spec.discard_queued_prompts {
         seed.queued_prompts.clear();
@@ -236,6 +249,23 @@ pub fn restore_single_repository_onto_branch(
     restore_git_snapshot(git, repository_path, &snapshot)
         .with_context(|| format!("restore repository {:?}", repository.metadata.id))?;
     Ok(archived_branch)
+}
+
+/// Restore a retired independent clone on the branch saved in its archive.
+pub fn restore_single_repository_into_checkout(
+    archive_path: &Path,
+    repository_path: &Path,
+    git: &dyn GitCommandRunner,
+) -> Result<()> {
+    ensure!(repository_path.is_dir(), "restore checkout is missing");
+    let archive = read_archive_verified(archive_path)?;
+    let [repository] = archive.manifest.repositories.as_slice() else {
+        bail!("an isolated checkout requires exactly one archived repository");
+    };
+    let mut snapshot = archived_repository_snapshot(&archive, repository)?;
+    snapshot.metadata.remote_workspace = false;
+    restore_git_snapshot(git, repository_path, &snapshot)
+        .context("restore independent checkout before moving it into a target")
 }
 
 /// Native session files use harness-specific working-directory keys. Rewrite

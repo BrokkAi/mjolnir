@@ -126,7 +126,7 @@ fn freshly_opened_chat(saved_draft: &str) -> ChatState {
     chat
 }
 
-fn test_image() -> ClipboardImage {
+pub(super) fn test_image() -> ClipboardImage {
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
@@ -156,6 +156,7 @@ fn background_task(id: &str, command: &str, can_stop: bool) -> mj_core::relay::B
 fn image_paste_submits_markers_as_images_at_the_cursor() {
     let image = test_image();
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
     assert_eq!(chat.input, "[image 1]");
     assert_eq!(
@@ -191,6 +192,7 @@ fn image_paste_submits_markers_as_images_at_the_cursor() {
 #[test]
 fn image_markers_move_and_delete_as_one_item() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.set_input("keep ".into());
     chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
     let end = chat.input_cursor;
@@ -211,6 +213,7 @@ fn image_markers_move_and_delete_as_one_item() {
 #[test]
 fn kill_and_yank_preserve_images_and_renumber_copies() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
     chat.handle_key(ctrl('u'));
     assert!(chat.input.is_empty());
@@ -225,6 +228,7 @@ fn kill_and_yank_preserve_images_and_renumber_copies() {
 #[test]
 fn composer_renders_numbered_images_and_advertises_control_v() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
     chat.feedback.clear();
     let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
@@ -274,6 +278,7 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
     let mut newer = test_image();
     newer.mime_type = "image/jpeg".into();
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.handle_clipboard_content(ClipboardContent::Image(newer.clone()));
     remote::apply_chat_remote_result(
         &mut chat,
@@ -289,6 +294,7 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
     assert_eq!(chat.input_images[1].image, newer);
     let saved = chat.draft_payload();
     let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.set_prompt_images_supported(true);
     reopened.restore_draft(chat.encoded_draft());
     assert_eq!(reopened.draft_payload(), saved);
     let retry = KeyEvent::new(
@@ -315,6 +321,7 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
 fn local_commands_cannot_silently_discard_an_attached_image() {
     for input in ["!pwd ", "/help ", "/model ", "/plan inspect "] {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
         chat.set_input(input.into());
         chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
         let before = chat.draft_payload();
@@ -326,6 +333,7 @@ fn local_commands_cannot_silently_discard_an_attached_image() {
 #[test]
 fn attach_command_accumulates_after_existing_image_markers() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
     chat.handle_paste("/attach /tmp/second.png");
 
@@ -358,6 +366,7 @@ fn pending_attachment_is_failed_when_a_saved_draft_is_restored() {
 #[test]
 fn removed_pending_attachment_releases_visible_capacity() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     for sequence in 0..MAX_IMAGES as u64 {
         assert!(chat.reserve_attachment(sequence));
     }
@@ -693,6 +702,26 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
     chat.set_session_activity(mj_client::usage_format::SessionActivity::default());
     let empty = drawn_transcript(&mut chat, 80, 12).join("\n");
     assert!(empty.contains("No background tasks remain."), "{empty}");
+}
+
+#[test]
+fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(!screen.contains("Subagents"), "{screen}");
+
+    chat.set_subagents_enabled(true);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · none yet"), "{screen}");
+    assert!(
+        chat.subagent_control_area.is_none(),
+        "the dimmed entry is not clickable"
+    );
+
+    chat.set_subagent_count(1);
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Subagents · 0 working"), "{screen}");
+    assert!(chat.subagent_control_area.is_some());
 }
 
 #[test]
@@ -1323,10 +1352,21 @@ fn escape_only_cancels_an_active_turn() {
     assert_eq!(chat.handle_key(control_c), ChatAction::None);
     assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
 
-    // A turn the harness started on its own runs with no prompt of ours in
-    // flight. The relay refuses to cancel that, so Esc must not offer to.
+    // Running with nothing of ours or Claude Code's to stop: Esc offers
+    // nothing.
     chat.phase = WorkerPhase::Running;
     assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+
+    // A Codex goal turn has its own controls.
+    chat.session_activity.harness_turn_started_at_ms = Some(1_000);
+    chat.session_activity.pursuing_goal = true;
+    assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+
+    // A turn Claude Code started on its own after a background task can be
+    // stopped.
+    chat.session_activity.pursuing_goal = false;
+    assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::Cancel);
+    chat.session_activity.harness_turn_started_at_ms = None;
 
     chat.set_prompt_in_flight(true);
     assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::Cancel);
@@ -1499,10 +1539,10 @@ fn fast_stays_local_when_the_active_model_does_not_support_it() {
     chat.input = "/fast".into();
 
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.input, "/fast");
+    assert!(chat.input.is_empty());
     assert_eq!(
         chat.notice().as_deref(),
-        Some("Fast mode is unavailable for the active Codex model")
+        Some("/fast: Fast mode is unavailable for the active Codex model")
     );
 }
 
@@ -1534,7 +1574,7 @@ fn config_commands_are_queued_while_the_agent_is_busy() {
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
         chat.feedback.current().as_deref(),
-        Some("The worker is closing; this configuration change was not sent")
+        Some("/model: The worker is closing; this configuration change was not sent")
     );
 }
 
@@ -1587,6 +1627,7 @@ fn a_queued_config_change_peels_back_into_the_composer() {
 #[test]
 fn editing_queued_images_preserves_payload_and_recovers_failed_removal() {
     let mut source = ChatState::new(&snapshot(), &[]);
+    source.set_prompt_images_supported(true);
     source.set_input("compare ".into());
     source.handle_clipboard_content(ClipboardContent::Image(test_image()));
     source.handle_paste(" with ");
@@ -1835,7 +1876,7 @@ fn plan_is_kept_local_without_a_compatible_mode_surface() {
     chat.set_input("/plan".into());
 
     assert_eq!(chat.submit_input(), ChatAction::None);
-    assert_eq!(chat.input, "/plan");
+    assert!(chat.input.is_empty());
     assert!(chat.feedback.current().unwrap().contains("does not expose"));
 }
 
@@ -1909,7 +1950,7 @@ fn a_harness_without_plan_mode_rejects_plan_and_implement_locally() {
     for command in ["/plan design it", "/implement"] {
         chat.set_input(command.into());
         assert_eq!(chat.submit_input(), ChatAction::None);
-        assert_eq!(chat.input, command);
+        assert!(chat.input.is_empty());
         assert!(
             chat.feedback
                 .current()
@@ -2022,6 +2063,31 @@ fn config_slash_command_without_value_shows_usage() {
 }
 
 #[test]
+fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.input = "/model".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.input.is_empty(), "draft kept: {:?}", chat.input);
+    assert!(chat.notice().unwrap().contains("/model"));
+}
+
+#[test]
+fn an_unknown_slash_command_is_not_sent_to_the_agent() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.input = "/bogus thing".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.input.is_empty());
+    assert!(chat.notice().unwrap().contains("/bogus"));
+
+    // A path is a prompt, not a command.
+    chat.input = "/tmp/log is empty".into();
+    assert!(matches!(
+        chat.handle_key(key(KeyCode::Enter)),
+        ChatAction::Prompt(_)
+    ));
+}
+
+#[test]
 fn editor_preserves_uppercase_text_while_shortcuts_remain_case_insensitive() {
     let mut chat = ChatState::new(&snapshot(), &[]);
 
@@ -2049,6 +2115,7 @@ fn editor_preserves_uppercase_text_while_shortcuts_remain_case_insensitive() {
 #[test]
 fn empty_terminal_paste_requests_clipboard_and_accepts_an_image() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_prompt_images_supported(true);
     chat.set_input("describe ".into());
     assert_eq!(
         chat.handle_terminal_paste(""),
@@ -2092,6 +2159,10 @@ fn ctrl_v_returns_paste_request_action() {
     let mut chat = ChatState::new(&snapshot(), &[]);
 
     assert_eq!(chat.handle_key(ctrl('v')), ChatAction::PasteFromClipboard);
+    assert_eq!(
+        chat.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER)),
+        ChatAction::PasteFromClipboard
+    );
     assert_eq!(
         chat.handle_key(KeyEvent::new(
             KeyCode::Char('v'),
@@ -2536,4 +2607,51 @@ fn continuing_feed_failure_survives_dismissal_and_clears_only_on_recovery() {
     );
     notices.set_persistent_failure(None);
     assert!(notices.current().is_none());
+}
+
+#[test]
+fn saved_image_drafts_require_current_capability_without_losing_content() {
+    let payload = PromptPayload::with_image("inspect ", test_image());
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_input_payload(payload.clone());
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.restore_draft(chat.encoded_draft());
+    assert_eq!(reopened.submit_input(), ChatAction::None);
+    assert_eq!(reopened.draft_payload(), payload);
+    assert!(
+        reopened
+            .notice()
+            .unwrap()
+            .contains("advertised image support")
+    );
+    reopened.set_prompt_images_supported(true);
+    assert!(matches!(reopened.submit_input(), ChatAction::Prompt(_)));
+    assert_eq!(reopened.take_submitting_images(), payload.images);
+}
+
+#[test]
+fn attaching_a_text_file_says_attach_takes_images_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "plain text").unwrap();
+    let error = super::attachments::install_path("attach-text", &path).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("/attach adds image files only"),
+        "{message}"
+    );
+    assert!(!message.contains("marker"), "{message}");
+}
+
+#[test]
+fn attach_requires_capability_and_clears_the_command_on_refusal() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_input("/attach picture.png".into());
+    assert_eq!(chat.submit_input(), ChatAction::None);
+    assert!(chat.input.is_empty());
+    let notice = chat.notice().unwrap();
+    assert_eq!(notice, super::input_state::ATTACH_UNSUPPORTED_NOTICE);
+    assert!(!notice.contains("marker"));
+    assert!(!chat.reserve_attachment(1));
+    assert!(chat.input_images.is_empty());
 }

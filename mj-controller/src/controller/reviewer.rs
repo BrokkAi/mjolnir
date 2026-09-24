@@ -130,14 +130,10 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        let target = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target template is missing")?;
+        let target = session.target_runtime_settings(&self.config)?;
         let execution_policy = profile
             .kind
-            .effective_execution_policy(target.execution_policy());
+            .effective_execution_policy(target.execution_policy);
         let (backend, worker_root) = self.worker_placement(session_id)?;
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
@@ -528,11 +524,18 @@ mod tests {
         let mut session = checkpoint_test_session(session_id);
         session.target_template_id = "local".into();
         session.state = SessionState::Running;
+        let template = match &locator {
+            mj_core::state::TargetLocator::LocalPodman { .. } => {
+                serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap()
+            }
+            mj_core::state::TargetLocator::LocalDocker { .. } => {
+                serde_json::from_str(r#"{"kind":"local-docker","image":"test"}"#).unwrap()
+            }
+            _ => TargetTemplate::LocalBare,
+        };
         session.target = Some(locator);
         let mut config = Config::default();
-        config
-            .targets
-            .insert("local".into(), TargetTemplate::LocalBare);
+        config.targets.insert("local".into(), template);
         for (id, kind) in [
             ("codex", HarnessKind::Codex),
             ("claude", HarnessKind::Claude),

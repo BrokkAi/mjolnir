@@ -6,6 +6,61 @@ use axum::http::Request;
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
+#[tokio::test]
+async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
+    let gate = Arc::new(crate::upgrade::Gate::default());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Body::from_stream(futures::stream::pending::<
+                            Result<String, std::convert::Infallible>,
+                        >())
+                    }
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            gate.clone(),
+            upgrade_admission,
+        ));
+
+    let request = tokio::spawn(
+        app.clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap()),
+    );
+    entered.notified().await;
+    assert!(gate.active_labels().is_empty());
+    assert!(
+        gate.try_close(),
+        "a waiting HTTP handler must not hold handoff"
+    );
+    release.notify_one();
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        gate.active_labels().is_empty(),
+        "an unread response must not hold handoff"
+    );
+
+    let rejected = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.headers()["x-mj-upgrade"], "pending");
+}
+
 use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
@@ -103,7 +158,10 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: BTreeMap::from([(
             "session-1".into(),
             SessionRecord {
+                target_runtime: None,
                 launch_base: None,
+                launch_branch: None,
+                publication: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -1404,8 +1462,8 @@ fn embedded_viewer_displays_capacity_retry_deadlines() {
     let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
     let checks = r#"
 const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
-if (sessionActivityLabel(session, 60000) !== 'Model at capacity · retrying in 1m00s') throw Error('missing retry countdown');
-if (sessionActivityLabel(session, 121000) !== 'Model at capacity · retrying in 0m00s') throw Error('negative retry countdown');
+if (sessionActivityLabel(session, 60000) !== 'Provider unavailable · retrying in 1m00s') throw Error('missing retry countdown');
+if (sessionActivityLabel(session, 121000) !== 'Provider unavailable · retrying in 0m00s') throw Error('negative retry countdown');
 "#;
     run_viewer_script("capacity-retry", &format!("{setup}\n{source}\n{checks}"));
 }
@@ -3163,6 +3221,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
         action.action,
         ControllerAction::New {
             launch_base: None,
+            launch_branch: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -3187,6 +3246,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         launch_base: None,
+        launch_branch: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -3306,6 +3366,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     let error = validate_action(
         &ControllerAction::Suspend {
             session_id: "not-managed".into(),
+            acknowledge_unpublished_work: false,
         },
         &snapshot,
     )
@@ -3546,6 +3607,44 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         &snapshot,
     )
     .unwrap();
+}
+
+/// Finding G-3: the login page used to learn it was signed out from a
+/// `GET /api/snapshot` 401, which every browser logs as a console error. The
+/// page asks this route instead, which answers 200 either way.
+#[tokio::test]
+async fn session_status_answers_signed_out_without_an_error_status() {
+    let (app, _, _, _, _) = app();
+    let status = |cookie: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::get("/auth/session");
+            if let Some(cookie) = cookie {
+                request = request.header(COOKIE, cookie);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    assert_eq!(
+        status(None).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    assert_eq!(
+        status(Some("mj_viewer=forged".into())).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    let cookie = login_cookie(&app).await;
+    assert_eq!(
+        status(Some(cookie)).await,
+        serde_json::json!({ "signed_in": true })
+    );
 }
 
 #[tokio::test]

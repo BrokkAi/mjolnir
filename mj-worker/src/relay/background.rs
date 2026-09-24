@@ -18,27 +18,6 @@ pub(super) struct KimiProvisionalTask {
     native_task_id: Option<String>,
 }
 
-/// `_meta` key the Claude adapter puts on the `usage_update` that settles a
-/// turn. Its value is an object with a `kind` naming the origin.
-pub(super) const CLAUDE_ORIGIN_META_KEY: &str = "_claude/origin";
-
-/// The origin kind on a settling `usage_update`, if the marker is present.
-///
-/// The outer option says whether the update carries the marker at all; the
-/// inner one is the origin kind, which is only ever reported for diagnostics.
-pub(super) fn claude_turn_origin(update: &SessionUpdate) -> Option<Option<String>> {
-    let SessionUpdate::UsageUpdate(usage) = update else {
-        return None;
-    };
-    let origin = usage.meta.as_ref()?.get(CLAUDE_ORIGIN_META_KEY)?;
-    Some(
-        origin
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-    )
-}
-
 /// Whether this update is agent output, which is what reveals that the
 /// harness is working. Everything else is session bookkeeping the harness
 /// also sends while idle.
@@ -55,7 +34,7 @@ pub(super) fn is_agent_output(update: &SessionUpdate) -> bool {
 
 /// How the Claude adapter begins the plain `agent_message_chunk` it publishes
 /// when a user-requested stop ends a background task. The SDK injects nothing
-/// into the model for that stop, so no turn and no origin marker follow it.
+/// into the model for that stop, so no model cycle and no result follow it.
 /// Only the prefix is stable: the name that follows is whatever the adapter
 /// currently calls the task, which later level and start messages rename.
 /// Checked against claude-agent-acp 0.81.0 `dist/async-tasks.js`

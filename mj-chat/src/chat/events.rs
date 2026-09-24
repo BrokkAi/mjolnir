@@ -23,7 +23,8 @@ impl ChatState {
                 if key.kind != KeyEventKind::Press {
                     return false;
                 }
-                if self.elicitation.is_some()
+                if self.earlier.is_some()
+                    || self.elicitation.is_some()
                     || self.config_picker_active()
                     || self.task_dialog_open
                     || self.task_control_focused

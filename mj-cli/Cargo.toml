@@ -37,6 +37,8 @@ futures = "0.3"
 libc.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["json", "query"] }
+# The API client pins the certificate the daemon publishes for its viewer.
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
@@ -51,6 +53,9 @@ tracing-subscriber.workspace = true
 mj-core = { workspace = true, features = ["test-hooks"] }
 # The API client test answers itself from a canned in-process router.
 axum.workspace = true
+# The pinned-certificate tests serve HTTPS with generated certificates.
+axum-server.workspace = true
+rcgen = "0.13"
 libc.workspace = true
 # The store-divergence test migrates the daemon's store from outside the
 # daemon, which is exactly what the incident it reproduces did.

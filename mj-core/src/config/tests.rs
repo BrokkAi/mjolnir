@@ -1,5 +1,25 @@
 use super::*;
 
+/// A machine whose file never named a workspace directory keeps using the
+/// directory its workspaces are already in, under the former product name;
+/// new machines get Mjolnir's own. Launch campaign finding C-17.
+#[test]
+fn a_machine_without_a_workspace_directory_keeps_the_existing_one() {
+    let config: Config = toml::from_str(&format!(
+        "version = {CONFIG_VERSION}\n[machines.box]\nkind = \"ssh\"\nhost = \"box\"\n"
+    ))
+    .unwrap();
+    let Some(Machine::Ssh {
+        workspace_prefix, ..
+    }) = config.machines.get("box")
+    else {
+        panic!("an SSH machine");
+    };
+    assert_eq!(workspace_prefix, Path::new(LEGACY_WORKSPACE_PREFIX));
+    assert_eq!(LEGACY_WORKSPACE_PREFIX, ".local/share/hel/workspaces");
+    assert_eq!(DEFAULT_WORKSPACE_PREFIX, ".local/share/mjolnir/workspaces");
+}
+
 fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessProfile {
     fs::write(
         home.join("config.toml"),
@@ -172,6 +192,36 @@ fn local_targets_need_no_setup_and_preserve_explicit_overrides() {
     let resolved = custom.with_local_targets();
     assert_eq!(resolved.targets["docker"], TargetTemplate::LocalBare);
     assert_eq!(resolved.clone().with_local_targets(), resolved);
+}
+
+/// Saving edits the user's file in place: comments, blank lines, and the
+/// order of sections and keys survive a save that changes one value.
+/// Launch campaign finding C-21.
+#[test]
+fn saving_keeps_the_files_comments_and_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let original = format!(
+        "# My Mjolnir settings\nversion = {CONFIG_VERSION}\n\n\
+         # Quiet, please.\n[notify]\ntitle = false # no counts in the title\nbell = true\n\n\
+         [advanced]\n# Clocks help me debug.\ndetailed_activity_clocks = true\n"
+    );
+    fs::write(&path, &original).unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    config.notify.bell = false;
+    config.save_to(&path).unwrap();
+
+    let saved = fs::read_to_string(&path).unwrap();
+    assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    // A version 12 file is marked as this build's, in place.
+    fs::write(&path, "# keep me\nversion = 12 # the file format\n").unwrap();
+    Config::load_from(&path).unwrap().save_to(&path).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("# keep me\nversion = {CONFIG_VERSION} # the file format\n")
+    );
 }
 
 #[test]
@@ -1739,6 +1789,28 @@ image = "ubuntu:24.04"
             .to_string()
             .contains("only supported by Podman")
     );
+}
+
+#[test]
+fn named_instances_default_to_their_own_stable_viewer_port() {
+    assert_eq!(default_phone_bind_for(None), "127.0.0.1:3765");
+    let port = |name: &str| -> u16 {
+        let bind: std::net::SocketAddr = default_phone_bind_for(Some(name)).parse().unwrap();
+        assert!(bind.ip().is_loopback(), "{name} binds beyond loopback");
+        bind.port()
+    };
+    let launch = port("launch-i1");
+    assert_eq!(
+        launch,
+        port("launch-i1"),
+        "the default must survive restarts"
+    );
+    assert!(
+        (INSTANCE_VIEWER_PORTS).contains(&launch),
+        "{launch} is outside the documented range"
+    );
+    assert_ne!(launch, 3765);
+    assert_ne!(port("dev"), port("dev-2"));
 }
 
 #[test]

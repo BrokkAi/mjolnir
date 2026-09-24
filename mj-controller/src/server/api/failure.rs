@@ -51,6 +51,12 @@ impl From<ApiError> for ApiFailure {
 
 impl From<anyhow::Error> for ApiFailure {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(refusal) = mj_core::refusal::Refusal::of(&error) {
+            return match refusal.kind() {
+                mj_core::refusal::RefusalKind::Precondition => Self::conflict(refusal.message()),
+                mj_core::refusal::RefusalKind::Unusable => Self::bad_request(refusal.message()),
+            };
+        }
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"))
     }
 }

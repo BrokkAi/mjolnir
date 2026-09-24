@@ -157,6 +157,8 @@ fn tar_with_file(path: &str, contents: &[u8], mode: u32) -> Vec<u8> {
 fn repository(id: &str) -> RepositorySnapshot {
     RepositorySnapshot {
         metadata: RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: id.to_string(),
             relative_destination: PathBuf::from(id),
             origin: format!("https://github.com/example/{id}.git"),
@@ -176,6 +178,8 @@ fn repository(id: &str) -> RepositorySnapshot {
 fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepositoryBundle {
     CheckpointRepositoryBundle {
         metadata: RepositoryMetadata {
+            saved_refs: Default::default(),
+            stash_stack: Vec::new(),
             id: "project".into(),
             relative_destination: "project".into(),
             origin: "https://github.com/example/project.git".into(),
@@ -1592,6 +1596,91 @@ fn session_delta_bundles_commits_missing_from_every_origin_ref() {
     );
 }
 
+#[test]
+fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("origin");
+    initialize_repository(&origin);
+    commit_file(&origin, "tracked.txt", b"base\n", "base");
+    let base = git_line(&origin, &["rev-parse", "HEAD"]);
+    let source = clone_repository(directory.path(), &origin, "source");
+    git(&source, &["switch", "-q", "-c", "side"]);
+    let mut value = 1_u64;
+    let large: Vec<u8> = (0..100_000)
+        .map(|_| {
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            value as u8
+        })
+        .collect();
+    commit_file(&source, "side.bin", &large, "side work");
+    let side_tip = git_line(&source, &["rev-parse", "HEAD"]);
+    git(&source, &["tag", "-a", "side-tag", "-m", "side tag"]);
+    git(&source, &["switch", "-q", "main"]);
+    commit_file(&source, "main.txt", b"main work\n", "main work");
+    fs::write(source.join("tracked.txt"), b"first stash\n").unwrap();
+    git(&source, &["stash", "push", "-q", "-m", "first"]);
+    fs::write(source.join("tracked.txt"), b"second stash\n").unwrap();
+    git(&source, &["stash", "push", "-q", "-m", "second"]);
+    let stash_latest = git_line(&source, &["rev-parse", "stash@{0}"]);
+    let stash_older = git_line(&source, &["rev-parse", "stash@{1}"]);
+    fs::write(source.join("tracked.txt"), b"working change\n").unwrap();
+
+    let snapshot = collect_git_snapshot(
+        &SystemGit,
+        &source,
+        &GitCollectionSpec {
+            id: "repo".into(),
+            relative_destination: "repo".into(),
+            history: GitHistoryMode::CloneFrom(base),
+            origin_override: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .metadata
+            .stash_stack
+            .iter()
+            .map(|entry| entry.commit.clone())
+            .collect::<Vec<_>>(),
+        vec![stash_latest.clone(), stash_older.clone()]
+    );
+    assert!(snapshot.metadata.stash_stack[0].message.contains("second"));
+    assert_eq!(snapshot.metadata.saved_refs["refs/heads/side"], side_tip);
+    assert!(!snapshot.committed_bundle.is_empty());
+
+    let destination = clone_repository(directory.path(), &origin, "restored");
+    restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+    assert_eq!(
+        git_line(&destination, &["rev-parse", "refs/heads/side"]),
+        side_tip
+    );
+    assert_eq!(
+        fs::read(destination.join("side.bin")).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        git_line(&destination, &["rev-parse", "stash@{0}"]),
+        stash_latest
+    );
+    assert_eq!(
+        git_line(&destination, &["rev-parse", "stash@{1}"]),
+        stash_older
+    );
+    let stash_list = git_line(&destination, &["stash", "list"]);
+    assert!(stash_list.contains("second") && stash_list.contains("first"));
+    assert_eq!(
+        fs::read(destination.join("tracked.txt")).unwrap(),
+        b"working change\n"
+    );
+    assert_eq!(
+        git_line(&destination, &["rev-parse", "refs/tags/side-tag"]),
+        git_line(&source, &["rev-parse", "refs/tags/side-tag"])
+    );
+}
+
 /// Provisioning must fetch a local repository's history before restoring
 /// into it: the delta bundle carries only the commits origin lacks.
 #[test]
@@ -1619,7 +1708,7 @@ fn session_delta_restore_requires_the_fetched_origin_history() {
     initialize_repository(&destination);
     let unfetched = restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap_err();
     assert!(
-        format!("{unfetched:#}").contains("fetch committed delta bundle"),
+        format!("{unfetched:#}").contains("import committed delta bundle"),
         "{unfetched:#}"
     );
 

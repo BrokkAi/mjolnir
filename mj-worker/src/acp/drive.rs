@@ -66,6 +66,8 @@ where
     let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
+    let claude_result_count = ClaudeResultCount::default();
+    let claude_sdk_result_count = claude_result_count.clone();
     let permission_events = events.clone();
     let permission_parent_context = spec.turn_context.clone();
     let permission_activity = spec.acp_activity.clone();
@@ -118,6 +120,10 @@ where
     let session_environment = spec.environment.clone();
     let restart = Arc::new(Mutex::new(None));
     let restart_slot = restart.clone();
+    // Set when the session itself failed (an agent error answer, for example),
+    // as opposed to the connection: only the latter may be stray bridge output.
+    let session_failed = Arc::new(AtomicBool::new(false));
+    let session_failed_flag = session_failed.clone();
     let native_agents = Arc::new(Mutex::new(native_agents::NativeAgentRouter::default()));
     let permission_native_agents = native_agents.clone();
     let elicitation_native_agents = native_agents.clone();
@@ -258,6 +264,29 @@ where
             async move |notification: ClaudeSdkMessageNotification, _cx| {
                 if claude_sdk_harness != HarnessKind::Claude {
                     return Ok(());
+                }
+                // Sent on the same stream as the session updates, so the
+                // coordinator records everything the adapter sent before the
+                // result ahead of it.
+                match ClaudeTurnResult::from_sdk_message(&notification.message) {
+                    Ok(Some(mut result)) => {
+                        result.received = claude_sdk_result_count.stamp();
+                        claude_sdk_events
+                            .send(RuntimeEvent::ClaudeTurnResult(result))
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        claude_sdk_events
+                            .send(RuntimeEvent::Warning {
+                                message: format!("ignored malformed Claude SDK result: {error}"),
+                            })
+                            .await
+                            .map_err(|_| relay_event_channel_error())?;
+                        return Ok(());
+                    }
                 }
                 let tasks = match claude_background_tasks(&notification.message) {
                     Ok(Some(tasks)) => tasks,
@@ -472,7 +501,7 @@ where
                         .await
                         .map_err(|_| relay_event_channel_error())?;
                 }
-                let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                 let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
                     "const": option.option_id.to_string(), "title": option.name,
                 })).collect();
@@ -487,7 +516,10 @@ where
                     .map(str::trim)
                     .filter(|title| !title.is_empty())
                 {
-                    Some(title) => title.to_owned(),
+                    Some(title) => permission_title_with_command(
+                        title,
+                        request.tool_call.fields.raw_input.as_ref(),
+                    ),
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
                 };
@@ -930,6 +962,7 @@ where
                 plan_implementation_slot,
                 opened,
                 agent_output_count,
+                claude_result_count,
                 session_updates_enabled,
                 resume_required,
                 native_session_used,
@@ -943,21 +976,78 @@ where
                         native_session_id;
                     Ok(())
                 }
-                Err(error) => Err(agent_client_protocol::Error::internal_error()
-                    .data(serde_json::Value::String(format!("{error:#}")))),
+                Err(error) => {
+                    session_failed_flag.store(true, Ordering::Release);
+                    Err(agent_client_protocol::Error::internal_error()
+                        .data(serde_json::Value::String(format!("{error:#}"))))
+                }
             }
         })
         .await
-        .map_err(|error| {
-            anyhow!(
-                "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
-                 and login-shell startup must be silent"
-            )
-        })?;
+        .map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// A permission form's text: the tool call's title, and the command it would
+/// run when the title does not already show it. Kimi titles a shell request
+/// just "Bash", which left the person approving a command they could not
+/// see (I2-5).
+pub(super) fn permission_title_with_command(
+    title: &str,
+    raw_input: Option<&serde_json::Value>,
+) -> String {
+    let command = raw_input.and_then(|input| {
+        let value = input.get("command").or_else(|| input.get("cmd"))?;
+        match value {
+            serde_json::Value::String(command) => Some(command.trim().to_owned()),
+            serde_json::Value::Array(parts) => {
+                let parts: Vec<&str> = parts.iter().filter_map(serde_json::Value::as_str).collect();
+                (!parts.is_empty()).then(|| parts.join(" "))
+            }
+            _ => None,
+        }
+    });
+    match command {
+        Some(command) if !command.is_empty() && !title.contains(&command) => {
+            format!("{title}\n$ {command}")
+        }
+        _ => title.to_owned(),
+    }
+}
+
+/// Drops the answer channel of every pending tool permission request. Each
+/// request's task then answers the agent with `cancelled` and reports the
+/// elicitation resolved, which closes its form.
+pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
+    pending
+        .lock()
+        .expect("pending elicitation lock poisoned")
+        .retain(|id, _| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+}
+
+/// The id prefix of a permission request shown as a form.
+pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+
+/// Describe a failed ACP connection. The hint about stray bridge output only
+/// helps when the connection itself broke or could not parse what the bridge
+/// wrote; an error the agent answered (such as a missing thread, I2-7) says
+/// nothing about bridge stdout, and the hint would send the person the wrong
+/// way.
+pub(super) fn protocol_failure(
+    error: agent_client_protocol::Error,
+    connection_failed: bool,
+) -> anyhow::Error {
+    if connection_failed || error.code == agent_client_protocol::Error::parse_error().code {
+        anyhow!(
+            "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
+             and login-shell startup must be silent"
+        )
+    } else {
+        anyhow!("ACP protocol failed: {error}")
+    }
 }
 
 /// muse-acp 0.5.0 asks, before each Muse question that offers choices, whether
@@ -1186,6 +1276,26 @@ impl AgentOutputCount {
     }
 }
 
+/// How many Claude Code SDK results one ACP connection has received.
+///
+/// The notification handler stamps each result with its position, and the
+/// prompt loop reads the count just before it sends `session/prompt`. A result
+/// stamped at or below that count arrived before the prompt was sent, so it
+/// cannot be the prompt's answer however late the coordinator relays it.
+#[derive(Clone, Default)]
+pub(super) struct ClaudeResultCount(Arc<AtomicU64>);
+
+impl ClaudeResultCount {
+    /// Count one more result and return its position, starting at one.
+    pub(super) fn stamp(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(super) fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// What the person is told when the harness ended a turn without answering.
 ///
 /// It leads with the stable marker `mj_core::credentials` matches on, then
@@ -1230,6 +1340,7 @@ pub(super) async fn drive_connection(
     plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: AgentOutputCount,
+    claude_result_count: ClaudeResultCount,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -1249,6 +1360,7 @@ pub(super) async fn drive_connection(
         &plan_implementation_slot,
         opened,
         &agent_output_count,
+        &claude_result_count,
         &session_updates_enabled,
         resume_required,
         native_session_used,
@@ -1270,9 +1382,16 @@ pub(super) async fn apply_cancel(
     cancel_id: String,
     events: &mpsc::Sender<RuntimeEvent>,
     terminals: &TerminalRegistry,
+    pending: &PendingElicitations,
 ) -> Result<()> {
     terminals.kill_live();
-    match connection.send_notification(CancelNotification::new(session_id.clone())) {
+    let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
+    // ACP: once the client cancels a turn it answers every pending
+    // `session/request_permission` of that turn with `cancelled`. Some agents
+    // (Kimi, I2-15) never withdraw the request themselves, which left the
+    // form open on an idle session.
+    withdraw_tool_permissions(pending);
+    match sent {
         Ok(()) => {
             emit_runtime_event(
                 events,
@@ -1426,6 +1545,72 @@ pub(super) async fn settle_steer(
     }
 }
 
+/// Settle a steer still waiting for its acknowledgement when the prompt ends.
+/// The acknowledgement normally follows at once; without it within two
+/// seconds, delivery is reported as unconfirmed and the queued input is held.
+pub(super) async fn settle_steer_at_turn_end(
+    events: &mpsc::Sender<RuntimeEvent>,
+    pending_steer: &mut Option<PendingSteer>,
+) -> Result<()> {
+    let Some(mut pending) = pending_steer.take() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(Duration::from_secs(2), pending.response.as_mut()).await {
+        Ok(outcome) => settle_steer(events, pending, outcome).await,
+        Err(_) => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandInterrupted {
+                    request_id: pending.request_id,
+                    message: "Steering delivery unconfirmed after the turn ended; queued input is held for review".into(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// Keep the adapter's `session/prompt` request alive after the prompt ended at
+/// Claude Code's result, and discard the reply when it comes.
+///
+/// Dropping the reply future before the reply arrives makes the ACP crate send
+/// `$/cancel_request`, which the adapter handles as a cancel of the live turn.
+/// The adapter holds the reply while background work the turn started runs,
+/// and answers it at the next prompt or when that work ends. The task belongs
+/// to the connection, so it ends with the connection.
+pub(super) fn detach_prompt_reply(
+    connection: &ConnectionTo<Agent>,
+    reply: ActivePrompt,
+    request_id: String,
+    recorded_stop_reason: String,
+) {
+    let task_request_id = request_id.clone();
+    let spawned = connection.spawn(async move {
+        match reply.await {
+            Ok(response) => tracing::debug!(
+                request_id = %task_request_id,
+                recorded_stop_reason,
+                reply_stop_reason = ?response.stop_reason,
+                "discarded the adapter's reply to a prompt that ended at its result"
+            ),
+            Err(error) => tracing::debug!(
+                request_id = %task_request_id,
+                recorded_stop_reason,
+                %error,
+                "discarded the adapter's failed reply to a prompt that ended at its result"
+            ),
+        }
+        Ok(())
+    });
+    if let Err(error) = spawned {
+        tracing::warn!(
+            %request_id,
+            %error,
+            "could not keep the adapter's prompt reply open; the connection is closing"
+        );
+    }
+}
+
 /// Discard requests left in the channel by the bridge that just restarted. See
 /// the call site in [`serve_session`] for why nothing is reported back.
 pub(super) fn drain_requests_from_the_previous_bridge(
@@ -1445,6 +1630,7 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
+            CommandRequest::ReleasePrompt { request_id, .. } => ("ReleasePrompt", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),
             CommandRequest::StopBackgroundTask { resolved, .. } => {
                 let _ = resolved.send(Err("ACP bridge restarted before stopping task".into()));

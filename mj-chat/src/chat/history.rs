@@ -457,6 +457,7 @@ mod tests {
     }
 
     fn image_draft(chat: &mut ChatState) -> Vec<super::super::PromptImage> {
+        chat.set_prompt_images_supported(true);
         chat.set_input("unfinished".into());
         chat.handle_clipboard_content(ClipboardContent::Image(ClipboardImage {
             data_base64: "synthetic-png".into(),

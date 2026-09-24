@@ -312,6 +312,7 @@ impl ActiveChat {
         let session = self.session.clone();
         let updates = self.chat_io_tx.clone();
         let answered_role = role.clone();
+        let automatic = mj_core::acp::is_plan_review_id(&elicitation_id);
         tokio::spawn(async move {
             let result = session
                 .reviewer_as(
@@ -324,7 +325,10 @@ impl ActiveChat {
                 .await
                 .map(|_| ())
                 .map_err(|error| format!("{error:#}"));
-            if let Err(error) = updates.send(ChatIoUpdate::ReviewerStarted(result)) {
+            let Some(update) = reviewer_answer_update(result, automatic) else {
+                return;
+            };
+            if let Err(error) = updates.send(update) {
                 tracing::debug!(%error, "reviewer form answer result dropped");
             }
         });
@@ -562,5 +566,52 @@ impl ActiveChat {
         if !finished {
             self.poll_reviewer_events();
         }
+    }
+}
+
+/// What the chat hears about one answer to a reviewer's form.
+///
+/// A request that is no longer pending was answered, withdrawn, or expired
+/// before the answer arrived. That is not a failed review, so it is said as a
+/// notice rather than reported as a review failure; and an answer Mjolnir
+/// sent on its own (a reviewer's plan decision) needs no notice at all
+/// (I2-5).
+fn reviewer_answer_update(
+    result: std::result::Result<(), String>,
+    automatic: bool,
+) -> Option<ChatIoUpdate> {
+    match result {
+        Err(error) if error.contains("is no longer pending") => (!automatic).then(|| {
+            ChatIoUpdate::ReviewerNotice(
+                "The reviewer's request had already ended (answered elsewhere, withdrawn, or \
+                 expired), so this answer was not delivered."
+                    .to_owned(),
+            )
+        }),
+        result => Some(ChatIoUpdate::ReviewerStarted(result)),
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+
+    #[test]
+    fn a_late_answer_says_why_it_was_not_delivered() {
+        let late = Err(r#"elicitation "tool-permission-2" is no longer pending"#.to_owned());
+        match reviewer_answer_update(late.clone(), false) {
+            Some(ChatIoUpdate::ReviewerNotice(notice)) => {
+                assert!(notice.contains("not delivered"), "{notice}");
+            }
+            _ => panic!("a person's late answer gets a notice"),
+        }
+        assert!(
+            reviewer_answer_update(late, true).is_none(),
+            "Mjolnir's own answer to a plan decision needs no notice"
+        );
+        assert!(matches!(
+            reviewer_answer_update(Err("relay unavailable".into()), false),
+            Some(ChatIoUpdate::ReviewerStarted(Err(_)))
+        ));
     }
 }

@@ -140,7 +140,7 @@ async fn serve_inner(
                 Err(error) => {
                     let port_conflict = error.kind() == std::io::ErrorKind::AddrInUse;
                     let message = if port_conflict {
-                        format!("Port {} is already in use.", address.port())
+                        port_conflict_message(address).await
                     } else {
                         format!("Could not listen on {address}: {error}")
                     };
@@ -172,12 +172,33 @@ async fn serve_inner(
     }
 }
 
+/// Explain a taken viewer port and give the exact `[phone] bind` line that
+/// moves this instance off it. The suggested port is one the OS reports free
+/// right now; writing it into the config keeps it stable across restarts.
+async fn port_conflict_message(address: SocketAddr) -> String {
+    let taken = format!(
+        "Port {} is already in use, possibly by another Mjolnir instance.",
+        address.port()
+    );
+    let Ok(free) = TcpListener::bind(SocketAddr::new(address.ip(), 0)).await else {
+        return taken;
+    };
+    let Ok(free) = free.local_addr() else {
+        return taken;
+    };
+    format!(
+        "{taken} To use another port, add `bind = \"{free}\"` under `[phone]` in {}.",
+        mj_core::config::config_path().display()
+    )
+}
+
 fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
     let WebViewerAccess::Ready {
         viewer_url,
         viewer_code,
         qr_login_url,
         fallback_reason,
+        certificate_sha256,
     } = ready
     else {
         bail!("viewer startup is missing its access details");
@@ -196,6 +217,7 @@ fn ready_at(ready: &WebViewerAccess, port: u16) -> Result<WebViewerAccess> {
             .map(|url| with_port(url, port))
             .transpose()?,
         fallback_reason: fallback_reason.clone(),
+        certificate_sha256: certificate_sha256.clone(),
     })
 }
 
@@ -522,6 +544,7 @@ mod tests {
             viewer_code: "123456".into(),
             qr_login_url: None,
             fallback_reason: None,
+            certificate_sha256: None,
         }
     }
 
@@ -647,7 +670,14 @@ mod tests {
         })
         .await;
         assert!(
-            matches!(failure, WebViewerAccess::Failed { address: failed, port_conflict: true, .. } if failed == address)
+            matches!(&failure, WebViewerAccess::Failed { address: failed, port_conflict: true, .. } if *failed == address)
+        );
+        let WebViewerAccess::Failed { message, .. } = &failure else {
+            unreachable!()
+        };
+        assert!(
+            message.contains("under `[phone]`") && message.contains("bind = \"127.0.0.1:"),
+            "a port conflict must name the config line that resolves it: {message}"
         );
         control.recover(WebViewerRecovery::AnotherPort).unwrap();
         assert!(
@@ -763,11 +793,12 @@ mod tests {
             viewer_code: "123456".into(),
             qr_login_url: Some("https://host.tailnet.ts.net:37650/auth/login?token=secret".into()),
             fallback_reason: None,
+            certificate_sha256: Some("pinned".into()),
         };
         let changed = ready_at(&ready, 49152).unwrap();
         assert!(
-            matches!(changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), .. }
-            if viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret")
+            matches!(changed, WebViewerAccess::Ready { viewer_url, viewer_code, qr_login_url: Some(login), certificate_sha256: Some(pin), .. }
+            if pin == "pinned" && viewer_url == "https://host.tailnet.ts.net:49152/" && viewer_code == "123456" && login == "https://host.tailnet.ts.net:49152/auth/login?token=secret")
         );
         let ipv6 = ready_at(&self::ready("[::1]:0".parse().unwrap()), 49152).unwrap();
         assert!(

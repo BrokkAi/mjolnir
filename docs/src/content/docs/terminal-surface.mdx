@@ -18,10 +18,9 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
 </figure>
 
 At startup, Mjolnir opens the most recently active live session in the selected
-workspace when one is available. When the opened workspace has no live sessions,
-the default startup setting creates one from the launch directory once while
-the dashboard opens. Set that setting off to leave the workspace empty until
-you choose **Create**. Switching workspace tabs only filters the live session
+workspace when one is available. Mjolnir never creates a session at startup:
+a workspace with no live sessions stays empty until you choose **Create**.
+Switching workspace tabs only filters the live session
 list and never creates a session; every workspace continues running
 independently.
 Suspended history is available from **Open**, including sessions that were
@@ -37,9 +36,8 @@ new session.
 
 **Create** opens the full session creation wizard and **Open** opens the
 session dialog, which starts on the running sessions and keeps the suspended
-history on its other tabs. The command palette opens with `prefix+:`, from the
-clickable `: palette` hint in the footer, or from the **Commands** button on
-the first-run screen; it remains available while you type and while a notice
+history on its other tabs. The command palette opens with `prefix+:`, from or
+from the clickable `: palette` hint in the footer; it remains available while you type and while a notice
 replaces the footer. Each session row has a **⋯** button for its actions.
 Displayed dashboard shortcut hints are clickable, including global shortcuts
 in the composer's footer. Help supports wheel scrolling and a **Close** button.
@@ -221,7 +219,7 @@ status indicators retain their own meanings.
 
 Mjolnir uses a tmux-style prefix key instead of one direct chord per command: press the prefix, release it, then press a second key. The footer shows a `PREFIX` banner while a prefix press is pending. The default prefix is `ctrl+b`, the same as tmux and [herdr](https://github.com/herdrdev/herdr), so the same muscle memory carries over. `Esc` cancels a pending prefix without sending anything; an unbound key after the prefix shows a footer notice instead of doing nothing silently.
 
-The commands below run from any dashboard pane and from the composer, once the prefix has been pressed. They are written here as `prefix+<key>` because every one of them, including the prefix itself, can be rebound:
+The commands below run from any dashboard pane and from the composer, once the prefix has been pressed. They are written here as `prefix+<key>` because every one of them, including the prefix itself, can be rebound. The table lists every command that has a default key; the [`[keys]` reference](/configuration/#keys-keys) also lists the commands that have none:
 
 | Key | Action |
 | --- | --- |
@@ -251,6 +249,13 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+minus` | Split this pane down and browse in the new half |
 | `prefix+x` | Close the conversation pane you are in |
 | `prefix+shift+x` | Confirm suspension of the selected session |
+| `prefix+.` | Open the selected session's actions menu (**Session actions…**); `.` does the same on the Sessions pane |
+| `prefix+shift+a` | Show the selected session's sub-agents |
+| `prefix+i` | Interrupt the selected session's running turn; `Esc` in the composer does the same |
+| `prefix+r` | Enter resize mode: arrow keys or `h`/`j`/`k`/`l` move the pane border, `Esc` leaves |
+| `prefix+shift+h` / `prefix+shift+j` / `prefix+shift+k` / `prefix+shift+l` | Swap the conversation pane you are in with the one left, below, above, or right |
+| `prefix+shift+w` | Rename the current workspace |
+| `prefix+shift+d` | Close the current workspace |
 | `prefix+h` / `prefix+j` / `prefix+k` / `prefix+l` | Move the keyboard to the conversation pane left, below, above, or right |
 | `prefix+;` | Move the keyboard back to the conversation pane it was in before |
 | `prefix+z` | Zoom the conversation pane you are in, or put the others back |
@@ -288,7 +293,8 @@ for its hidden rows, and a minimized Sessions pane carries one in its title.
 When a session you are not looking at starts needing you, Mjolnir rings the
 terminal bell after a short delay and keeps the terminal window title at
 `mj · 2 waiting · 1 unread`, so a background tab or a tmux window shows the
-count without switching to it. **Setup → Notifications** turns the bell off,
+count without switching to it. Failed and unreachable sessions are counted
+under their own words, for example `mj · 1 unreachable · 2 waiting`. **Setup → Notifications** turns the bell off,
 adds a desktop notification, or changes the delay; see
 [Configuration](/configuration/#notifications-notify).
 
@@ -311,15 +317,15 @@ Click **Commands** or press `prefix+:` to expose both shortcut-backed and palett
 
 Matching is fuzzy: `cre` finds **Create session** and `mvs` finds **Move session**, with a command whose label starts with the query first, then in-order matches on the label, then commands whose description contains the text. With an empty query the last five commands you ran appear under **Recent** before the groups. Create, Sessions, and Workspaces are listed like every other command, so a search finds them even though they also have buttons.
 
-Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Suspend session, Restart, and Destroy session. **Suspend session** saves a recovery copy and releases the environment for later Resume; idle sessions suspend immediately; a running turn or active sub-agents require confirmation. Its shortcut is `prefix+shift+x`. **Close pane** (`prefix+x`) only dismisses the viewer and leaves the session running.
+Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Suspend session, Restart, and Destroy session. **Suspend session** saves a recovery copy and releases the environment for later Resume; managed clones ask for confirmation when publication is unverified, and a running turn or active sub-agents also require confirmation. Its shortcut is `prefix+shift+x`. **Close pane** (`prefix+x`) only dismisses the viewer and leaves the session running.
 
-**Move** opens preparation and confirmation for a compatible profile or target while keeping the logical session. Restart runs at once when idle and asks first mid-turn. **Destroy session** permanently removes the session, environment, and recovery archive after confirmation; deleting its managed branch is a separate choice. Keeping the branch does not save work held only in the environment. After a failed suspension, **Discard changes since checkpoint…** requires a second confirmation identifying the recovery copy and warning that newer work will be lost. Every confirmation lists a letter for each button, for example `c Cancel · d Destroy session · a Destroy and delete branch`; `Esc` takes the safe answer.
+**Move** opens preparation and confirmation for a compatible profile or target while keeping the logical session. Restart runs at once when idle and asks first mid-turn. **Destroy session** permanently removes the session, environment, and recovery archive after confirmation. Older linked-worktree sessions also offer a choice to delete their managed branch. Keeping that branch does not save work held only in the environment. After a failed suspension, **Discard changes since checkpoint…** requires a second confirmation identifying the recovery copy and warning that newer work will be lost. Every confirmation lists a letter for each button, for example `c Cancel · d Destroy session`; `Esc` takes the safe answer.
 
 ## New session and Setup
 
 Press **Create**, `n`, `N`, or `prefix+c` to open the full session
-creation wizard. It asks for the profile, project, target, and launch options,
-then provisions the session in the selected workspace. The new row appears
+creation wizard. It asks for the profile, then the target, then the project,
+and ends on a review step with the launch options. It then provisions the session in the selected workspace. The new row appears
 immediately with background launch progress; when it is ready, the normal Prompt
 receives focus. No separate fast path or task-entry dialog remains.
 
@@ -330,7 +336,7 @@ section or edits a value. Fixed choices open in a compact menu over the page;
 free-text values open the full editor.
 The page's controls stack in a column at its right edge. **Add** and **Remove**
 manage entries, and on Projects **Create** makes a new project bundle.
-**Detect machine** on **Agent Profiles** discovers the agents installed
+**Detect profiles** on **Agent Profiles** discovers the agents installed
 on this machine and usable local runtimes. Review settings are part of the same
 draft: discovery checks the selected reviewer profile's model and effort
 capabilities and filters incompatible profiles. **Save and Close** or Ctrl+S
@@ -377,6 +383,7 @@ changing the prompt draft.
 | `Tab` | Accept a completion, or move to the next pane when none is offered |
 | `Esc` | Cancel the running turn or shell command |
 | `Page Up` / `Page Down` | Scroll the transcript |
+| `Ctrl+Page Up` | Browse earlier conversation pages; Enter loads an earlier page and Esc returns to the live conversation |
 | `↑` / `↓` | Move within multiline input or walk prompt history |
 | `Ctrl+R` | Search prompt history; `Alt+R` changes the search scope |
 | `Ctrl+V` | Paste the system clipboard |
@@ -394,6 +401,30 @@ Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `�
 
 Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
 
+## Clipboard images
+
+`Ctrl+V` reads the clipboard on the machine running the terminal client. `Cmd+V`
+works too if your terminal forwards that key to Mjolnir. When the active agent
+advertises image support, Mjolnir prefers an image over text and inserts an
+editable `[image N]` marker. Delete the marker to remove the attachment. `/attach <path>` adds an image from that machine's filesystem under the same capability
+rule.
+
+Agents that have not advertised image support, question answer fields, and
+history search receive only the clipboard's text representation. If none is
+available, the notice includes the clipboard error. Text pasted by your terminal
+always stays text. If image support disappears, existing image drafts are kept;
+remove their markers or wait for support to return before sending. `prefix+m`
+remains the dictation shortcut.
+
+Native macOS and Windows use their system clipboards. Linux needs access to a
+working X11 or Wayland clipboard; a headless shell alone cannot read your desktop
+clipboard. WSL uses Windows PowerShell to read the Windows clipboard. Over SSH,
+Mjolnir runs on the remote machine and cannot read your laptop's clipboard image
+through an ordinary text paste. Run the terminal client locally when you need
+local image paste into a remote session. Terminal and tmux key bindings can
+intercept clipboard shortcuts; configure them to forward the key. OSC 52 copy
+support does not provide image clipboard reads.
+
 ## Shell commands
 
 Start a message with `!` to run the remainder through `bash -lc` inside the selected session's target and workspace:
@@ -410,7 +441,7 @@ Press `Esc` to cancel a running shell command. The same `!` syntax works in the 
 
 Press `prefix+?` for scrollable contextual help and `Esc` to close it. The footer is generated from the same command registry: pane-local commands appear first, then the live prefix chord group, so the footer never names a key that is not actually bound.
 
-Inside help, press `/` to filter the rows. Typing narrows them to the rows whose key, command name, or description contains what you typed; `Ctrl+U` clears the filter text; `Esc` clears the filter and a second `Esc` closes help; `Enter` closes it from either state. The arrow and page keys keep scrolling while the filter has focus, and `Ctrl+P` and `Ctrl+N` move up and down one row, the same pairing the command palette answers.
+The help filter has focus as soon as help opens. Typing narrows them to the rows whose key, command name, or description contains what you typed; `Ctrl+U` clears the filter text; `Esc` clears the filter and a second `Esc` closes help; `Enter` closes it from either state. The arrow and page keys keep scrolling while the filter has focus, and `Ctrl+P` and `Ctrl+N` move up and down one row, the same pairing the command palette answers.
 
 If you run Mjolnir inside tmux or GNU screen with its default `ctrl+b` prefix, the multiplexer sees `ctrl+b` first and Mjolnir's prefix never arms. Press `ctrl+b` twice to send it through, as you would for tmux's own prefix, or set `prefix` to a different key in `[keys]`. The dashboard notices this on its first launch inside a multiplexer and says so once in the footer.
 

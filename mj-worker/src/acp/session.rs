@@ -11,6 +11,7 @@ pub(super) async fn serve_session(
     plan_implementation_slot: &PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: &AgentOutputCount,
+    claude_result_count: &ClaudeResultCount,
     session_updates_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -375,7 +376,7 @@ pub(super) async fn serve_session(
         .or(spec.context_restore.as_ref())
     {
         for (key, value) in &reset.selectors {
-            apply_session_selector(
+            let applied = apply_session_selector(
                 connection,
                 &session_id,
                 &mut config_options,
@@ -384,8 +385,26 @@ pub(super) async fn serve_session(
                 key,
                 value,
             )
-            .await
-            .with_context(|| format!("restore {key} after clear"))?;
+            .await;
+            let Err(error) = applied else { continue };
+            // These values are what the previous bridge reported, not what
+            // the user chose (the accepted configuration above carries that).
+            // A resumed Claude bridge reports its model as a raw id it does
+            // not list, and it refuses that id when it is sent back. Such a
+            // value cannot be restored, so the new conversation keeps the
+            // bridge's own value. The rollback after a failed clear never
+            // fails on a selector: it must leave a usable session.
+            if spec.clear_context_request.is_some()
+                && selector_value_is_offered(&config_options, key, value)
+            {
+                return Err(error.context(format!("restore {key} after clear")));
+            }
+            tracing::warn!(
+                selector = key.as_str(),
+                value = value.as_str(),
+                error = format!("{error:#}"),
+                "kept the bridge's value after clear because the reported value could not be restored"
+            );
         }
         if let Some(mode) = &reset.mode {
             enforce_execution_mode(
@@ -669,6 +688,9 @@ pub(super) async fn serve_session(
                 // `session/prompt` reply, so there is no harness that is safe
                 // to exempt and nothing left to special-case.
                 let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
+                // Read before the send: a Claude result stamped at or below
+                // this position arrived before the prompt reached the adapter.
+                let mut prompt_sent_after = claude_result_count.get();
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -724,33 +746,7 @@ pub(super) async fn serve_session(
                                     message: "Plan implementation stopped because Claude did not finish the planning turn successfully.".into(),
                                 }).await?;
                             }
-                            if let Some(mut pending) = pending_steer.take() {
-                                match tokio::time::timeout(
-                                    Duration::from_secs(2),
-                                    pending.response.as_mut(),
-                                )
-                                .await
-                                {
-                                    Ok(outcome) => {
-                                        settle_steer(
-                                            events,
-                                            pending,
-                                            outcome,
-                                        )
-                                        .await?;
-                                    }
-                                    Err(_) => {
-                                        emit_runtime_event(
-                                            events,
-                                            RuntimeEvent::CommandInterrupted {
-                                                request_id: pending.request_id,
-                                                message: "Steering delivery unconfirmed after the turn ended; queued input is held for review".into(),
-                                            },
-                                        )
-                                        .await?;
-                                    }
-                                }
-                            }
+                            settle_steer_at_turn_end(events, &mut pending_steer).await?;
                             // A rejected prompt fails the turn, not the worker: the
                             // bridge can still serve later prompts. A JSON-RPC
                             // error stays on this connection; a dead transport
@@ -817,9 +813,7 @@ pub(super) async fn serve_session(
                                         },
                                     )
                                     .await?;
-                                    if spec.harness == HarnessKind::Codex && mj_core::relay::capacity_error(&error) {
-                                        mj_core::relay::CAPACITY_STOP_REASON.to_owned()
-                                    } else if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
+                                    if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
                                         mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
                                     } else {
                                         PROMPT_ERROR_STOP_REASON.to_owned()
@@ -991,7 +985,7 @@ pub(super) async fn serve_session(
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() }).await?;
                                 } else {
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
@@ -1018,7 +1012,7 @@ pub(super) async fn serve_session(
                                 approved_plan = None;
                                 implementation_deadline = None;
                                 if !prompt_running {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                         request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
@@ -1033,7 +1027,7 @@ pub(super) async fn serve_session(
                                         pending_steer = Some(start_steer(connection, &session_id, cancel_id, steering_prompt));
                                     }
                                 } else {
-                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
                                     if cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }
@@ -1077,6 +1071,47 @@ pub(super) async fn serve_session(
                                 .await?;
                                 cancellation.context("cancel ACP prompt during runtime shutdown")?;
                                 return Ok(None);
+                            }
+                            Some(CommandRequest::ReleasePrompt { request_id: released, received, stop_reason, usage }) => {
+                                // The coordinator saw the result of the cycle
+                                // that answered this prompt. Only this loop knows
+                                // whether that cycle is really the prompt's last:
+                                // a cancel's reply, a plan hand-off, or a newer
+                                // `session/prompt` under the same id still decide.
+                                let answers_this_prompt = released == request_id
+                                    && prompt_running
+                                    && received > prompt_sent_after;
+                                if !answers_this_prompt
+                                    || cancel_deadline.is_some()
+                                    || approved_plan.is_some()
+                                    || mode_restoration.is_some()
+                                {
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        request_id = %released,
+                                        received,
+                                        prompt_sent_after,
+                                        cancelling = cancel_deadline.is_some(),
+                                        plan_handoff = approved_plan.is_some() || mode_restoration.is_some(),
+                                        "a Claude result did not end the running prompt"
+                                    );
+                                    continue;
+                                }
+                                spec.acp_activity.mark();
+                                spec.step_clock.end_turn();
+                                settle_steer_at_turn_end(events, &mut pending_steer).await?;
+                                emit_runtime_event(
+                                    events,
+                                    RuntimeEvent::PromptFinished {
+                                        request_id: request_id.clone(),
+                                        stop_reason: stop_reason.clone(),
+                                        usage,
+                                        diagnostic: None,
+                                    },
+                                )
+                                .await?;
+                                detach_prompt_reply(connection, prompt, request_id, stop_reason);
+                                break;
                             }
                             Some(CommandRequest::Prompt { request_id, .. } | CommandRequest::PromptAttachments { request_id, .. }) => {
                                 emit_runtime_event(
@@ -1179,6 +1214,7 @@ pub(super) async fn serve_session(
                                     updates_before = agent_output_count.get();
                                     asked_to_compact = false;
                                     spec.step_clock.begin_turn();
+                                    prompt_sent_after = claude_result_count.get();
                                     prompt = Box::pin(connection.send_request(PromptRequest::new(session_id.clone(), vec![ContentBlock::Text(TextContent::new(continuation))])).block_task());
                                     prompt_running = true;
                                 }
@@ -1223,7 +1259,7 @@ pub(super) async fn serve_session(
                 )
                 .await;
                 match applied {
-                    Ok(()) => {
+                    Ok(value) => {
                         spec.accepted_config
                             .lock()
                             .map_err(|_| {
@@ -1323,7 +1359,24 @@ pub(super) async fn serve_session(
                 .await?;
             }
             CommandRequest::Cancel { request_id, .. } => {
-                apply_cancel(connection, &session_id, request_id, events, terminals).await?;
+                apply_cancel(
+                    connection,
+                    &session_id,
+                    request_id,
+                    events,
+                    terminals,
+                    pending_elicitations,
+                )
+                .await?;
+            }
+            CommandRequest::ReleasePrompt { request_id, .. } => {
+                // The adapter's reply ended this prompt before the coordinator
+                // relayed its result.
+                tracing::debug!(
+                    session_id = %session_id,
+                    %request_id,
+                    "a Claude result arrived for a prompt that had already ended"
+                );
             }
             CommandRequest::ResolveElicitation {
                 elicitation_id,

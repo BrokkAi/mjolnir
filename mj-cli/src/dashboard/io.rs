@@ -165,6 +165,9 @@ pub(crate) enum DashboardIoUpdate {
         target_id: String,
         result: std::result::Result<(), String>,
     },
+    MountHistory(
+        std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
+    ),
     TargetTest {
         target_id: String,
         result: std::result::Result<(), String>,
@@ -748,14 +751,8 @@ impl DashboardContext {
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        let detach = self
-                            .dashboard
-                            .first_key_label(mj_tui::CommandId::QuitDetach)
-                            .map(|key| format!(" {key} quits."))
-                            .unwrap_or_default();
-                        self.dashboard.set_notice(format!(
-                            "Could not open session: {error}. Press Enter in Sessions to retry, or select another session.{detach}"
-                        ));
+                        self.dashboard
+                            .report_open_failure(&session_id, &error.to_string());
                     }
                 }
             }
@@ -906,6 +903,17 @@ impl DashboardContext {
                     "Container settings failed for {}: {error}",
                     short_id(&session_id)
                 )),
+            },
+            DashboardIoUpdate::MountHistory(result) => match result {
+                Ok(history) => {
+                    // The controller copy is what later `set_state` calls
+                    // publish, so it has to carry the fresh history too.
+                    self.controller.state.mount_history = history.clone();
+                    self.dashboard.apply_mount_history(history);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not refresh recent project directories");
+                }
             },
             DashboardIoUpdate::TargetReadiness {
                 generation,
@@ -1572,8 +1580,9 @@ impl DashboardContext {
                     message.push_str(failure);
                 }
             }
+            tracing::warn!(%session_id, "{message}");
             self.dashboard
-                .set_notice(format!("Session {}: {message}", short_id(&session_id)));
+                .report_session_unreachable(&session_id, false);
         } else if let Err(error) = &result {
             tracing::warn!(%session_id, "stale worker diagnosis task failed: {error}");
         }
@@ -1619,7 +1628,7 @@ mod tests {
             &state,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("active session"), "{error}");
+        assert!(error.to_string().contains("running session"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // An unrelated preference remains editable even while a session needs repair.
         updated = original.clone();
@@ -2035,7 +2044,10 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            target_runtime: None,
             launch_base: None,
+            launch_branch: None,
+            publication: None,
             build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,

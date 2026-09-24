@@ -7,6 +7,8 @@ sessions side by side, on your laptop, in containers, over SSH, or on EC2, and
 keeps them running after you close the terminal. You can move a session to
 another account, another harness, or another machine without starting over.
 
+By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifier, through a public Cloudflare proxy, to tell a question from ongoing work. [Security boundaries](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default) lists everything that leaves your machine and which parts can be turned off.
+
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
 [Releases](https://github.com/BrokkAi/mjolnir/releases)

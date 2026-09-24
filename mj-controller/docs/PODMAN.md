@@ -4,12 +4,12 @@ This is the operational contract for a host that runs Mjolnir Podman
 targets. For a coding-agent handoff, run `mj setup instructions --platform
 linux` and `mj doctor --json`, then give the instructions page plus the output
 of `mj doctor --json` to the coding agent. The host is ready only when every
-postcondition in [Verification](#verification) passes for the same unprivileged
+postcondition in the Verification section below passes for the same unprivileged
 user that will run `mj`.
 
 Mjolnir supports Podman **4.3.0 or newer**. 4.3.0 is the minimum because Mjolnir
 maps each session container's image user onto your host user with
-`--userns=keep-id:uid=,gid=`, which that release added, and because the local
+`--userns=keep-id:uid=<uid>,gid=<gid>`, which that release added, and because the local
 target relies on the mature rootless user-namespace behavior and CLI interfaces
 that Mjolnir probes (`podman info` and `podman unshare`). Podman 3.x and Podman
 4.0 through 4.2 are not supported Mjolnir runtimes.
@@ -119,7 +119,7 @@ the `sessions` directory while managed containers are running.
 `mj doctor --json` runs those three checks only when a local Podman runtime
 exists, and then checks `podman image exists` for each configured image. `mj doctor --json --smoke` replaces that presence check
 with the full disposable run/exec/remove test, so it automates
-[Verification](#verification) sections 3 and 4 for every configured image.
+Verification sections 3 and 4 for every configured image.
 
 A Podman runtime on an SSH machine gets the same probes and the same smoke test, each
 wrapped in a noninteractive `ssh` call to the configured host. Every
@@ -224,9 +224,9 @@ with an exact remediation.
 podman --version
 ```
 
-Expected: the reported version starts with `4.` or a higher major version. For
-example, `podman version 5.4.2` passes. A `3.x` result fails; upgrade Podman as
-described above.
+Expected: the reported version is 4.3.0 or newer. For example,
+`podman version 5.4.2` and `podman version 4.3.1` pass. `3.x` and 4.0 through
+4.2 fail; upgrade Podman as described above.
 
 ### 2. Rootless mode and subordinate mappings work
 
@@ -276,11 +276,11 @@ podman image exists localhost/mjolnir/agent-dev:latest
 
 ### 4. A container can run, execute a command, and be removed
 
-Use the same image as the configured target. The Mjolnir development image supports
-the following verbatim:
+Set `IMAGE` to the configured target's image. The commands below work as
+written with Mjolnir's published image:
 
 ```console
-IMAGE=localhost/mjolnir/agent-dev:latest
+IMAGE=ghcr.io/brokkai/mjolnir/agent-dev:latest
 CHECK_NAME="mj-podman-check-$$"
 podman run --init --detach --name "$CHECK_NAME" "$IMAGE" sleep infinity
 podman exec "$CHECK_NAME" /bin/sh -c 'printf "Mjolnir Podman exec works\n"'

@@ -35,6 +35,67 @@ fn agent_item(position: u64) -> Arc<TranscriptItem> {
     })
 }
 
+#[test]
+fn projection_window_keeps_whole_turns_and_unsettled_content() {
+    let mut session = MaterializedSession::empty("windowed");
+    session.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "original request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    let mut window = ProjectionWindow::of(&session);
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript[0].position, 1401);
+    assert_eq!(window.omitted_items, 1400);
+    assert_eq!(window.latest_turn_start_position, Some(2401));
+    assert_eq!(
+        window.provisional_title.as_deref(),
+        Some("original request")
+    );
+    let retained = session.transcript.clone();
+    window.trim(&mut session, 1024);
+    assert_eq!(session.transcript, retained);
+    assert_eq!(window.omitted_items, 1400);
+
+    let mut long_turn = MaterializedSession::empty("long-turn");
+    long_turn.transcript.push(user_item(1, "large turn"));
+    long_turn.transcript.extend((2..=2500).map(agent_item));
+    let mut long_window = ProjectionWindow::of(&long_turn);
+    long_window.trim(&mut long_turn, 1024);
+    assert_eq!(
+        long_turn.transcript.len(),
+        2500,
+        "never cut an active turn in half"
+    );
+
+    let mut pending = MaterializedSession::empty("pending");
+    pending.transcript = (1..=2500)
+        .map(|position| {
+            if position % 100 == 1 {
+                user_item(position, "request")
+            } else {
+                agent_item(position)
+            }
+        })
+        .collect();
+    if let TranscriptBody::Agent { streaming, .. } =
+        &mut Arc::make_mut(&mut pending.transcript[1]).body
+    {
+        *streaming = true;
+    }
+    let mut pending_window = ProjectionWindow::of(&pending);
+    pending_window.trim(&mut pending, 1024);
+    assert_eq!(
+        pending.transcript.len(),
+        2500,
+        "late streaming data keeps its original turn"
+    );
+}
+
 fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSessionSnapshot {
     ManagedSessionSnapshot {
         materialized: session,
@@ -125,7 +186,10 @@ fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
@@ -274,6 +338,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     let mut parent = sample_session();
     parent.id = "parent-session".into();
     parent.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/worktrees/parent-session"),
@@ -413,6 +478,7 @@ fn project_name_prefers_a_worktree_source_then_a_project_directory_then_the_bund
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
     session.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/home/test/Projects/source/.mj/worktrees/0123456789abcdef"),
@@ -575,6 +641,7 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
     session.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source/crate"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
         worktree_root: PathBuf::from("/home/test/Projects/source/.mj/worktrees/0123456789abcdef"),
@@ -968,6 +1035,29 @@ fn project_directory_history_is_recent_and_isolated_per_remote_host() {
     );
 }
 
+/// A refused Setup change names the running session and what it uses the
+/// way the screen names them, and only what the change touches. Launch
+/// campaign finding C-20.
+#[test]
+fn a_refused_setup_change_names_the_session_and_setting_by_display_name() {
+    let mut state = sample_state();
+    let before = sample_config();
+    let session = state.sessions.values_mut().next().unwrap();
+    session.session_title_override = Some("Fix the login page".into());
+    let project = session.project_name(&before);
+    let mut after = before.clone();
+    after.bundles.remove("hel");
+    let error = state
+        .validate_setup_update(&before, &after)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("\"Fix the login page\""), "{error}");
+    assert!(error.contains(&format!("project \"{project}\"")), "{error}");
+    assert!(!error.contains("0123456789abcdef"), "{error}");
+    assert!(!error.contains("codex-1"), "{error}");
+    assert!(!error.contains("podman"), "{error}");
+}
+
 #[test]
 fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults() {
     let state = sample_state();
@@ -991,7 +1081,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
                 .validate_setup_update(&before, &after)
                 .unwrap_err()
                 .to_string()
-                .contains("active session")
+                .contains("running session")
         );
         // Restoring a removed entry is always permitted.
         state.validate_setup_update(&after, &before).unwrap();

@@ -16,17 +16,48 @@ mj
 
 ## 1. Open the dashboard
 
+Two words come up on every screen:
+
+- A **profile** is one coding-agent account: which agent (Claude Code, Codex,
+  Kimi Code, Grok Build, or Muse Code) and the home directory that holds its
+  sign-in.
+- A **target** is where the session runs: this machine directly (`localhost`),
+  a local container, an SSH host, or an EC2 instance.
+
 When no workspace exists, Mjolnir creates one using the current directory's
 name, then leaves the dashboard ready for an explicit session. On Linux and
-macOS, an unconfigured installation prepares a local Codex profile and
-`localhost` target; it does not start a session.
+macOS, when there is no configuration yet, `mj` adds a `codex` profile that uses
+`~/.codex` and a `localhost` target. It does not check that Codex is installed,
+and it does not start a session.
 
 Press **Create**, `N`, or `prefix+c` to open the full creation wizard. Choose the
 profile, target, project, resources, and attached directories before launch.
 Launch progress and failures appear on the dashboard. When the new session is
 ready, type a prompt and press `Enter`. Use **prefix+s Settings** to discover agent
-accounts, add SSH or EC2 connections, and change runtime options. No setup
-command is required.
+accounts, add SSH or EC2 connections, and change runtime options.
+
+`mj setup` is optional. It does the same discovery from the shell: it looks
+for signed-in agents and local container runtimes, writes what it finds to
+`config.toml`, runs `mj doctor`, and ends by telling you to run `mj`. You can
+skip it and use Settings instead.
+
+### If no coding agent is installed
+
+Mjolnir runs an agent you already use; it does not include one. `mj setup`
+then prints `No existing Codex, Claude Code, Kimi Code, or Grok Build homes
+found.`, and the dashboard says `Mjolnir needs a little fuel.` To fix this:
+
+1. Install one supported agent and sign in with it once, using that agent's
+   own instructions. For example, Claude Code: `npm install -g
+   @anthropic-ai/claude-code`, then run `claude`. Codex: `npm install -g
+   @openai/codex`, then run `codex login`. Signing in creates the agent's home
+   directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`, or
+   `~/.config/muse`).
+2. Open Settings (`prefix+s`), choose **Agent Profiles**, and press **Detect
+   profiles**, or run `mj setup` again.
+
+Codex and Claude Code sessions on this machine also need Node.js 22 or newer
+and npm on `PATH`; Mjolnir installs its own pinned copy of the agent with them.
 
 The dashboard keeps its session list, Conversation and Prompt regions, target
 capacity, and profile quota visible together.
@@ -126,3 +157,75 @@ mj daemon status
 ```
 
 See the [web viewer](/web-viewer/) for browser and phone access. For workspace selection, scripting, daemon operations, and every command-line flag, use the [CLI reference](/cli-reference/).
+
+## What a session does to your repository
+
+On the `localhost` target, a new session gets its own Git worktree at
+`.mj/worktrees/<id>` inside your repository, on a new branch named `mj/<id>`.
+The branch and files you have checked out are not changed. The source checkout must be
+clean. To let the agent edit your checkout directly instead, clear **Create
+managed worktree** on the wizard's review step. Container, SSH, and EC2 targets
+clone the repository instead and do not touch your checkout.
+
+To get the work out:
+
+- Look at the branch: `git log mj/<id>`, or merge it with `git merge mj/<id>`.
+  The branch holds only what the agent committed; uncommitted work is in the
+  worktree folder.
+- Print the diff: `mj diff --session <id>`.
+- Write a patch file: `mj export --session <id> --kind patch --out work.patch`.
+- In the dashboard, `prefix+d` lists the changed files.
+
+**Destroy session…** removes the worktree. It keeps the `mj/<id>` branch
+unless you choose **Destroy and delete branch**.
+
+## What it costs
+
+Mjolnir itself is free. Every agent turn, every automatic review, and every
+automatic continuation turn uses your agent subscription's quota, the same as
+if you ran the agent yourself. The Quota pane shows what is left. EC2 targets
+start instances in your AWS account, and AWS bills you for them until the
+session is suspended or destroyed. Nothing else is billed.
+
+By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifier through a public proxy. [Security boundaries](/security/#what-leaves-this-machine-by-default) lists everything that leaves your machine.
+
+## Bring in a session from another tool (optional)
+
+The Import tab of the session dialog (`prefix+g`) and `mj import` adopt a
+session you started directly in Claude Code, Codex, Kimi Code, Grok Build, or
+Muse Code. Import only reads your repository: it archives the tracked changes
+into Mjolnir's data directory and does not change the checkout. When the
+imported session has a single Git root, resuming it runs the agent in that live
+checkout, not in a new worktree. See [sessions](/sessions/#import-a-native-harness-session).
+
+## Stopping and uninstalling
+
+Each way of stopping leaves a different amount running:
+
+| Action | What stops | What keeps running |
+| --- | --- | --- |
+| `prefix+q` (detach) | This dashboard only | The daemon, every session, and active turns |
+| **Suspend session…** (`prefix+shift+x`) or `mj suspend --session <id>` | That session's agent and target; a recovery copy is saved for **Resume** | The daemon and other sessions |
+| `mj daemon stop` | The daemon | Session workers and their targets, including EC2 instances; the next `mj` reconnects to them |
+| **Destroy session…** or `mj destroy --session <id>` | That session, its target, and its recovery copy, permanently | The daemon, other sessions, and the `mj/<id>` branch unless you delete it |
+
+To stop everything, suspend or destroy each session first, then run
+`mj daemon stop`. `mj sessions` lists what is still live.
+
+To uninstall after that:
+
+1. Remove the programs. The release installer put `mj`, `mj-desktop`,
+   `mj-voice-worker`, and the `mj-worker*` files in `~/.local/bin` (or
+   `MJOLNIR_INSTALL_DIR`). For npm, run `npm uninstall -g @brokkai/mjolnir`.
+2. Remove the configuration directory: `~/.config/mjolnir` on Linux, or the
+   path in `MJ_CONFIG_DIR`.
+3. Remove the data directory, which holds the session database, recovery
+   archives, logs, and project memory: `~/.local/share/mjolnir` on Linux, or
+   the path in `MJ_DATA_DIR`. Deleting it deletes every suspended session.
+4. Remove the cache, which holds Git mirrors and the pinned agent installs:
+   `~/.cache/mjolnir`, or `$XDG_CACHE_HOME/mjolnir` when that is set.
+5. In each repository you used, remove `.mj/worktrees` with
+   `git worktree remove`, and delete the `mj/<id>` branches you no longer want.
+
+On macOS the configuration and data directories are both
+`~/Library/Application Support/mjolnir`.

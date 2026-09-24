@@ -59,7 +59,7 @@ dashboard. The full wizard resolves four things:
 3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
 
-**Create managed worktree** on the final review controls whether a bare Git
+**Create isolated checkout** on the final review controls whether a bare Git
 session gets a separate checkout or uses the selected directory directly. It
 defaults on for primary checkouts and off for linked worktrees. Containers, VMs,
 and plain directories leave it disabled. The terminal and web reviews both
@@ -160,9 +160,9 @@ The daemon verifies the selected recovery copy again before releasing the enviro
 
 **Destroy session…** is a separate irreversible action in both terminal and web
 interfaces. It removes the environment, managed checkout, recovery archive, and
-session record. The confirmation keeps the managed branch by default and offers
-an explicit choice to delete it too. Keeping the managed branch does not preserve
-work held only inside the destroyed environment.
+session record. New managed clones have no branch in the source repository; their
+branches survive only in a published remote or the recovery archive. Older linked
+worktrees keep their managed branch by default and offer a choice to delete it.
 
 **Interrupt turn** leaves the environment available for further prompts.
 **Close pane** only dismisses a viewer; it does not interrupt or suspend a session.
@@ -201,6 +201,18 @@ blocks while the resume runs and reports the reason if it fails. Afterwards
 operation is `POST /api/v1/sessions/{id}/resume` in the
 [HTTP API](/api-reference/#resume-a-suspended-session).
 
+To test native recovery for one selected session, use **Restart session** in
+the terminal command palette, or suspend and resume that session with the
+commands above. This stops its worker and starts a new one, which attempts to
+reload the recorded native session. Restarting only the Mjolnir daemon leaves
+detached workers running and does not exercise native reload. If Codex or
+Claude reports that a never-prompted native session is missing, Mjolnir warns
+and opens a new empty native session under the same Mjolnir session ID. A
+native session with recorded use is not replaced this way. For worker
+attribution during diagnosis, workers launched by current Mjolnir versions
+carry their owning `MJ_INSTANCE` in the process environment; workers launched
+before that marker was added acquire it after a supported session restart.
+
 ### Resume a local session into a container
 
 A session that runs the agent in a directory on this machine can resume on an
@@ -220,8 +232,8 @@ staged, unstaged, and untracked files. What does not travel is anything Git
 ignores—build output, `.env` files, `node_modules`—and anything outside the
 checkout. Install steps and files elsewhere on the host are not migrated.
 
-The branch rule follows the session. A Mjolnir-managed worktree arrives on its
-`mj/<session>` branch. A session opened directly on your own checkout arrives on
+The branch rule follows the checkout. A managed clone arrives on its selected
+or default branch. A session opened directly on your own checkout arrives on
 whatever branch that checkout was on, and `git push` inside the container pushes
 that branch. In the second case your checkout stays on this machine and stops
 tracking the session: edits made in the container do not come back on their own,
@@ -375,9 +387,11 @@ first profile and target.
 
 ### Searching the session dialog
 
-On the **Live** tab the search box matches the running sessions by name, ID, and
-workspace, answering from the dashboard's own state and needing no index. On the
-three history tabs it searches the index and nothing else. With the box empty,
+On the **Live** tab the search box matches running sessions by name, ID, and
+workspace immediately from the dashboard's own state. It also searches the
+index in the background so the other tabs show their match counts before you
+switch tabs. On the three history tabs the index supplies the results. With the
+box empty,
 each tab lists what it always lists. With a query, each tab lists only the
 sessions the index returned, in the order the index ranked them, and each row
 carries the text the search matched. That includes text that appears only inside
@@ -396,6 +410,9 @@ The dialog's last tab, **Archived**, lists sessions whose live Mjolnir copy is
 gone but whose conversation SessionWiki still has. The pane under
 the list previews the selected session's conversation. The web viewer has the
 same search, Archived section, preview, and Restore button.
+Scroll the preview with the wheel or by clicking and dragging its scrollbar.
+When the search has transcript hits, use the up and down arrows beside the hit
+count to move to the previous or next hit; `N` and `n` work from the list too.
 
 ### Restore
 
@@ -403,7 +420,7 @@ Pressing Enter on an archived row, or **Restore** in the viewer, starts a new
 session and hands it a compacted summary of the old conversation as hidden
 first-prompt context — the same compaction Mjolnir uses when a session moves
 between harnesses. The new session keeps the archived session's title. It opens
-in the repository above the archived session's old managed worktree unless you
+in the source repository of the archived session's old managed checkout unless you
 name another project directory. This is a new session, not a revival: there is
 no checkpoint to restore, so the workspace starts fresh and only the
 conversation carries over. An archived session with no user prompt cannot be
@@ -414,11 +431,12 @@ restored.
 With `archive_after_days = N`, the hourly job removes Mjolnir's own copy of a
 suspended session older than N days, but only after confirming SessionWiki holds
 its conversation. It deletes the session record, the checkpoint archive, and the
-session's image attachments. It deletes the `mj/<session id>` branch only when
-every commit on it is already on another branch, local or remote-tracking, that
-is not itself a session branch; otherwise the branch stays, so any work the
-session committed is still there. A branch whose work was squash-merged or
-rebased onto another branch looks unmerged to git and is kept. A session with a
+session's image attachments. For independent clones it does so only when the
+verified checkpoint has no uncommitted files or stashes and every saved commit
+and ref has been confirmed on the configured push remote. A pushed branch can
+be archived even when it has not merged. Unknown publication status keeps the
+checkpoint. Older linked-worktree sessions retain their branch under the legacy
+rule. A session with a
 sub-agent child that is not ready to be archived waits for the next pass. Leave
 `archive_after_days` unset to keep every session forever.
 

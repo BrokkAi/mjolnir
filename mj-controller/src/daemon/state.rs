@@ -183,6 +183,7 @@ impl RuntimeState {
         let registered = self
             .start_create_session(CreateSessionRequest {
                 launch_base: None,
+                launch_branch: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,
@@ -525,6 +526,7 @@ impl RuntimeState {
                 viewer_code,
                 qr_login_url,
                 fallback_reason,
+                ..
             } => WebViewerStatus::Ready {
                 viewer_url: viewer_url.clone(),
                 viewer_code: viewer_code.clone(),

@@ -26,6 +26,8 @@ pub fn is_context_boundary(stable_id: &str) -> bool {
     stable_id.starts_with(CONTEXT_BOUNDARY_PREFIX)
 }
 pub const ARCHIVE_SCHEMA_VERSION_CONTEXT: u32 = 5;
+/// Git refs and stash entries are preserved in independently owned clones.
+pub const ARCHIVE_SCHEMA_VERSION_CLONE_REFS: u32 = 6;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -82,6 +84,18 @@ pub struct RepositoryMetadata {
     pub base_commit: String,
     pub head_commit: String,
     pub branch: Option<String>,
+    /// Saved local branches, tags, and notes in an independent clone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub saved_refs: BTreeMap<String, String>,
+    /// Newest to oldest, including stash entries unreachable from refs/stash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stash_stack: Vec<SavedStashEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedStashEntry {
+    pub commit: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

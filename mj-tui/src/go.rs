@@ -17,6 +17,12 @@ pub struct GoMode {
 }
 
 impl DashboardState {
+    /// Record the repository `mj` was started in, so a new local session
+    /// starts with it as its project directory.
+    pub fn set_launch_project_directory(&mut self, directory: Option<PathBuf>) {
+        self.launch_project_directory = directory;
+    }
+
     pub fn register_go_workspaces(&mut self, modes: impl IntoIterator<Item = GoMode>) {
         for mode in modes {
             if let Some(id) = &mode.workspace_id {

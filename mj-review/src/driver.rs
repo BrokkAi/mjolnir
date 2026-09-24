@@ -545,6 +545,13 @@ impl TurnReviewDriver {
                 super::lanes::QUICK_LANE.label,
                 RoleState::Clean,
             );
+            // A clean report does not wait for a running analysis, but one
+            // that already failed means the reviewer worked without it. That
+            // is a failed review, not "no material findings" (I1-15).
+            if let Analysis::Failed(reason) = self.analysis.clone() {
+                return self
+                    .request_failed(format!("the review could not analyze the change: {reason}"));
+            }
             return self.reach_verdict(ReviewVerdict::Clean);
         }
         self.mark_role(

@@ -65,6 +65,17 @@ fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
     assert!(!view.is_working());
 }
 
+/// I1-14: a review that could not start because a lifecycle operation held
+/// the session said only "session is reserved for a lifecycle operation".
+#[test]
+fn a_review_that_cannot_start_says_so_in_plain_words() {
+    assert_eq!(
+        start_refusal_notice("session is reserved for a lifecycle operation"),
+        "Turn review did not start: another operation was using the session. \
+         The next review covers these changes."
+    );
+}
+
 #[test]
 fn resolution_notices_keep_the_verdict_context_after_close() {
     let resolved_dismissed = TurnReviewPhase::Resolved(Resolution::Dismissed);
@@ -367,6 +378,7 @@ struct FakeEnvironment {
     state: Mutex<TurnReviewState>,
     writes: Mutex<Vec<(TurnReviewState, std::thread::ThreadId)>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
+    subagent: std::sync::atomic::AtomicBool,
 }
 
 struct SaveGate {
@@ -417,6 +429,7 @@ impl FakeEnvironment {
             state: Mutex::new(TurnReviewState::default()),
             writes: Mutex::new(Vec::new()),
             save_gate: Mutex::new(None),
+            subagent: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -454,6 +467,10 @@ impl FakeEnvironment {
 impl ReviewEnvironment for FakeEnvironment {
     fn check(&self, _session_id: &str, _profile: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    fn is_subagent(&self, _session_id: &str) -> bool {
+        self.subagent.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn resolve<'a>(
@@ -552,7 +569,10 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
 #[test]
 fn the_primary_profile_can_run_an_independent_reviewer() {
     let session = mj_core::state::SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -642,6 +662,45 @@ async fn auto_preparation_is_visible_and_can_be_cancelled() {
     assert!(!host.refuses_prompt(&session));
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
     host.shutdown().await.unwrap();
+}
+
+/// I2-9: a Mjolnir sub-agent's turn is reviewed through its parent's turn.
+/// Reviewing the child on its own raced the parent's lifecycle operations
+/// and posted their internal refusals into the child's transcript.
+#[tokio::test]
+async fn a_subagent_turn_is_not_reviewed_on_its_own() {
+    let session = session_id("subagent000");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .subagent
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
+    finish_a_turn(&manager, &host).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "a sub-agent's turn asks its worker for nothing"
+    );
+    assert!(!host.refuses_prompt(&session));
+    let view = host.view(&session);
+    assert!(
+        view.as_ref()
+            .is_none_or(|view| !view.status.contains("did not start")),
+        "{view:?}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_lifecycle_cancellation_is_not_shown_as_an_internal_error() {
+    let notice = start_refusal_notice("reviewer operation cancelled for session lifecycle change");
+    assert!(!notice.contains("lifecycle"), "{notice}");
+    assert!(
+        notice.contains("another operation was using the session"),
+        "{notice}"
+    );
 }
 
 /// A turn the harness starts on its own also runs and then goes idle.

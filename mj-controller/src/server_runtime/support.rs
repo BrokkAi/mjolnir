@@ -9,25 +9,13 @@ pub(super) fn feed_stopped(shutting_down: bool, reason: &'static str) -> Option<
     (!shutting_down).then(|| anyhow::anyhow!(reason))
 }
 
-/// Whether a session's agent said it accepts image content in prompts. An
-/// agent that has not answered `initialize` yet has advertised nothing, so the
-/// phone is not offered controls the agent may refuse.
-pub(super) fn agent_accepts_prompt_images(
-    operational: &mj_core::relay::RelayOperationalState,
-) -> bool {
-    operational
-        .agent_capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.prompt_capabilities.image)
-}
-
 pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<String> {
     match action {
         ControllerAction::New { .. } => None,
         ControllerAction::Prompt { session_id, .. }
         | ControllerAction::RunShell { session_id, .. }
         | ControllerAction::CancelShell { session_id, .. }
-        | ControllerAction::Suspend { session_id }
+        | ControllerAction::Suspend { session_id, .. }
         | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }

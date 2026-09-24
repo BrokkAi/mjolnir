@@ -467,7 +467,10 @@ fn mounts_without_an_overlay_are_not_probed() {
 fn failed_new_session_provisioning_retains_error_record() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -551,6 +554,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "failed image",
             SessionLaunchOptions {
                 launch_base: None,
+                launch_branch: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -631,6 +635,7 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
             "borrow the parent container",
             SessionLaunchOptions {
                 launch_base: None,
+                launch_branch: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -726,6 +731,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "missing Node",
             SessionLaunchOptions {
                 launch_base: None,
+                launch_branch: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -774,7 +780,12 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
+            r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
+        ).unwrap()).into()),
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -810,6 +821,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         last_checkpoint_error: None,
         checkpoint: None,
     };
+    let runtime = session.target_runtime.clone();
     let mut cleaned = State::default();
     cleaned.sessions.insert(session_id.into(), session.clone());
 
@@ -833,6 +845,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let retained = cleanup_failed.sessions.get(session_id).unwrap();
     assert_eq!(retained.state, SessionState::Error);
     assert!(retained.target.is_some());
+    assert_eq!(retained.target_runtime, runtime);
     assert!(failure.to_string().contains("cleanup"));
 }
 #[test]
@@ -1294,7 +1307,7 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         let lock = lock.clone();
         let started = started.clone();
         std::thread::spawn(move || {
-            let guard = lock.lock().unwrap();
+            let guard = crate::image_pull_gate::hold_image_pull(&lock, || false, || {}).unwrap();
             started.wait();
             std::thread::sleep(std::time::Duration::from_millis(300));
             drop(guard);

@@ -11,6 +11,13 @@ pub trait ReviewEnvironment: Send + Sync {
     /// reviewed under `profile`.
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
+    /// Whether this session is a Mjolnir-managed sub-agent. Its changes are
+    /// reviewed through the parent's turn, so it is never reviewed on its
+    /// own. Blocking: it reads the controller's database.
+    fn is_subagent(&self, _session_id: &str) -> bool {
+        false
+    }
+
     fn resolve<'a>(
         &'a self,
         handle: ManagedSessionHandle,
@@ -75,6 +82,10 @@ impl ReviewEnvironment for ControllerEnvironment {
             controller.state.sessions.get(session_id),
             profile,
         )
+    }
+
+    fn is_subagent(&self, session_id: &str) -> bool {
+        crate::database::load_subagent(session_id).is_ok_and(|record| record.is_some())
     }
 
     fn resolve<'a>(

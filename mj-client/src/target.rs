@@ -20,22 +20,13 @@ pub fn managed_worktree_target(template: &TargetTemplate) -> Result<ManagedWorkt
                 Some(user) => format!("{user}@{}", ssh.host),
                 None => ssh.host.clone(),
             };
-            // Keep this in lockstep with the controller's SSH backend. These
-            // options are part of the target identity because the managed
-            // worktree compares it when deciding whether a resume stays put.
-            let mut ssh_args = vec![
-                "-o".to_owned(),
-                "BatchMode=yes".to_owned(),
-                "-o".to_owned(),
-                "StrictHostKeyChecking=accept-new".to_owned(),
-                "-o".to_owned(),
-                "ConnectTimeout=15".to_owned(),
-            ];
-            ssh_args.extend(ssh.extra_args.iter().cloned());
-            if let Some(identity) = &ssh.identity_file {
-                ssh_args.push("-i".to_owned());
-                ssh_args.push(identity.to_string_lossy().into_owned());
-            }
+            // The same arguments the controller's SSH backend uses. Only the
+            // location they name (see `ManagedWorktreeTarget::same_location`)
+            // decides whether a resume stays put.
+            let ssh_args = mj_core::targets::ssh_args_with_identity(
+                &ssh.extra_args,
+                ssh.identity_file.as_deref(),
+            );
             Ok(ManagedWorktreeTarget::Ssh {
                 destination,
                 ssh_args,
@@ -108,7 +99,9 @@ pub fn resume_compatibility(
         ));
     };
     match managed_worktree_target(target) {
-        Ok(resume_target) if resume_target == worktree.target => Ok(ResumePlan::InPlace),
+        Ok(resume_target) if resume_target.same_location(&worktree.target) => {
+            Ok(ResumePlan::InPlace)
+        }
         Ok(_) => Err(format!(
             "this session's working tree lives on {}; resume it there",
             managed_worktree_location(&worktree.target)

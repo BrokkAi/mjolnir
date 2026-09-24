@@ -110,6 +110,19 @@ pub(super) async fn poll_daemon_runtime(
         .await
 }
 
+/// A submit the daemon answered with an error was refused, not lost, unless
+/// the daemon itself says delivery is unconfirmed. Only a failed exchange with
+/// the daemon leaves delivery unknown (I1-12).
+fn remote_submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+    let unconfirmed = error
+        .downcast_ref::<mj_client::daemon::DaemonRefusal>()
+        .is_none_or(mj_client::daemon::DaemonRefusal::delivery_unconfirmed);
+    mj_client::session::SubmitFailure {
+        unconfirmed,
+        message: format!("{error:#}"),
+    }
+}
+
 pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest) {
     match request {
         RemoteSessionRequest::Submit {
@@ -132,10 +145,7 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
                     .await
             }
             .await
-            .map_err(|error| mj_client::session::SubmitFailure {
-                unconfirmed: true,
-                message: format!("{error:#}"),
-            });
+            .map_err(|error| remote_submit_failure(&error));
             let _ = reply.send(result);
         }
         RemoteSessionRequest::Sync { session_id, reply } => {
@@ -219,4 +229,29 @@ pub(super) fn queued_prompt_entries(
             created_at_ms: prompt.queued_at_ms,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_submit_failure;
+    use mj_client::daemon::DaemonRefusal;
+
+    /// I1-12: the daemon's refusal of `/clear` reached the chat as
+    /// "Delivery unconfirmed" and stayed pinned as an unconfirmed row.
+    #[test]
+    fn a_daemon_refusal_is_a_rejection_and_a_lost_exchange_is_unconfirmed() {
+        let refused = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(
+            "/clear requires an idle session".into(),
+        )));
+        assert!(!refused.unconfirmed);
+        assert_eq!(refused.message, "/clear requires an idle session");
+
+        let unconfirmed = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(
+            "delivery unconfirmed: channel closed".into(),
+        )));
+        assert!(unconfirmed.unconfirmed);
+
+        let lost = remote_submit_failure(&anyhow::anyhow!("daemon connection reset"));
+        assert!(lost.unconfirmed);
+    }
 }

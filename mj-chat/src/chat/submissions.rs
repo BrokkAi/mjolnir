@@ -14,6 +14,21 @@ pub(super) struct PendingSubmission {
     started_at: Option<std::time::Instant>,
 }
 
+/// "Delivery unconfirmed: <why>", without repeating the words when the error
+/// itself starts with them.
+fn unconfirmed_status(error: &str) -> String {
+    let marker = mj_client::session::DeliveryUnconfirmed.to_string();
+    let reason = error
+        .strip_prefix(marker.as_str())
+        .map(|rest| rest.trim_start_matches(':').trim_start())
+        .unwrap_or(error);
+    if reason.is_empty() {
+        "Delivery unconfirmed".to_owned()
+    } else {
+        format!("Delivery unconfirmed: {reason}")
+    }
+}
+
 impl ChatState {
     pub(super) fn restore_submissions(&mut self, pending: Vec<PendingSubmission>) {
         self.pending_submissions = pending;
@@ -101,7 +116,7 @@ impl ChatState {
         for pending in &mut self.pending_submissions {
             if !pending.finished {
                 pending.finished = true;
-                pending.status = format!("Delivery unconfirmed: {error}");
+                pending.status = unconfirmed_status(error);
             }
         }
         self.pending_submissions
@@ -116,7 +131,7 @@ impl ChatState {
             .find(|pending| pending.id == id)
         {
             pending.finished = true;
-            pending.status = format!("Delivery unconfirmed: {error}");
+            pending.status = unconfirmed_status(error);
         }
         self.pending_submissions
             .retain(|pending| !(pending.represented && pending.finished));
@@ -257,6 +272,46 @@ mod tests {
         );
         reopened.apply_materialized(&queued("one"), &[], &[]);
         assert_eq!(reopened.submission_entries().count(), 0);
+    }
+
+    /// I1-12: the words "Delivery unconfirmed" appear once.
+    #[test]
+    fn an_unconfirmed_status_does_not_repeat_its_prefix() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        submit(&mut chat, "one", "hello");
+        chat.unconfirm_submission("one", "delivery unconfirmed: channel closed");
+        assert_eq!(
+            chat.pending_submissions[0].status,
+            "Delivery unconfirmed: channel closed"
+        );
+    }
+
+    /// I1-12: a refused `/clear` becomes a dated notice, leaves nothing pinned
+    /// below later turns or saved with the draft, and keeps the command in
+    /// the composer for a retry.
+    #[test]
+    fn a_refused_slash_command_is_a_notice_not_a_pinned_row() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        submit(&mut chat, "clear", "/clear");
+        apply_chat_remote_result(
+            &mut chat,
+            ChatRemoteResult::Prompt {
+                command_id: "clear".into(),
+                text: "/clear".into(),
+                images: Vec::new(),
+                result: Err("/clear requires an idle session".into()),
+            },
+        );
+        assert!(chat.unsent_prompts.is_empty());
+        assert!(chat.pending_submissions.is_empty());
+        assert_eq!(chat.input, "/clear");
+        assert_eq!(
+            chat.conversation_notices
+                .last()
+                .map(|notice| notice.text.as_str()),
+            Some("/clear was not run: /clear requires an idle session")
+        );
+        assert!(!chat.encoded_draft().contains("requires an idle session"));
     }
 
     #[test]

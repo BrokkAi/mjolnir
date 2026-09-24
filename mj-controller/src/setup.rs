@@ -766,9 +766,10 @@ pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str,
     }
 }
 
-/// The same default `serde` applies to a hand-written SSH machine.
+/// A new machine's directory. The file names it, so a machine written here
+/// never falls back to the former directory a hand-written one keeps.
 fn default_ssh_workspace_prefix() -> PathBuf {
-    PathBuf::from(".local/share/hel/workspaces")
+    PathBuf::from(mj_core::config::DEFAULT_WORKSPACE_PREFIX)
 }
 
 fn config_id(value: &str) -> String {
@@ -909,7 +910,10 @@ fn run_setup_dialog_inner(
         output,
         "Advanced users can edit TOML for extra profiles, virtual monorepos, SSH, and AWS."
     )?;
-    writeln!(output, "Press n to start your first session.")?;
+    writeln!(
+        output,
+        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
+    )?;
     Ok(SetupOutcome::Written)
 }
 
@@ -1465,7 +1469,36 @@ fn run_smoke_test(
         _ => "Smoke test: verifying a disposable container...",
     };
     writeln!(output, "{description}")?;
+    if let Some(announcement) = smoke_download_announcement(target) {
+        writeln!(output, "{announcement}")?;
+    }
     run_setup_smoke_test(target, &smoke_id, executor)
+}
+
+/// Download size of [`mj_core::config::DEFAULT_CONTAINER_IMAGE`], as the
+/// launch campaign measured it (1.93 GB on 2026-09-23). Update it when the
+/// image grows or shrinks noticeably.
+const DEFAULT_IMAGE_DOWNLOAD_SIZE: &str = "about 2 GB";
+
+/// The engine pulls a missing image as part of the smoke test's first
+/// command and prints nothing while it does, so say what may happen before
+/// the wait starts.
+fn smoke_download_announcement(target: &RuntimeTargetTemplate) -> Option<String> {
+    let (engine, container) = match target {
+        RuntimeTargetTemplate::LocalPodman(container) => ("Podman", container),
+        RuntimeTargetTemplate::LocalDocker(container) => ("Docker", container),
+        RuntimeTargetTemplate::AppleContainer(container) => ("Apple container", container),
+        _ => return None,
+    };
+    let image = &container.image;
+    let size = if image == mj_core::config::DEFAULT_CONTAINER_IMAGE {
+        format!(" ({DEFAULT_IMAGE_DOWNLOAD_SIZE})")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "If {image} is not on this machine yet, {engine} downloads it first{size}. That can take several minutes, and nothing more is printed until it finishes."
+    ))
 }
 
 #[cfg(test)]

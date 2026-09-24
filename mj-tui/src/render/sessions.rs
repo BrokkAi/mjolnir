@@ -1377,11 +1377,22 @@ pub(crate) fn permission_badge(mode: Option<PermissionMode>) -> Option<Span<'sta
     })
 }
 
-pub(crate) fn capacity_target_labels(target_ids: &[String], config: &Config) -> Line<'static> {
+pub(crate) fn capacity_target_labels(
+    target_ids: &[String],
+    dashboard: &DashboardState,
+) -> Line<'static> {
+    let config = &dashboard.config;
     let mut spans = Vec::new();
     for (index, target_id) in target_ids.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
+        }
+        if dashboard.target_known_unavailable(target_id) {
+            spans.push(Span::styled(
+                format!("{target_id} (unavailable)"),
+                Style::default().fg(theme::palette().muted),
+            ));
+            continue;
         }
         spans.push(Span::raw(target_id.clone()));
         if let Some(badge) = config
@@ -1403,8 +1414,21 @@ pub(crate) fn render_session_scrollbar(
     position: usize,
     viewport_content_length: usize,
 ) {
+    if let Some(geometry) =
+        session_scrollbar_geometry(area, content_length, position, viewport_content_length)
+    {
+        render_scrollbar(frame, geometry);
+    }
+}
+
+pub(crate) fn session_scrollbar_geometry(
+    area: Rect,
+    content_length: usize,
+    position: usize,
+    viewport_content_length: usize,
+) -> Option<mj_chat::components::ScrollbarGeometry> {
     if area.width == 0 || content_length <= viewport_content_length {
-        return;
+        return None;
     }
     let track = Rect::new(
         area.right().saturating_sub(1),
@@ -1412,11 +1436,7 @@ pub(crate) fn render_session_scrollbar(
         1,
         area.height.saturating_sub(2),
     );
-    if let Some(geometry) =
-        scrollbar_geometry(track, content_length, position, viewport_content_length)
-    {
-        render_scrollbar(frame, geometry);
-    }
+    scrollbar_geometry(track, content_length, position, viewport_content_length)
 }
 
 pub(crate) fn operation_status(operation: &SessionOperationDisplay) -> (String, u64) {

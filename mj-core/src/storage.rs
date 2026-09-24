@@ -161,6 +161,30 @@ pub struct TranscriptPage {
     pub execution: MaterializedExecutionState,
 }
 
+/// Exclusive chronological cursor; update sequences are not creation order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptCursor {
+    pub position: u64,
+    pub stable_id: String,
+}
+
+impl TranscriptCursor {
+    pub fn of(item: &TranscriptItem) -> Self {
+        Self {
+            position: item.position,
+            stable_id: item.stable_id.clone(),
+        }
+    }
+}
+
+/// A bounded historical read, independent of the live projection window.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptHistoryPage {
+    pub items: Vec<Arc<TranscriptItem>>,
+    pub before: Option<TranscriptCursor>,
+    pub frontier: u64,
+}
+
 /// What one retention pass reclaimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TranscriptRetention {

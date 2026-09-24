@@ -128,15 +128,16 @@ turn, harness-started work, terminal, background command, queued prompt, or
 another checkpoint operation is not quiet and may defer the copy. See
 [Troubleshooting](/troubleshooting/) if a checkpoint never becomes eligible.
 
-## Detach, stop, destroy, and resume are different
+## Detach, suspend, destroy, and resume are different
 
 **Detach** closes only the current client. The daemon, worker, harness, and
 queue keep running. In the TUI use `prefix+q`; running `mj` later reattaches.
 
-**Stop** preserves the logical session. A normal stop records its intent,
+**Suspend session…** (`prefix+shift+x`) preserves the logical session. A
+normal suspension records its intent,
 creates or safely reuses a verified archive, closes and seals the relay at the
 captured frontier, and only then removes the exact managed target. If a
-checkpoint fails, stop fails non-destructively and can be retried. A controller
+checkpoint fails, suspension fails non-destructively and can be retried. A controller
 restart can continue a previously recorded closing transition.
 
 **Resume** provisions a fresh selected target, verifies and restores the
@@ -202,21 +203,21 @@ harness-private state is not translated into another harness's native history.
 Move restores the harness from the checkpoint rather than transferring live
 processes, whether or not it keeps the environment.
 
-**Destroy** is permanent. Destroying a stopped session removes its recovery
-archive and record. Force-destroy can tear down an active target without a new
-checkpoint and removes every Mjolnir-owned recovery artifact; it is the
-explicit data-loss escape hatch.
+**Destroy session…** is permanent. Destroying a suspended session removes its
+recovery archive and record. Destroying a live session tears down its target
+without a new checkpoint and removes every Mjolnir-owned recovery artifact; it
+is the explicit data-loss escape hatch.
 
-Destroying a session does not delete the git branch of its managed worktree.
-The checkout goes, the branch stays in the source repository, so committed
-work survives and you can check it out or recreate a worktree from it. Both
-destroy confirmations offer a third button, **Yes, delete branch**, which
-deletes the branch as well. That is the only way Mjolnir removes a branch you
-have worked in.
+An independent managed clone owns its own branches. Suspension verifies a
+checkpoint before deleting the clone, and Resume recreates it from the source
+and saved Git work. Destroy removes that recovery copy and can discard work
+which has not been pushed. Older linked-worktree sessions retain their branch
+in the source repository; their destroy dialog can also delete that branch.
 
-A **force stop** is narrower: it requires an existing verified archive, skips
-the fresh checkpoint, tears down the current target, and leaves the session
-resumable from that older archive. Any work after that archive can be lost.
+When a suspension fails, **Discard changes since checkpoint…** is narrower: it
+requires an existing verified archive, skips the fresh checkpoint, tears down
+the current target, and leaves the session resumable from that older archive.
+It asks a second time before it runs. Any work after that archive can be lost.
 
 Session commands and confirmation screens are covered in
 [Session lifecycle](/sessions/).
