@@ -387,7 +387,7 @@ pub(crate) struct ExportArgs {
     #[arg(long, value_enum, default_value_t = ExportKindArg::Patch)]
     kind: ExportKindArg,
     /// Branch to push, required by `--kind branch`.
-    #[arg(long)]
+    #[arg(long, required_if_eq("kind", "branch"))]
     branch: Option<String>,
     /// File to read, relative to the directory the agent runs in, required by
     /// `--kind file`.
@@ -1841,6 +1841,16 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::File);
         assert_eq!(args.path.as_deref(), Some("src/main.rs"));
+
+        // Launch finding R3-11: without a branch name the API answered "a
+        // branch export needs a branch name", which named no flag. The
+        // command line refuses it first and names `--branch`.
+        let Err(error) =
+            Cli::try_parse_from(["mj", "export", "--session", "s1", "--kind", "branch"])
+        else {
+            panic!("a branch export without --branch is refused");
+        };
+        assert!(error.to_string().contains("--branch"), "{error}");
 
         // An export defaults to the patch, which is what a caller reviewing
         // the work asks for most.
