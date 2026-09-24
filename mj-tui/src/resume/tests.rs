@@ -1377,10 +1377,12 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
     dashboard.handle_key(key(KeyCode::Char('/')));
     focus_resume_control(&mut dashboard, ResumeFocus::Search);
     for character in "mast".chars() {
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char(character))),
-            DashboardAction::None,
-            "a name search answers from the session list, not the index"
+        assert!(
+            matches!(
+                dashboard.handle_key(key(KeyCode::Char(character))),
+                DashboardAction::SearchArchivedSessions { .. }
+            ),
+            "the Live list answers immediately while the index searches the other tabs"
         );
     }
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
@@ -1485,11 +1487,10 @@ fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
     assert_eq!(rows(&dashboard).len(), 3, "`a` brings the whole list back");
 }
 
-/// The Live tab matches names itself, so the index never hears what is typed
-/// there. Leaving for a history tab is when it has to be asked, or that tab
-/// would show no matches until the next keystroke.
+/// The Live tab matches names immediately and asks the index so the other
+/// tabs' counts can update before the person leaves Live.
 #[test]
-fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
+fn a_live_tab_search_updates_other_tab_counts_before_switching() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
     dashboard.show_resume_dialog(1, Vec::new());
     // Drawing registers the dialog's controls, so `/` reaches the box; the
@@ -1497,28 +1498,33 @@ fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
     drawn(&mut dashboard, 120, 40);
     dashboard.handle_key(key(KeyCode::Char('/')));
     for character in "mast".chars() {
-        assert_eq!(
+        assert!(matches!(
             dashboard.handle_key(key(KeyCode::Char(character))),
-            DashboardAction::None,
-            "a name search answers from the session list, not the index"
-        );
+            DashboardAction::SearchArchivedSessions { .. }
+        ));
     }
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 
-    // The caret sits at the end of what was typed, so Right has no query left
-    // to walk and belongs to the tab strip.
+    apply_ready_rows(&mut dashboard, vec![wiki_row("gone", true)]);
+    assert_eq!(dashboard.resume_hit_counts, [0, 0, 0, 1]);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        resume_tab_labels(&dashboard, dialog),
+        [" Live ", " Mjolnir · 0 ", " Import · 0 ", " Archived · 1 "]
+    );
+
+    // Switching tabs uses the answer already requested while typing.
     let action = dashboard.handle_key(key(KeyCode::Right));
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
     assert_eq!(dialog.tab, ResumeTab::Hel);
-    assert!(
-        matches!(
-            &action,
-            DashboardAction::SearchArchivedSessions { query, .. } if query == "mast"
-        ),
-        "{action:?}"
-    );
+    assert!(!matches!(
+        action,
+        DashboardAction::SearchArchivedSessions { .. }
+    ));
 }
 
 /// The arrows go on walking the strip after landing on a tab with nothing in
@@ -2697,6 +2703,47 @@ fn the_wheel_scrolls_the_preview_pane_it_is_over() {
     assert!(before > 0);
 }
 
+#[test]
+fn the_preview_scrollbar_seeks_and_drags_to_both_ends() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    switch_to_archive(&mut dashboard);
+    dashboard.apply_wiki_brief(
+        "archive-0".into(),
+        (0..120)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    drawn(&mut dashboard, 120, 40);
+    let geometry = match &dashboard.mode {
+        Mode::ResumeDialog(dialog) => dialog.preview_scrollbar.borrow().geometry().unwrap(),
+        _ => panic!("expected the resume dialog"),
+    };
+    let at = |kind, row| mouse_at(kind, (geometry.track.x, row));
+    assert!(dashboard.component_handles_mouse(at(
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.track.y
+    )));
+    dashboard.handle_mouse(at(
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.track.y,
+    ));
+    dashboard.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), u16::MAX));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.preview_scroll, geometry.max_scroll);
+    dashboard.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), 0));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.preview_scroll, 0);
+    dashboard.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), 0));
+    assert!(!dashboard.component_handles_mouse(at(MouseEventKind::Drag(MouseButton::Left), 0)));
+}
+
 /// A search that is still running says so, and only the answer to the
 /// outstanding request ends the wait.
 #[test]
@@ -2826,6 +2873,27 @@ fn n_moves_the_preview_pane_to_the_next_hit() {
     };
     assert_eq!(dialog.preview_hit, 1);
     assert!(dialog.preview_scroll > 0, "the pane scrolled to get there");
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let previous = point(&lines, "[↑]");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), previous));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), previous));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.preview_hit, 0,
+        "the up arrow selects the preceding hit"
+    );
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let next = point(&lines, "[↓]");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), next));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), next));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.preview_hit, 1, "the down arrow selects the next hit");
 }
 
 /// The pane asks for what it shows: the query's matching passages while a
