@@ -362,7 +362,11 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardControl::Back => {
-                wizard.step = WizardStep::Bundle;
+                wizard.step = if self.config.bundles.is_empty() {
+                    WizardStep::Target
+                } else {
+                    WizardStep::Bundle
+                };
                 wizard.form.get_mut().focus(step_initial(wizard.step));
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -377,7 +381,11 @@ impl DashboardState {
             }
             WizardControl::NewBundleSource => {
                 wizard.form.get_mut().focus(WizardControl::NewBundleSource);
-                self.add_or_report_new_bundle_repository(wizard)
+                if wizard.project_picker.multiple {
+                    self.add_or_report_new_bundle_repository(wizard)
+                } else {
+                    self.submit_new_bundle(wizard)
+                }
             }
             WizardControl::Add => {
                 wizard.form.get_mut().focus(WizardControl::Add);
@@ -391,7 +399,7 @@ impl DashboardState {
             }
             WizardControl::Next => {
                 wizard.form.get_mut().focus(WizardControl::Next);
-                self.submit_new_bundle(wizard)
+                self.activate_project_control(wizard, id)
             }
             WizardControl::ProfileList
             | WizardControl::BundleList
@@ -409,6 +417,7 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
+            _ => self.activate_project_control(wizard, id),
         }
     }
 
@@ -422,7 +431,10 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    fn submit_new_bundle(&mut self, mut wizard: NewWizard) -> DashboardAction {
+    pub(in crate::wizards) fn submit_new_bundle(
+        &mut self,
+        mut wizard: NewWizard,
+    ) -> DashboardAction {
         let sources = wizard.new_bundle_sources_for_submit();
         if sources.is_empty() {
             self.notices.set("Repository source cannot be empty.");
@@ -430,7 +442,8 @@ impl DashboardState {
             return DashboardAction::None;
         }
         wizard.bundle_creation_in_flight = true;
-        self.notices.set("Creating bundle…");
+        wizard.project_picker.creation_error = None;
+        self.notices.set("Preparing project…");
         self.mode = Mode::New(wizard);
         DashboardAction::CreateBundle { sources }
     }

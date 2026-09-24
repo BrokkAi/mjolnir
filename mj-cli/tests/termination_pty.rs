@@ -593,18 +593,18 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_output(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 1/4 profile",
+        b"New session \xc2\xb7 1/4 account",
         Instant::now() + TIMEOUT,
     );
     // Explicit New always enters the full wizard. The first two steps already
     // have deterministic fixture defaults, while the project step requires
     // the real temporary checkout path. Later titles arrive as terminal diff
-    // updates, so wait for each changed title suffix rather than a full redraw.
+    // updates, so wait for a changed title fragment rather than a full redraw.
     master.write_all(b"\r").expect("choose fixture profile");
     wait_for_output(
         &mut master,
         &mut output,
-        b"target \xe2\x94\x80",
+        b"where ",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").expect("choose fixture target");
@@ -671,14 +671,14 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_output(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 1/4 profile",
+        b"New session \xc2\xb7 1/4 account",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
     wait_for_output(
         &mut master,
         &mut output,
-        b"target \xe2\x94\x80",
+        b"where ",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();

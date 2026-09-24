@@ -125,9 +125,9 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
 
     before = {row["id"] for row in lab.snapshot()["sessions"]}
     click("Create")
-    tmux.wait_for("New session · 1/4 profile")
+    tmux.wait_for("New session · 1/4 account")
     click("  Next  ")
-    tmux.wait_for("New session · 2/4 target")
+    tmux.wait_for("New session · 2/4 where to run")
     click("  Next  ")
     tmux.wait_for("New session · 3/4 local project")
     name(str(lab.project))

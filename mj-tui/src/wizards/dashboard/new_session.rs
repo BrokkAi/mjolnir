@@ -118,7 +118,11 @@ impl DashboardState {
                         .unwrap_or_default();
                     WizardStep::Bundle
                 };
-                wizard.form.get_mut().focus(step_initial(wizard.step));
+                if wizard.step == WizardStep::Bundle && self.config.bundles.is_empty() {
+                    wizard.open_projects(self);
+                } else {
+                    wizard.form.get_mut().focus(step_initial(wizard.step));
+                }
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
@@ -287,14 +291,14 @@ impl DashboardState {
             .position(|id| *id == bundle_id)
         else {
             self.notices
-                .set(format!("Created bundle {bundle_id:?} was not found."));
+                .set(format!("Selected project {bundle_id:?} was not found."));
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         };
         self.invalidate_new_remote_preflight(&mut wizard);
         wizard.bundle = index;
         wizard.step = WizardStep::Review;
-        self.notices.set(format!("Created bundle {bundle_id}."));
+        self.notices.set(format!("Selected project {bundle_id}."));
         self.mode = Mode::New(wizard);
         DashboardAction::None
     }
@@ -306,10 +310,10 @@ impl DashboardState {
             && wizard.bundle_creation_in_flight
         {
             wizard.bundle_creation_in_flight = false;
+            wizard.project_picker.creation_error = Some(error.to_owned());
             self.mode = Mode::New(wizard);
         }
-        self.notices
-            .set(format!("Could not create bundle: {error}"));
+        self.notices.set(format!("Could not use project: {error}"));
     }
 
     pub fn apply_aws_resource_options(

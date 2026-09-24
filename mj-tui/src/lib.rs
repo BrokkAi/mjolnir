@@ -251,6 +251,10 @@ pub enum DashboardAction {
         retry: Box<DashboardAction>,
     },
     /// Ask the host that owns a path field for its completion candidates.
+    DiscoverProjects {
+        context: String,
+        request: mj_core::project_picker::ProjectDiscoveryRequest,
+    },
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
         kind: mj_core::path_completion::CompletionKind,

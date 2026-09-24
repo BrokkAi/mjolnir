@@ -279,9 +279,7 @@ impl WizardDraft for NewWizard {
         }
         if self.step == WizardStep::Bundle && id == WizardControl::Add {
             dashboard.invalidate_new_remote_preflight(&mut self);
-            self.step = WizardStep::NewBundle;
-            self.form.get_mut().focus(step_initial(self.step));
-            self.form.get_mut().focus(WizardControl::NewBundleSource);
+            self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
         if id == WizardControl::Back {
@@ -341,11 +339,24 @@ impl WizardDraft for NewWizard {
                 }
                 Ok(())
             }
+            WizardControl::ProjectQuery => {
+                let input = if self.project_picker.tab == ProjectTab::Folders {
+                    &mut self.project_picker.folder_filter
+                } else {
+                    &mut self.project_picker.query
+                };
+                if PathField::apply(input, edit) == EditOutcome::Changed {
+                    self.project_picker.focus_results = false;
+                    dashboard.record_event_handled();
+                }
+                Ok(())
+            }
             WizardControl::NewBundleSource => {
                 if self.bundle_creation_in_flight {
                     return Ok(());
                 }
                 if PathField::apply(&mut self.new_bundle_source, edit) == EditOutcome::Changed {
+                    self.project_picker.creation_error = None;
                     dashboard.record_event_handled();
                 }
                 Ok(())
@@ -371,6 +382,25 @@ impl WizardDraft for NewWizard {
                     self.note_draft_change(dashboard, DraftChange::BundleSelected);
                 }
                 self.bundle = *selected;
+            }
+            Interaction::Select(WizardControl::ProjectResults, selected) => {
+                self.project_picker.selected = *selected;
+            }
+            Interaction::Toggle(WizardControl::ProjectMultiple) => {
+                self.project_picker.multiple = !self.project_picker.multiple;
+                if !self.project_picker.multiple {
+                    if let Some(source) = self
+                        .new_bundle_repositories
+                        .get(self.new_bundle_selected)
+                        .cloned()
+                    {
+                        self.new_bundle_source.set_value(&source);
+                        self.choose_project_tab(dashboard, ProjectTab::Url);
+                        self.form.get_mut().focus(WizardControl::NewBundleSource);
+                    }
+                    self.new_bundle_repositories.clear();
+                }
+                dashboard.record_event_handled();
             }
             Interaction::Select(WizardControl::NewBundleRepositories, selected) => {
                 let next = (*selected).min(self.new_bundle_repositories.len().saturating_sub(1));
@@ -482,47 +512,7 @@ impl WizardDraft for NewWizard {
                 }
                 declare_wizard_buttons(form, true, true);
             }
-            WizardStep::NewBundle => {
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRepositories,
-                    ControlKind::ChoiceList {
-                        len: self.new_bundle_repositories.len(),
-                        selected: self.new_bundle_selected,
-                    },
-                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::NewBundleSource,
-                    self.new_bundle_source.control_kind(),
-                    true,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Add,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight && !self.new_bundle_source.trim().is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRemove,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::Cancel,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Back,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Next,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight
-                        && !self.new_bundle_sources_for_submit().is_empty(),
-                );
-            }
+            WizardStep::NewBundle => self.declare_project_controls(form),
             step => unreachable!("{step:?} is declared by declare_wizard_controls"),
         }
     }

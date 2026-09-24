@@ -692,6 +692,26 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
+        DashboardAction::DiscoverProjects {
+            context: picker_context,
+            request,
+        } => {
+            let (cancelled, _) = spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "finding projects",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(15));
+                    mj_controller::project_picker::discover(&request, &executor)
+                },
+                move |result| DashboardIoUpdate::ProjectDiscovery {
+                    context: picker_context,
+                    result,
+                },
+            );
+            context.track_completion(cancelled);
+        }
         DashboardAction::CompletePath { host, kind, prefix } => {
             let input_context = context.dashboard.path_input_context();
             let config = context.controller.config.clone();
@@ -1169,7 +1189,7 @@ pub(crate) async fn apply_dashboard_action(
             target_template_ids,
         } => context.resolve_aws_resource_options(target_template_ids),
         DashboardAction::CreateBundle { sources } => {
-            context.dashboard.set_notice("Creating bundle…");
+            context.dashboard.set_notice("Preparing project…");
             spawn_create_bundle(
                 sources,
                 context.dashboard_io_tx.clone(),

@@ -1214,6 +1214,81 @@ details.block-fold > pre {
   margin: 0 0 8px;
 }
 
+.project-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.project-sources button,
+.project-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.project-sources button[aria-pressed='true'] {
+  border-color: var(--accent);
+}
+
+.project-source-tabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 12px 0;
+}
+
+.project-source-tabs button {
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+}
+
+.project-sources small,
+.project-result small {
+  font-weight: 400;
+}
+
+.project-results {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 20px;
+}
+
+.project-browser {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.project-result-action {
+  color: var(--accent);
+}
+
+.project-result-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.project-result-row > .project-result {
+  flex: 1 1 200px;
+}
+
+.project-location {
+  overflow-wrap: anywhere;
+}
+
+.project-location-input > summary {
+  cursor: pointer;
+  min-height: var(--touch);
+  box-sizing: border-box;
+  padding: 10px 0;
+}
+
 /* ---- readings: capacity and quota ---- */
 
 /* The terminal's thresholds, by headroom remaining. A busy machine and an

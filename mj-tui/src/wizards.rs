@@ -1,5 +1,7 @@
 //! New-session and resume wizards, including their mount and review steps.
 mod picker;
+mod projects;
+use projects::{ProjectPicker, ProjectTab};
 mod render;
 pub(crate) use picker::*;
 pub(crate) use render::*;
@@ -71,6 +73,19 @@ pub(crate) enum WizardControl {
     NewBundleRepositories,
     NewBundleSource,
     NewBundleRemove,
+    ProjectRecent,
+    ProjectGithub,
+    ProjectFolders,
+    ProjectUrl,
+    ProjectQuery,
+    ProjectSearch,
+    ProjectResults,
+    ProjectUp,
+    ProjectHome,
+    ProjectOpenFolder,
+    ProjectRetry,
+    ProjectMultiple,
+    ProjectMakePrimary,
     MountSource,
     MountDestination,
     MountAccess,
@@ -139,6 +154,7 @@ pub(crate) struct NewWizard {
     pub(crate) target: usize,
     pub(crate) mounts: MountWizard,
 
+    pub(crate) project_picker: Box<ProjectPicker>,
     pub(crate) new_bundle_selected: usize,
     pub(crate) new_bundle_repositories: Vec<String>,
     pub(crate) new_bundle_source: PathInput,
@@ -171,6 +187,7 @@ impl PartialEq for NewWizard {
             && self.bundle == other.bundle
             && self.target == other.target
             && self.mounts == other.mounts
+            && self.project_picker == other.project_picker
             && self.new_bundle_selected == other.new_bundle_selected
             && self.new_bundle_repositories == other.new_bundle_repositories
             && self.new_bundle_source == other.new_bundle_source
@@ -665,7 +682,13 @@ impl NewWizard {
         if source.is_empty() {
             return false;
         }
-        self.new_bundle_repositories.push(source.to_owned());
+        if !self
+            .new_bundle_repositories
+            .iter()
+            .any(|item| item == source)
+        {
+            self.new_bundle_repositories.push(source.to_owned());
+        }
         self.new_bundle_selected = self.new_bundle_repositories.len() - 1;
         self.new_bundle_source.clear();
         self.form.get_mut().focus(WizardControl::NewBundleSource);
@@ -696,7 +719,7 @@ impl NewWizard {
     fn new_bundle_sources_for_submit(&self) -> Vec<String> {
         let mut sources = self.new_bundle_repositories.clone();
         let current = self.new_bundle_source.trim();
-        if !current.is_empty() {
+        if !current.is_empty() && !sources.iter().any(|source| source == current) {
             sources.push(current.to_owned());
         }
         sources
