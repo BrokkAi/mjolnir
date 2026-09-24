@@ -644,6 +644,14 @@ impl DashboardState {
         match result {
             Ok(entries) => {
                 let previous_busy = manager.busy;
+                // A rename or close started from its shortcut ends where the
+                // shortcut was pressed, as leaving it with Esc does (B-11).
+                // Read before the new entries can reset the view.
+                let return_to_dashboard = manager.leaves_to_dashboard()
+                    && matches!(
+                        previous_busy,
+                        Some(WorkspaceMutation::Rename | WorkspaceMutation::Close)
+                    );
                 let previous_view_id = manager.view_workspace_id().map(str::to_owned);
                 let previous_selected_id = manager
                     .selected_entry()
@@ -725,6 +733,13 @@ impl DashboardState {
                     }
                 }
                 manager.sync_form();
+                if return_to_dashboard {
+                    match &mut self.mode {
+                        Mode::WorkspaceManager(_) => self.cancel_modal(),
+                        Mode::Help(overlay) => *overlay.return_to = Mode::Dashboard,
+                        _ => {}
+                    }
+                }
                 return foreground;
             }
             Err(error) => {
@@ -1226,11 +1241,16 @@ pub(crate) fn render_workspace_manager(
             WorkspaceManagerView::List => {
                 "Enter opens the selected workspace · Tab moves between controls".into()
             }
+            // Esc from a page leaves it for the list, unless the page was
+            // opened by its shortcut, which never showed the list (B-11).
             WorkspaceManagerView::Create => {
-                "Enter creates the workspace · Esc closes manager".into()
+                "Enter creates the workspace · Esc returns to the list".into()
+            }
+            WorkspaceManagerView::Rename { .. } if dialog.leaves_to_dashboard() => {
+                "Enter saves the new name · Esc cancels".into()
             }
             WorkspaceManagerView::Rename { .. } => {
-                "Enter saves the new name · Esc closes manager".into()
+                "Enter saves the new name · Esc returns to the list".into()
             }
             WorkspaceManagerView::Close { .. } if dialog.busy == Some(WorkspaceMutation::Close) => {
                 "Suspending sessions · Esc returns to the dashboard".into()
@@ -1239,10 +1259,10 @@ pub(crate) fn render_workspace_manager(
                 "Confirm closing the workspace · Esc cancels".into()
             }
             WorkspaceManagerView::Delete { .. } => {
-                "Every deletion requires confirmation · Esc closes manager".into()
+                "Every deletion requires confirmation · Esc returns to the list".into()
             }
             WorkspaceManagerView::Drafts { .. } => {
-                "Enter recovers the selected draft · Esc closes manager".into()
+                "Enter recovers the selected draft · Esc returns to the list".into()
             }
         }
     };

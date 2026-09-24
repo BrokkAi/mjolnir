@@ -737,9 +737,9 @@ fn a_workspace_close_can_run_in_background_and_reopen_for_cancellation() {
     );
     assert_eq!(dashboard.workspace_close_finished("a"), Some(reopened));
     dashboard.finish_workspace_management(reopened, Ok(vec![]));
-    assert!(
-        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.entries.is_empty() && manager.busy.is_none())
-    );
+    // The dialog came from the Close shortcut, so a finished close returns
+    // to the dashboard rather than to the manager's list (B-11).
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 /// Launch finding A-5: the Rename and Close shortcuts open their dialog
@@ -810,4 +810,106 @@ fn workspace_tabs_keep_the_hosts_order_across_updates() {
     assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);
     dashboard.set_workspace_names(names);
     assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);
+}
+
+/// Launch finding B-11, Enter half: Enter in the Rename dialog opened by its
+/// shortcut renamed the workspace but left the Workspaces manager open, a
+/// screen the user never opened, and the dialog said "Esc closes manager".
+/// Once the rename lands the dialog returns to the dashboard, as Esc does
+/// since A-5.
+#[test]
+fn a_rename_opened_by_shortcut_returns_to_the_dashboard_when_it_lands() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::RenameWorkspace)
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    let rendered = draw_manager(&dashboard).join("\n");
+    assert!(!rendered.contains("Esc closes manager"), "{rendered}");
+    assert!(
+        rendered.contains("Enter saves the new name · Esc cancels"),
+        "{rendered}"
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.name = TextInput::from_value("Renamed");
+    }
+    assert!(matches!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::RenameWorkspace { .. }
+    ));
+
+    assert!(dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Renamed")])));
+
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+/// The Close shortcut likewise returns to the dashboard once the close
+/// finishes, rather than to the manager's list.
+#[test]
+fn a_close_opened_by_shortcut_returns_to_the_dashboard_when_it_finishes() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("a", "Example"), entry("b", "Other")]),
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.sync_form();
+        manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
+    }
+    assert!(matches!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::CloseWorkspace { .. }
+    ));
+
+    let generation = dashboard
+        .workspace_close_finished("a")
+        .unwrap_or(generation);
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("b", "Other")]));
+
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+/// Opened from the manager's list, a finished rename goes back to the list,
+/// and the dialog says Esc does the same.
+#[test]
+fn a_rename_opened_from_the_list_returns_to_the_list() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.open_selected_command(false);
+        manager.sync_form();
+    }
+    let rendered = draw_manager(&dashboard).join("\n");
+    assert!(
+        rendered.contains("Enter saves the new name · Esc returns to the list"),
+        "{rendered}"
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.name = TextInput::from_value("Renamed");
+    }
+    assert!(matches!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::RenameWorkspace { .. }
+    ));
+
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Renamed")]));
+
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
+    );
 }
