@@ -1380,7 +1380,7 @@ impl DashboardContext {
         if let Some(error) = self.read_receipts.failures.get(&session_id) {
             self.dashboard.set_notice(format!(
                 "Could not save read status for {}: {error}",
-                short_id(&session_id)
+                self.session_notice_name(&session_id)
             ));
         }
         if let Some(through) = next {
@@ -2030,13 +2030,13 @@ fn dashboard_event_action(dashboard: &mut DashboardState, event: Event) -> Dashb
 }
 
 pub(crate) fn resume_progress_notice(
-    session_id: &str,
+    session_name: &str,
     profile_id: &str,
     target_id: &str,
 ) -> String {
     format!(
         "Preparing {}: verifying checkpoint, provisioning {target_id}, and restoring {profile_id}…",
-        short_id(session_id)
+        session_name
     )
 }
 

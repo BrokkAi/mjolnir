@@ -585,10 +585,12 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     if args.bundle.is_none() && args.project_directory.is_none() {
         bail!("pass --bundle, --project-directory, or both");
     }
+    // Every session lives in a workspace the dashboard and the viewer list,
+    // so the command names one (launch finding H-3).
     let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
         (Some(workspace_id), _) => Some(workspace_id.clone()),
         (None, Some(name)) => Some(crate::resolve_store_workspace(Some(name)).await?),
-        (None, None) => None,
+        (None, None) => return Err(crate::workspace_required("mj new", true).await),
     };
     let request = StartSessionRequest {
         mjolnir_subagents: None,

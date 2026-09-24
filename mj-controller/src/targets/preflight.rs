@@ -204,20 +204,30 @@ pub fn verify_ssh_podman(
 
 /// One rootless Podman postcondition, with the wording used to report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PodmanProbe {
+pub(crate) enum PodmanPostcondition {
     Version,
     Rootless,
     UidMap,
 }
 
+/// One Podman command whose result is checked.
+///
+/// No probe checks rootless mode on its own: `podman unshare` refuses to run
+/// for rootful or remote Podman, so the UID-map probe reports that failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PodmanProbe {
+    Version,
+    UidMap,
+}
+
 /// A rootless Podman postcondition that was not met, carrying which one.
 ///
-/// `mj doctor` needs the probe, not its wording, to name the fix. Carrying the
-/// probe on the error means the diagnosis never depends on matching message
-/// text that this repository itself produces.
+/// `mj doctor` needs the postcondition, not its wording, to name the fix.
+/// Carrying it on the error means the diagnosis never depends on matching
+/// message text that this repository itself produces.
 #[derive(Debug)]
 pub(crate) struct PodmanProbeFailure {
-    probe: PodmanProbe,
+    postcondition: PodmanPostcondition,
     /// What was observed, without the fix.
     observation: String,
     /// The observation followed by the fix and the guide link.
@@ -232,11 +242,11 @@ impl std::fmt::Display for PodmanProbeFailure {
 
 impl std::error::Error for PodmanProbeFailure {}
 
-/// The probe whose postcondition failed, when the error came from one.
-pub(crate) fn failed_podman_probe(error: &anyhow::Error) -> Option<PodmanProbe> {
+/// The postcondition that failed, when the error came from a probe.
+pub(crate) fn failed_podman_postcondition(error: &anyhow::Error) -> Option<PodmanPostcondition> {
     error
         .downcast_ref::<PodmanProbeFailure>()
-        .map(|failure| failure.probe)
+        .map(|failure| failure.postcondition)
 }
 
 /// What a failed probe observed, without the fix, so a report that prints
@@ -247,16 +257,20 @@ pub(crate) fn podman_probe_observation(error: &anyhow::Error) -> Option<&str> {
         .map(|failure| failure.observation.as_str())
 }
 
-/// Fail a probe with what it observed, followed by that probe's fix and the
-/// published guide, keeping the probe machine-readable.
-fn probe_failure(host: PodmanHost<'_>, probe: PodmanProbe, observation: String) -> anyhow::Error {
+/// Fail a postcondition with what was observed, followed by its fix and the
+/// published guide, keeping the postcondition machine-readable.
+fn probe_failure(
+    host: PodmanHost<'_>,
+    postcondition: PodmanPostcondition,
+    observation: String,
+) -> anyhow::Error {
     let message = format!(
         "{observation} {}{} See {PODMAN_DOCUMENTATION_URL}.",
         host.remediation_scope(),
-        probe.remediation()
+        postcondition.remediation()
     );
     anyhow::Error::new(PodmanProbeFailure {
-        probe,
+        postcondition,
         observation,
         message,
     })
@@ -267,7 +281,6 @@ impl PodmanProbe {
     pub(super) fn key(self) -> &'static str {
         match self {
             Self::Version => "version",
-            Self::Rootless => "rootless",
             Self::UidMap => "uid_map",
         }
     }
@@ -275,7 +288,6 @@ impl PodmanProbe {
     pub(super) fn args(self) -> &'static [&'static str] {
         match self {
             Self::Version => &["podman", "--version"],
-            Self::Rootless => &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
             Self::UidMap => &["podman", "unshare", "cat", "/proc/self/uid_map"],
         }
     }
@@ -283,16 +295,31 @@ impl PodmanProbe {
     pub(super) fn purpose(self) -> &'static str {
         match self {
             Self::Version => "check Podman version",
-            Self::Rootless => "check rootless Podman mode",
             Self::UidMap => "check rootless Podman UID map",
         }
     }
 
-    pub(super) fn postcondition(self) -> &'static str {
+    pub(super) fn postcondition(self) -> PodmanPostcondition {
+        match self {
+            Self::Version => PodmanPostcondition::Version,
+            Self::UidMap => PodmanPostcondition::UidMap,
+        }
+    }
+}
+
+/// Whether `podman unshare` refused to run because Podman is rootful
+/// (`please use unshare with rootless`) or remote (`cannot use command
+/// "podman unshare" with the remote podman client`).
+fn unshare_refused_non_rootless(stderr: &str) -> bool {
+    stderr.contains("unshare with rootless") || stderr.contains("remote podman client")
+}
+
+impl PodmanPostcondition {
+    pub(super) fn statement(self) -> &'static str {
         match self {
             Self::Version => "Postcondition `podman --version` succeeds with Podman 4.3.0 or newer",
             Self::Rootless => {
-                "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`"
+                "Postcondition Podman is local and rootless (`podman unshare` is allowed)"
             }
             Self::UidMap => {
                 "Postcondition `podman unshare cat /proc/self/uid_map` maps container UIDs 0 and 1"
@@ -331,30 +358,15 @@ pub(super) fn verify_podman_probes(
     let version = probe_output(PodmanProbe::Version)?;
     let version = parse_podman_version(host, &version.stdout)?;
 
-    let rootless = probe_output(PodmanProbe::Rootless)?;
-    let rootless_output = String::from_utf8_lossy(&rootless.stdout);
-    if rootless_output.trim() != "true" {
-        return Err(probe_failure(
-            host,
-            PodmanProbe::Rootless,
-            format!(
-                "{}: {} returned {:?}.",
-                host.failure(),
-                PodmanProbe::Rootless.postcondition(),
-                rootless_output.trim(),
-            ),
-        ));
-    }
-
     let uid_map = probe_output(PodmanProbe::UidMap)?;
     if !valid_rootless_uid_map(&uid_map.stdout) {
         return Err(probe_failure(
             host,
-            PodmanProbe::UidMap,
+            PodmanPostcondition::UidMap,
             format!(
                 "{}: {} was not met.",
                 host.failure(),
-                PodmanProbe::UidMap.postcondition(),
+                PodmanPostcondition::UidMap.statement(),
             ),
         ));
     }
@@ -446,11 +458,11 @@ pub(super) fn podman_probe_run_failure(
         Some(message) => anyhow::anyhow!(message),
         None => probe_failure(
             host,
-            probe,
+            probe.postcondition(),
             format!(
                 "{}: {} could not be checked: {reported}.",
                 host.failure(),
-                probe.postcondition(),
+                probe.postcondition().statement(),
             ),
         ),
     }
@@ -471,14 +483,21 @@ pub(super) fn check_podman_probe_status(
         bail!("{message}");
     }
     if output.status != 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let postcondition = if probe == PodmanProbe::UidMap && unshare_refused_non_rootless(stderr)
+        {
+            PodmanPostcondition::Rootless
+        } else {
+            probe.postcondition()
+        };
         return Err(probe_failure(
             host,
-            probe,
+            postcondition,
             format!(
-                "{}: {} failed. Podman reported: {}",
+                "{}: {} failed. Podman reported: {stderr}",
                 host.failure(),
-                probe.postcondition(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                postcondition.statement(),
             ),
         ));
     }
@@ -511,7 +530,6 @@ probe() {
     return "$status"
 }
 probe version podman --version || exit 0
-probe rootless podman info --format '{{.Host.Security.Rootless}}'
 probe uid_map podman unshare cat /proc/self/uid_map
 probe linger sh -c 'loginctl show-user "$(id -u)" --property=Linger --value'
 exit 0
@@ -650,10 +668,10 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     else {
         return Err(probe_failure(
             host,
-            PodmanProbe::Version,
+            PodmanPostcondition::Version,
             format!(
                 "{failure}: {} returned {version:?}.",
-                PodmanProbe::Version.postcondition()
+                PodmanPostcondition::Version.statement()
             ),
         ));
     };
@@ -661,10 +679,10 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     let Some(Some(major)) = numbers.next() else {
         return Err(probe_failure(
             host,
-            PodmanProbe::Version,
+            PodmanPostcondition::Version,
             format!(
                 "{failure}: {} returned {version:?}.",
-                PodmanProbe::Version.postcondition()
+                PodmanPostcondition::Version.statement()
             ),
         ));
     };
@@ -674,10 +692,10 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
     if (major, minor) < PODMAN_MINIMUM_VERSION {
         return Err(probe_failure(
             host,
-            PodmanProbe::Version,
+            PodmanPostcondition::Version,
             format!(
                 "{failure}: {} was not met (found {candidate}).",
-                PodmanProbe::Version.postcondition()
+                PodmanPostcondition::Version.statement()
             ),
         ));
     }

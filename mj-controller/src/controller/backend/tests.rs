@@ -693,6 +693,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
     let config = Config {
         keys: Default::default(),
         build_cache: Default::default(),
+        jev: Default::default(),
         subagents: Default::default(),
         version: mj_core::config::CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -845,9 +846,7 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
         notices: RefCell::new(vec![]),
     };
 
-    let error = preflight_target(&template, &executor)
-        .unwrap_err()
-        .to_string();
+    let error = verify_target(&template, &executor).unwrap_err().to_string();
     assert!(error.contains("Retry launch"));
     assert!(error.contains("dev@example.test"));
     assert!(error.contains("Podman 4.3.0"));
@@ -877,7 +876,6 @@ fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {
             status: 0,
             stdout: crate::targets::ssh_podman_probe_fixture(&[
                 ("version", 0, "podman version 5.4.2\n", ""),
-                ("rootless", 0, "true\n", ""),
                 ("uid_map", 0, "0 1000 1\n1 100000 65536\n", ""),
                 ("linger", 0, "no\n", ""),
             ]),
@@ -886,12 +884,65 @@ fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {
         notices: RefCell::new(vec![]),
     };
 
-    preflight_target(&template, &executor).unwrap();
+    verify_target(&template, &executor).unwrap();
 
     let notices = executor.notices.borrow();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("last SSH connection closes"));
     assert!(notices[0].contains("sudo loginctl enable-linger"));
+}
+#[test]
+fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
+    struct Recording(RefCell<Vec<CommandSpec>>);
+    impl CommandExecutor for Recording {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.0.borrow_mut().push(command.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
+        }
+    }
+    let ssh = SshConnection {
+        host: "example.test".into(),
+        user: Some("dev".into()),
+        identity_file: None,
+        extra_args: vec![],
+    };
+    let container = ConfigContainer {
+        build_cache: None,
+        image: "ubuntu:24.04".into(),
+        pull_policy: Default::default(),
+        platform: None,
+        cpus: None,
+        memory: None,
+        environment: std::collections::BTreeMap::new(),
+        workspace_storage: Default::default(),
+    };
+    for template in [
+        TargetTemplate::SshPodman {
+            ssh: ssh.clone(),
+            container: container.clone(),
+        },
+        TargetTemplate::SshDocker { ssh, container },
+    ] {
+        let executor = Recording(RefCell::default());
+
+        preflight_target(&template, &executor).unwrap();
+
+        let commands = executor.0.borrow();
+        assert_eq!(commands.len(), 1, "{template:?}");
+        assert_eq!(commands[0].purpose, "verify SSH connectivity");
+        assert!(
+            !commands[0]
+                .args
+                .iter()
+                .any(|arg| arg.contains("podman") || arg.contains("docker")),
+            "{:?}",
+            commands[0].args
+        );
+    }
 }
 #[test]
 fn apple_container_preflight_failures_recommend_doctor() {

@@ -150,6 +150,17 @@ impl VerdictClient {
     }
 
     fn resolve_blocking(source: Option<VerdictSource>) -> Option<Self> {
+        Self::resolve_with(source, mj_core::jev::disabled_by_environment())
+    }
+
+    /// `jev_disabled` is `[jev] enabled = false` as the launch passed it.
+    /// The switch covers the default source only: an explicit source is a
+    /// test's own endpoint.
+    fn resolve_with(source: Option<VerdictSource>, jev_disabled: bool) -> Option<Self> {
+        if source.is_none() && jev_disabled {
+            tracing::info!(target: "mj_jev", outcome = "disabled", reason = "jev_switch_off", "Jev classifier disabled");
+            return None;
+        }
         let source = source.unwrap_or_else(|| VerdictSource::for_key(api_key()));
         if matches!(&source, VerdictSource::Direct { key, .. } if key.trim().is_empty()) {
             tracing::info!(target: "mj_jev", outcome = "disabled", reason = "explicit_blank_key", "Jev classifier disabled");
@@ -588,6 +599,15 @@ mod tests {
             }))
             .is_none()
         );
+    }
+
+    /// `[jev] enabled = false` reaches the worker as its launch environment;
+    /// the worker then builds no classifier, so no turn evidence is sent and
+    /// turns end on the harness's own signals.
+    #[test]
+    fn the_jev_switch_leaves_the_worker_without_a_classifier() {
+        assert!(VerdictClient::resolve_with(None, true).is_none());
+        assert!(VerdictClient::resolve_with(None, false).is_some());
     }
 
     #[tokio::test]

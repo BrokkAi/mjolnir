@@ -425,7 +425,7 @@ async fn run_bridge(
         .take()
         .context("ACP bridge stderr unavailable")?;
     let stderr_task = tokio::spawn(read_stderr_tail(stderr));
-    let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
+    let transport = ByteStreams::new(stdin.compat_write(), skip_stdout_preamble(stdout).compat());
 
     let (mut result, child_reaped) = {
         let drive = drive(
@@ -445,7 +445,7 @@ async fn run_bridge(
                 let result = match waited {
                     Ok(status) => Err(anyhow!(
                         "ACP bridge exited before the protocol runtime completed with {status}; \
-                         bridge stdout must contain only JSON-RPC frames and login-shell startup must be silent"
+                         {BRIDGE_STDOUT_RULE}"
                     )),
                     Err(error) => Err(error).context("wait for ACP bridge"),
                 };
@@ -682,6 +682,58 @@ fn merge_drive_error(result: &mut Result<Option<SessionRestart>>, additional: an
         Ok(_) => Err(additional),
         Err(error) => Err(error.context(format!("additional ACP runtime error: {additional:#}"))),
     };
+}
+
+/// What a bridge's stdout may carry, for errors that follow a broken transport.
+pub(super) const BRIDGE_STDOUT_RULE: &str = "bridge stdout must contain only JSON-RPC frames once the \
+     first frame arrives; non-JSON lines before it are logged and skipped";
+
+/// Passes a bridge's stdout through to the ACP transport, dropping the
+/// non-JSON lines a launcher or login shell prints before the bridge's first
+/// JSON-RPC frame. Each dropped line is logged. The ACP transport answers every
+/// unparsable line with a parse error, and a Kimi launcher's installer output
+/// ended a session that way (#1136). From the first frame on, bytes pass
+/// through unchanged, so the transport stays strict. A bridge that never sends
+/// a frame still fails at the initialize timeout.
+pub(super) fn skip_stdout_preamble<R>(stdout: R) -> tokio::io::DuplexStream
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let (reader, mut writer) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let mut stdout = tokio::io::BufReader::new(stdout);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match stdout.read_until(b'\n', &mut line).await {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "read ACP bridge stdout before its first frame");
+                    return;
+                }
+            }
+            let text = line.trim_ascii();
+            if serde_json::from_slice::<serde_json::Value>(text).is_ok() {
+                if writer.write_all(&line).await.is_err() {
+                    return;
+                }
+                break;
+            }
+            if !text.is_empty() {
+                tracing::warn!(
+                    line = %String::from_utf8_lossy(text),
+                    "skipping non-JSON ACP bridge output before its first JSON-RPC frame"
+                );
+            }
+        }
+        if let Err(error) = tokio::io::copy_buf(&mut stdout, &mut writer).await {
+            tracing::debug!(%error, "ACP bridge stdout relay ended");
+        }
+    });
+    reader
 }
 
 async fn read_stderr_tail(mut stderr: tokio::process::ChildStderr) -> Result<String> {

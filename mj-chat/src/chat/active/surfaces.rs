@@ -34,8 +34,10 @@ impl ActiveChat {
         );
     }
 
-    /// Visible host footer commands, indexed through the supplied chords then functions.
-    pub fn footer_command_areas(&self) -> Vec<(usize, Rect)> {
+    /// Visible host footer commands, indexed through the supplied chords then
+    /// functions, with the text drawn in each area. The text can differ from
+    /// the supplied hint: the first surviving chord carries the chord prefix.
+    pub fn footer_command_areas(&self) -> Vec<(usize, Rect, String)> {
         self.state.footer_command_areas.borrow().clone()
     }
 

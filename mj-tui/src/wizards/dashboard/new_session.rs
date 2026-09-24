@@ -183,8 +183,11 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
-        if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
-            || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
+        // Checks start on the first step so they are usually done by the time
+        // the target step needs them.
+        let checks_targets = |step| matches!(step, WizardStep::Profile | WizardStep::Target);
+        if matches!(&self.mode, Mode::New(wizard) if checks_targets(wizard.step))
+            || matches!(&self.mode, Mode::Resume(wizard) if checks_targets(wizard.step))
         {
             let target_ids: Vec<_> = self
                 .config

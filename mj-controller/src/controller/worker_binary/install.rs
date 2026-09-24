@@ -330,6 +330,7 @@ pub(super) fn install_worker_files(
     ownership: &Path,
     profile_stage: &Path,
 ) -> Result<()> {
+    verify_worker_build(worker_binary)?;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             if profile_stage.is_dir() {

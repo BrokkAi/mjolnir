@@ -6568,7 +6568,7 @@ fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     )
     .to_string();
     assert!(agent.contains("thread not found"), "{agent}");
-    assert!(!agent.contains("login-shell"), "{agent}");
+    assert!(!agent.contains("bridge stdout"), "{agent}");
     // Output the transport could not parse, or a connection that broke, is
     // what the hint is for.
     let garbage = protocol_failure(
@@ -6577,12 +6577,113 @@ fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     )
     .to_string();
     assert!(
-        garbage.contains("login-shell startup must be silent"),
+        garbage.contains("bridge stdout must contain only JSON-RPC frames"),
         "{garbage}"
     );
     let closed = protocol_failure(agent_client_protocol::Error::internal_error(), true).to_string();
     assert!(
-        closed.contains("login-shell startup must be silent"),
+        closed.contains("bridge stdout must contain only JSON-RPC frames"),
         "{closed}"
+    );
+}
+
+/// A Kimi launcher printed installer lines on the bridge's stdout before the
+/// agent's first frame, and the transport answered each with a parse error
+/// and never initialized (#1136). Those lines are skipped, not answered.
+#[tokio::test]
+async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (bridge_read, mut bridge_write) = tokio::io::split(bridge_stream);
+    // What the client sent. Shared rather than returned: the stdout relay
+    // keeps the client stream open, so the bridge never sees end of input.
+    let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let bridge_received = received.clone();
+    let bridge = tokio::spawn(async move {
+        bridge_write
+            .write_all(b"==> Detected target: linux-x64\n")
+            .await
+            .unwrap();
+        let mut lines = BufReader::new(bridge_read).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+            bridge_received.lock().unwrap().push(message.clone());
+            let id = message["id"].clone();
+            let response = match message["method"].as_str() {
+                Some("initialize") => {
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
+                }
+                Some("session/new") => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": {"sessionId": "scripted"}
+                }),
+                _ => continue,
+            };
+            bridge_write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(
+        client_write.compat_write(),
+        crate::acp::skip_stdout_preamble(client_read).compat(),
+    );
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let opened = Arc::new(Mutex::new(None));
+    let spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Kimi,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let driver = tokio::spawn({
+        let opened = opened.clone();
+        async move { drive(transport, spec, &mut request_rx, event_tx, opened, false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while opened.lock().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the session must open despite the launcher's lines");
+    drop(request_tx);
+    driver.abort();
+    let _ = driver.await;
+    events.abort();
+    bridge.abort();
+    let received = received.lock().unwrap().clone();
+    assert_eq!(received[0]["method"], "initialize");
+    assert!(
+        received
+            .iter()
+            .all(|message| message.get("error").is_none()),
+        "the client answered launcher output with an error: {received:?}"
     );
 }

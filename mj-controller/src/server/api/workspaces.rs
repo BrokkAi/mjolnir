@@ -8,12 +8,6 @@
 
 use super::*;
 
-/// The name a session falls back to when the instance has no workspace yet.
-///
-/// The store is created with this workspace already in it; it is hidden from
-/// listings until it owns a session, which is why a fresh instance looks empty.
-pub(super) const DEFAULT_WORKSPACE_NAME: &str = "default";
-
 pub(super) async fn list_workspaces(
     State(state): State<ServerState>,
 ) -> Result<Json<WorkspaceListResponse>, ApiFailure> {
@@ -39,14 +33,13 @@ pub(super) async fn create_workspace(
     }))
 }
 
-/// The workspace a new session belongs to when the caller named none.
+/// The workspace a new session belongs to.
 ///
-/// An empty answer means "let the controller choose", which is what it already
-/// does when the instance holds exactly one workspace and what it refuses when
-/// it holds several. Only the empty case is decided here: a fresh instance
-/// lists no workspace, so a script's first `mj new` was refused with nothing it
-/// could do about it from the CLI or the API (#1080). The store always holds
-/// the `default` workspace, so adopt that instead of refusing.
+/// An empty answer means "let the controller choose", which it does only when
+/// the instance holds exactly one workspace. Every session lives in a
+/// workspace the dashboard and the viewer list, so an instance with none is
+/// refused with the way to make one, rather than given a workspace nobody
+/// sees (launch finding H-3).
 pub(super) async fn workspace_for_new_session(
     backend: &Arc<dyn SubagentBackend>,
     requested: Option<String>,
@@ -54,11 +47,11 @@ pub(super) async fn workspace_for_new_session(
     if let Some(requested) = requested {
         return Ok(requested);
     }
-    if !backend.list_workspaces().await?.is_empty() {
-        return Ok(String::new());
+    if backend.list_workspaces().await?.is_empty() {
+        return Err(ApiFailure::conflict(
+            "this instance has no workspace yet; create one with POST /api/v1/workspaces \
+             or `mj workspaces create NAME`, then name it in workspace_id",
+        ));
     }
-    Ok(backend
-        .create_workspace(DEFAULT_WORKSPACE_NAME.to_owned())
-        .await?
-        .id)
+    Ok(String::new())
 }

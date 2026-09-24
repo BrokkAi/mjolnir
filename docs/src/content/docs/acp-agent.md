@@ -19,22 +19,25 @@ editor that accepts a custom agent command. If you drive agents by hand, the
 Point the program's agent command at `mj acp`:
 
 ```text
-mj acp [--profile <id>] [--target <id>] [--bundle <id>] [--on-exit keep|suspend|destroy]
+mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
+       [--on-exit keep|suspend|destroy]
 ```
 
 | Flag | Meaning |
 | --- | --- |
+| `--workspace <name>` | The workspace the sessions are created in. Required: every session lives in a workspace the dashboard and the web viewer list. Without it `mj acp` exits at once, listing the workspaces and how to create one (`mj workspaces create <name>`). |
 | `--profile <id>` | The [profile](/profiles/) whose account and harness run the session. Omitted follows your saved default. |
 | `--target <id>` | The [target](/targets/) the session runs on: this machine, a container, an SSH host, or an EC2 instance. Omitted follows your saved default. |
 | `--bundle <id>` | The [bundle](/workspaces-bundles/) to provision on a managed target. Without one, the working directory the client submits becomes the project, which is what a local target needs. |
 | `--on-exit <policy>` | What happens to the sessions this process created when it exits: `keep` (the default), `suspend`, or `destroy`. See [When the program exits](#when-the-program-exits). |
 
-Every flag is optional, and an omitted one resolves the same way `mj new`
-resolves it, so `mj acp` on its own is a valid agent command:
+`--workspace` is required. The other flags are optional, and an omitted one
+resolves the same way `mj new` resolves it:
 
 ```sh
-mj acp
-mj acp --profile codex-work --target builder --bundle product
+mj workspaces create editor
+mj acp --workspace editor
+mj acp --workspace editor --profile codex-work --target builder --bundle product
 ```
 
 The command is hidden from `mj --help` because a person does not run it; a

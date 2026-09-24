@@ -647,7 +647,8 @@ which is the quickest way to see a shape before you write a client for it.
 ## A whole run
 
 ```console
-mj new --profile codex --target local --project-directory . \
+mj workspaces create scripts
+mj new --workspace scripts --profile codex --target local --project-directory . \
   "add a README line"
 mj wait --session <id>
 mj prompt --session <id> --wait "now add a test"
@@ -715,11 +716,12 @@ mj set-config --session "$id" --key effort --value high --json
 `mj sessions --workspace <name>` to that workspace ID. Without a selector, the
 list includes all workspaces.
 
-`POST /api/v1/sessions` accepts `workspace_id`, and chooses one when the request
-names none: the instance's only workspace when it has exactly one, and the
-`default` workspace when it has none at all, so a fresh instance can be scripted
-without opening the terminal first. An instance with several workspaces needs an
-explicit `workspace_id`. `GET /api/v1/workspaces` and `POST /api/v1/workspaces`
+`POST /api/v1/sessions` accepts `workspace_id`. When the request names none, it
+uses the instance's only workspace when there is exactly one. An instance with
+no workspace answers `409` and says how to create one, and an instance with
+several needs an explicit `workspace_id`. No session is placed in a workspace
+that the dashboard and the viewer do not list. The CLI's `mj new` always names
+its workspace. `GET /api/v1/workspaces` and `POST /api/v1/workspaces`
 are the routes for choosing deliberately.
 
 `close` is accepted while provisioning or another lifecycle operation is in

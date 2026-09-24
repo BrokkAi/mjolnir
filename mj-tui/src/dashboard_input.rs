@@ -602,7 +602,7 @@ impl DashboardState {
             };
         }
         if let Some(issue) = session.configuration_issue(&self.config) {
-            self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConfigurationRepair {
+            self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::ConfigurationRepair {
                 session_id: session.id.clone(),
                 error: issue,
                 previous: Box::new(self.mode.clone()),

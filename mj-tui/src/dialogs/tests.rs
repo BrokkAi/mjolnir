@@ -506,6 +506,7 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
         mj_core::config::Config {
             keys: Default::default(),
             build_cache: Default::default(),
+            jev: Default::default(),
             subagents: Default::default(),
             version: mj_core::config::CONFIG_VERSION,
             sessions_side: Default::default(),

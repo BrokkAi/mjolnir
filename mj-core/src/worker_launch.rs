@@ -316,8 +316,15 @@ impl WorkerLaunchConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
             .with_context(|| format!("read worker launch config {}", path.display()))?;
-        serde_json::from_slice(&body)
-            .with_context(|| format!("parse worker launch config {}", path.display()))
+        serde_json::from_slice(&body).with_context(|| {
+            format!("parse worker launch config {} with worker build {}", path.display(), crate::worker_build::BUILD_ID)
+        }).map_err(|error| {
+            if error.root_cause().to_string().contains("unknown field") {
+                error.context("the worker may be older than the daemon that wrote launch.json; install the worker built with the running mj")
+            } else {
+                error
+            }
+        })
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -422,6 +429,22 @@ mod tests {
             "cwd": "/workspace/project",
             "execution_policy": "configured_approvals"
         })
+    }
+
+    #[test]
+    fn unknown_launch_fields_explain_the_worker_daemon_build_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("launch.json");
+        let mut launch = launch_json();
+        launch["future_daemon_field"] = serde_json::json!(true);
+        std::fs::write(&path, serde_json::to_vec(&launch).unwrap()).unwrap();
+        let error = format!("{:#}", WorkerLaunchConfig::read(&path).unwrap_err());
+        assert!(error.contains("older than the daemon"), "{error}");
+        assert!(error.contains("future_daemon_field"), "{error}");
+        assert!(error.contains(crate::worker_build::BUILD_ID), "{error}");
+        std::fs::write(&path, b"not JSON").unwrap();
+        let error = format!("{:#}", WorkerLaunchConfig::read(&path).unwrap_err());
+        assert!(!error.contains("older than the daemon"), "{error}");
     }
 
     #[test]

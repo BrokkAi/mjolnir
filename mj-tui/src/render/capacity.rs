@@ -8,7 +8,7 @@ use super::*;
 /// up is what it costs.
 pub(crate) fn fleet_vm_label(detail: &CapacityDetail) -> String {
     let count = detail.target.probes.len();
-    format!("{count} VM{}", if count == 1 { "" } else { "s" })
+    crate::widgets::counted(count, "VM", "VMs")
 }
 
 /// A reading older than this stopped tracking the host: the poller samples

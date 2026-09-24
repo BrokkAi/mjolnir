@@ -453,7 +453,7 @@ pub(crate) async fn apply_dashboard_action(
                     move |cancelled| {
                         let executor = CancellableProcessExecutor::new(cancelled)
                             .with_deadline(std::time::Duration::from_secs(15));
-                        config_only_controller(config).test_target(&target_id, &executor)
+                        config_only_controller(config).check_target_readiness(&target_id, &executor)
                     },
                     move |result| DashboardIoUpdate::TargetReadiness {
                         generation,
@@ -998,9 +998,10 @@ pub(crate) async fn apply_dashboard_action(
                 );
                 return Ok(());
             };
-            context
-                .dashboard
-                .set_notice(format!("Moving {}…", short_id(&session_id)));
+            context.dashboard.set_notice(format!(
+                "Moving {}…",
+                context.session_notice_name(&session_id)
+            ));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
             spawn_lifecycle_operation(
@@ -1063,9 +1064,10 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard.begin_move_recovery(operation);
                 return Ok(());
             }
-            context
-                .dashboard
-                .set_notice(format!("Retrying move for {}…", short_id(&session_id)));
+            context.dashboard.set_notice(format!(
+                "Retrying move for {}…",
+                context.session_notice_name(&session_id)
+            ));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
             spawn_lifecycle_operation(
@@ -1142,9 +1144,10 @@ pub(crate) async fn apply_dashboard_action(
             session_id,
             acknowledge_unpublished_work,
         } => {
-            context
-                .dashboard
-                .set_notice(format!("Suspending {}…", short_id(&session_id)));
+            context.dashboard.set_notice(format!(
+                "Suspending {}…",
+                context.session_notice_name(&session_id)
+            ));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
@@ -1263,7 +1266,7 @@ pub(crate) async fn apply_dashboard_action(
             context.dashboard.set_notice(format!(
                 "Cancelling {} for {}…",
                 kind.label().to_ascii_lowercase(),
-                short_id(&session_id)
+                context.session_notice_name(&session_id)
             ));
         }
     }
@@ -1515,7 +1518,7 @@ fn start_session_launch_with_repository_preflight(
             discard_queue,
         } => {
             context.dashboard.set_notice(resume_progress_notice(
-                &session_id,
+                &context.session_notice_name(&session_id),
                 &profile_id,
                 &target_template_id,
             ));

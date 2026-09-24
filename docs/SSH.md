@@ -180,6 +180,12 @@ branch. Changes in the source checkout stay there. If you
 select an existing linked worktree, Mjolnir uses that checkout directly instead
 of creating another one.
 
+Because the session works in a checkout that belongs to the host, it stays
+there: `mj move` and `mj resume` refuse a target on another machine
+(`this session's working tree lives on <host>; resume it there`). Changing
+the profile in place works. To continue elsewhere, push the session's branch
+and start a new session from it.
+
 `workspace_prefix` is separate from this project workflow. It derives a
 Mjolnir-owned lifecycle path that is recorded with the target and removed
 during teardown. It does not control the selected project, the linked-worktree

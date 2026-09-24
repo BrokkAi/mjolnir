@@ -1042,8 +1042,8 @@ pub(super) fn protocol_failure(
 ) -> anyhow::Error {
     if connection_failed || error.code == agent_client_protocol::Error::parse_error().code {
         anyhow!(
-            "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
-             and login-shell startup must be silent"
+            "ACP protocol failed: {error}; {}",
+            super::BRIDGE_STDOUT_RULE
         )
     } else {
         anyhow!("ACP protocol failed: {error}")

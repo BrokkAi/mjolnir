@@ -947,6 +947,11 @@ fn render_combined_themed(
                         transition,
                         failed,
                         pane_focused: false,
+                        title_lead: crate::pane_controls::pane_chrome_width(
+                            dashboard,
+                            pane_id,
+                            transcript_area.width,
+                        ),
                     },
                 ),
                 (Some(chat), None) => {
@@ -1023,6 +1028,7 @@ fn render_combined_themed(
                 prompt_area,
                 dashboard,
                 focus_borders,
+                crate::pane_controls::pane_chrome_width(dashboard, pane_id, transcript_area.width),
             );
             false
         } else if let Some((session_id, transition, failed)) = selected_transition.clone() {
@@ -1036,6 +1042,11 @@ fn render_combined_themed(
                     transition,
                     failed,
                     pane_focused: focus_borders,
+                    title_lead: crate::pane_controls::pane_chrome_width(
+                        dashboard,
+                        pane_id,
+                        transcript_area.width,
+                    ),
                 },
             );
             false
@@ -1095,14 +1106,16 @@ fn render_combined_themed(
                         transcript_selected,
                     );
                     if prompt_focused {
-                        for (index, command_area) in chat.footer_command_areas() {
-                            if let Some((id, text)) = commands.get(index) {
+                        // Draw the text the chat fitted into each area, not
+                        // the host's hint: the first chord carries the prefix.
+                        for (index, command_area, text) in chat.footer_command_areas() {
+                            if let Some((id, _)) = commands.get(index) {
                                 crate::surface_controls::render_footer_command(
                                     frame,
                                     command_area,
                                     dashboard,
                                     *id,
-                                    text,
+                                    &text,
                                 );
                             }
                         }
@@ -1486,11 +1499,12 @@ fn render_launch_standby_surface(
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     pane_focused: bool,
+    title_lead: u16,
 ) {
     let panel = theme::panel(pane_focused)
-        .title(format!(
-            " Transition · {} ",
-            SessionTransitionKind::Starting.label()
+        .title(transition_title(
+            SessionTransitionKind::Starting,
+            title_lead,
         ))
         .title(
             Line::from(vec![
@@ -1546,6 +1560,21 @@ struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
     pane_focused: bool,
+    /// Columns the pane chrome draws its label into at the left of the
+    /// title row; the title starts after them.
+    title_lead: u16,
+}
+
+/// A transition panel title that starts after the pane chrome label, the
+/// same way the conversation title does, so the label does not cover the
+/// state word (launch findings B-2 and D-1: "Conversation g" for
+/// Suspending).
+fn transition_title(transition: SessionTransitionKind, lead: u16) -> String {
+    format!(
+        "{} Transition · {} ",
+        " ".repeat(usize::from(lead)),
+        transition.label()
+    )
 }
 
 fn render_transition_surface(
@@ -1560,6 +1589,7 @@ fn render_transition_surface(
         transition,
         failed,
         pane_focused,
+        title_lead,
     } = surface;
     if failed && transcript_area.height > 3 {
         dashboard.failure_drawn(session_id);
@@ -1610,8 +1640,7 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
-    let mut panel =
-        theme::panel(pane_focused).title(format!(" Transition · {} ", transition.label()));
+    let mut panel = theme::panel(pane_focused).title(transition_title(transition, title_lead));
     if !failed {
         panel = panel.title(
             Line::from(vec![
@@ -1723,6 +1752,111 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// Launch finding E-8 (right edge): a conversation title too long for its
+    /// row stopped at the pane chips with no ellipsis ("End to follo ◇").
+    /// The title must end in an ellipsis before the chips.
+    #[tokio::test]
+    async fn a_long_conversation_title_ends_in_an_ellipsis_before_the_pane_chips() {
+        let session = running_session();
+        let session_id = session.id.clone();
+        for width in [140_u16, 100, 80] {
+            let mut dashboard = dashboard_with_session(session.clone());
+            let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+            let chat = ActiveChat::open(
+                fixture.stopped,
+                "hel",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity {
+                    title: "a very long session title ".repeat(8),
+                    ..Default::default()
+                },
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            );
+            let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let row = &lines[0];
+            let title = row
+                .split_once("| Conversation")
+                .map(|(_, title)| title)
+                .unwrap_or_else(|| panic!("{width}: no pane title in {row}"));
+            let before_chips = title.split(theme::glyphs().pin).next().unwrap();
+            assert!(
+                before_chips.trim_end_matches([' ', '─']).ends_with('…'),
+                "{width}: {row}"
+            );
+        }
+    }
+
+    /// Launch finding A-12 / R1-2: the composer footer drew the host's
+    /// unlabeled first chord over the "ctrl+b then " label, so the row read
+    /// "g sessionsn g sessions". The label and the chord after it must read
+    /// as one intact hint at every width the campaign captured.
+    #[tokio::test]
+    async fn composer_footer_keeps_the_chord_label_and_first_chord_apart() {
+        let session = running_session();
+        let session_id = session.id.clone();
+        for width in [140_u16, 100, 80] {
+            let mut dashboard = dashboard_with_session(session.clone());
+            dashboard.focus = Focus::Prompt;
+            let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+            let chat = ActiveChat::open(
+                fixture.stopped,
+                "hel",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity::default(),
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            );
+            let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let footer = lines.last().unwrap();
+            let chord_group = footer
+                .split(theme::footer_group_separator())
+                .nth(1)
+                .unwrap_or_else(|| panic!("{width}: no chord group in {footer:?}"));
+            let label = chord_group
+                .trim_start()
+                .strip_prefix("ctrl+b then ")
+                .unwrap_or_else(|| panic!("{width}: label overdrawn in {footer:?}"));
+            let first = label.split(theme::footer_separator()).next().unwrap();
+            let chords =
+                crate::render::footer_commands(&dashboard, crate::actions::FooterGroup::Chord);
+            assert!(
+                chords
+                    .iter()
+                    .any(|(_, text)| text.as_str() == first.trim_end()),
+                "{width}: {first:?} is not a whole chord in {footer:?}"
+            );
+        }
+    }
 
     /// Launch campaign finding A-13: in an empty pane the "Pin selected
     /// here" hint on the first inside row was drawn over the splash at 79
@@ -1963,6 +2097,33 @@ mod tests {
                 .any(|line| line.contains("ctrl+b shift+c to cancel suspending")),
             "cancel chord missing: {lines:?}"
         );
+    }
+
+    /// Launch findings B-2 / D-1 for Suspending: the transition panel's title
+    /// started under the pane chrome label, so the row read
+    /// "Conversation g". It starts after the label, as the chat title does.
+    #[test]
+    fn the_pane_chrome_does_not_cover_the_transition_title() {
+        for (kind, word) in [
+            (SessionOperationKind::Suspending, "Suspending"),
+            (SessionOperationKind::Launching, "Starting"),
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.begin_session_operation("session-1".into(), kind, None);
+            for width in [140_u16, 100] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+                terminal
+                    .draw(|frame| crate::render::render(frame, &mut dashboard))
+                    .unwrap();
+                let lines = buffer_lines(terminal.backend().buffer());
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line.contains(&format!("Transition · {word}"))),
+                    "{width}: {word} title covered: {lines:?}"
+                );
+            }
+        }
     }
 
     /// The standby composer keeps the empty chat composer's floor and grows

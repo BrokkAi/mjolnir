@@ -229,6 +229,7 @@ fn worker_binary_replacement_plan(
     worker_binary: &Path,
     installed_name: &str,
 ) -> Result<CommandPlan> {
+    verify_worker_build(worker_binary)?;
     let worker_root = targets::worker_root(locator, session_id)?;
     let installed = format!("{worker_root}/{installed_name}");
     let staged = format!("{installed}.next");
@@ -461,6 +462,8 @@ pub(super) fn replace_target_worker_binary_if_stale(
     installed_digest: &CommandSpec,
     source: &Path,
 ) -> Result<bool> {
+    // Digest equality is meaningful only after the source matches this build.
+    verify_worker_build(source)?;
     let expected = mj_core::worker_launch::worker_executable_digest(source)?;
     let installed = executor
         .execute(installed_digest)

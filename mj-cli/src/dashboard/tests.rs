@@ -1611,7 +1611,7 @@ fn a_workspace_with_no_live_session_never_arms_the_startup_pick() {
 #[test]
 fn resume_progress_explains_the_blocking_work() {
     assert_eq!(
-        resume_progress_notice("0123456789", "codex-1", "podman"),
+        resume_progress_notice("01234567", "codex-1", "podman"),
         "Preparing 01234567: verifying checkpoint, provisioning podman, and restoring codex-1…"
     );
 }

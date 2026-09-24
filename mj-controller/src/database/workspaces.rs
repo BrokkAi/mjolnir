@@ -1,7 +1,37 @@
 use super::*;
 
+/// Every workspace that can hold a session the user sees.
+///
+/// The store keeps a row with the id `default` that older releases put
+/// sessions in when no workspace was named. No new session goes there, and
+/// the row is left out only while it holds no session at all: a store whose
+/// `default` holds sessions, suspended ones included, lists it as an ordinary
+/// workspace named `default`, so none of those sessions is hidden (launch
+/// finding H-3).
 pub fn list_workspaces() -> Result<Vec<WorkspaceRecord>> {
     list_workspaces_from(&database_path())
+}
+
+/// The `default` row keeps its name whether or not it is listed. While it
+/// holds no session it is not listed, so creating a workspace with its name
+/// would return a workspace nobody can see. Refuse the name then.
+fn refuse_legacy_default_name(connection: &Connection, name_key: &str) -> Result<()> {
+    let hidden: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM workspaces w
+              WHERE w.workspace_id = ?1 AND w.name_key = ?2
+                AND NOT EXISTS(
+                    SELECT 1 FROM session_contexts c JOIN sessions s USING(session_id)
+                     WHERE c.workspace_id = w.workspace_id))",
+        [DEFAULT_WORKSPACE_ID, name_key],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !hidden,
+        "the workspace name {name_key:?} is reserved for sessions made before a workspace \
+         was required; choose another name"
+    );
+    Ok(())
 }
 
 pub(super) struct DbPaneSize(PaneSize);
@@ -150,9 +180,7 @@ pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
            LEFT JOIN session_contexts c USING(workspace_id)
            LEFT JOIN sessions s USING(session_id)
           GROUP BY w.workspace_id
-         HAVING w.workspace_id != 'default' OR count(s.session_id) FILTER (
-                    WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
-                ) > 0
+         HAVING w.workspace_id != 'default' OR count(s.session_id) > 0
           ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -192,6 +220,7 @@ pub fn create_or_get_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRe
     let id = new_workspace_id()?;
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut connection = open(path)?;
+    refuse_legacy_default_name(&connection, &name_key)?;
     let transaction = connection.transaction()?;
     transaction
         .execute(
@@ -231,6 +260,7 @@ pub fn create_workspace_at(path: &Path, name: &str) -> Result<WorkspaceRecord> {
     let id = new_workspace_id()?;
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let connection = open(path)?;
+    refuse_legacy_default_name(&connection, &name_key)?;
     connection
         .execute(
             "INSERT INTO workspaces(workspace_id, name, name_key, created_at, last_opened_at)

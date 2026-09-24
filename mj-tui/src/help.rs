@@ -230,21 +230,26 @@ impl DashboardState {
     }
 
     fn help_query_changed(&mut self) {
+        let semantic = self.config.jev.enabled;
         self.help_request_generation = self.help_request_generation.wrapping_add(1);
         if let Mode::Help(overlay) = &mut self.mode {
             overlay.request_id = self.help_request_generation;
             overlay.scroll = 0;
             overlay.drawn_scroll.set(0);
             overlay.related.clear();
-            overlay.pending = !overlay.query.trim().is_empty();
+            overlay.pending = semantic && !overlay.query.trim().is_empty();
             overlay.unavailable = false;
         }
     }
 
     /// A generation survives completion, so the coordinator never repeats a search.
+    /// None while `[jev] enabled = false`: the filter then matches text only
+    /// and nothing leaves the machine.
     pub fn help_search_generation(&self) -> Option<u64> {
         match &self.mode {
-            Mode::Help(overlay) if !overlay.query.trim().is_empty() => Some(overlay.request_id),
+            Mode::Help(overlay) if self.config.jev.enabled && !overlay.query.trim().is_empty() => {
+                Some(overlay.request_id)
+            }
             _ => None,
         }
     }
@@ -678,16 +683,28 @@ pub(crate) fn render_help(
         .filter(|entry| literal(entry, &needle))
         .count();
     let status_text = if overlay.unavailable {
-        format!("Semantic search unavailable; showing {count} text matches")
+        format!(
+            "Semantic search unavailable; showing {}",
+            crate::widgets::counted(count, "text match", "text matches")
+        )
     } else if overlay.pending {
-        format!("{count} text matches · Searching related shortcuts…")
+        format!(
+            "{} · Searching related shortcuts…",
+            crate::widgets::counted(count, "text match", "text matches")
+        )
     } else if needle.is_empty() {
         format!(
             "{} shortcuts · Type to search by key, name, or intent",
             catalog.len()
         )
+    } else if !dashboard.config.jev.enabled {
+        crate::widgets::counted(count, "text match", "text matches")
     } else {
-        format!("{count} text matches · {} related", overlay.related.len())
+        format!(
+            "{} · {} related",
+            crate::widgets::counted(count, "text match", "text matches"),
+            overlay.related.len()
+        )
     };
     frame.render_widget(Paragraph::new(status_text).style(theme::muted()), status);
     let lines = help_lines(dashboard, overlay, usize::from(body.width));
@@ -1068,7 +1085,7 @@ mod tests {
         filter(&mut dashboard, "animations");
         let rendered = drawn(&mut dashboard, 120, 40).join("\n");
         assert!(rendered.contains("Next spinner style"), "{rendered}");
-        assert!(rendered.contains("1 text matches"), "{rendered}");
+        assert!(rendered.contains("1 text match "), "{rendered}");
         filter(&mut dashboard, "palette😀");
         dashboard.handle_key(key(KeyCode::Backspace));
         dashboard.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
@@ -1084,6 +1101,28 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("No matching shortcuts"), "{rendered}");
+    }
+
+    /// With `[jev] enabled = false` the filter matches text only: no request
+    /// is offered to the coordinator and nothing says a search is running.
+    #[test]
+    fn help_search_matches_text_only_when_jev_is_off() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = dashboard.config.clone();
+        config.jev.enabled = false;
+        dashboard.set_config(config);
+        filter(&mut dashboard, "animations");
+        assert_eq!(dashboard.help_search_generation(), None);
+        assert!(dashboard.help_search_request().is_none());
+        let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(rendered.contains("Next spinner style"), "{rendered}");
+        assert!(rendered.contains("1 text match"), "{rendered}");
+        assert!(!rendered.contains("Searching"), "{rendered}");
+        assert!(!rendered.contains("related"), "{rendered}");
+        filter(&mut dashboard, "no-such-shortcut-xyz");
+        let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(rendered.contains("No matching shortcuts."), "{rendered}");
+        assert!(!rendered.contains("Searching"), "{rendered}");
     }
 
     /// Launch campaign finding A-1: a query of several words matches a row

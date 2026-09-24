@@ -388,17 +388,51 @@ impl Controller {
         targets
     }
 
+    /// The full check behind the Targets pane's Test action.
     pub fn test_target(&self, target_id: &str, executor: &impl CommandExecutor) -> Result<()> {
-        let template = self
-            .config
+        verify_target(self.configured_target(target_id)?, executor)
+    }
+
+    /// The check a session wizard runs before it offers a target: the same
+    /// one a launch runs.
+    pub fn check_target_readiness(
+        &self,
+        target_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        preflight_target(self.configured_target(target_id)?, executor)
+    }
+
+    fn configured_target(&self, target_id: &str) -> Result<&TargetTemplate> {
+        self.config
             .targets
             .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?;
-        preflight_target(template, executor)
+            .with_context(|| format!("unknown target template {target_id:?}"))
     }
 }
 
+/// Check a target before a launch, resume, or move uses it.
+///
+/// An SSH host's container runtime is verified by `mj setup`, `mj doctor`,
+/// and the Targets pane's Test action; here it is assumed to still be as
+/// they left it, and only the host's reachability is checked. That probe
+/// joins an open shared connection, so it usually costs one SSH channel.
 pub(super) fn preflight_target(
+    template: &TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    match template {
+        TargetTemplate::SshBare { ssh, .. }
+        | TargetTemplate::SshPodman { ssh, .. }
+        | TargetTemplate::SshDocker { ssh, .. } => {
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
+        }
+        _ => verify_target(template, executor),
+    }
+}
+
+/// Check that a target's host and runtime can run sessions.
+pub(super) fn verify_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
@@ -469,17 +503,7 @@ pub(super) fn preflight_target(
             Ok(())
         }
         TargetTemplate::SshBare { ssh, .. } => {
-            let ssh = SshTarget::from(ssh);
-            let command = targets::ssh_connectivity_probe(&ssh);
-            let output = executor.execute(&command)?;
-            ensure!(
-                output.status == 0,
-                "SSH connectivity test failed for {} with status {}: {}",
-                ssh.destination,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            Ok(())
+            verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
         TargetTemplate::AwsEc2 {
             aws_profile,
@@ -532,6 +556,18 @@ pub(super) fn preflight_target(
         }
         TargetTemplate::LocalBare => Ok(()),
     }
+}
+
+fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> Result<()> {
+    let output = executor.execute(&targets::ssh_connectivity_probe(ssh))?;
+    ensure!(
+        output.status == 0,
+        "SSH connectivity test failed for {} with status {}: {}",
+        ssh.destination,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 pub(super) fn backend_bundle(

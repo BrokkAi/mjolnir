@@ -13,9 +13,9 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanProbe,
+    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanPostcondition,
     ProcessExecutor, SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    failed_podman_probe, podman_probe_observation, run_setup_smoke_test, ssh_command,
+    failed_podman_postcondition, podman_probe_observation, run_setup_smoke_test, ssh_command,
     ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
     verify_ssh_docker, verify_ssh_podman,
 };
@@ -1777,7 +1777,7 @@ fn podman_failure_detail(error: &anyhow::Error) -> String {
 /// this repository just produced. A failure that is not a probe result, such
 /// as an unreachable SSH host, has no specific fix here.
 fn podman_remediation_match(error: &anyhow::Error) -> Option<&'static str> {
-    failed_podman_probe(error).map(PodmanProbe::remediation)
+    failed_podman_postcondition(error).map(PodmanPostcondition::remediation)
 }
 
 const AWS_CLI_INSTALL_URL: &str =

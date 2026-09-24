@@ -716,6 +716,8 @@ fn the_destroy_button_replaces_the_d_key() {
         confirm.confirmation,
         Confirmation::DestroyStopped { .. }
     ));
+    // Launch finding B-3: the dialog names a titled session by its title.
+    assert_eq!(confirm.session_name.as_deref(), Some("ACP pretty name"));
 }
 
 /// The active tab is highlighted whether or not the strip has focus, so

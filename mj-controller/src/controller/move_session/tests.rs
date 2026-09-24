@@ -1133,8 +1133,6 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
         assert_eq!(command.program, "podman", "unexpected {}", command.program);
         let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
             b"podman version 5.4.2\n"
-        } else if command.args.iter().any(|argument| argument == "info") {
-            b"true\n"
         } else {
             b"         0       1000          1\n         1     100000      65536\n"
         };
@@ -1754,7 +1752,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
 /// the controller as the worker binary to install.
 #[cfg(unix)]
 fn fake_worker_dispatcher() -> PathBuf {
-    mj_core::test_hooks::fake_command_dispatcher()
+    mj_core::test_hooks::fake_worker_dispatcher()
 }
 
 /// A profile whose home is the user's own directory has nothing the session

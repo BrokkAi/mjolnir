@@ -22,6 +22,15 @@ pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
     }
 }
 
+/// Whether the wizard's project is the repository `mj` was started in, which
+/// the project step fills in without being asked.
+fn launch_directory_chosen(dashboard: &DashboardState, wizard: &NewWizard) -> bool {
+    dashboard
+        .launch_project_directory
+        .as_deref()
+        .is_some_and(|launch| std::path::Path::new(wizard.project_directory.trim()) == launch)
+}
+
 pub(crate) fn begin_form_frame(form: &mut Dialog<WizardControl>, _initial: WizardControl) {
     form.begin_frame();
 }
@@ -74,7 +83,11 @@ pub(crate) fn render_new_wizard(
                 } else {
                     bundle_id.as_deref().expect("bundle selected")
                 },
-                project_note: "",
+                project_note: if raw_project && launch_directory_chosen(dashboard, wizard) {
+                    "  (the repository mj was started in)"
+                } else {
+                    ""
+                },
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
@@ -131,6 +144,15 @@ pub(crate) fn render_new_wizard(
                 Style::default().fg(theme::palette().error),
             ));
             lines.push(Line::raw(""));
+        }
+        // Launch finding R1-1: the field starts as the repository `mj` was
+        // started in, so say so. A plain Enter then reads as choosing that
+        // repository rather than accepting a default nobody saw.
+        if local && launch_directory_chosen(dashboard, wizard) {
+            lines.push(Line::styled(
+                "Filled in with the repository mj was started in; Enter uses it.",
+                Style::default().fg(theme::palette().warning),
+            ));
         }
         let mut history_start = None;
         if !wizard.project_history.is_empty() {
@@ -456,7 +478,14 @@ pub(crate) fn render_new_wizard(
                 .into_iter()
                 .map(|id| {
                     let bundle = &dashboard.config.bundles[id];
-                    PickerChoice::text(format!("{id}  {} repositories", bundle.repositories.len()))
+                    PickerChoice::text(format!(
+                        "{id}  {}",
+                        crate::widgets::counted(
+                            bundle.repositories.len(),
+                            "repository",
+                            "repositories"
+                        )
+                    ))
                 })
                 .collect(),
             wizard.bundle,
@@ -918,9 +947,9 @@ pub(crate) fn render_review_wizard(
             frame,
             queue_area,
             &format!(
-                "{} {count} queued command{} {}",
+                "{} {} {}",
                 if discard { "Discard" } else { "Start" },
-                if count == 1 { "" } else { "s" },
+                crate::widgets::counted(count, "queued command", "queued commands"),
                 if moving { "after move" } else { "on resume" },
             ),
             discard,

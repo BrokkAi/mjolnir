@@ -7,7 +7,7 @@ sessions side by side, on your laptop, in containers, over SSH, or on EC2, and
 keeps them running after you close the terminal. You can move a session to
 another account, another harness, or another machine without starting over.
 
-By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifier, through a public Cloudflare proxy, to tell a question from ongoing work. [Security boundaries](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default) lists everything that leaves your machine and which parts can be turned off.
+By default Mjolnir sends recent prompt and reply text, and help-search text, to TypeSafe's hosted Jev classifier through a public proxy, and `[jev] enabled = false` in `config.toml` stops all of it ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
@@ -55,9 +55,9 @@ away.
   actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
-- **Terminal, web, and desktop.** A full terminal dashboard, plus a private web
-  viewer you can reach from your phone over Tailscale, and a desktop app. All
-  three share the same live sessions.
+- **Terminal, web, and desktop.** A full terminal dashboard, plus a
+  privacy-first web viewer you can reach from your phone over Tailscale, and a
+  desktop app. All three share the same live sessions.
 
 ## Install
 

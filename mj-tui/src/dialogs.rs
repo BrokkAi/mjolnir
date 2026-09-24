@@ -506,7 +506,42 @@ fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     form.reset_geometry();
 }
 
+impl Confirmation {
+    /// The session this confirmation is about, when it is about one.
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::ConfigurationRepair { session_id, .. }
+            | Self::CloseFailed { session_id, .. }
+            | Self::SuspendSession { session_id, .. }
+            | Self::DiscardSinceCheckpoint { session_id, .. }
+            | Self::InterruptWork { session_id, .. }
+            | Self::ForceDestroy { session_id, .. }
+            | Self::DestroyStopped { session_id, .. }
+            | Self::RecoverFailed { session_id, .. } => Some(session_id),
+            Self::RepairRepositoryRemotes { .. }
+            | Self::LaunchFailed { .. }
+            | Self::Dismiss { .. }
+            | Self::ConvertRawCheckout { .. }
+            | Self::RecoverMove { .. } => None,
+        }
+    }
+}
+
 impl DashboardState {
+    /// A confirmation dialog that names its session by the title the user
+    /// sees in the session list, with the id only when the record is gone.
+    pub(crate) fn confirm_dialog(&self, confirmation: Confirmation) -> ConfirmDialog {
+        let name = confirmation
+            .session_id()
+            .and_then(|session_id| self.state.sessions.get(session_id))
+            .map(|session| session.display_title().to_owned());
+        let dialog = ConfirmDialog::new(confirmation);
+        match name {
+            Some(name) => dialog.naming_session(&name),
+            None => dialog,
+        }
+    }
+
     pub fn apply_web_access(&mut self, access: WebViewerAccess) {
         let Mode::Web(current) = &mut self.mode else {
             return;
@@ -1005,15 +1040,17 @@ impl DashboardState {
 
     /// Show the recovery choices after a checkpointed close could not finish.
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
-        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::CloseFailed {
-            can_discard: self
-                .state
-                .sessions
-                .get(&session_id)
-                .is_some_and(|s| s.checkpoint.is_some()),
-            session_id,
-            error: error.into(),
-        }));
+        self.mode = Mode::Confirm(
+            self.confirm_dialog(Confirmation::CloseFailed {
+                can_discard: self
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|s| s.checkpoint.is_some()),
+                session_id,
+                error: error.into(),
+            }),
+        );
     }
 
     pub fn show_import_progress(&mut self, session_title: String) {
@@ -1537,7 +1574,7 @@ impl DashboardState {
                     .and_then(|s| s.checkpoint.clone())
                 {
                     self.mode =
-                        Mode::Confirm(ConfirmDialog::new(Confirmation::DiscardSinceCheckpoint {
+                        Mode::Confirm(self.confirm_dialog(Confirmation::DiscardSinceCheckpoint {
                             session_id,
                             checkpoint,
                         }));

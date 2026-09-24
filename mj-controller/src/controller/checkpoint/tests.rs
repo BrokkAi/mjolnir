@@ -648,7 +648,9 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
              unknown field `protocol_version`, expected `session` at line 1 column 20\n",
     )
     .retry_stdin_after_failure();
-    let worker_binary = Path::new("/hel-test-worker");
+    let directory = tempfile::tempdir().unwrap();
+    let worker_binary = directory.path().join("hel-test-worker");
+    std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
     let output = run_checkpoint_staging_command(
         &executor,
@@ -657,7 +659,7 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         &spec,
         export_stdin_command,
         "export target checkpoint",
-        Some(worker_binary),
+        Some(&worker_binary),
     )
     .unwrap();
 

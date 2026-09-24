@@ -12,6 +12,7 @@ use ratatui::{Terminal, backend::TestBackend};
 fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
         ("continuation", "Enabled"),
+        ("jev", "Enabled"),
         ("subagents", "Enabled"),
         ("build_cache", "Enabled"),
         ("phone", "Enabled"),
@@ -2716,6 +2717,7 @@ fn every_setting_description_fits_its_two_rows() {
         &["bundles", "b", "repositories"],
         &["review"],
         &["continuation"],
+        &["jev"],
         &["sessionwiki"],
         &["sessionwiki", "archive_after_days"],
         &["subagents"],

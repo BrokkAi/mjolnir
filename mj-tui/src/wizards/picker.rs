@@ -105,21 +105,33 @@ impl PickerChoice {
         self
     }
 
-    pub(crate) fn line(&self, widths: &[usize]) -> Line<'static> {
+    /// The row as one line, each cell padded to its column. The last cell
+    /// is cut with an ellipsis where the row would pass `max_width`, so a
+    /// long note such as a target's unavailability reason shows it was cut
+    /// (launch finding C-10).
+    pub(crate) fn line(&self, widths: &[usize], max_width: usize) -> Line<'static> {
         let mut spans = Vec::new();
+        let mut used = 0usize;
         for (index, cell) in self.cells.iter().enumerate() {
             let last = index + 1 == self.cells.len();
-            let padding = if last {
-                0
-            } else {
-                widths[index]
-                    .saturating_add(COLUMN_GAP)
-                    .saturating_sub(cell.width())
-            };
+            if last {
+                let room = max_width.saturating_sub(used);
+                let text = if cell.width() <= room {
+                    cell.text.clone()
+                } else {
+                    truncate_to_cells(&cell.text, room, Truncate::SUMMARY)
+                };
+                spans.push(Span::styled(text, cell.style));
+                break;
+            }
+            let padding = widths[index]
+                .saturating_add(COLUMN_GAP)
+                .saturating_sub(cell.width());
             spans.push(Span::styled(cell.text.clone(), cell.style));
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
             }
+            used = used.saturating_add(cell.width()).saturating_add(padding);
         }
         Line::from(spans)
     }
@@ -236,7 +248,7 @@ pub(crate) fn render_picker(
     let widths = picker_columns(&choices);
     let rows = choices
         .iter()
-        .map(|choice| choice.line(&widths))
+        .map(|choice| choice.line(&widths, usize::from(list_area.width)))
         .collect::<Vec<_>>();
     let mut row_map = Vec::with_capacity(choices.len());
     let mut items = 0usize;
