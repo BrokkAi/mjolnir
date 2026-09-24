@@ -54,8 +54,8 @@ fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
 }
 
 #[test]
-fn stale_override_is_skipped_and_stale_pins_are_re_resolved() {
-    const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
+fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
+    const CHILD: &str = "MJ_STALE_WORKER_OVERRIDE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("override");
@@ -69,14 +69,44 @@ fn stale_override_is_skipped_and_stale_pins_are_re_resolved() {
         .unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
-            "stale_override_is_skipped_and_stale_pins_are_re_resolved",
+            "a_stale_worker_binary_override_fails_instead_of_falling_back",
         ))
         .isolated_store(directory.path())
-        .env("MJ_INSTANCE", "issue-1138-pins")
+        .env("MJ_INSTANCE", "issue-1138-override")
         .env(CHILD, "1")
         .env("MJ_WORKER_BINARY", worker)
         .env("MJ_WORKER_DIR", workers)
         .run();
+        return;
+    }
+    // A matching worker in MJ_WORKER_DIR must not replace the named override.
+    let error = format!(
+        "{:#}",
+        worker_binary_prerequisite_for_arch("x86_64").unwrap_err()
+    );
+    assert!(error.contains("MJ_WORKER_BINARY does not match"), "{error}");
+    assert!(error.contains("override"), "{error}");
+    assert!(error.contains("missing worker build stamp"), "{error}");
+}
+
+#[test]
+fn stale_pins_are_re_resolved() {
+    const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let workers = directory.path().join("workers");
+        std::fs::create_dir(&workers).unwrap();
+        std::fs::write(
+            workers.join("mj-worker-x86_64-unknown-linux-musl"),
+            stamped_worker(b"current"),
+        )
+        .unwrap();
+        IsolatedTest::new(test_name(module_path!(), "stale_pins_are_re_resolved"))
+            .isolated_store(directory.path())
+            .env("MJ_INSTANCE", "issue-1138-pins")
+            .env(CHILD, "1")
+            .env("MJ_WORKER_DIR", workers)
+            .run();
         return;
     }
     let selected = worker_binary_prerequisite_for_arch("x86_64").unwrap();
