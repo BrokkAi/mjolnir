@@ -334,7 +334,7 @@ pub(crate) fn render_import_bundle_confirmation(
         Checkbox::render(
             frame,
             Rect::new(inner.x, y, inner.width, 1),
-            "Create managed worktree",
+            "Create isolated checkout",
             confirmation.create_managed_worktree,
             true,
             &mut form,

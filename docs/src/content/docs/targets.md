@@ -23,8 +23,8 @@ command is required. A target that is checking or unavailable cannot advance;
 
 | Runtime | Machine | Isolation boundary | New-session project | Supplemental directories | Resource choice | Target lifecycle |
 | --- | --- | --- | --- | --- | --- | --- |
-| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; managed session worktree is archived and retired on stop. |
-| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; per-session worktree/workspace is archived and retired. |
+| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; the session's managed clone is archived and retired on stop. |
+| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; the per-session clone or workspace is archived and retired. |
 | `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
 | `podman` | `local` (Linux/WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |

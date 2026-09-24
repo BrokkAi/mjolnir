@@ -5,7 +5,8 @@ Two runtimes can run on it:
 
 - `bare` — uses an existing Git project directory on the remote machine.
   When that path is the repository's primary checkout, Mjolnir creates a
-  session-specific linked worktree beside it and runs the harness there.
+  session-specific clone under `.mj/clones/<session-id>` in that repository
+  and runs the harness there.
 - `podman` (or `docker`) — starts a rootless container on the remote machine
   (the same model as on this machine, just reached over SSH) and runs the
   session inside it.

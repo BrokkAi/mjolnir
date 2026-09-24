@@ -149,7 +149,7 @@ Select a live session, press `prefix+:`, and choose **Suspend session**. Suspend
 1. Freezes dispatch at a safe boundary.
 2. Captures and verifies a current recovery archive.
 3. Terminates the owning process group or remote worker.
-4. Retires the session's managed worktree, container, or instance only after the worker has stopped.
+4. Retires the session's managed clone, container, or instance only after the worker has stopped.
 5. Leaves the session record and verified archive available to resume.
 
 If checkpoint creation or verification fails, suspension refuses teardown and
@@ -314,8 +314,9 @@ mj import muse --session <native-uuid> --bundle myapp
 ```
 
 Dashboard imports that will resume in a bare Git project also offer
-**Create managed worktree**, even when there are no import warnings. The saved
-choice takes effect on first resume.
+**Create isolated checkout**, even when there are no import warnings. The saved
+choice takes effect on first resume, which then makes the session's clone
+under `.mj/clones/<session id>`.
 
 Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 

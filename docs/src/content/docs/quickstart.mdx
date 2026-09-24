@@ -160,24 +160,28 @@ See the [web viewer](/web-viewer/) for browser and phone access. For workspace s
 
 ## What a session does to your repository
 
-On the `localhost` target, a new session gets its own Git worktree at
-`.mj/worktrees/<id>` inside your repository, on a new branch named `mj/<id>`.
-The branch and files you have checked out are not changed. The source checkout must be
-clean. To let the agent edit your checkout directly instead, clear **Create
-managed worktree** on the wizard's review step. Container, SSH, and EC2 targets
-clone the repository instead and do not touch your checkout.
+On the `localhost` target, a new session gets its own Git clone at
+`.mj/clones/<id>` inside your repository. The clone starts on the default
+branch of your `origin` remote (on your current branch when there is no
+remote, or on the branch you name with `mj new --branch`), and its `origin` is
+the same remote as yours. Your checkout is not changed: its branch, its files,
+and any uncommitted changes stay as they are, and Mjolnir adds no branch to
+your repository. To let the agent edit your checkout directly instead, clear
+**Create isolated checkout** on the wizard's review step. Container, SSH, and
+EC2 targets also work in their own clone and do not touch your checkout.
 
 To get the work out:
 
-- Look at the branch: `git log mj/<id>`, or merge it with `git merge mj/<id>`.
-  The branch holds only what the agent committed; uncommitted work is in the
-  worktree folder.
 - Print the diff: `mj diff --session <id>`.
 - Write a patch file: `mj export --session <id> --kind patch --out work.patch`.
+- Push it as a branch: `mj export --session <id> --kind branch --branch <name>`
+  pushes the session's work to `origin` as `<name>`.
+- Look at the clone itself: `git -C .mj/clones/<id> log`. Its commits are not
+  in your repository until they are pushed.
 - In the dashboard, `prefix+d` lists the changed files.
 
-**Destroy session…** removes the worktree. It keeps the `mj/<id>` branch
-unless you choose **Destroy and delete branch**.
+**Destroy session…** removes the clone and its recovery copy. Work that was not
+pushed or exported is lost.
 
 ## What it costs
 
@@ -196,7 +200,7 @@ session you started directly in Claude Code, Codex, Kimi Code, Grok Build, or
 Muse Code. Import only reads your repository: it archives the tracked changes
 into Mjolnir's data directory and does not change the checkout. When the
 imported session has a single Git root, resuming it runs the agent in that live
-checkout, not in a new worktree. See [sessions](/sessions/#import-a-native-harness-session).
+checkout, not in a new clone. See [sessions](/sessions/#import-a-native-harness-session).
 
 ## Stopping and uninstalling
 
@@ -207,7 +211,7 @@ Each way of stopping leaves a different amount running:
 | `prefix+q` (detach) | This dashboard only | The daemon, every session, and active turns |
 | **Suspend session…** (`prefix+shift+x`) or `mj suspend --session <id>` | That session's agent and target; a recovery copy is saved for **Resume** | The daemon and other sessions |
 | `mj daemon stop` | The daemon | Session workers and their targets, including EC2 instances; the next `mj` reconnects to them |
-| **Destroy session…** or `mj destroy --session <id>` | That session, its target, and its recovery copy, permanently | The daemon, other sessions, and the `mj/<id>` branch unless you delete it |
+| **Destroy session…** or `mj destroy --session <id>` | That session, its target, its clone, and its recovery copy, permanently | The daemon and other sessions |
 
 To stop everything, suspend or destroy each session first, then run
 `mj daemon stop`. `mj sessions` lists what is still live.
@@ -224,8 +228,11 @@ To uninstall after that:
    the path in `MJ_DATA_DIR`. Deleting it deletes every suspended session.
 4. Remove the cache, which holds Git mirrors and the pinned agent installs:
    `~/.cache/mjolnir`, or `$XDG_CACHE_HOME/mjolnir` when that is set.
-5. In each repository you used, remove `.mj/worktrees` with
-   `git worktree remove`, and delete the `mj/<id>` branches you no longer want.
+5. In each repository you used, delete the `.mj` folder, which holds only the
+   session clones: `rm -rf .mj`. Sessions made by older Mjolnir versions used
+   linked worktrees under `.mj/worktrees` on `mj/<id>` branches; remove those
+   with `git worktree remove` first, and delete the `mj/<id>` branches you no
+   longer want.
 
 On macOS the configuration and data directories are both
 `~/Library/Application Support/mjolnir`.
