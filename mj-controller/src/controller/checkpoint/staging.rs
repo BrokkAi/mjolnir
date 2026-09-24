@@ -101,10 +101,20 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
         {
             continue;
         }
-        bail!(
+        let error = anyhow::anyhow!(
             "{operation} failed with status {}: {failure}",
             output.status
         );
+        // The export's stderr can name paths, so it stays in the daemon log.
+        // This one failure has a reason the caller can act on (R4-5).
+        if failure.contains(NO_SESSION_ARTIFACTS) {
+            return Err(error.context(mj_core::refusal::Refusal::precondition(
+                "the agent has saved no conversation for this session although it was sent a \
+                 prompt, so there is nothing to checkpoint; run a turn that succeeds and try \
+                 again, or destroy the session with mj destroy",
+            )));
+        }
+        return Err(error);
     }
 }
 

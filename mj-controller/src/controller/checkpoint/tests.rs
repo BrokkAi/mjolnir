@@ -632,6 +632,54 @@ fn a_failing_export_is_not_retried_as_an_old_worker() {
         vec!["export target checkpoint".to_owned()]
     );
 }
+/// R4-5: a suspend whose export found no native history ended with "the
+/// daemon log records the reason under reference ...". The caller now gets a
+/// sentence it can act on, carried as a refusal the way J-14's is.
+#[test]
+fn an_export_with_no_native_history_tells_the_caller_why() {
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    };
+    // What the worker printed in R4 (`cli/stop-02-wait.txt`, daemon log).
+    let executor = ExportExecutor::new(
+        1,
+        "2026-09-24T19:48:36Z ERROR mj_worker: Mjolnir worker exited with an error \
+         error=\"no session artifacts found\"\nError: no session artifacts found\n",
+    );
+
+    let error = run_checkpoint_staging_command(
+        &executor,
+        &locator,
+        LATCH_RELAY_SESSION,
+        &export_spec_fixture(),
+        export_stdin_command,
+        "export target checkpoint",
+        None,
+    )
+    .unwrap_err();
+
+    let refusal = mj_core::refusal::Refusal::of(&error).expect("the reason reaches the caller");
+    assert!(
+        refusal.message().contains("saved no conversation"),
+        "{refusal}"
+    );
+    // Any other export failure stays internal.
+    let executor = ExportExecutor::new(1, "Error: repository '/home/me/app' is missing\n");
+    let error = run_checkpoint_staging_command(
+        &executor,
+        &locator,
+        LATCH_RELAY_SESSION,
+        &export_spec_fixture(),
+        export_stdin_command,
+        "export target checkpoint",
+        None,
+    )
+    .unwrap_err();
+    assert!(mj_core::refusal::Refusal::of(&error).is_none());
+}
+
 /// The explicit export protocol field makes every older worker reject the
 /// current spec before it can apply obsolete path or collection behavior.
 #[test]

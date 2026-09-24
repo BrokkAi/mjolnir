@@ -412,7 +412,9 @@ impl Controller {
                     harness_home: spec.harness_home.clone(),
                     workspace_root: spec.workspace_root.clone(),
                     repositories: spec.repositories.clone(),
-                    allow_empty_native: !canonical_session_contains_prompt(&spec.canonical_session),
+                    allow_empty_native: !current_native_session_received_prompt(
+                        &spec.canonical_session,
+                    ),
                     stage_path: target_path(&remote_stage),
                     refresh_existing: true,
                 };

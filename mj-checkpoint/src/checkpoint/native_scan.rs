@@ -6,6 +6,11 @@ pub(super) const CODEX_PROBE_FLOOR_SLACK_MS: i64 = 48 * 3600 * 1000;
 
 pub(super) const CODEX_SCAN_CACHE_FILE: &str = "codex-scan-cache.json";
 
+/// How a checkpoint export fails when the harness saved nothing for a native
+/// session that received a prompt. The controller recognizes it in the
+/// export's stderr to tell the caller what happened.
+pub const NO_SESSION_ARTIFACTS: &str = "no session artifacts found";
+
 /// Rollouts whose `session_meta` header named a different resumable thread.
 /// Codex writes that header once, when it creates the file, so a negative
 /// verdict never turns positive and is safe to remember across exports.
@@ -132,10 +137,7 @@ pub(super) fn collect_native_artifacts_cached(
         collect_claude_memory_artifacts(home, session_id, &mut output)?;
     }
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    ensure!(
-        allow_empty || !output.is_empty(),
-        "no session artifacts found"
-    );
+    ensure!(allow_empty || !output.is_empty(), NO_SESSION_ARTIFACTS);
     let total = output
         .iter()
         .try_fold(0_u64, |total, artifact| {
