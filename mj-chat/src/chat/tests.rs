@@ -713,6 +713,12 @@ fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child(
     chat.set_subagents_enabled(true);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
     assert!(screen.contains("Subagents · none yet"), "{screen}");
+    // Launch finding R1-3: the ASCII symbol set draws no middle dot.
+    let ascii = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        drawn_transcript(&mut chat, 100, 24).join("\n")
+    });
+    assert!(ascii.contains("Subagents - none yet"), "{ascii}");
+    assert!(!ascii.contains('·'), "{ascii}");
     assert!(
         chat.subagent_control_area.is_none(),
         "the dimmed entry is not clickable"
