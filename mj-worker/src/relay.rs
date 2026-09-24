@@ -97,6 +97,9 @@ pub struct DurableRelay {
     checkpoint_only: bool,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
+    /// The connected bridge returns steers it cannot inject, so the relay may
+    /// steer queued prompts on its own. Belongs to the bridge, like readiness.
+    automatic_steering: bool,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -366,6 +369,7 @@ impl DurableRelay {
             acp_ready: false,
             checkpoint_only,
             steering_supported: None,
+            automatic_steering: false,
             snapshot,
             journal_spans,
             hot_events,
@@ -564,11 +568,17 @@ impl DurableRelay {
     pub fn clear_acp_readiness(&mut self) {
         self.acp_ready = false;
         self.steering_supported = None;
+        self.automatic_steering = false;
     }
 
     /// Publish the current harness's steering support without changing the journal.
     pub fn set_steering_supported(&mut self, supported: Option<bool>) {
         self.steering_supported = supported;
+    }
+
+    /// Allow the relay to steer queued prompts into the running turn itself.
+    pub fn set_automatic_steering(&mut self, enabled: bool) {
+        self.automatic_steering = enabled;
     }
 
     /// Every fact that bears on whether this session is working.

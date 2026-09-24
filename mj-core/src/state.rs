@@ -167,6 +167,17 @@ pub struct MaterializedTurn {
     /// position of the turn's first item.
     pub turn_start_position: u64,
     pub started_at_ms: i64,
+    /// The relay prompt still executing this turn after a steer moved the
+    /// turn to a queued prompt. That prompt's completion ends this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steered_into: Option<String>,
+}
+
+impl MaterializedTurn {
+    /// Whether the ending of relay prompt `command_id` ends this turn.
+    pub fn belongs_to(&self, command_id: &str) -> bool {
+        self.command_id == command_id || self.steered_into.as_deref() == Some(command_id)
+    }
 }
 
 /// How a prompt ended.

@@ -284,6 +284,227 @@ fn uncertain_steering_survives_restart_and_requires_explicit_retry() {
     assert_eq!(claimed[0].command_id, "prompt-queued");
 }
 
+/// A relay whose bridge returns steers it cannot inject, with `prompt-first`
+/// running.
+fn relay_steering_automatically(root: &std::path::Path) -> DurableRelay {
+    let mut relay = DurableRelay::open(root, SESSION, "test").unwrap();
+    relay.set_steering_supported(Some(true));
+    relay.set_automatic_steering(true);
+    submit_relay(
+        &mut relay,
+        "prompt-first",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("first")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+}
+
+fn queue_prompt(relay: &mut DurableRelay, command_id: &str, text: &str) {
+    submit_relay(
+        relay,
+        command_id,
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from(text)],
+        },
+    );
+}
+
+fn claimed_steer_of(claimed: &[ClaimedRelayCommand], queued: &str) -> String {
+    let [steer] = claimed else {
+        panic!("expected one automatic steer, got {claimed:?}");
+    };
+    assert!(steer.command_id.starts_with("auto-steer-"));
+    assert!(matches!(
+        &steer.command,
+        RelayCommand::Steer { active_prompt_id, queued_prompt_id }
+            if active_prompt_id == "prompt-first" && queued_prompt_id == queued
+    ));
+    assert_eq!(
+        steer.steering_prompt.as_ref().unwrap().queued_command_id,
+        queued
+    );
+    steer.command_id.clone()
+}
+
+#[test]
+fn queued_prompts_are_steered_into_the_running_turn_one_at_a_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    queue_prompt(&mut relay, "prompt-second", "also this");
+    let steer = claimed_steer_of(
+        &relay.claim_pending_commands(true).unwrap(),
+        "prompt-second",
+    );
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        mj_core::relay::SteeringStatus::Pending
+    );
+
+    queue_prompt(&mut relay, "prompt-third", "and this");
+    assert!(
+        relay.claim_pending_commands(true).unwrap().is_empty(),
+        "a second steer waits for the first to settle"
+    );
+
+    relay
+        .record_command_completed(
+            &steer,
+            RelayCommandOutcome::Steered {
+                queued_command_id: "prompt-second".into(),
+            },
+        )
+        .unwrap();
+    claimed_steer_of(&relay.claim_pending_commands(true).unwrap(), "prompt-third");
+}
+
+#[test]
+fn automatic_steering_stops_for_a_turn_that_returned_a_steer() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    queue_prompt(&mut relay, "prompt-second", "also this");
+    let steer = claimed_steer_of(
+        &relay.claim_pending_commands(true).unwrap(),
+        "prompt-second",
+    );
+    relay
+        .record_command_completed(
+            &steer,
+            RelayCommandOutcome::SteeringReturned {
+                queued_command_id: "prompt-second".into(),
+            },
+        )
+        .unwrap();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    // The returned prompt runs as the next turn.
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "prompt-second");
+}
+
+#[test]
+fn slash_commands_and_waiting_checkpoints_are_not_steered() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    queue_prompt(&mut relay, "prompt-review", "/review the parser");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    submit_relay(
+        &mut relay,
+        "checkpoint-1",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    queue_prompt(&mut relay, "prompt-second", "/home/me/notes.txt is wrong");
+    assert!(
+        !relay
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|claimed| matches!(claimed.command, RelayCommand::Steer { .. })),
+        "a checkpoint is waiting for this turn to end"
+    );
+}
+
+#[test]
+fn bridges_that_start_their_own_turns_are_not_steered_automatically() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    relay.set_automatic_steering(false);
+    queue_prompt(&mut relay, "prompt-second", "also this");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(relay.operational_state().steering.is_none());
+}
+
+#[test]
+fn a_path_is_a_message_and_a_command_name_is_not() {
+    let prompt = |text: &str| vec![ContentBlock::from(text)];
+    assert!(mj_core::acp::prompt_is_slash_command(&prompt("/review")));
+    assert!(mj_core::acp::prompt_is_slash_command(&prompt(
+        "  /plugin:run now"
+    )));
+    assert!(!mj_core::acp::prompt_is_slash_command(&prompt(
+        "/home/me/file"
+    )));
+    assert!(!mj_core::acp::prompt_is_slash_command(&prompt("/ nothing")));
+    assert!(!mj_core::acp::prompt_is_slash_command(&prompt(
+        "fix /review"
+    )));
+}
+
+#[test]
+fn a_returned_steer_keeps_the_prompt_queued_for_the_next_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-first",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("first")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-queued",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("next")],
+        },
+    );
+    submit_relay(
+        &mut relay,
+        "steer-first",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-queued".into(),
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "steer-first",
+            RelayCommandOutcome::SteeringReturned {
+                queued_command_id: "prompt-queued".into(),
+            },
+        )
+        .unwrap();
+
+    // Nothing was delivered and nothing waits on the user.
+    let state = relay.operational_state();
+    let steering = state.steering.unwrap();
+    assert_eq!(steering.status, mj_core::relay::SteeringStatus::Resolved);
+    assert_eq!(steering.message, None);
+    assert_eq!(state.queued_prompts.len(), 1);
+    assert_eq!(state.queued_prompts[0].command_id, "prompt-queued");
+
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "prompt-queued");
+}
+
 #[test]
 fn steering_rejects_changed_queue_and_consumes_late_confirmed_input_once() {
     let temp = tempfile::tempdir().unwrap();

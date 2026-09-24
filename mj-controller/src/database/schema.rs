@@ -511,6 +511,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: stored relay JSON can now hold the steering-returned outcome,
+    // and stored active-turn JSON the prompt a steer continued, which older
+    // readers reject and older writers would drop.
+    if version < 48 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 48 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (48, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 48;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -669,8 +683,9 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 47 adds independent clone ownership.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 47;
+    /// `SCHEMA_VERSION`. Migration 48 stores returned steering and steered
+    /// turn identity.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 48;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -702,6 +717,37 @@ mod reader_tests {
     }
 
     #[test]
+    fn steering_migration_refuses_builds_that_cannot_read_returned_steers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("steering-migration.sqlite3");
+        let record = super::super::tests::session("steered-session", "project");
+        save_session_to(&path, &record).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version >= 48;
+             UPDATE schema_compatibility SET minimum_compatible_version = 47;
+             PRAGMA user_version = 47;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+        let upgraded = open_writer(&path).unwrap();
+        let schema = read_schema_state(&upgraded).unwrap();
+        assert_eq!(schema.revision, 48);
+        assert_eq!(schema.minimum_compatible, Some(48));
+        let error = schema.ensure_supported_by(47).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 48
+            }
+        ));
+        drop(upgraded);
+        assert_eq!(load_state_from(&path).unwrap().sessions[&record.id], record);
+    }
+
+    #[test]
     fn durable_target_migration_preserves_sessions_and_refuses_previous_builds() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("target-migration.sqlite3");
@@ -719,13 +765,13 @@ mod reader_tests {
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
-        assert_eq!(schema.revision, 47);
-        assert_eq!(schema.minimum_compatible, Some(47));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let error = schema.ensure_supported_by(45).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 47
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         ));
         drop(upgraded);

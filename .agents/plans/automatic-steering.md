@@ -14,9 +14,9 @@ To see it working: start a session in an isolated instance, send a prompt that m
 
 - [x] (2026-09-24) Released `@brokkai/codex-acp` 1.13.2, which honors `_meta.steering.idleBehavior: "promptRequired"` and advertises `_meta.steering.idleBehaviors: ["promptRequired"]`. Live guardian and yolo sessions passed with the packed adapter before publication.
 - [x] (2026-09-24) Milestone 1: pinned `@brokkai/codex-acp` 1.13.2 and Codex 0.156.1 in `harness_runtime.rs`, the bridge package files, the agent-dev Containerfile, and the reliability lab; paired Codex's `user_note` field with its question. The regenerated lockfile drops the nested second Codex copy that the old bridge's own 0.153.4 pin required.
-- [ ] Milestone 2: record a returned steer as its own outcome, keep turn identity through steering, and add database migration 48.
-- [ ] Milestone 3: steer queued prompts automatically in the worker.
-- [ ] Milestone 4: validate live with Codex and Claude in an isolated instance, then commit and push.
+- [x] (2026-09-24) Milestone 2: a `promptRequired` reply becomes `RelayCommandOutcome::SteeringReturned` and resolves the steering operation quietly; `MaterializedTurn.steered_into` keeps the turn's identity through a steer, so waits finish and interrupted steered turns clear; migration 48 (breaking) records both. Tests: `a_returned_steer_keeps_the_prompt_queued_for_the_next_turn`, `returned_steering_leaves_the_prompt_to_mj_without_cancellation`, `a_steered_prompt_finishes_with_the_turn_it_joined`, `an_interrupted_steered_turn_clears_the_running_turn`, `a_returned_steer_leaves_the_prompt_queued_and_the_turn_running`, `steering_migration_refuses_builds_that_cannot_read_returned_steers`.
+- [x] (2026-09-24) Milestone 3: `RuntimeEvent::Connected.steering_returns_idle_input` (from `steering_returns_idle_input` in `mj-worker/src/acp/drive.rs`) enables `DurableRelay::set_automatic_steering`; `claim_pending_commands_up_to` calls `submit_automatic_steer`. Tests: `queued_prompts_are_steered_into_the_running_turn_one_at_a_time`, `automatic_steering_stops_for_a_turn_that_returned_a_steer`, `slash_commands_and_waiting_checkpoints_are_not_steered`, `bridges_that_start_their_own_turns_are_not_steered_automatically`, `a_path_is_a_message_and_a_command_name_is_not`, `only_bridges_that_return_idle_steers_are_steered_automatically`. Milestones 2 and 3 share files (`mj-core/src/acp.rs`, `mj-worker/src/acp/drive.rs`, `dispatch.rs`), so they are one commit.
+- [x] (2026-09-24) Milestone 4: validated live in the isolated instance `steer-1132` with Codex (`codex4`) and Claude (`claude2`); evidence under Artifacts and Notes. The full default Cargo suite, clippy with `-D warnings`, and formatting passed.
 
 ## Surprises & Discoveries
 
@@ -25,6 +25,10 @@ The Codex bridge used to drop the steering `_meta` and start a new Codex turn wh
 `mj prompt --wait` and `mj wait --turn N` never finish for a prompt that was steered. The transcript projection (`mj-transcript/src/projection/observation.rs`) moves the running turn to the steered prompt, and then the completion of the original prompt looks for an active turn with the original command ID, finds none, and records an outcome with no accepted ordinal. The wait rule in `mj-controller/src/server/api/wait_policy.rs` needs an accepted ordinal at or after its target. The same filter means an interrupted steered turn is never cleared from the projection. Escape steering already had this bug; automatic steering would hit it constantly.
 
 A Claude steer is delivered at the SDK's `now` priority and aborts the model response in progress; the turn continues with the new message. The bridge comment says it slots in between tool calls; that detail is not verified. This is the same behavior Escape steering has today, and it is not a cancel: tools, subagents, compaction and the turn itself continue.
+
+A lifecycle `destroy` accepted just before `mj daemon stop` did not finish: after the next daemon start the session came back `running` with a new worker, and a second `destroy` with the daemon left running archived it. Seen for five lab sessions in two instances on 2026-09-24. This is unrelated to steering and was not investigated further.
+
+The `claude4` account was at its session limit during validation; the Claude run used `claude2`.
 
 ## Decision Log
 
@@ -44,11 +48,13 @@ A Claude steer is delivered at the SDK's `now` priority and aborts the model res
 
 2026-09-24: Migration 48 is breaking. Stored relay JSON can contain the new outcome, and stored `active_turn_json` can contain `steered_into`, which older readers reject because `MaterializedTurn` denies unknown fields.
 
+2026-09-24: The terminal chat's palette "interrupt turn" command now treats a steer in progress from any source as pending turn control (`turn_control_pending` in `mj-chat/src/chat/status.rs`), matching what Escape already did in `mj-chat/src/chat/keys.rs`. Without it, interrupting during an automatic steer would send a second steer that admission rejects.
+
 2026-09-24: Codex's new "Other" field has `_meta.codex.role: "user_note"` and `questionId`, where 1.11.5 had `isOtherAnswer: true`. mj pairs it with its question through the existing `custom_answer_for` link with no `custom_answer_option`, so the note replaces the choice, as the old "Other" field did. Coupling to the bridge's "None of the above" label was rejected.
 
 ## Outcomes & Retrospective
 
-To be completed at the end of implementation.
+Queued prompts now join the running turn without Escape for Codex (bridge 1.13.2 and later) and Claude, and `mj prompt --wait` finishes for a steered prompt when its turn ends. Harnesses that do not return idle steers keep the queue-then-Escape behavior. The race in which a steer arrives just as a turn ends was not reproduced live; unit tests cover it at the bridge (`returned_steering_leaves_the_prompt_to_mj_without_cancellation`), relay, and projection levels. On Claude a steer still aborts the model response in progress, as Escape steering already did; the turn, its tools and its subagents continue.
 
 ## Context and Orientation
 
@@ -93,6 +99,19 @@ All live testing uses the isolated instance and a cache directory under the sess
 ## Artifacts and Notes
 
 Release evidence for 1.13.2 (2026-09-24): a guardian session wrote in its workspace on two successive turns without approval, and a sandbox-blocked `curl` was escalated through Codex's automatic review ("Guardian" tool entry) and returned 200 with no question to mj. A yolo session over SSH ran network access and a write to `$HOME` with no approval.
+
+Live validation (2026-09-24, build of this branch, instance `steer-1132`, cache under the session scratchpad):
+
+    Codex, session 2e772c58: first prompt ran `sleep 40`; the follow-up sent during it was
+    admitted as auto-steer-1dd595d3… and applied. Transcript: [29] agent, [30] tool (sleep),
+    [34] user "Also add a second line…", [49] agent "FIRST-DONE / SECOND-DONE Thursday".
+    `mj prompt --wait` for the follow-up: "finished (EndTurn) turn 31 in 44.3s".
+    The managed install came from npm: codex-acp-1.13.2.tgz in the committed lockfile.
+
+    Claude, session 1821335f: auto-steer-1cfb15c5… applied; [21] user follow-up inside the
+    turn. Claude Code moved the 40-second sleep to the background and ended the turn;
+    `mj prompt --wait` returned "finished (EndTurn) turn 18 in 6.3s". Its next cycle answered
+    "FIRST-DONE … / SECOND-DONE: Today, 2026-09-24, is a Thursday."
 
 ## Interfaces and Dependencies
 

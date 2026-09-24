@@ -90,6 +90,8 @@ pub(super) async fn serve_session(
                 .any(|value| value == "nativeSubagentSessions")
         });
     let steering_supported = steering_supported_from_meta(initialized.meta.as_ref());
+    let steering_returns_idle_input =
+        steering_supported && steering_returns_idle_input(initialized.meta.as_ref(), spec.harness);
     let availability_supported = initialized
         .meta
         .as_ref()
@@ -117,6 +119,7 @@ pub(super) async fn serve_session(
             capabilities: Some(Box::new(initialized.agent_capabilities.clone())),
             agent_info: initialized.agent_info.clone(),
             steering_supported: Some(steering_supported),
+            steering_returns_idle_input,
         },
     )
     .await?;

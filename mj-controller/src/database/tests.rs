@@ -4015,6 +4015,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
             accepted_ordinal: Some(1),
             turn_start_position: 2,
             started_at_ms: 90,
+            steered_into: None,
         })),
         queued_prompts: Some(vec![MaterializedQueuedPrompt {
             command_id: "prompt-2".into(),
@@ -4221,6 +4222,7 @@ fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
                 accepted_ordinal: Some(1),
                 turn_start_position: 1,
                 started_at_ms: 100,
+                steered_into: None,
             })),
             ..MaterializedSessionMutation::default()
         },

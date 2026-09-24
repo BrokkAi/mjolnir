@@ -990,6 +990,11 @@ pub enum RelayCommandOutcome {
     Steered {
         queued_command_id: String,
     },
+    /// The harness had no running turn to take the steered prompt and handed
+    /// it back. The prompt keeps its place at the head of the queue.
+    SteeringReturned {
+        queued_command_id: String,
+    },
     Closed,
     QueueChanged {
         removed_command_ids: Vec<String>,
