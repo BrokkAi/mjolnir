@@ -19,7 +19,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A landed in full (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7; `c69618f4..aa89c000`), validated (controller, cli, core, tui tests; clippy; fmt), pushed; master = origin = `526ab788`. `bin-fixed/` rebuilt from `dd9e55ce` after R2-B (`SHA256SUMS-dd9e55ce.txt`; all three stamped `2.20.0+dd9e55ce…`).
 - Fix wave R2-B landed (R2-2 `5f732831`, R2-1 `5dafd135`), validated, pushed; master = origin = `dd9e55ce`. R2-11 cause confirmed, fix deferred (see the runbook's R2 fix waves paragraph and the open list). Its worktree `agent-ab36fc8a205e13311` is still locked by the agent; remove it when unlocked. #1144 filed for the suspend handler's `Controller::load()` and the test that reads the real store.
 - Stale agent worktrees and branches from the 09-23 fix waves were pruned on 09-24 at the user's request. The J-25 work in progress from the Track J worktree is saved as `evidence/track-j/j25-codex-quota-error-wip.patch`. Branch `worktree-agent-aa0dbae3ef12d579e` (pre-campaign "WIP: partial ACP 2.0 upgrade") was left for the user.
-- R3 (Track J on EC2 plus the group-16 behaviors) is running as the one subagent against the `dd9e55ce` binaries; if it is lost, its EC2 host is tagged `mj-ssh-docker-run` and its ledger is under `evidence/reverify-3/ec2` with a backup in `evidence/reverify-3/ledger-backup`. R4 is next. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
+- R3 done: `evidence/reverify-3/notes.md` (EC2 cleaned up; the ledger directories keep the tool-generated key for a key pair that no longer exists). R4 (real harnesses) is running as the one subagent. Fix wave R3 (mission `evidence/fix-wave-r3-mission.md`) is next after R4. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
 ## Next steps, in order
 
@@ -32,6 +32,9 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 7. **Close the runbook**: fill the Run 2 section's I2 line and the re-verification results, list what stays open, commit, push. Close #1136 if its commit didn't (`Fixes #1136`), remove `agent-in-progress`.
 
 ## Still open (not fixed; decide or schedule)
+
+- **Public install path unverified** (R3 runbook error 1): the harness refused `curl … install.sh | bash` and the installer's PATH prompt for the subagent. Either grant that permission for one run or run the README install on a fresh Ubuntu 24.04 host by hand and read the first-run path; the R3 notes say what to look for.
+- R3-4 / J-16: every SSH-bare session uploads its own worker copy (139 MB, ~7 min per create under load); needs a shared per-host worker cache keyed by build stamp. Design work, not a wording fix.
 
 - I2-1 Codex session title comes from the injected project-memory block (design choice: move the block or prefer Mjolnir's title).
 - I2-10 review "Preparing reviewer…" before discovering no files changed (capture-first refactor breaks six host tests' order).
