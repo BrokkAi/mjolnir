@@ -19,7 +19,7 @@ The daemon is mj's controller process; it owns session records, lifecycle change
 - [x] (2026-09-23) Checkpoints save clone refs, detached HEAD, the full stash stack, and file changes; restoration rebuilds them before resuming.
 - [x] (2026-09-23) Migration 47 stores checkpoint-bound publication evidence; age cleanup requires clean published evidence and lost cleanup retains owned clone storage.
 - [x] (2026-09-23) Open/Resume marks unpublished or unknown work; TUI/web confirm suspension, while CLI/API require explicit acknowledgment.
-- [ ] Validate with isolated named instances and automated tests, commit coherent checkpoints, push to origin/master, and close #1073.
+- [x] (2026-09-23) Validated with an isolated named instance and automated tests, committed on the current branch, pushed `2666a09b` to origin/master, and closed #1073.
 
 ## Surprises & Discoveries
 
@@ -42,7 +42,7 @@ The local proof used `git clone --local` twice on one source. Three object files
 ## Outcomes & Retrospective
 
 
-The independent-clone test starts two sessions on the same branch, confirms independent commits, and observes a normal non-fast-forward push rejection from the second clone. The archive test restores a secondary branch, annotated tag, two named stashes, dirty tracked work, and a payload above the pipe buffer size. The publication test distinguishes an unpushed commit, a pushed unmerged commit, uncommitted files, a stash, and a separate push URL. Migration 47 preserves older rows and makes new ownership state inaccessible to older writers. The full `cargo test` and `cargo clippy --all-targets -- -D warnings` runs passed on the dev profile. A named isolated CLI smoke check and delivery are pending.
+The independent-clone test starts two sessions on the same branch, confirms independent commits, and observes a normal non-fast-forward push rejection from the second clone. The archive test restores a secondary branch, annotated tag, two named stashes, dirty tracked work, and a payload above the pipe buffer size. The publication test distinguishes an unpushed commit, a pushed unmerged commit, uncommitted files, a stash, and a separate push URL. Migration 47 preserves older rows and makes new ownership state inaccessible to older writers. A named `--instance issue-1073-smoke` CLI run used isolated configuration and data directories. Dev-profile Rust suites and `cargo clippy --all-targets -- -D warnings` passed. During the final serial full-suite run, one PTY quit test crossed its five-second deadline under load; it passed alone and with its entire 10-test PTY target on rerun. The validated implementation was pushed to `origin/master` at `2666a09b`; #1073 was closed and its `agent-in-progress` label removed.
 
 ## Context and Orientation
 
