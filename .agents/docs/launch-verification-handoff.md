@@ -1,0 +1,47 @@
+# Handoff: launch verification campaign (2026-09-23/24)
+
+For the next coordinator (Fable). Read this first, then `.agents/docs/launch-verification-2026-09-23.md` (the runbook: tracks, evidence standard, Run 1/Run 2 records, fix-wave record).
+
+## Standing rules from the user
+
+- **At most one subagent running at a time, until the user lifts it.** Count resumed agents too. (Quota.)
+- Fable designs, triages and reviews; implementation goes to Opus/Sonnet subagents in isolated worktrees; the coordinator cherry-picks onto `master`, runs the affected crates' `cargo test` + `cargo clippy --all-targets -- -D warnings` + `cargo fmt --all -- --check`, then pushes.
+- Authorized to file and fix issues as found, commit on `master`, and push (the user asked to keep master current).
+- Out of scope: `morannon-podman` (de-risked); macOS (issue #1135, user drives it on a MacBook).
+- Never touch the user's default Mjolnir instance or `target/` for evidence (mbx evicts `target/`). Campaign root: `/home/jonathan/mj-campaign/launch-2026-09-23/` (`bin/` = original campaign build `8b7b1120`; `bin-fixed/` = current fixed build; `evidence/` = all captures and findings).
+
+## State right now
+
+- Local `master` is at `2fe3b29c`: **ahead 12, behind 7** of `origin/master`. The push was rejected; origin moved during the quota pause.
+- The 12 unpushed commits: group 16 (mandatory `--workspace` for `mj new`/`mj acp` with a workspace list in the error; `[jev] enabled` switch on Setup → Privacy covering every Jev use; help-search debounce 200 ms; "privacy-first" back in the README; R1 leftovers A-12, B-2/D-1, B-3, R1-3, C-12, C-10, E-8 test, R1-1), the Windows CI fix `0f8199ff`, and #1136 `2fe3b29c`. All validated locally (worker, controller, cli, clippy green).
+- `bin-fixed/` was rebuilt from `2fe3b29c`: `mj` `a158e416`, `mj-worker` `4dacdeb3`, musl worker `492a3809`. Rebuild again after the merge below.
+- No subagent is running.
+
+## Next steps, in order
+
+1. **Merge `origin/master` into `master`** (merge, not rebase; the repo's history uses merges), resolve conflicts, validate all crates + clippy + fmt + `npm test --prefix tests/e2e/web`, push. Last time conflicts were in `mj-controller/src/server/api/wait_policy.rs` and `mj-controller/src/sessionwiki.rs` (keep both sides' intent).
+2. **macOS CI test fix — awaiting the user's "go".** `mj-cli/src/api_client.rs` test `the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin` asserts the **unpinned** client's error contains `CaUsedAsEndEntity` (webpki text); on macOS reqwest's unpinned path uses the platform verifier and says `-67843`. The pin itself works. Proposed: (a) assert `invalid peer certificate` instead; (b) in `the_cli_refuses_a_certificate_other_than_the_pinned_one`, `unwrap_err` and assert `ApplicationVerificationFailure` (only the pin verifier emits it). A subagent's classifier blocked this edit as "test removal"; do not apply it without the user's explicit go. Windows CI failure is fixed (`0f8199ff`).
+3. **Rebuild `bin-fixed/`** from the pushed tip (`cargo build -p brokk-mjolnir -p brokk-mj-worker` and `-p brokk-mj-worker --target x86_64-unknown-linux-musl`, copy into `bin-fixed/debug/` and `bin-fixed/x86_64-unknown-linux-musl/debug/`, record SHA-256s).
+4. **R2 re-verification** (one subagent): re-run the reproductions of every fixed F, G, H finding against `bin-fixed`. Findings files: `evidence/luna-manual-seed-3206-340978/track-f/findings.md`, `…3207-341010/track-g/findings.md`, `…3208-2579821/track-h/findings.md`. Model the prompt on R1 (results in `evidence/luna-manual-seed-3301-2541214/reverify-1/notes.md`). Note for Track G: the lab needs `phone_tls=True` for a QR URL; Web dialog is `prefix+u`. For H, download old releases into `evidence/releases/`, never `target/`.
+5. **R3 re-verification** for J (needs one EC2 host; `tests/e2e/ssh_docker_lab.py`, back up the ledger right after `create`, cleanup by run tag if lost) and the new-in-group-16 behaviors (mandatory `--workspace`, Jev switch off).
+6. **Real-harness re-check** (one subagent, isolated instance with `[phone] bind` on its own port, `version = 13`): the items flagged "needs live check": I1-3 `/model claude-opus-5-5`, I1-6 same-profile resume keeps model, I1-11/I1-13 `/clear` incl. after resume, I1-15 review failure reported, I1-17 interrupted marker, I2-7 never-prompted Codex resume, I2-15 Kimi Esc closes permission form, I2-5 command in permission form, #1136 Kimi on a container target, J-19/J-17/J-21 on SSH.
+7. **Close the runbook**: fill the Run 2 section's I2 line and the re-verification results, list what stays open, commit, push. Close #1136 if its commit didn't (`Fixes #1136`), remove `agent-in-progress`.
+
+## Still open (not fixed; decide or schedule)
+
+- I2-1 Codex session title comes from the injected project-memory block (design choice: move the block or prefer Mjolnir's title).
+- I2-10 review "Preparing reviewer…" before discovering no files changed (capture-first refactor breaks six host tests' order).
+- I2-14 Muse question delayed ~3 min (needs logs for the window).
+- J-24 container mount source not validated; J-25 Codex quota error shown raw (was in progress when group 11 hit the session limit); J-22 docs for the `mj move` refusal off SSH-bare.
+- A-4/E-9 dictation chord gives no feedback without a microphone.
+- D-14 narrow pinned pane not following new replies after restart (may be covered by `bf09b3d6`; re-verify).
+- B-11 Enter half of the workspace dialog issue still reproduces (R1 capture 015).
+- Flaky under full parallel load (pass alone): `worker_environment.rs` re-exec test, controller `web_viewer::tests::retry_uses_the_original_port_after_its_owner_releases_it`, `mj-cli/tests/store_divergence.rs`.
+
+## Useful mechanics
+
+- Conflict helper for "both sides appended tests": `/tmp/claude-1000/-home-jonathan-Projects-mjolnir/54c16526-8fdf-497a-93bb-dd889fe4a87f/scratchpad/join_conflict.py <file>` (joins HEAD block then incoming block). Use only on test files; resolve code conflicts by hand — it produced a broken `api_client.rs` once.
+- Subagent worktrees often start from a stale base (`18eeb2f0`); tell every agent to branch from master's tip.
+- The harness often refuses subagents' `findings.md` writes; have them return findings text and write the file yourself.
+- Lab cleanup: `mj daemon stop` leaves workers running and they carry no `MJ_DATA_DIR`; kill by exact PID matching the lab runtime path in `/proc/<pid>/cmdline`.
+- Memory notes for this project live in `~/.claude3/projects/-home-jonathan-Projects-mjolnir/memory/` (campaign scope, lab mechanics, the subagent cap rule).
