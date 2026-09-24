@@ -21,6 +21,7 @@ use mj_core::config::{
 };
 use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION};
 use mj_core::project_memory::{ProjectMemoryIdentity, RepositoryMemoryIdentity};
+use mj_core::worker_build::{BUILD_ID, verify_worker_build};
 use mj_core::worker_launch::{
     HarnessRuntimePolicy, ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery, WorkerLaunchConfig,
     WorkerOwnership,

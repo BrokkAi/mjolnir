@@ -222,7 +222,14 @@ impl WorkerBinarySourceSnapshot {
             );
         };
         match source {
-            Ok(availability) => Ok(availability.clone()),
+            Ok(availability) => {
+                if let WorkerBinaryAvailability::Local { path, .. } = availability {
+                    verify_worker_build(path).inspect_err(|error| {
+                        tracing::warn!(path = %path.display(), error = %error, "rejecting pinned worker source");
+                    })?;
+                }
+                Ok(availability.clone())
+            }
             Err(error) => bail!(
                 "worker source for {arch} ({requirement:?}) was unavailable when the daemon started: {error}"
             ),
@@ -295,11 +302,13 @@ pub(super) fn publish_cached_worker(
     cache_root: &Path,
     digest: &str,
 ) -> Result<PathBuf> {
+    verify_worker_build(temporary.path())?;
     let directory = cache_root.join(digest);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create pinned worker cache {}", directory.display()))?;
     let destination = directory.join("hel");
     if destination.is_file() {
+        verify_cached_worker(&destination, digest)?;
         return Ok(destination);
     }
     match temporary.persist_noclobber(&destination) {
@@ -312,6 +321,7 @@ pub(super) fn publish_cached_worker(
         }
         Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
             if destination.is_file() {
+                verify_cached_worker(&destination, digest)?;
                 Ok(destination)
             } else {
                 Err(error.error).with_context(|| {
@@ -322,6 +332,16 @@ pub(super) fn publish_cached_worker(
         Err(error) => Err(error.error)
             .with_context(|| format!("publish pinned worker artifact {}", destination.display())),
     }
+}
+
+fn verify_cached_worker(path: &Path, digest: &str) -> Result<()> {
+    verify_worker_build(path)?;
+    ensure!(
+        mj_core::worker_launch::worker_executable_digest(path)? == digest,
+        "content-addressed worker cache {} does not match {digest} checksum",
+        path.display()
+    );
+    Ok(())
 }
 
 /// Find a worker source without downloading it.
@@ -395,17 +415,8 @@ fn resolve_worker_source_again(
     match resolved {
         Ok(WorkerBinaryAvailability::Local { path, source }) => {
             let cache_root = data_dir().join("workers").join("pinned");
-            let path = match copy_worker_source_to_cache(&path, &cache_root) {
-                Ok(cached) => cached,
-                Err(error) => {
-                    tracing::warn!(
-                        arch,
-                        error = format!("{error:#}"),
-                        "could not cache a re-resolved worker source; using it where it is"
-                    );
-                    path
-                }
-            };
+            let path = copy_worker_source_to_cache(&path, &cache_root)
+                .context("pin the re-resolved worker source")?;
             tracing::info!(
                 arch,
                 requirement = ?requirement,
@@ -433,14 +444,30 @@ pub(super) fn worker_binary_prerequisite_for_current(
     is_file: &dyn Fn(&Path) -> bool,
 ) -> Result<WorkerBinaryAvailability> {
     let triple = format!("{arch}-unknown-linux-musl");
+    let rejected = std::cell::RefCell::new(Vec::new());
+    let matches_build = |path: &Path| {
+        if !is_file(path) {
+            return false;
+        }
+        match verify_worker_build(path) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), error = %error, "skipping incompatible worker source");
+                rejected.borrow_mut().push(format!("{error:#}"));
+                false
+            }
+        }
+    };
     if let Some(path) = mj_core::config::env_override_os("WORKER_BINARY").map(PathBuf::from) {
         if !is_file(&path) {
             bail!("MJ_WORKER_BINARY is not a file: {}", path.display());
         }
-        return Ok(WorkerBinaryAvailability::Local {
-            path,
-            source: "MJ_WORKER_BINARY".into(),
-        });
+        if matches_build(&path) {
+            return Ok(WorkerBinaryAvailability::Local {
+                path,
+                source: "MJ_WORKER_BINARY".into(),
+            });
+        }
     }
     // A rebuilt or renamed checkout leaves a running controller pointing at a
     // path that no longer holds a binary. Every lookup derived from that path
@@ -454,14 +481,14 @@ pub(super) fn worker_binary_prerequisite_for_current(
         ));
         candidates.push((directory.join(&triple).join("hel"), "MJ_WORKER_DIR"));
     }
-    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| is_file(path)) {
+    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| matches_build(path)) {
         return Ok(WorkerBinaryAvailability::Local {
             path,
             source: source.into(),
         });
     }
     if requirement == WorkerBinaryRequirement::LocalHost
-        && let Some((path, source)) = select_native_worker(current, is_file)
+        && let Some((path, source)) = select_native_worker(current, matches_build)
     {
         return Ok(WorkerBinaryAvailability::Local {
             path,
@@ -469,7 +496,7 @@ pub(super) fn worker_binary_prerequisite_for_current(
         });
     }
     if !controller_replaced
-        && let Some((path, source)) = select_sibling_worker(current, &triple, is_file)
+        && let Some((path, source)) = select_sibling_worker(current, &triple, matches_build)
     {
         return Ok(WorkerBinaryAvailability::Local {
             path,
@@ -486,6 +513,12 @@ pub(super) fn worker_binary_prerequisite_for_current(
             triple,
         });
     }
+    let rejected = rejected.into_inner();
+    ensure!(
+        rejected.is_empty(),
+        "no worker matching controller build {BUILD_ID} for {triple}; rejected sources:\n{}\nInstall the worker from the same mj release, or rebuild from the same commit with `cargo build --target {triple} -p brokk-mj-worker --bin mj-worker` and set MJ_WORKER_BINARY to that file (local native: `cargo build -p brokk-mj-worker --bin mj-worker`).",
+        rejected.join("\n")
+    );
     // Telling someone to install a worker beside a binary that is no longer
     // there sends them looking in the wrong place.
     ensure!(

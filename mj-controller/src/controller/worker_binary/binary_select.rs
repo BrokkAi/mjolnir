@@ -66,9 +66,9 @@ pub(super) fn preflight_architectures(
 ///
 /// A resume compacts a cross-harness transcript before it provisions anything,
 /// which costs minutes and paid model requests. Resolving the worker binary is
-/// local and takes microseconds, so a resume that could never install a worker
-/// must fail before spending any of that. This downloads nothing: a remote
-/// source counts as available, because fetching it belongs to provisioning.
+/// performed before target creation, so a resume that could never install a worker
+/// must fail before spending any of that. Remote sources are downloaded and
+/// verified here too, before provisioning can create a container.
 pub(in crate::controller) fn preflight_worker_binary(
     template: &mj_core::config::TargetTemplate,
 ) -> Result<()> {
@@ -81,7 +81,7 @@ pub(in crate::controller) fn preflight_worker_binary(
     };
     let mut failure = None;
     for arch in preflight_architectures(template) {
-        match worker_binary_for_arch(arch, requirement) {
+        match worker_binary_for_arch(arch, requirement).and_then(materialize_worker_source) {
             Ok(_) => return Ok(()),
             Err(error) => failure = Some(error),
         }
@@ -89,7 +89,7 @@ pub(in crate::controller) fn preflight_worker_binary(
     match failure {
         // The message is the one provisioning would have printed later, so the
         // user reads the same fix, sooner.
-        Some(error) => Err(error).context("preflight the worker binary before resuming"),
+        Some(error) => Err(error).context("preflight the worker binary before provisioning"),
         None => Ok(()),
     }
 }
@@ -104,14 +104,20 @@ pub(in crate::controller) fn worker_binary_for(
     } else {
         WorkerBinaryRequirement::PortableLinux
     };
-    match worker_binary_for_arch(arch, requirement)? {
+    materialize_worker_source(worker_binary_for_arch(arch, requirement)?)
+}
+
+fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf> {
+    let path = match source {
         WorkerBinaryAvailability::Local { path, .. } => Ok(path),
         WorkerBinaryAvailability::Remote {
             url,
             sha256,
             triple,
         } => download_worker(&url, &sha256, &triple),
-    }
+    }?;
+    verify_worker_build(&path)?;
+    Ok(path)
 }
 
 pub(in crate::controller) fn target_architecture(
@@ -142,6 +148,7 @@ pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) ->
             )
         })?;
         if lower_hex(Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256) {
+            verify_worker_build(&destination)?;
             return Ok(destination);
         }
         bail!(

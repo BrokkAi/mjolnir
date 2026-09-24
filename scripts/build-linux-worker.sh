@@ -33,11 +33,13 @@ esac
 triple="${arch}-unknown-linux-musl"
 output="$repo_root/target/worker/$triple/$profile"
 repo_key=$(printf '%s' "$repo_root" | cksum | cut -d ' ' -f 1)
+build_revision=${MJ_BUILD_REVISION:-$(git -C "$repo_root" rev-parse HEAD)}
 mkdir -p "$output"
 
 # Keep Linux build caches on a container volume, separate from macOS Cargo
 # artifacts. Only the completed executable crosses the host filesystem mount.
 "$engine" run --rm --init --user 0 --entrypoint sh \
+  --env "MJ_BUILD_REVISION=$build_revision" \
   --mount "type=bind,source=$repo_root,target=/source,readonly" \
   --mount "type=bind,source=$output,target=/output" \
   --mount "type=volume,source=mjolnir-dev-worker-$arch-$repo_key,target=/build" \

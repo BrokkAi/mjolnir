@@ -1,6 +1,199 @@
 use super::launch::*;
 use super::*;
 
+fn stamped_worker(body: &[u8]) -> Vec<u8> {
+    let mut bytes = body.to_vec();
+    bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+    bytes
+}
+
+#[test]
+fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
+    let directory = tempfile::tempdir().unwrap();
+    let controller = directory.path().join("target/debug/mj");
+    let stale = controller
+        .parent()
+        .unwrap()
+        .join("mj-worker-x86_64-unknown-linux-musl");
+    let legacy = directory
+        .path()
+        .join("target/worker/x86_64-unknown-linux-musl/debug/mj-worker");
+    let matching = directory
+        .path()
+        .join("target/x86_64-unknown-linux-musl/debug/mj-worker");
+    for path in [&controller, &stale, &legacy, &matching] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"unstamped").unwrap();
+    }
+    let stale_stamp = format!("\0MJ-WORKER-BUILD:2.0.0+{}\0", "a".repeat(40));
+    std::fs::write(&stale, stale_stamp).unwrap();
+    std::fs::write(&matching, stamped_worker(b"current")).unwrap();
+    let resolve = || {
+        worker_binary_prerequisite_for_current(
+            "x86_64",
+            WorkerBinaryRequirement::PortableLinux,
+            &controller,
+            &|path| path.is_file(),
+        )
+    };
+    assert!(
+        matches!(resolve().unwrap(), WorkerBinaryAvailability::Local { path, .. } if path == matching)
+    );
+    std::fs::remove_file(matching).unwrap();
+    let error = format!("{:#}", resolve().unwrap_err());
+    for expected in [
+        stale.to_str().unwrap(),
+        legacy.to_str().unwrap(),
+        "2.0.0+",
+        BUILD_ID,
+        "missing worker build stamp",
+        "cargo build --target x86_64-unknown-linux-musl",
+    ] {
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn stale_override_is_skipped_and_stale_pins_are_re_resolved() {
+    const CHILD: &str = "MJ_STALE_WORKER_PIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("override");
+        std::fs::write(&worker, b"legacy override").unwrap();
+        let workers = directory.path().join("workers");
+        std::fs::create_dir(&workers).unwrap();
+        std::fs::write(
+            workers.join("mj-worker-x86_64-unknown-linux-musl"),
+            stamped_worker(b"current"),
+        )
+        .unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "stale_override_is_skipped_and_stale_pins_are_re_resolved",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-1138-pins")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", worker)
+        .env("MJ_WORKER_DIR", workers)
+        .run();
+        return;
+    }
+    let selected = worker_binary_prerequisite_for_arch("x86_64").unwrap();
+    assert!(
+        matches!(selected, WorkerBinaryAvailability::Local { ref source, .. } if source == "MJ_WORKER_DIR")
+    );
+    pin_worker_binary_sources().unwrap();
+    let WorkerBinaryAvailability::Local { path: pinned, .. } =
+        worker_binary_prerequisite_for_arch("x86_64").unwrap()
+    else {
+        panic!("local source")
+    };
+    // Model a cache removed between daemon handoffs, then restored with stale bytes.
+    std::fs::write(&pinned, b"stale restored cache").unwrap();
+    let error = worker_binary_prerequisite_for_arch("x86_64").unwrap_err();
+    assert!(format!("{error:#}").contains("missing worker build stamp"));
+    std::fs::remove_file(&pinned).unwrap();
+    let WorkerBinaryAvailability::Local { path, .. } =
+        worker_binary_prerequisite_for_arch("x86_64").unwrap()
+    else {
+        panic!("local source")
+    };
+    verify_worker_build(&path).unwrap();
+    assert!(path.starts_with(data_dir().join("workers/pinned")));
+}
+
+#[test]
+fn pinning_rejects_stale_sources_before_publication() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("worker");
+    std::fs::write(&source, b"legacy worker").unwrap();
+    let cache = directory.path().join("cache");
+    let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |_, _| {
+        Ok(WorkerBinaryAvailability::Local {
+            path: source.clone(),
+            source: "stale fixture".into(),
+        })
+    });
+    assert!(
+        snapshot
+            .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
+            .is_err()
+    );
+    assert_eq!(std::fs::read_dir(cache).unwrap().count(), 0);
+}
+
+#[test]
+fn downloads_reject_stale_builds_even_with_the_expected_checksum() {
+    const CHILD: &str = "MJ_STALE_DOWNLOAD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "downloads_reject_stale_builds_even_with_the_expected_checksum",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-1138-download")
+        .env(CHILD, "1")
+        .run();
+        return;
+    }
+    let bytes = vec![b'x'; 150_000];
+    let digest = lower_hex(Sha256::digest(&bytes));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/worker", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        use std::io::BufRead;
+        let mut request = std::io::BufReader::new(&mut stream);
+        loop {
+            let mut line = String::new();
+            assert!(request.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&bytes).unwrap();
+    });
+    let error = download_worker(&url, &digest, "x86_64-unknown-linux-musl").unwrap_err();
+    server.join().unwrap();
+    assert!(format!("{error:#}").contains("missing worker build stamp"));
+    let cached = data_dir().join("workers/pinned").join(&digest).join("hel");
+    assert!(!cached.exists());
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, vec![b'x'; 150_000]).unwrap();
+    let error = download_worker(&url, &digest, "x86_64-unknown-linux-musl").unwrap_err();
+    assert!(format!("{error:#}").contains("missing worker build stamp"));
+}
+
+#[test]
+fn a_matching_digest_never_authorizes_a_stale_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("worker");
+    std::fs::write(&source, b"same stale worker on host and target").unwrap();
+    let digest = mj_core::worker_launch::worker_executable_digest(&source).unwrap();
+    let executor = DigestExecutor {
+        installed_line: format!("{digest}  /root/hel\n"),
+        commands: RefCell::new(Vec::new()),
+    };
+    let error = replace_target_worker_binary_if_stale(
+        &executor,
+        &ssh_bare_locator("session-remote"),
+        "session-remote",
+        &CommandSpec::new("true", Vec::<String>::new()),
+        &source,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("missing worker build stamp"));
+    assert!(executor.commands.borrow().is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
@@ -11,7 +204,7 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
     let installed = worker_root.join("hel");
     let source = directory.path().join("new-worker");
     std::fs::write(&installed, b"running-worker").unwrap();
-    std::fs::write(&source, b"replacement-worker").unwrap();
+    std::fs::write(&source, stamped_worker(b"replacement-worker")).unwrap();
     let locator = targets::TargetLocator::LocalBare {
         worker_root: worker_root.to_string_lossy().into_owned(),
     };
@@ -29,7 +222,10 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
     stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
     install_staged_worker_binary(&executor, &locator, session_id).unwrap();
-    assert_eq!(std::fs::read(&installed).unwrap(), b"replacement-worker");
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        stamped_worker(b"replacement-worker")
+    );
 }
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
@@ -196,9 +392,9 @@ fn pinned_snapshot_keeps_native_and_portable_sources_stable() {
     let native = directory.path().join("native-worker");
     let x86 = directory.path().join("x86-worker");
     let arm = directory.path().join("arm-worker");
-    std::fs::write(&native, b"native bytes").unwrap();
-    std::fs::write(&x86, b"x86 bytes").unwrap();
-    std::fs::write(&arm, b"arm bytes").unwrap();
+    std::fs::write(&native, stamped_worker(b"native bytes")).unwrap();
+    std::fs::write(&x86, stamped_worker(b"x86 bytes")).unwrap();
+    std::fs::write(&arm, stamped_worker(b"arm bytes")).unwrap();
     let cache = directory.path().join("cache");
     let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |arch, requirement| {
         let path = match requirement {
@@ -230,16 +426,19 @@ fn pinned_snapshot_keeps_native_and_portable_sources_stable() {
     let WorkerBinaryAvailability::Local { path: arm, .. } = arm else {
         panic!("arm source should be local");
     };
-    assert_eq!(std::fs::read(native).unwrap(), b"native bytes");
-    assert_eq!(std::fs::read(x86).unwrap(), b"x86 bytes");
-    assert_eq!(std::fs::read(arm).unwrap(), b"arm bytes");
+    assert_eq!(
+        std::fs::read(native).unwrap(),
+        stamped_worker(b"native bytes")
+    );
+    assert_eq!(std::fs::read(x86).unwrap(), stamped_worker(b"x86 bytes"));
+    assert_eq!(std::fs::read(arm).unwrap(), stamped_worker(b"arm bytes"));
 }
 
 #[test]
 fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("worker");
-    std::fs::write(&source, b"before").unwrap();
+    std::fs::write(&source, stamped_worker(b"before")).unwrap();
     let cache = directory.path().join("cache");
     let resolve_source = |_: &str, _: WorkerBinaryRequirement| {
         Ok(WorkerBinaryAvailability::Local {
@@ -256,10 +455,10 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
     else {
         panic!("source should be local");
     };
-    assert_eq!(std::fs::read(path).unwrap(), b"before");
+    assert_eq!(std::fs::read(path).unwrap(), stamped_worker(b"before"));
 
     let replacement = directory.path().join("replacement");
-    std::fs::write(&replacement, b"after").unwrap();
+    std::fs::write(&replacement, stamped_worker(b"after")).unwrap();
     std::fs::rename(replacement, &source).unwrap();
     let WorkerBinaryAvailability::Local { path, .. } = pinned
         .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
@@ -267,7 +466,7 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
     else {
         panic!("source should be local");
     };
-    assert_eq!(std::fs::read(path).unwrap(), b"before");
+    assert_eq!(std::fs::read(path).unwrap(), stamped_worker(b"before"));
     let fresh_replaced = WorkerBinarySourceSnapshot::capture(&cache, resolve_source);
     let WorkerBinaryAvailability::Local { path, .. } = fresh_replaced
         .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
@@ -275,7 +474,7 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
     else {
         panic!("source should be local");
     };
-    assert_eq!(std::fs::read(path).unwrap(), b"after");
+    assert_eq!(std::fs::read(path).unwrap(), stamped_worker(b"after"));
 
     let missing = directory.path().join("missing-worker");
     let missing_snapshot = WorkerBinarySourceSnapshot::capture(&cache, {
@@ -291,7 +490,7 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
             }
         }
     });
-    std::fs::write(&missing, b"now installed").unwrap();
+    std::fs::write(&missing, stamped_worker(b"now installed")).unwrap();
     assert!(
         missing_snapshot
             .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
@@ -364,8 +563,11 @@ fn dev_checkout_prefers_the_dedicated_musl_worker() {
 
 #[test]
 fn local_bare_may_use_a_native_worker_beside_the_controller() {
-    let controller = PathBuf::from("target/debug/mj");
-    let worker = PathBuf::from("target/debug/mj-worker");
+    let directory = tempfile::tempdir().unwrap();
+    let controller = directory.path().join("target/debug/mj");
+    let worker = directory.path().join("target/debug/mj-worker");
+    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+    std::fs::write(&worker, stamped_worker(b"native")).unwrap();
     let selected = worker_binary_prerequisite_for_current(
         std::env::consts::ARCH,
         WorkerBinaryRequirement::LocalHost,
@@ -384,9 +586,12 @@ fn local_bare_may_use_a_native_worker_beside_the_controller() {
 
 #[test]
 fn local_bare_prefers_the_isolated_native_development_worker() {
-    let controller = PathBuf::from("target/debug/mj");
-    let worker = PathBuf::from("target/worker/debug/mj-worker");
-    let packaged = PathBuf::from("target/debug/mj-worker");
+    let directory = tempfile::tempdir().unwrap();
+    let controller = directory.path().join("target/debug/mj");
+    let worker = directory.path().join("target/worker/debug/mj-worker");
+    let packaged = directory.path().join("target/debug/mj-worker");
+    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+    std::fs::write(&worker, stamped_worker(b"native")).unwrap();
     let selected = worker_binary_prerequisite_for_current(
         std::env::consts::ARCH,
         WorkerBinaryRequirement::LocalHost,
@@ -720,7 +925,7 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
     if std::env::var_os(WORKER_BINARY_OVERRIDE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("mj-worker");
-        std::fs::write(&worker, b"worker").unwrap();
+        std::fs::write(&worker, stamped_worker(b"worker")).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
             "a_replaced_controller_still_honors_the_worker_binary_override",
@@ -1073,14 +1278,14 @@ struct PodmanInstallFixture {
 fn podman_install_fixture() -> PodmanInstallFixture {
     let root = tempfile::tempdir().unwrap();
     let worker_binary = root.path().join("hel");
-    std::fs::write(&worker_binary, b"worker-binary-bytes").unwrap();
+    std::fs::write(&worker_binary, stamped_worker(b"worker-binary-bytes")).unwrap();
     let launch_config = root.path().join("launch.json");
     std::fs::write(&launch_config, b"{}").unwrap();
     let ownership = root.path().join("ownership.json");
     std::fs::write(&ownership, b"{}").unwrap();
     let profile_stage = root.path().join("profile");
     std::fs::create_dir_all(&profile_stage).unwrap();
-    let digest = lower_hex(Sha256::digest(b"worker-binary-bytes"));
+    let digest = lower_hex(Sha256::digest(stamped_worker(b"worker-binary-bytes")));
     PodmanInstallFixture {
         _root: root,
         worker_binary,
@@ -1334,6 +1539,155 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
 }
 
 #[test]
+#[ignore = "requires Docker, agent-dev image, MJ_WORKER_BINARY and MJ_INSTANCE=issue-1138-docker"]
+fn stopped_docker_session_recovers_with_the_current_worker_build() {
+    assert_eq!(mj_core::config::instance_identity(), "issue-1138-docker");
+    let source =
+        PathBuf::from(std::env::var_os("MJ_WORKER_BINARY").expect("portable Linux worker"));
+    verify_worker_build(&source).unwrap();
+    let session = mj_core::state::new_session_id().unwrap();
+    let container_id = targets::resource_name(&session).unwrap();
+    let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+    };
+    execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new(
+            "docker",
+            [
+                "run",
+                "--pull=never",
+                "-d",
+                "--name",
+                &container_id,
+                "--label",
+                "dev.mj.managed=true",
+                "--label",
+                &format!("dev.mj.session={session}"),
+                "--label",
+                "dev.mj.instance=issue-1138-docker",
+                "ghcr.io/brokkai/mjolnir/agent-dev:latest",
+                "sleep",
+                "infinity",
+            ],
+        ),
+    )
+    .unwrap();
+    let result = (|| -> Result<()> {
+        let root = targets::worker_root(&locator, &session)?;
+        execute_checked(
+            &ProcessExecutor,
+            targets::locator_command(
+                &locator,
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "mkdir -p {root} && printf legacy > {root}/hel && printf old-config > {root}/launch.json"
+                    ),
+                ],
+            ),
+        )?;
+        let relay = tempfile::tempdir()?;
+        drop(mj_worker::relay::DurableRelay::open(
+            relay.path(),
+            &session,
+            "2.0.0",
+        )?);
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                [
+                    "cp".to_owned(),
+                    relay.path().join(".").to_string_lossy().into_owned(),
+                    format!("{container_id}:{root}"),
+                ],
+            ),
+        )?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new(
+                "docker",
+                container_upload_ownership_args(&container_id, &root, &[&root]),
+            ),
+        )?;
+        execute_checked(
+            &ProcessExecutor,
+            CommandSpec::new("docker", ["stop", &container_id]),
+        )?;
+        let launch: WorkerLaunchConfig = serde_json::from_value(serde_json::json!({
+            "session_id": session, "harness": "codex", "bridge_command": "/not-used",
+            "bridge_args": [], "environment": {"MJ_INSTANCE": "issue-1138-docker"},
+            "target_environment": {"MJ_INSTANCE": "issue-1138-docker"},
+            "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
+        }))?;
+        let plan = WorkerRecoveryPlan {
+            source_target: mj_core::state::TargetLocator::LocalDocker {
+                container_id: container_id.clone(),
+                borrowed_from: None,
+            },
+            target: targets::target_recovery_plan(&locator, &session)?,
+            workspace: None,
+            liveness_probe: worker_liveness_command(&locator, &root),
+            binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
+            launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
+            restart: CommandPlan {
+                description: "restart isolated Docker worker".into(),
+                commands: vec![start_worker_command(&locator, &root)],
+            },
+        };
+        crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor)?;
+        let installed = execute_checked(
+            &ProcessExecutor,
+            installed_file_digest_command(
+                &locator,
+                &format!("{root}/hel"),
+                "check recovered worker",
+            ),
+        )?;
+        ensure!(
+            String::from_utf8(installed.stdout)?
+                .starts_with(&mj_core::worker_launch::worker_executable_digest(&source)?),
+            "recovery did not install the current worker"
+        );
+        let reconnect = targets::reconnect_plan(&locator, &session)?
+            .commands
+            .remove(0);
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut connection = loop {
+                match crate::worker_client::RelayClient::connect(&reconnect, &session).await {
+                    Ok(connection) => break connection,
+                    Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                }
+            };
+            ensure!(
+                connection.status().await?.checkpoint_only,
+                "recovered worker must read the new launch configuration"
+            );
+            ensure!(
+                connection.worker_build()
+                    == Some(mj_core::worker_launch::worker_executable_digest(&source)?.as_str()),
+                "the recovered process must run the installed build"
+            );
+            Ok::<_, anyhow::Error>(())
+        })?;
+        Ok(())
+    })();
+    // Stop the owning container before removing its files, even on failure.
+    let cleanup = execute_checked(
+        &ProcessExecutor,
+        CommandSpec::new("docker", ["rm", "-f", &container_id]),
+    );
+    result.unwrap();
+    cleanup.unwrap();
+}
+
+#[test]
 fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
@@ -1359,8 +1713,8 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
     let executor = RecordingExecutor {
         commands: RefCell::new(Vec::new()),
     };
-    replace_installed_worker_binary(&executor, &locator, session, Path::new("/controller/hel"))
-        .unwrap();
+    let fixture = podman_install_fixture();
+    replace_installed_worker_binary(&executor, &locator, session, &fixture.worker_binary).unwrap();
 
     let mut lines = rendered(&executor.commands.borrow());
     let ownership = lines.remove(1);
@@ -1371,7 +1725,8 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         lines,
         vec![
             format!(
-                "podman cp /controller/hel {container_id}:/var/lib/hel/workers/{session}/hel.next"
+                "podman cp {} {container_id}:/var/lib/hel/workers/{session}/hel.next",
+                fixture.worker_binary.display()
             ),
             format!(
                 "podman exec {container_id} mv -f /var/lib/hel/workers/{session}/hel.next /var/lib/hel/workers/{session}/hel"
@@ -3135,7 +3490,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
 fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("worker");
-    std::fs::write(&source, b"fresh musl worker").unwrap();
+    std::fs::write(&source, stamped_worker(b"fresh musl worker")).unwrap();
     let executor = DigestExecutor {
         installed_line: format!("{}  /root/hel\n", "0".repeat(64)),
         commands: RefCell::new(Vec::new()),
@@ -3159,7 +3514,7 @@ fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
 fn a_remote_worker_already_current_is_restarted_without_recopying() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("worker");
-    std::fs::write(&source, b"fresh musl worker").unwrap();
+    std::fs::write(&source, stamped_worker(b"fresh musl worker")).unwrap();
     let current = mj_core::worker_launch::worker_executable_digest(&source).unwrap();
     let executor = DigestExecutor {
         installed_line: format!("{current}  /root/hel\n"),
@@ -3209,6 +3564,8 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
             "recovery_preserves_launch_config_until_a_matching_worker_source_is_available",
         ))
         .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-1138-recovery")
         .env("MJ_WORKER_BINARY", directory.path().join("not-built-yet"))
         .run();
         return;
@@ -3274,11 +3631,35 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
     assert_eq!(std::fs::read(&launch).unwrap(), b"old launch schema");
     assert!(!restarted.exists());
 
+    std::fs::write(
+        std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+        b"legacy worker",
+    )
+    .unwrap();
+    let error = crate::session_manager::recover_worker_controlled(
+        plan.clone(),
+        false,
+        None,
+        &ProcessExecutor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("missing worker build stamp"));
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old worker");
+    assert_eq!(std::fs::read(&launch).unwrap(), b"old launch schema");
+    assert!(!restarted.exists());
+
     // The same recovery plan retries after the matching worker is installed;
     // no controller restart or replanning is needed.
-    std::fs::write(std::env::var_os("MJ_WORKER_BINARY").unwrap(), b"new worker").unwrap();
+    std::fs::write(
+        std::env::var_os("MJ_WORKER_BINARY").unwrap(),
+        stamped_worker(b"new worker"),
+    )
+    .unwrap();
     crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor).unwrap();
-    assert_eq!(std::fs::read(binary).unwrap(), b"new worker");
+    assert_eq!(
+        std::fs::read(binary).unwrap(),
+        stamped_worker(b"new worker")
+    );
     assert_eq!(std::fs::read(launch).unwrap(), b"new launch schema");
     assert!(restarted.exists());
 }
