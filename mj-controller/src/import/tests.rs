@@ -1315,6 +1315,9 @@ fn codex_import_rejects_legacy_history_with_migration_guidance() {
     let error = read_codex_transcript(&path).unwrap_err().to_string();
     assert!(error.contains("Legacy Codex history cannot be imported"));
     assert!(error.contains("codex migrate-rollouts --apply"));
+    // R2-9: the CLI has no dialog, so the advice fits both surfaces.
+    assert!(error.contains("then try the import again"), "{error}");
+    assert!(!error.contains("dialog"), "{error}");
 }
 
 #[test]

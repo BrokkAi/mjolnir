@@ -30,8 +30,10 @@ pub enum CodexHistoryMode {
 /// Grok Build's conversation of record inside a session directory.
 pub(super) const CHAT_HISTORY: &str = "chat_history.jsonl";
 
-pub const CODEX_LEGACY_IMPORT_ISSUE: &str = "Legacy Codex history cannot be imported. Run codex migrate-rollouts --apply, then reopen \
-     this dialog.";
+/// Shown by the dashboard's import tab and by `mj import`, so it names no
+/// surface of its own (launch finding R2-9).
+pub const CODEX_LEGACY_IMPORT_ISSUE: &str = "Legacy Codex history cannot be imported. Run codex migrate-rollouts --apply, then try \
+     the import again.";
 
 impl CodexHistoryMode {
     pub fn import_issue(self) -> Option<&'static str> {
