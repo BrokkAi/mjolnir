@@ -1391,11 +1391,27 @@ impl SessionRecord {
         )
     }
 
+    /// The target access settings this session's commands use: the ones
+    /// recorded when its target was selected, with the machine's current ssh
+    /// options while they still reach the same host, user, and port, or the
+    /// configured target's when nothing was recorded.
     pub fn target_runtime_settings<'a>(
         &'a self,
         config: &Config,
     ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
         if let Some(runtime) = &self.target_runtime {
+            // How to reach the target follows the machine's current ssh
+            // options; where it is stays as recorded (launch finding R3-7).
+            if let Some(refreshed) =
+                config
+                    .targets
+                    .get(&self.target_template_id)
+                    .and_then(|template| {
+                        runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+                    })
+            {
+                return Ok(std::borrow::Cow::Owned(refreshed));
+            }
             return Ok(std::borrow::Cow::Borrowed(runtime));
         }
         let template = config.targets.get(&self.target_template_id).ok_or_else(|| {

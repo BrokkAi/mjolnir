@@ -1241,6 +1241,82 @@ impl CommandExecutor for DurableTargetExecutor {
     }
 }
 
+/// Launch finding R3-7 (a leftover of J-21): after a machine's `extra_args`
+/// changed and `mj daemon restart`, running SSH-bare sessions reconnected
+/// their relays with the ssh options recorded when they were provisioned,
+/// until each was resumed. The relay the daemon starts on recovery follows the
+/// machine's current options; only where the worker lives stays as recorded.
+#[test]
+fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
+    let ssh_bare = |host: &str, extra_args: &[&str]| -> TargetTemplate {
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-bare", "host": host, "user": "ubuntu", "extra_args": extra_args,
+            "permissions": "guardian",
+        }))
+        .unwrap()
+    };
+    let mut session =
+        super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
+    session.target_template_id = "ec2".into();
+    session.target_runtime = Some((&ssh_bare("ec2.test", &["-o", "ServerAliveCountMax=3"])).into());
+    session.target = Some(TargetLocator::SshBare {
+        host: "ec2.test".into(),
+        workspace: ".local/share/hel/workspaces/0123456789abcdef0123456789abcdef".into(),
+        worker_id: None,
+    });
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    let relay_with = |controller: &mut Controller, template: TargetTemplate| {
+        controller.config.targets.insert("ec2".into(), template);
+        controller.reconnect_command(&session.id).unwrap()
+    };
+
+    let relay = relay_with(
+        &mut controller,
+        ssh_bare("ec2.test", &["-o", "ServerAliveInterval=15"]),
+    );
+    assert!(
+        relay.args.contains(&"ServerAliveInterval=15".to_owned()),
+        "{relay:?}"
+    );
+    assert!(
+        !relay.args.contains(&"ServerAliveCountMax=3".to_owned()),
+        "{relay:?}"
+    );
+    // It still runs as one counted session on the machine's shared
+    // connection, so the daemon places it on a ControlPath shard.
+    let shared = relay
+        .ssh_session
+        .as_ref()
+        .expect("a shared-connection session");
+    assert!(
+        shared
+            .ssh_args
+            .contains(&"ServerAliveInterval=15".to_owned())
+    );
+
+    // A machine that now names another host is not where this worker lives;
+    // the relay keeps the recorded access.
+    let relay = relay_with(
+        &mut controller,
+        ssh_bare("elsewhere.test", &["-o", "ServerAliveInterval=15"]),
+    );
+    assert!(
+        relay.args.contains(&"ServerAliveCountMax=3".to_owned()),
+        "{relay:?}"
+    );
+    assert!(
+        relay.args.iter().any(|arg| arg.contains("ec2.test")),
+        "{relay:?}"
+    );
+}
+
 #[test]
 fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     const MARKER: &str = "MJ_TEST_DURABLE_TARGET_CHILD";
