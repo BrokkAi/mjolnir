@@ -16,7 +16,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - Step 2 (macOS CI test) is done: origin's `e8afa5c9` already asserts `invalid peer certificate`; no user "go" was needed.
 - `bin-fixed/` rebuilt from `d501dcf9`: `mj` `dc00467d`, `mj-worker` `2463f5c0`, musl worker `328b7498` (`bin-fixed/SHA256SUMS-d501dcf9.txt`).
 - #1136 closed by its commit; `agent-in-progress` removed.
-- R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7) is running as the one subagent in an isolated worktree; R2-B (R2-1, R2-2, R2-11) is next. R3 and R4 mission texts are ready at `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
+- R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A: R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9 landed on master (`c69618f4..30d087c7`, validated: controller/cli/core tests, clippy, fmt); the agent was cut off by host resource exhaustion on 09-24 ~09:30 and was resumed to finish R2-8, R2-10, R2-7 (worktree `agent-afe91e5ad864b641e`). R2-B (R2-1, R2-2, R2-11) is next; its mission text is in the session scratchpad `fix-r2b-prompt.md` and summarized in the runbook's R2 record. R3 and R4 mission texts are ready at `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
 ## Next steps, in order
 
