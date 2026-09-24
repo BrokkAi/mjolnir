@@ -10,18 +10,19 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - Out of scope: `morannon-podman` (de-risked); macOS (issue #1135, user drives it on a MacBook).
 - Never touch the user's default Mjolnir instance or `target/` for evidence (mbx evicts `target/`). Campaign root: `/home/jonathan/mj-campaign/launch-2026-09-23/` (`bin/` = original campaign build `8b7b1120`; `bin-fixed/` = current fixed build; `evidence/` = all captures and findings).
 
-## State right now
+## State right now (updated 2026-09-24 morning)
 
-- Local `master` is at `2fe3b29c`: **ahead 12, behind 7** of `origin/master`. The push was rejected; origin moved during the quota pause.
-- The 12 unpushed commits: group 16 (mandatory `--workspace` for `mj new`/`mj acp` with a workspace list in the error; `[jev] enabled` switch on Setup → Privacy covering every Jev use; help-search debounce 200 ms; "privacy-first" back in the README; R1 leftovers A-12, B-2/D-1, B-3, R1-3, C-12, C-10, E-8 test, R1-1), the Windows CI fix `0f8199ff`, and #1136 `2fe3b29c`. All validated locally (worker, controller, cli, clippy green).
-- `bin-fixed/` was rebuilt from `2fe3b29c`: `mj` `a158e416`, `mj-worker` `4dacdeb3`, musl worker `492a3809`. Rebuild again after the merge below.
-- No subagent is running.
+- `master` = `origin/master` = `d501dcf9` (merge of origin into the 13 campaign commits; conflicts were in README, acp-agent.md, cli-reference.md, dashboard/actions.rs, tests/acp.rs, resume.rs, plus one semantic conflict in dialogs.rs where origin added `delete_branch_available` to `ForceDestroy`). Validated: default-member `cargo test` (42 binaries, 0 failures), clippy, fmt, web e2e (92 passed, 3 skipped). Pushed.
+- Step 2 (macOS CI test) is done: origin's `e8afa5c9` already asserts `invalid peer certificate`; no user "go" was needed.
+- `bin-fixed/` rebuilt from `d501dcf9`: `mj` `dc00467d`, `mj-worker` `2463f5c0`, musl worker `328b7498` (`bin-fixed/SHA256SUMS-d501dcf9.txt`).
+- #1136 closed by its commit; `agent-in-progress` removed.
+- R2 (F/G/H re-verification) is running as the one subagent; its mission text is saved at `evidence/reverify-2-mission.md` under the campaign root.
 
 ## Next steps, in order
 
-1. **Merge `origin/master` into `master`** (merge, not rebase; the repo's history uses merges), resolve conflicts, validate all crates + clippy + fmt + `npm test --prefix tests/e2e/web`, push. Last time conflicts were in `mj-controller/src/server/api/wait_policy.rs` and `mj-controller/src/sessionwiki.rs` (keep both sides' intent).
-2. **macOS CI test fix — awaiting the user's "go".** `mj-cli/src/api_client.rs` test `the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin` asserts the **unpinned** client's error contains `CaUsedAsEndEntity` (webpki text); on macOS reqwest's unpinned path uses the platform verifier and says `-67843`. The pin itself works. Proposed: (a) assert `invalid peer certificate` instead; (b) in `the_cli_refuses_a_certificate_other_than_the_pinned_one`, `unwrap_err` and assert `ApplicationVerificationFailure` (only the pin verifier emits it). A subagent's classifier blocked this edit as "test removal"; do not apply it without the user's explicit go. Windows CI failure is fixed (`0f8199ff`).
-3. **Rebuild `bin-fixed/`** from the pushed tip (`cargo build -p brokk-mjolnir -p brokk-mj-worker` and `-p brokk-mj-worker --target x86_64-unknown-linux-musl`, copy into `bin-fixed/debug/` and `bin-fixed/x86_64-unknown-linux-musl/debug/`, record SHA-256s).
+1. ~~Merge origin/master~~ done (`d501dcf9`).
+2. ~~macOS CI test fix~~ landed upstream in `e8afa5c9`.
+3. ~~Rebuild `bin-fixed/`~~ done.
 4. **R2 re-verification** (one subagent): re-run the reproductions of every fixed F, G, H finding against `bin-fixed`. Findings files: `evidence/luna-manual-seed-3206-340978/track-f/findings.md`, `…3207-341010/track-g/findings.md`, `…3208-2579821/track-h/findings.md`. Model the prompt on R1 (results in `evidence/luna-manual-seed-3301-2541214/reverify-1/notes.md`). Note for Track G: the lab needs `phone_tls=True` for a QR URL; Web dialog is `prefix+u`. For H, download old releases into `evidence/releases/`, never `target/`.
 5. **R3 re-verification** for J (needs one EC2 host; `tests/e2e/ssh_docker_lab.py`, back up the ledger right after `create`, cleanup by run tag if lost) and the new-in-group-16 behaviors (mandatory `--workspace`, Jev switch off).
 6. **Real-harness re-check** (one subagent, isolated instance with `[phone] bind` on its own port, `version = 13`): the items flagged "needs live check": I1-3 `/model claude-opus-5-5`, I1-6 same-profile resume keeps model, I1-11/I1-13 `/clear` incl. after resume, I1-15 review failure reported, I1-17 interrupted marker, I2-7 never-prompted Codex resume, I2-15 Kimi Esc closes permission form, I2-5 command in permission form, #1136 Kimi on a container target, J-19/J-17/J-21 on SSH.
