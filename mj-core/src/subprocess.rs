@@ -154,8 +154,8 @@ pub fn spawn_detached(command: &mut Command, log_path: &Path) -> Result<u32> {
 ///
 /// Forking inside `pre_exec` rather than forking this process directly keeps
 /// the fork out of a multi-threaded address space: only `fork`, `setsid`,
-/// `write` and `_exit` run between the fork and the exec, and all of those are
-/// async-signal-safe.
+/// `fcntl` (or `close_range`), `write` and `_exit` run between the fork and
+/// the exec, and all of those are async-signal-safe.
 #[cfg(unix)]
 fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
     use std::io::Read;
@@ -169,6 +169,10 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
     // caller's group; the grandchild then takes a session, and with it a group,
     // of its own, which is the group callers terminate by the returned PID.
     command.process_group(0);
+
+    // Computed before the fork: the loop fallback in the child must not
+    // allocate or call anything that is not async-signal-safe.
+    let descriptor_limit = inherited_descriptor_limit();
 
     // SAFETY: the closure runs between fork and exec in the child. It calls
     // only async-signal-safe functions and touches no state shared with
@@ -184,6 +188,14 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
+                // The long-lived process keeps nothing of its launcher beyond
+                // the stdio set up above. A descriptor the launcher holds
+                // without close-on-exec -- on macOS, a sibling thread's pipe
+                // caught between `pipe()` and its `FD_CLOEXEC` call -- would
+                // otherwise stay open for the daemon's whole life, and whoever
+                // reads that pipe would never see EOF. Marking rather than
+                // closing keeps the standard library's exec-error pipe working.
+                mark_inherited_descriptors_cloexec(descriptor_limit);
                 Ok(())
             }
             grandchild => {
@@ -227,6 +239,58 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
     }
 
     Ok(u32::from_ne_bytes(pid_bytes))
+}
+
+/// One past the highest descriptor this process can hold, for the per-fd
+/// loop in [`mark_inherited_descriptors_cloexec`].
+#[cfg(unix)]
+fn inherited_descriptor_limit() -> libc::c_int {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable rlimit.
+    let current = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur != libc::RLIM_INFINITY
+    {
+        limit.rlim_cur as i64
+    } else {
+        // SAFETY: sysconf only reads a system constant.
+        (unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }) as i64
+    };
+    current.clamp(3, i64::from(libc::c_int::MAX)) as libc::c_int
+}
+
+/// Set `FD_CLOEXEC` on every descriptor from 3 upward. Runs between fork and
+/// exec, so it uses only async-signal-safe calls.
+#[cfg(unix)]
+fn mark_inherited_descriptors_cloexec(limit: libc::c_int) {
+    // Linux 5.11+ marks the whole range in one call. It is invoked as a raw
+    // syscall so the glibc 2.28 build does not need the newer libc wrapper;
+    // older kernels reject it and take the per-descriptor loop.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes
+        // descriptor flags.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked == 0 {
+            return;
+        }
+    }
+    for fd in 3..limit {
+        // SAFETY: F_SETFD on a closed descriptor fails with EBADF and changes
+        // nothing; on an open one it only sets close-on-exec.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
 }
 
 /// Run `command` with `input` written to its stdin, returning the captured
@@ -547,6 +611,43 @@ mod tests {
         assert_eq!(group, raw_pid, "the child must lead its own process group");
 
         signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_detached_child_keeps_no_descriptor_its_launcher_left_inheritable() {
+        // A launcher can hold a descriptor without close-on-exec: on macOS a
+        // sibling thread's pipe is briefly in that state. If the detached
+        // child kept it, whoever reads that pipe would wait for EOF for the
+        // child's whole life.
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::time::Duration;
+
+        let (mut reader, writer) = std::io::pipe().expect("create pipe");
+        // SAFETY: clears FD_CLOEXEC on a descriptor this test owns.
+        let cleared = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) };
+        assert_eq!(cleared, 0, "clear FD_CLOEXEC on the write end");
+
+        let log_dir = tempfile::tempdir().expect("create log directory");
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let spawned = spawn_detached(&mut command, &log_dir.path().join("child.log"));
+        drop(writer);
+        let pid = spawned.expect("spawn_detached should start the child");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rest = Vec::new();
+            let _ = sender.send(reader.read_to_end(&mut rest).map(|_| ()));
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(10));
+
+        let raw_pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+        signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
+        outcome
+            .expect("the pipe must reach EOF while the detached child is still running")
+            .expect("read the pipe to EOF");
     }
 
     #[cfg(unix)]
