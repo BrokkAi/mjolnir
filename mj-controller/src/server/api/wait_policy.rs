@@ -194,7 +194,10 @@ impl WaitDecision {
 ///    one", which additionally requires the session to be idle with an empty
 ///    queue — with queued prompts, "idle" alone would return an earlier
 ///    prompt's outcome — and able to take a prompt, so a session that is
-///    still provisioning or reattaching is not reported as finished.
+///    still provisioning or reattaching is not reported as finished. A
+///    prompt handed over at creation that has not become a turn yet is
+///    queued work too: until it is submitted there is no turn to target,
+///    and an idle session would otherwise read as finished before it.
 /// 4. A completed turn under server assessment or with a retry armed is not an
 ///    ending: the worker may submit the retry itself, so the wait keeps waiting.
 ///
@@ -340,6 +343,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         None => {
             if observation.checking_continuation
                 || observation.cannot_take_prompt
+                || matches!(observation.start_status, Some(StartStatus::Pending))
                 || observation.execution != MaterializedExecutionState::Idle
                 || observation.active_turn.is_some()
                 || observation.queued > 0

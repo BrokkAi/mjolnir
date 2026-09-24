@@ -2223,6 +2223,59 @@ fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
     );
 }
 
+/// Launch finding R3-1: `mj wait` with no turn, run right after
+/// `mj new ... "<prompt>"`, answered "finished" with `chat_phase idle` while
+/// the first prompt was still waiting to be submitted. The session was
+/// attached and idle, but the prompt `mj new` handed over had not become a
+/// turn yet. That prompt is work in flight, like a running turn.
+#[tokio::test(start_paused = true)]
+async fn a_wait_right_after_creating_with_a_prompt_waits_for_that_prompt() {
+    let idle_session = || {
+        Some(TurnState {
+            execution: MaterializedExecutionState::Idle,
+            active_turn: None,
+            last_turn_outcome: None,
+        })
+    };
+    let can_take_prompt = |snapshot: &mut ViewerSnapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    };
+    let wait = |app: axum::Router| async move {
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"timeout_secs":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        json_body(response).await
+    };
+
+    let queued_first_prompt = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![idle_session()]),
+        start_status: Some(StartStatus::Pending),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(queued_first_prompt, can_take_prompt);
+    let body = wait(app).await;
+    assert_eq!(
+        body["outcome"], "timeout",
+        "the first prompt has not been answered yet: {body}"
+    );
+
+    // With nothing handed over at creation, an idle session that can take a
+    // prompt has nothing to wait for.
+    let nothing_queued = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![idle_session()]),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(nothing_queued, can_take_prompt);
+    assert_eq!(wait(app).await["outcome"], "finished");
+}
+
 #[test]
 fn an_earlier_prompt_s_outcome_never_answers_a_later_prompt_s_wait() {
     let request = WaitRequest {
