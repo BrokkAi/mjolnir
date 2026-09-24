@@ -4,7 +4,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 
 ## Standing rules from the user
 
-- **At most one subagent running at a time, until the user lifts it.** Count resumed agents too. (Quota.)
+- **Subagent cap: three Opus subagents at once** (raised from one by the user on 09-24 afternoon: "go ahead and go to 3 opus subagents"). Count resumed agents too.
 - Fable designs, triages and reviews; implementation goes to Opus/Sonnet subagents in isolated worktrees; the coordinator cherry-picks onto `master`, runs the affected crates' `cargo test` + `cargo clippy --all-targets -- -D warnings` + `cargo fmt --all -- --check`, then pushes.
 - Authorized to file and fix issues as found, commit on `master`, and push (the user asked to keep master current).
 - Out of scope: `morannon-podman` (de-risked); macOS (issue #1135, user drives it on a MacBook).
@@ -19,7 +19,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - R2 (F/G/H) done: `evidence/luna-manual-seed-3401-3191736/reverify-2/notes.md` (mission text: `evidence/reverify-2-mission.md`). Fix wave R2-A landed in full (R2-6, F-7, R2-5, R2-14, R2-4, R2-3, R2-9, R2-8, R2-10, R2-7; `c69618f4..aa89c000`), validated (controller, cli, core, tui tests; clippy; fmt), pushed; master = origin = `526ab788`. `bin-fixed/` rebuilt from `dd9e55ce` after R2-B (`SHA256SUMS-dd9e55ce.txt`; all three stamped `2.20.0+dd9e55ce…`).
 - Fix wave R2-B landed (R2-2 `5f732831`, R2-1 `5dafd135`), validated, pushed; master = origin = `dd9e55ce`. R2-11 cause confirmed, fix deferred (see the runbook's R2 fix waves paragraph and the open list). Its worktree `agent-ab36fc8a205e13311` is still locked by the agent; remove it when unlocked. #1144 filed for the suspend handler's `Controller::load()` and the test that reads the real store.
 - Stale agent worktrees and branches from the 09-23 fix waves were pruned on 09-24 at the user's request. The J-25 work in progress from the Track J worktree is saved as `evidence/track-j/j25-codex-quota-error-wip.patch`. Branch `worktree-agent-aa0dbae3ef12d579e` (pre-campaign "WIP: partial ACP 2.0 upgrade") was left for the user.
-- R3 done: `evidence/reverify-3/notes.md` (EC2 cleaned up; the ledger directories keep the tool-generated key for a key pair that no longer exists). R4 (real harnesses) is running as the one subagent. Fix wave R3 (mission `evidence/fix-wave-r3-mission.md`) is next after R4. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
+- R3 done: `evidence/reverify-3/notes.md` (EC2 cleaned up; the ledger directories keep the tool-generated key for a key pair that no longer exists). R4 done: `evidence/reverify-4/notes.md`. Three fix waves are running in parallel in isolated worktrees: R4 (`evidence/fix-wave-r4-mission.md`: R4-2/R4-3 blockers, I2-7, R4-4, R4-1, R4-5, R4-10, R4-7, R4-6, R4-9, R4-11, R4-12, R4-13), R3 (`evidence/fix-wave-r3-mission.md`: R3-3, R3-1, R3-2, R3-8, R3-7, R3-6, R3-5, J-24, J-25, R3-10, R3-9, R3-11), R5 (`evidence/fix-wave-r5-mission.md`: R3-4/J-16 per-host worker cache, R2-11 index-before-destroy). Cherry-pick each as it lands (expect small conflicts in `backend.rs`/`resume.rs` between R3 and R5), validate, push, rebuild `bin-fixed`, then one final re-verification of the three waves on fresh labs (F/G/H-style plus one EC2 host plus the real harnesses once the Codex quota resets on 09-26), then close. Mission texts: `evidence/reverify-3-mission.md` and `evidence/reverify-4-mission.md`.
 
 ## Next steps, in order
 
@@ -34,6 +34,10 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 ## Still open (not fixed; decide or schedule)
 
 - **Public install path unverified** (R3 runbook error 1): the harness refused `curl … install.sh | bash` and the installer's PATH prompt for the subagent. Either grant that permission for one run or run the README install on a fresh Ubuntu 24.04 host by hand and read the first-run path; the R3 notes say what to look for.
+- R4-14: `TYPESAFE_API_KEY` reaches the ACP bridge environment (inside containers too), so the agent's own tools can read Mjolnir's Jev key; the Jev-off switch removes it, but with Jev on it is exposed. Decide whether the worker should keep the key to itself.
+- R4-8: `~/.claude/skills/tufte-viz/demos/sunspot-pretty.html` (2.2 MB) exceeds the 1 MiB skills_state limit and every worker logs a failure per minute; a user-environment issue, but the product should log it once, not per minute.
+- R4-15: Mjolnir-run Codex sessions keep state under the user's real `~/.codex/projects/`; the Import tab lists a native sub-agent thread. Decide whether that is intended.
+- The Codex account (`codex`) is over its limit until 2026-09-26 12:42 and Kimi's weekly quota is spent; the Codex halves of I1-11/I1-17, I2-9 and I2-15 wait on that.
 - R3-4 / J-16: every SSH-bare session uploads its own worker copy (139 MB, ~7 min per create under load); needs a shared per-host worker cache keyed by build stamp. Design work, not a wording fix.
 
 - I2-1 Codex session title comes from the injected project-memory block (design choice: move the block or prefer Mjolnir's title).
@@ -46,7 +50,7 @@ For the next coordinator (Fable). Read this first, then `.agents/docs/launch-ver
 - A-4/E-9 dictation chord gives no feedback without a microphone.
 - D-14 narrow pinned pane not following new replies after restart (may be covered by `bf09b3d6`; re-verify).
 - B-11 Enter half of the workspace dialog issue still reproduces (R1 capture 015).
-- Flaky under full parallel load (pass alone): `worker_environment.rs` re-exec test, controller `web_viewer::tests::retry_uses_the_original_port_after_its_owner_releases_it`, `mj-cli/tests/store_divergence.rs`, and (seen 09-24 after merging `69e2f7a6`) controller `move_session::tests::terminal_move_recovery_finishes_interrupted_close_before_phase_retry` and `in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped`.
+- Flaky under full parallel load (pass alone): `worker_environment.rs` re-exec test, controller `web_viewer::tests::retry_uses_the_original_port_after_its_owner_releases_it`, `mj-cli/tests/store_divergence.rs`, and (seen 09-24 after merging `69e2f7a6`) controller `move_session::tests::terminal_move_recovery_finishes_interrupted_close_before_phase_retry` and `in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped`. Also `mj-worker` `verdict_client::tests::continuous_overall_activity_does_not_postpone_or_invalidate_parent_check` (timing). And while several agent worktrees build through the shared mbx cache, the controller's `in_place_move_*` tests can fail with `MJ_WORKER_BINARY is not a file: /mnt/optane/mbx-cache/out-dirs/…/fake-worker.sh` (the build-time fixture's out-dir moved under them); they pass alone. That is the mbx cache, not the code; do not change mbx or `target/` for it.
 - Since origin's `51dccacd` (#1138) the controller refuses a worker whose `version+commit` stamp differs from its own. Every `bin-fixed/` rebuild must build `mj`, `mj-worker` and the musl worker from the same commit in one go, and the old-release labs (Track H) are unaffected because they use their own workers.
 
 ## Useful mechanics

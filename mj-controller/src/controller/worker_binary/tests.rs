@@ -1495,6 +1495,220 @@ fn ssh_docker_install_uses_docker_for_remote_container_operations() {
     );
 }
 
+/// An SSH host that remembers which files exist, so consecutive installs see
+/// the cache an earlier install left behind. A `test -f` succeeds only for a
+/// path the host holds, and an `mv` adds its destination, which is how a
+/// completed upload enters the cache.
+#[derive(Default)]
+struct SshHostExecutor {
+    commands: RefCell<Vec<CommandSpec>>,
+    host_files: RefCell<HashSet<String>>,
+}
+impl CommandExecutor for SshHostExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        let mut status = 0;
+        if command.program == "ssh" {
+            let remote = command.args.last().cloned().unwrap_or_default();
+            let words = remote
+                .split(' ')
+                .map(|word| word.trim_matches('\''))
+                .collect::<Vec<_>>();
+            match words.as_slice() {
+                ["test", "-f", path] if !self.host_files.borrow().contains(*path) => status = 1,
+                ["mv", _, destination] => {
+                    self.host_files
+                        .borrow_mut()
+                        .insert((*destination).to_owned());
+                }
+                _ => {}
+            }
+        }
+        Ok(CommandOutput {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+fn install_on_ssh_host(
+    executor: &SshHostExecutor,
+    fixture: &PodmanInstallFixture,
+    locator: &targets::TargetLocator,
+    session: &str,
+) -> Vec<String> {
+    let root = session_worker_root(session);
+    install_worker_files(
+        executor,
+        locator,
+        session,
+        &root,
+        &format!("{root}/profile"),
+        &fixture.worker_binary,
+        &fixture.launch_config,
+        &fixture.ownership,
+        &fixture.profile_stage,
+    )
+    .unwrap();
+    rendered(&executor.commands.take())
+}
+/// The home-relative worker root SSH-bare and EC2 sessions use (see
+/// `targets::worker_root`), used for every install here so the roots are easy
+/// to name in assertions.
+fn session_worker_root(session: &str) -> String {
+    format!(".local/share/hel/workers/{session}")
+}
+/// An SSH-bare session on the same host as [`podman_install_fixture`]'s
+/// container.
+fn bare_locator_on_the_container_host(session: &str) -> targets::TargetLocator {
+    targets::TargetLocator::SshBare {
+        worker_id: None,
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: format!(".local/share/hel/workspaces/{session}"),
+    }
+}
+/// Scp commands that carry the worker binary itself.
+fn worker_uploads(lines: &[String], fixture: &PodmanInstallFixture) -> Vec<String> {
+    let source = format!("{} ", fixture.worker_binary.display());
+    lines
+        .iter()
+        .filter(|line| line.starts_with("scp ") && line.contains(&source))
+        .cloned()
+        .collect()
+}
+fn position_of(lines: &[String], needle: &str) -> usize {
+    lines
+        .iter()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("expected {needle:?} in {lines:#?}"))
+}
+/// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
+/// parallel creates on one host each held a daemon action slot for minutes.
+/// The binary now crosses the network once per build and host; each session
+/// still gets its own copy in its own worker root.
+#[test]
+fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let first = "0123456789abcdef0123456789abcdef";
+    let second = "fedcba9876543210fedcba9876543210";
+    let cache_dir = format!(".cache/mjolnir/workers/{}", fixture.digest);
+    let cached = format!("{cache_dir}/hel");
+    assert_eq!(
+        targets::worker_root(&bare_locator_on_the_container_host(first), first).unwrap(),
+        session_worker_root(first)
+    );
+
+    let lines = install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(first),
+        first,
+    );
+    let partial = format!("{cache_dir}/hel.partial-{first}");
+    assert_eq!(
+        worker_uploads(&lines, &fixture),
+        [format!(
+            "scp {} user@example.test:{partial}",
+            fixture.worker_binary.display()
+        )],
+        "the first session on a host uploads the worker once, to its own \
+         partial name in the cache, got {lines:#?}"
+    );
+    let probe = position_of(&lines, &format!("'test' '-f' '{cached}'"));
+    let publish = position_of(&lines, &format!("'mv' '{partial}' '{cached}'"));
+    let root = session_worker_root(first);
+    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
+    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
+    assert!(
+        probe < publish && publish < copy && copy < executable,
+        "probe, publish, copy, then chmod, got {lines:#?}"
+    );
+
+    let lines = install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(second),
+        second,
+    );
+    assert!(
+        worker_uploads(&lines, &fixture).is_empty(),
+        "the second session on the host must not upload the worker again, got {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("'mv'")),
+        "a cache hit renames nothing, got {lines:#?}"
+    );
+    position_of(&lines, &format!("'test' '-f' '{cached}'"));
+    let root = session_worker_root(second);
+    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
+    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
+    assert!(copy < executable, "copy before chmod, got {lines:#?}");
+    for name in ["launch.json", "ownership.json"] {
+        assert!(
+            lines.iter().any(|line| line.starts_with("scp ")
+                && line.ends_with(&format!("user@example.test:{root}/{name}"))),
+            "{name} is still uploaded per session, got {lines:#?}"
+        );
+    }
+}
+#[test]
+fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let bare = "0123456789abcdef0123456789abcdef";
+    install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(bare),
+        bare,
+    );
+
+    let container = "fedcba9876543210fedcba9876543210";
+    let lines = install_on_ssh_host(&executor, &fixture, &fixture.locator, container);
+    assert!(
+        worker_uploads(&lines, &fixture).is_empty(),
+        "a container session on the same host reuses the cached worker, got {lines:#?}"
+    );
+}
+#[test]
+fn ec2_installs_upload_the_worker_straight_into_the_session() {
+    // A disposable EC2 instance runs one session and is terminated with it, so
+    // a host cache there would only hold a second copy of the worker.
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let session = "0123456789abcdef0123456789abcdef";
+    let locator = targets::TargetLocator::AwsEc2 {
+        profile: "default".into(),
+        region: "us-east-1".into(),
+        instance_id: "i-test".into(),
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: "workspace".into(),
+    };
+    let lines = install_on_ssh_host(&executor, &fixture, &locator, session);
+    assert_eq!(
+        worker_uploads(&lines, &fixture),
+        [format!(
+            "scp {} user@example.test:{}/hel",
+            fixture.worker_binary.display(),
+            session_worker_root(session)
+        )],
+        "expected a direct upload into the session's worker root, got {lines:#?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains(".cache/mjolnir/workers")),
+        "EC2 installs do not use the host cache, got {lines:#?}"
+    );
+}
+
 #[test]
 #[ignore = "requires Docker and the locally installed agent-dev image"]
 fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
