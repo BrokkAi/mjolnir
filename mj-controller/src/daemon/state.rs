@@ -49,6 +49,7 @@ impl RuntimeState {
                 })
             },
             revisions.notifier(),
+            Some(recovery_observer.gate.clone()),
         );
         Self {
             attachments: Mutex::new(BTreeMap::new()),

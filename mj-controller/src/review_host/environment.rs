@@ -53,6 +53,18 @@ pub trait ReviewEnvironment: Send + Sync {
     /// interrupted review never advanced one, so the next review covers the
     /// same change and nothing is lost.
     fn clear_interrupted(&self) -> Result<Vec<String>, String>;
+
+    /// Waits until no background work holds this session, or until
+    /// `deadline`. The automatic recovery copy a finished turn starts takes
+    /// the session's lease, and a lease cancels reviewer actions in flight
+    /// (R4-9). An environment with no background work returns at once.
+    fn background_work_settled<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _deadline: tokio::time::Instant,
+    ) -> mj_client::session::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// The production environment: the controller as it is on disk right now.
@@ -60,8 +72,12 @@ pub trait ReviewEnvironment: Send + Sync {
 /// It is reloaded per call rather than held, because a review is rare and the
 /// answer must reflect the config as it stands when the review starts -- the
 /// daemon reloads config.toml every 500 ms for the same reason.
-#[derive(Debug, Default)]
-pub struct ControllerEnvironment;
+#[derive(Default)]
+pub struct ControllerEnvironment {
+    /// The daemon's gate for recovery copies and worker upgrades, which a
+    /// review waits behind instead of racing for the session's lease.
+    pub background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+}
 
 impl ReviewEnvironment for ControllerEnvironment {
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String> {
@@ -137,6 +153,26 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
         crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
+    }
+
+    fn background_work_settled<'a>(
+        &'a self,
+        session_id: &'a str,
+        deadline: tokio::time::Instant,
+    ) -> mj_client::session::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(gate) = &self.background else {
+                return;
+            };
+            let mut busy = gate.subscribe();
+            // A deadline that passes leaves the review to try anyway; its
+            // own refusal then says what held the session.
+            let _ = tokio::time::timeout_at(
+                deadline,
+                busy.wait_for(|sessions| !sessions.contains(session_id)),
+            )
+            .await;
+        })
     }
 }
 

@@ -24,18 +24,26 @@ impl TurnReviewHost {
     /// Starts the host's task, reviewing through the real controller.
     #[must_use]
     pub fn spawn(control: SessionManagerControl, config: ReviewConfigSource) -> Self {
-        Self::spawn_notifying(control, config, Arc::new(|| {}))
+        Self::spawn_notifying(control, config, Arc::new(|| {}), None)
     }
 
     /// Starts the production host and calls `changed` whenever a surface view
-    /// is added, changed, or removed.
+    /// is added, changed, or removed. A review waits behind the background
+    /// work `background` coordinates, such as a recovery copy, rather than
+    /// racing it for the session.
     #[must_use]
     pub fn spawn_notifying(
         control: SessionManagerControl,
         config: ReviewConfigSource,
         changed: Arc<dyn Fn() + Send + Sync>,
+        background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
     ) -> Self {
-        Self::spawn_in_notifying(control, config, Arc::new(ControllerEnvironment), changed)
+        Self::spawn_in_notifying(
+            control,
+            config,
+            Arc::new(ControllerEnvironment { background }),
+            changed,
+        )
     }
 
     /// The same, against a caller-supplied environment. `config` is read at

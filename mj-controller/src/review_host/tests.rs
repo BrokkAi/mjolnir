@@ -379,6 +379,10 @@ struct FakeEnvironment {
     writes: Mutex<Vec<(TurnReviewState, std::thread::ThreadId)>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
+    /// Refusals the next reviewer resolutions answer with, in order.
+    resolve_refusals: Mutex<std::collections::VecDeque<String>>,
+    /// How many times the host waited for background work on the session.
+    background_waits: std::sync::atomic::AtomicUsize,
 }
 
 struct SaveGate {
@@ -430,7 +434,21 @@ impl FakeEnvironment {
             writes: Mutex::new(Vec::new()),
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
+            resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
+            background_waits: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    fn refuse_next_resolve(&self, reason: &str) {
+        self.resolve_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(reason.to_owned());
+    }
+
+    fn background_waits(&self) -> usize {
+        self.background_waits
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn state(&self) -> TurnReviewState {
@@ -482,7 +500,15 @@ impl ReviewEnvironment for FakeEnvironment {
         'a,
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     > {
+        let refusal = self
+            .resolve_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
         Box::pin(async move {
+            if let Some(refusal) = refusal {
+                return Err(refusal);
+            }
             Ok(mj_core::review::settings::ResolvedReviewSettings {
                 profile: config.profile.unwrap_or_else(|| "auto-reviewer".into()),
                 main: mj_core::review::settings::ReviewModelSettings {
@@ -553,6 +579,87 @@ impl ReviewEnvironment for FakeEnvironment {
             .active = None;
         Ok(Vec::new())
     }
+
+    fn background_work_settled<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _deadline: tokio::time::Instant,
+    ) -> mj_client::session::BoxFuture<'a, ()> {
+        self.background_waits
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Box::pin(async {})
+    }
+}
+
+/// R4-9: a turn that ended with a command still running in the background
+/// also started the automatic recovery copy, which took the session's lease
+/// while the review was choosing its reviewer. The review gave up with "Turn
+/// review did not start: another operation was using the session". It now
+/// waits for that background work and tries again, within a bound.
+#[tokio::test]
+async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
+    let session = session_id("waitforcopy0");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment.refuse_next_resolve("reviewer operation cancelled for session lifecycle change");
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+
+    // The review opens and captures what it reviews.
+    let (_, action, _reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    assert!(matches!(action, ReviewerAction::CaptureDelta { .. }));
+    assert!(
+        environment.background_waits() >= 2,
+        "the retry waited for background work first"
+    );
+    assert!(
+        host.view(session)
+            .is_none_or(|view| !view.status.contains("did not start")),
+        "{:?}",
+        host.view(session)
+    );
+    host.shutdown().await.unwrap();
+}
+
+/// A refusal that has nothing to do with another operation is not retried.
+#[tokio::test]
+async fn a_review_refused_for_another_reason_does_not_wait() {
+    let session = session_id("nowaitrefuse");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment.refuse_next_resolve("no reviewer profile is enabled");
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the refused review releases prompts");
+    assert_eq!(environment.background_waits(), 1);
+    host.shutdown().await.unwrap();
 }
 
 fn armed(profile: Option<&str>) -> ReviewConfigSource {

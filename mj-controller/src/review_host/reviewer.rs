@@ -157,10 +157,10 @@ pub(super) async fn prepare(
             "prompts are queued; the review waits for them".to_owned(),
         ));
     }
-    let reviewer = environment
-        .resolve(handle.clone(), config, cancelled.clone())
-        .await
-        .map_err(StartRefusal)?;
+    let reviewer =
+        resolve_after_background_work(environment, &handle, session_id, config, &cancelled)
+            .await
+            .map_err(StartRefusal)?;
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(StartRefusal("review preparation cancelled".into()));
     }
@@ -229,6 +229,66 @@ pub(super) async fn prepare_recovery(
     }))
 }
 
+/// How long a review waits for other work holding its session, such as the
+/// automatic recovery copy the same finished turn starts, before it gives up.
+pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Pause between attempts when the session's lease was taken by something the
+/// recovery gate does not coordinate, so a retry does not spin.
+const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a refusal only says another operation held the session: a lease
+/// refused the reviewer action, or a lease taken meanwhile cancelled it.
+pub(super) fn preempted_by_lifecycle(reason: &str) -> bool {
+    reason.contains("session is reserved for a lifecycle operation")
+        || reason.contains("cancelled for session lifecycle change")
+}
+
+/// Chooses the reviewer once no background work holds the session.
+///
+/// A finished turn also starts the automatic recovery copy, and its lease
+/// cancels the reviewer actions the choice makes (R4-9). The review waits for
+/// that copy and tries again instead of giving up, until
+/// [`BACKGROUND_WORK_WAIT`] has passed. The copy is not held back for the
+/// review: it protects the work, and it takes seconds.
+async fn resolve_after_background_work(
+    environment: &Arc<dyn ReviewEnvironment>,
+    handle: &ManagedSessionHandle,
+    session_id: &str,
+    config: ReviewConfig,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<mj_core::review::settings::ResolvedReviewSettings, String> {
+    let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
+    let mut attempt = 0_u32;
+    loop {
+        if attempt > 0 {
+            tokio::time::sleep(LEASE_RETRY_PAUSE).await;
+        }
+        attempt += 1;
+        environment
+            .background_work_settled(session_id, deadline)
+            .await;
+        let resolved = environment
+            .resolve(handle.clone(), config.clone(), cancelled.clone())
+            .await;
+        match resolved {
+            Err(reason)
+                if preempted_by_lifecycle(&reason)
+                    && tokio::time::Instant::now() < deadline
+                    && !cancelled.load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                tracing::info!(
+                    %session_id,
+                    attempt,
+                    %reason,
+                    "turn review waits for another operation on the session"
+                );
+            }
+            resolved => return resolved,
+        }
+    }
+}
+
 /// Why a sub-agent session is not reviewed on its own. An automatic review
 /// skips it without a notice; a manual request gets this sentence.
 pub(super) const SUBAGENT_REFUSAL: &str =
@@ -241,9 +301,7 @@ pub(super) const SUBAGENT_REFUSAL: &str =
 pub fn start_refusal_notice(reason: &str) -> String {
     // Internal lifecycle refusals name the actor's mechanism, not anything a
     // person did (I1-14, I2-9).
-    let reason = if reason.contains("session is reserved for a lifecycle operation")
-        || reason.contains("cancelled for session lifecycle change")
-    {
+    let reason = if preempted_by_lifecycle(reason) {
         "another operation was using the session"
     } else {
         reason
