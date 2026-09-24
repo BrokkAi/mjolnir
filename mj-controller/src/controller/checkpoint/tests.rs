@@ -883,6 +883,33 @@ fn a_harness_turn_started_during_capture_abandons_the_archive() {
     assert!(checkpoint_was_deferred(&error), "{error:#}");
 }
 
+/// R4-3: a suspend's checkpoint restarted the worker, the replacement
+/// exited because its harness could not start, and the suspend ended as
+/// "Error / Recovery unavailable". A checkpoint needs only the relay journal
+/// and the files on the target, so a suspend (which holds the latch through
+/// close) takes it from a worker started without the harness instead. A
+/// routine recovery copy does not: it would leave the session unable to
+/// run, and it has nothing to finish.
+#[test]
+fn a_suspend_whose_worker_restart_left_no_worker_checkpoints_without_the_harness() {
+    let no_worker = anyhow::anyhow!("write relay history_requests request: Broken pipe")
+        .context(crate::controller::worker_restart::WorkerRestartLeftNoWorker)
+        .context("wait for ACP session after restarting the worker for checkpoint");
+    assert!(restart_falls_back_to_checkpoint_only(
+        LatchExclusivity::HoldThroughClose,
+        &no_worker
+    ));
+    assert!(!restart_falls_back_to_checkpoint_only(
+        LatchExclusivity::ReleaseAfterLatch,
+        &no_worker
+    ));
+    let stop_failed = anyhow::anyhow!("stop wedged Mjolnir worker before retrying checkpoint");
+    assert!(
+        !restart_falls_back_to_checkpoint_only(LatchExclusivity::HoldThroughClose, &stop_failed),
+        "a worker that may still run is not replaced by a second one"
+    );
+}
+
 #[test]
 fn a_stuck_checkpoint_barrier_is_retried_by_restarting_the_worker() {
     // Both ways the wait can end without a barrier, each wrapped the way
