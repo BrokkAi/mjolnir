@@ -309,6 +309,7 @@ const ROOT_GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Display", &["interface", "notify", "advanced"]),
+    ("Privacy", &["jev"]),
 ];
 
 /// A row of a settings page. The first page puts a heading above each group

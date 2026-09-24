@@ -440,6 +440,7 @@ fn sample_config() -> Config {
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
         build_cache: BuildCacheConfig::default(),
+        jev: Default::default(),
         legacy_startup: (),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
@@ -1415,6 +1416,33 @@ fn version_eight_enables_parent_only_subagents_by_default() {
     assert!(config.subagents.eligible_profiles.is_empty());
     assert!(config.subagents.profile_is_eligible("work", "work"));
     assert!(!config.subagents.profile_is_eligible("work", "other"));
+}
+
+#[test]
+fn the_jev_switch_defaults_on_round_trips_and_stops_continuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, format!("version = {CONFIG_VERSION}\n")).unwrap();
+    let config = Config::load_from(&path).unwrap();
+    assert!(config.jev.enabled);
+    assert!(config.automatic_continuation_enabled());
+
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[jev]\nenabled = false\n"),
+    )
+    .unwrap();
+    let config = Config::load_from(&path).unwrap();
+    assert!(!config.jev.enabled);
+    assert!(config.continuation.enabled);
+    assert!(!config.automatic_continuation_enabled());
+    config.save_to(&path).unwrap();
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("[jev]\nenabled = false")
+    );
+    assert!(!Config::load_from(&path).unwrap().jev.enabled);
 }
 
 #[test]

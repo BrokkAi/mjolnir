@@ -338,6 +338,37 @@ impl BuildCacheConfig {
     }
 }
 
+/// The one switch for the hosted Jev service. When it is off, Mjolnir sends
+/// nothing to Jev: no turn classification, no automatic continuation
+/// verdicts, and no semantic help search. `[jev] enabled = false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JevConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Default for JevConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl JevConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Config {
+    /// Automatic continuation asks Jev whether a finished turn left work
+    /// undone, so it runs only while `[continuation]` and `[jev]` are both on.
+    #[must_use]
+    pub fn automatic_continuation_enabled(&self) -> bool {
+        self.continuation.enabled && self.jev.enabled
+    }
+}
+
 pub const CONFIG_VERSION: u32 = 13;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
@@ -376,6 +407,7 @@ pub struct Config {
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub build_cache: BuildCacheConfig,
+    pub jev: JevConfig,
     pub keys: KeysConfig,
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
@@ -418,6 +450,8 @@ struct StoredConfig {
     subagents: SubagentConfig,
     #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
     build_cache: BuildCacheConfig,
+    #[serde(default, skip_serializing_if = "JevConfig::is_default")]
+    jev: JevConfig,
     #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
     keys: KeysConfig,
     #[serde(
@@ -529,6 +563,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             build_cache,
+            jev,
             keys,
             legacy_startup,
             profiles,
@@ -574,6 +609,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             build_cache,
+            jev,
             keys,
             legacy_startup,
             profiles,
@@ -611,6 +647,7 @@ impl From<Config> for StoredConfig {
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
             build_cache: config.build_cache,
+            jev: config.jev,
             keys: config.keys,
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
@@ -637,6 +674,7 @@ impl Default for Config {
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             build_cache: BuildCacheConfig::default(),
+            jev: JevConfig::default(),
             keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),

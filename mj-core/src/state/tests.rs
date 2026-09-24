@@ -244,6 +244,7 @@ fn sample_state() -> State {
 fn sample_config() -> Config {
     Config {
         build_cache: Default::default(),
+        jev: Default::default(),
         keys: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),

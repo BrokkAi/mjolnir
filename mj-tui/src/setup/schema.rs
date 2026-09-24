@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -20,6 +20,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
+        "jev" => json!({"enabled":true}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
         }
@@ -215,6 +216,7 @@ pub(super) fn label(key: &str) -> String {
         "phone" => "Web Access",
         "review" => "Code Review",
         "continuation" => "Continuation",
+        "jev" => "Jev (hosted service)",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
@@ -413,6 +415,13 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
                 "Off".to_owned()
             } else {
                 "On · 3 continuations plus quota recovery".to_owned()
+            }
+        }
+        "jev" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off · nothing is sent".to_owned()
+            } else {
+                "On · sends turn text for classification".to_owned()
             }
         }
         "subagents" => {
@@ -651,6 +660,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
+        }
+        "jev" => {
+            "Sends turn and help-search text to a hosted classifier. Off: nothing is sent and continuation stops."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."

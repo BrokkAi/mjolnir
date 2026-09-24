@@ -280,6 +280,7 @@ impl Controller {
             workspace_container.as_deref(),
             &target,
         )?;
+        apply_jev_switch(&mut launch, self.config.jev.enabled);
         launch.subagent_tools =
             subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
         // Claude reads Mjolnir's delegation server from a configuration file in
@@ -418,6 +419,22 @@ impl Controller {
         Ok(ProjectMemorySyncTarget {
             canonical_root: canonical_memory_root(&launch.project_key),
         })
+    }
+}
+
+/// Carries `[jev] enabled = false` to the worker, which reads it from its
+/// launch environment, and keeps the Jev key out of the worker and the
+/// harness so nothing can reach the service.
+pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
+    if enabled {
+        return;
+    }
+    for environment in [&mut launch.target_environment, &mut launch.environment] {
+        environment.remove("TYPESAFE_API_KEY");
+        environment.insert(
+            mj_core::jev::DISABLED_ENVIRONMENT.to_owned(),
+            "1".to_owned(),
+        );
     }
 }
 

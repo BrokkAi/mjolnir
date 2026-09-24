@@ -2234,6 +2234,67 @@ fn muse_settings_that_are_not_an_object_report_the_staged_file() {
     );
 }
 
+/// `[jev] enabled = false` reaches the worker as its launch environment and
+/// takes the Jev key out of both the worker's and the harness's environment.
+#[test]
+fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = zai_profile(home.path());
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(session_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(session_id).unwrap(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+    let template = mj_core::config::TargetTemplate::LocalPodman {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
+    session.harness_kind = HarnessKind::Codex;
+    session.last_profile = "glm".into();
+    session.project_directory = None;
+    session.container_workspace = Some(workspace.clone());
+    let mut launch = worker_launch_config(
+        &session,
+        &profile,
+        Some(&bundle),
+        &locator,
+        session_id,
+        Some(&workspace),
+        &mj_core::state::TargetRuntimeSettings::from(&template),
+    )
+    .unwrap()
+    .0;
+    for environment in [&mut launch.target_environment, &mut launch.environment] {
+        environment.insert("TYPESAFE_API_KEY".into(), "secret".into());
+    }
+
+    let mut on = launch.clone();
+    apply_jev_switch(&mut on, true);
+    assert_eq!(on.target_environment, launch.target_environment);
+    assert_eq!(on.environment, launch.environment);
+
+    apply_jev_switch(&mut launch, false);
+    for environment in [&launch.target_environment, &launch.environment] {
+        assert!(!environment.contains_key("TYPESAFE_API_KEY"));
+        assert_eq!(
+            environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
+            Some(&"1".to_owned())
+        );
+    }
+}
+
 #[test]
 fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
     let home = tempfile::tempdir().unwrap();

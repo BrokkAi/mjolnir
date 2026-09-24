@@ -10,9 +10,9 @@ But if you expand beyond that, Mjolnir offers flexibility across all three:
 2. Move sessions across harnesses (codex to claude code)
 3. Move sessions across machines or containers (local workstation to ec2)
 
-... while handling details like cross-harness memory sync and integrating a no-setup web ui via Tailscale for when you're not at your desk.
+... while handling details like cross-harness memory sync and integrating a privacy-first, no-setup web ui via Tailscale for when you're not at your desk.
 
-By default Mjolnir sends recent prompt and reply text to TypeSafe's Jev classifier, through a public Cloudflare proxy, to tell a question from ongoing work. [Security boundaries](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default) lists everything that leaves your machine and which parts can be turned off.
+By default Mjolnir sends recent prompt and reply text, and help-search text, to TypeSafe's hosted Jev classifier through a public proxy, and `[jev] enabled = false` in `config.toml` stops all of it ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
 Mjolnir is free and open source from the engineers at [Brokk AI]([url](https://brokk.ai/)). We're not trying to make money off of mj; we built it because we wanted to use it.
 

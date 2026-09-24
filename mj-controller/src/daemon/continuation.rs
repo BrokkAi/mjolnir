@@ -94,7 +94,7 @@ fn allowed(state: &RuntimeState, session: &str) -> bool {
             .controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        controller.config.continuation.enabled
+        controller.config.automatic_continuation_enabled()
             && controller.state.sessions.contains_key(session)
             && !controller.state.subagents.contains_key(session)
     };

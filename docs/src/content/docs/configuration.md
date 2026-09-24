@@ -350,6 +350,36 @@ Cancel applies to the entire configuration draft. Setup can discover the
 selected review profile's supported model and effort choices and filters the
 profile list to compatible reviewer profiles.
 
+## Hosted Jev service `[jev]`
+
+```toml
+[jev]
+enabled = false
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification, automatic continuation, and semantic help search. |
+
+Jev reads recent conversation text to answer three questions: whether a
+silent turn is waiting for you, whether a finished reply left work undone,
+and which help rows match what you typed. [Security
+boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
+each request sends and where.
+
+With `enabled = false`:
+
+- Workers do not classify turns. A turn ends when the harness ends it. A
+  turn that goes quiet while the agent waits for an answer stays **Working**
+  until the harness reports the end of the turn, and after a reply the
+  session's state follows the harness's own background-task reports.
+- Automatic continuation does not run, whatever `[continuation]` says.
+- The help filter matches text only and shows no related shortcuts.
+
+Workers read the switch when they start, so a running session follows the
+new value after it is next resumed or restarted. In the terminal the switch
+is **Setup → Privacy → Jev (hosted service)**.
+
 ## Session index `[sessionwiki]`
 
 [SessionWiki](https://github.com/jbellis/sessionwiki) is a separate tool that

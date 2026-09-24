@@ -7,6 +7,16 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 
+/// Set to `1` in a worker's launch environment when `[jev] enabled = false`.
+/// Workers re-exec with a cleared environment and may run on another
+/// machine, so the switch travels in the launch configuration.
+pub const DISABLED_ENVIRONMENT: &str = "MJ_JEV_DISABLED";
+
+/// Whether this process was launched with Jev turned off.
+pub fn disabled_by_environment() -> bool {
+    std::env::var(DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
+}
+
 const SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 const SEGMENTS: usize = 4;
 
