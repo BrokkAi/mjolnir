@@ -475,11 +475,27 @@ pub(super) fn install_worker_files(
                 execute_checked(executor, command)?;
             }
         }
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => {
+        // A disposable EC2 instance hosts one session and is terminated with
+        // it, so a cache there would only hold a second copy of the worker.
+        targets::TargetLocator::AwsEc2 { ssh, .. } => {
             install_worker_over_ssh(
                 executor,
                 ssh,
+                None,
+                worker_root,
+                profile_home,
+                worker_binary,
+                launch_config,
+                ownership,
+                profile_stage,
+            )?;
+        }
+        targets::TargetLocator::SshBare { ssh, .. } => {
+            let cached_worker = cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?;
+            install_worker_over_ssh(
+                executor,
+                ssh,
+                Some(&cached_worker),
                 worker_root,
                 profile_home,
                 worker_binary,
@@ -499,44 +515,7 @@ pub(super) fn install_worker_files(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            // The worker binary is 10-30 MB and identical across sessions, so
-            // keep it in a content-addressed cache on the remote host and copy
-            // it over the wire only once per unique binary.
-            let digest = mj_core::worker_launch::worker_executable_digest(worker_binary)?;
-            // Home-relative, not "~/": targets::ssh_command single-quotes every
-            // argument, so a tilde would stay literal in the remote shell
-            // while scp expands it, and the two sides would disagree. Both
-            // ssh commands (cwd is the login home) and scp resolve a relative
-            // path against the remote home.
-            let cache_dir = format!(".cache/mjolnir/workers/{digest}");
-            let cached_worker = format!("{cache_dir}/hel");
-            let cached = matches!(
-                executor.execute(
-                    &crate::targets::ssh_command(ssh, ["test", "-f", &cached_worker])
-                        .purpose("probe cached remote Mjolnir worker"),
-                ),
-                Ok(output) if output.status == 0
-            );
-            if !cached {
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
-                        .purpose("create remote worker cache"),
-                )?;
-                let partial = format!("{cache_dir}/hel.partial-{session_id}");
-                execute_checked(
-                    executor,
-                    crate::targets::scp_upload(ssh, worker_binary, &partial, false)
-                        .purpose("upload remote container worker binary"),
-                )?;
-                // Rename within the cache directory so the final path only
-                // ever names a complete upload.
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command(ssh, ["mv", &partial, &cached_worker])
-                        .purpose("publish cached remote Mjolnir worker"),
-                )?;
-            }
+            let cached_worker = cache_worker_on_ssh_host(executor, ssh, session_id, worker_binary)?;
             let upload = format!("{}/{session_id}", targets::REMOTE_UPLOAD_STAGING);
             execute_checked(
                 executor,
@@ -635,10 +614,80 @@ pub(super) fn install_worker_files(
     Ok(())
 }
 
+/// Put the worker binary in the SSH host's content-addressed cache and answer
+/// with its path there. The binary crosses the network only when the host
+/// does not hold this build yet.
+///
+/// A worker binary is well over 100 MB and identical across sessions. Uploading
+/// it once per session made each create on a slow link hold a daemon action
+/// slot for minutes (R3-4). Every session on the host, SSH-bare or in a remote
+/// container, copies its own worker from here instead.
+///
+/// Two sessions that find the cache empty at the same time each upload to
+/// their own partial name and rename it into place, so the cached path only
+/// ever names a complete file.
+fn cache_worker_on_ssh_host(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    session_id: &str,
+    worker_binary: &Path,
+) -> Result<String> {
+    let digest = mj_core::worker_launch::worker_executable_digest(worker_binary)?;
+    // Home-relative, not "~/": targets::ssh_command single-quotes every
+    // argument, so a tilde would stay literal in the remote shell while scp
+    // expands it, and the two sides would disagree. Both ssh commands (cwd is
+    // the login home) and scp resolve a relative path against the remote home.
+    let cache_dir = format!(".cache/mjolnir/workers/{digest}");
+    let cached_worker = format!("{cache_dir}/hel");
+    let cached = matches!(
+        executor.execute(
+            &crate::targets::ssh_command(ssh, ["test", "-f", &cached_worker])
+                .purpose("probe cached remote Mjolnir worker"),
+        ),
+        Ok(output) if output.status == 0
+    );
+    if cached {
+        return Ok(cached_worker);
+    }
+    execute_checked(
+        executor,
+        crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
+            .purpose("create remote worker cache"),
+    )?;
+    let partial = format!("{cache_dir}/hel.partial-{session_id}");
+    if let Err(error) = execute_checked(
+        executor,
+        crate::targets::scp_upload(ssh, worker_binary, &partial, false)
+            .purpose("upload Mjolnir worker to the remote cache"),
+    ) {
+        // The partial file is outside every session's worker root, so no
+        // session cleanup would ever remove it. Best effort: a connection
+        // that failed the upload may fail this too.
+        let _ = executor.execute(
+            &crate::targets::ssh_command(ssh, ["rm", "-f", "--", &partial])
+                .purpose("remove partial remote worker upload"),
+        );
+        return Err(error);
+    }
+    execute_checked(
+        executor,
+        crate::targets::ssh_command(ssh, ["mv", &partial, &cached_worker])
+            .purpose("publish cached remote Mjolnir worker"),
+    )?;
+    Ok(cached_worker)
+}
+
+/// Install a worker on a host reached over SSH with no container.
+///
+/// `cached_worker` is the host's cached copy of the worker binary, from
+/// [`cache_worker_on_ssh_host`]; the session gets its own copy of it, so its
+/// worker root and cleanup are the same as with an upload. Without one, the
+/// local binary is uploaded straight into the worker root.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_worker_over_ssh(
     executor: &impl CommandExecutor,
     ssh: &SshTarget,
+    cached_worker: Option<&str>,
     worker_root: &str,
     profile_home: &str,
     worker_binary: &Path,
@@ -651,14 +700,21 @@ pub(super) fn install_worker_over_ssh(
         crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root, profile_home])
             .purpose("create SSH worker directories"),
     )?;
-    for (source, remote, recursive) in [
-        (worker_binary, format!("{worker_root}/hel"), false),
-        (launch_config, format!("{worker_root}/launch.json"), false),
-        (ownership, format!("{worker_root}/ownership.json"), false),
+    let worker = format!("{worker_root}/hel");
+    let install_worker = match cached_worker {
+        Some(cached_worker) => crate::targets::ssh_command(ssh, ["cp", cached_worker, &worker])
+            .purpose("copy cached Mjolnir worker into the session"),
+        None => crate::targets::scp_upload(ssh, worker_binary, &worker, false)
+            .purpose("upload SSH worker file"),
+    };
+    execute_checked(executor, install_worker)?;
+    for (source, remote) in [
+        (launch_config, format!("{worker_root}/launch.json")),
+        (ownership, format!("{worker_root}/ownership.json")),
     ] {
         execute_checked(
             executor,
-            crate::targets::scp_upload(ssh, source, &remote, recursive)
+            crate::targets::scp_upload(ssh, source, &remote, false)
                 .purpose("upload SSH worker file"),
         )?;
     }
