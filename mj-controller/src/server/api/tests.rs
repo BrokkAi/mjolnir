@@ -1517,9 +1517,16 @@ async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await.to_string();
     assert!(
-        body.contains("the workspace name \\\"default\\\" is reserved; choose another name"),
+        body.contains("the workspace name \\\"default\\\" is reserved"),
         "{body}"
     );
+    // Launch finding R3-11: the refusal gave no reason. It says what the
+    // name is kept for.
+    assert!(
+        body.contains("sessions made before Mjolnir had workspaces"),
+        "{body}"
+    );
+    assert!(body.contains("choose another name"), "{body}");
     assert!(backend.workspaces.0.lock().unwrap().is_empty());
 }
 
