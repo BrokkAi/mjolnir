@@ -3422,6 +3422,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
@@ -3523,6 +3524,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
@@ -3609,6 +3611,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
     };
     let mut launch = WorkerLaunchConfig {
         subagent_tools: false,
+        handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
@@ -3921,4 +3924,29 @@ fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
         !pinned_source_is_usable(&never_pinned, &exists),
         "a source that never resolved must be tried again, not repeated back"
     );
+}
+
+/// Claude reads Mjolnir's MCP servers from its staged profile. A parent's
+/// entry serves delegation; a child's serves only `handback`, and the role
+/// travels in the arguments so one worker binary can serve either.
+#[test]
+fn the_staged_claude_profile_names_the_sub_agent_role() {
+    for role in [
+        mj_core::subagent::SubagentMcpRole::Parent,
+        mj_core::subagent::SubagentMcpRole::Child,
+    ] {
+        let stage = tempfile::tempdir().unwrap();
+        configure_claude_subagent_mcp(stage.path(), "/worker", role).unwrap();
+        let staged: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap())
+                .unwrap();
+        let args = staged["mcpServers"]["mj-agents"]["args"]
+            .as_array()
+            .expect("the staged server has arguments")
+            .iter()
+            .map(|arg| arg.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args[..2], ["worker", "subagent-mcp"]);
+        assert_eq!(args[args.len() - 2..], ["--role", role.id()], "{args:?}");
+    }
 }

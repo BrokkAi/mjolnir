@@ -158,6 +158,25 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
+        let handback_tool = child_gets_handback_tool(
+            profile,
+            &child_id,
+            &super::backend::backend_locator(
+                session.target.as_ref().expect("child target set above"),
+                &session,
+                &self.config,
+            )?,
+        );
+        // The first prompt names the tool only when the child will have it.
+        let initial_prompt = if handback_tool {
+            format!(
+                "{}\n\n{}",
+                request.initial_prompt,
+                mj_core::subagent::HANDBACK_PROMPT_NOTE
+            )
+        } else {
+            request.initial_prompt
+        };
         let relation = SubagentRecord {
             child_session_id: child_id.clone(),
             parent_session_id: parent.id,
@@ -166,10 +185,11 @@ impl Controller {
             model: request.model,
             effort: request.effort,
             working_directory: request.working_directory,
-            initial_prompt: request.initial_prompt,
+            initial_prompt,
             request_key: request.request_key,
             created_at,
             noticed_turn: None,
+            handback_tool,
         };
         crate::database::save_subagent_session(&session, &relation)?;
         self.state.sessions.insert(child_id, session);
@@ -296,6 +316,24 @@ fn borrowed_locator(
         // container borrowing was recorded.
         other @ TargetLocator::AwsEc2 { .. } => other.clone(),
     })
+}
+
+/// Whether a child can be given the `handback` tool. Codex takes Mjolnir's MCP
+/// servers over ACP; Claude reads them from a staged profile, so a Claude child
+/// needs a harness home of its own. Other harnesses keep reporting through
+/// their last message.
+fn child_gets_handback_tool(
+    profile: &mj_core::config::HarnessProfile,
+    child_id: &str,
+    locator: &crate::targets::TargetLocator,
+) -> bool {
+    match profile.kind {
+        HarnessKind::Codex => true,
+        HarnessKind::Claude => {
+            crate::controller::session_owns_profile_home(locator, child_id, profile)
+        }
+        _ => false,
+    }
 }
 
 /// A parent may delegate to Mjolnir children only if its own stored choice

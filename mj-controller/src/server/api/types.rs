@@ -237,14 +237,12 @@ pub struct SpawnSubagentRequest {
     pub context: Option<String>,
     #[serde(default)]
     pub files: Vec<SubagentSourceRange>,
-    pub request_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubagentView {
     pub parent_session_id: String,
     pub task_name: String,
-    pub request_key: String,
     pub session: ApiSession,
 }
 
@@ -386,9 +384,15 @@ pub struct WaitResponse {
     /// Why the wait ended this way, when there is something to say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// The agent's last message of the turn, flattened to text.
+    /// The agent's last message of the turn, flattened to text. For a
+    /// sub-agent child it is the report the child handed back, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_message: Option<String>,
+    /// For a sub-agent child: `handback` when `final_message` is the report
+    /// the child handed back, `last_message` when it is the turn's last
+    /// message. Absent for every other session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
     /// One-based position of this turn in the conversation.

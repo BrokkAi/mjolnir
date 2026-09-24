@@ -583,21 +583,49 @@ pub async fn run_server(
                             let parent_id = relation.parent_session_id.clone();
                             let task_name = relation.task_name.clone();
                             let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
+                            let handback_tool = relation.handback_tool;
+                            let last_turn = outcome.clone();
+                            let in_flight = snapshot
+                                .materialized
+                                .active_turn
+                                .iter()
+                                .map(|turn| turn.command_id.clone())
+                                .chain(
+                                    snapshot
+                                        .materialized
+                                        .queued_prompts
+                                        .iter()
+                                        .map(|queued| queued.command_id.clone()),
+                                )
+                                .collect::<Vec<_>>();
                             relation.noticed_turn = Some(turn);
                             let backend = api_backend.clone();
                             let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             subagent_completion_jobs.spawn(async move {
                                 let _upgrade_task = upgrade_task;
                                 let result = async {
-                                    backend
-                                        .record_subagent_completion_notice(
-                                            parent_id,
+                                    // A child that owes its report is reminded
+                                    // first; the parent hears about it when the
+                                    // reminder turn ends.
+                                    let reminded = backend
+                                        .remind_subagent_to_hand_back(
                                             &child_id,
-                                            &task_name,
-                                            turn,
-                                            &outcome_name,
+                                            handback_tool,
+                                            &last_turn,
+                                            &in_flight,
                                         )
                                         .await?;
+                                    if !reminded {
+                                        backend
+                                            .record_subagent_completion_notice(
+                                                parent_id,
+                                                &child_id,
+                                                &task_name,
+                                                turn,
+                                                &outcome_name,
+                                            )
+                                            .await?;
+                                    }
                                     tokio::task::spawn_blocking({
                                         let child_id = child_id.clone();
                                         move || crate::database::mark_subagent_turn_noticed(&child_id, turn)

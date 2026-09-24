@@ -21,9 +21,6 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
-    if request.request_key.trim().is_empty() {
-        return Err(ApiFailure::bad_request("request_key cannot be empty"));
-    }
     let profile_id = request
         .profile_id
         .clone()
@@ -72,18 +69,22 @@ pub(super) async fn spawn_subagent(
             model: selected_model.clone(),
             effort: selected_effort.clone(),
             working_directory: request.working_directory.unwrap_or_default(),
-            initial_prompt: initial_prompt.clone(),
-            request_key: request.request_key,
+            initial_prompt,
+            // Every request is its own spawn; the key only lets Mjolnir
+            // recognise one request it is asked to run twice.
+            request_key: mj_core::state::new_session_id().map_err(ApiFailure::from)?,
         })
         .await
         .map_err(|error| ApiFailure::conflict(format!("sub-agent creation failed: {error:#}")))?;
     backend
         .start_followup(
             relation.child_session_id.clone(),
+            // Registration completes the first prompt (it names the handback
+            // tool when the child gets one), so send what it kept.
             StartFollowup {
                 model: selected_model,
                 effort: selected_effort,
-                prompt: Some(initial_prompt),
+                prompt: Some(relation.initial_prompt.clone()),
             },
         )
         .await?;
@@ -93,7 +94,6 @@ pub(super) async fn spawn_subagent(
         Json(SubagentView {
             parent_session_id,
             task_name: relation.task_name,
-            request_key: relation.request_key,
             session,
         }),
     ))
@@ -158,7 +158,6 @@ pub(super) async fn list_subagents(
             Ok(SubagentView {
                 parent_session_id: parent_session_id.clone(),
                 task_name: record.task_name,
-                request_key: record.request_key,
                 session: ApiSession::from(session),
             })
         })

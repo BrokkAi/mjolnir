@@ -15,7 +15,7 @@ pub(crate) mod verdict_client;
 use claude_tasks::*;
 use drive::*;
 use launch::*;
-pub use launch::{ContextReset, LaunchSpec};
+pub use launch::{ContextReset, LaunchSpec, SubagentMcpSocket};
 use permissions::*;
 use session::*;
 use session_config::*;

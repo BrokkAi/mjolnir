@@ -6,6 +6,7 @@ use super::*;
 use agent_client_protocol::schema::v1::{
     SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions, ToolCallUpdate,
 };
+use mj_core::subagent::SubagentMcpRole;
 
 /// Every launch request states the servers Mjolnir owns. A bridge that opens
 /// the session again is a new harness process, and Codex builds the resumed
@@ -59,7 +60,7 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
         );
     }
 
-    spec.subagent_mcp_socket = Some("/worker/subagents.sock".into());
+    spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
     let names = |request: &serde_json::Value| -> Vec<String> {
         request
             .get("mcpServers")
@@ -178,7 +179,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
             "{harness:?} without a socket must keep its native tools: {meta}"
         );
 
-        spec.subagent_mcp_socket = Some("/worker/subagents.sock".into());
+        spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
         let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
         let hidden = match harness {
             HarnessKind::Claude => meta.pointer("/claudeCode/options/disallowedTools"),
@@ -186,7 +187,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         };
         let expected = match harness {
             HarnessKind::Claude => {
-                serde_json::json!(["Agent", "Task", "TaskOutput", "TaskStop"])
+                serde_json::json!(["Agent", "Task"])
             }
             _ => serde_json::json!(["spawn_agent"]),
         };
@@ -387,16 +388,11 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
         );
     }
     spec.execution_policy = ExecutionPolicy::Unconstrained;
-    spec.subagent_mcp_socket = Some("/worker/subagents.sock".into());
+    spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
     let claude_meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
     assert_eq!(
         claude_meta.pointer("/claudeCode/options/disallowedTools"),
-        Some(&serde_json::json!([
-            "Agent",
-            "Task",
-            "TaskOutput",
-            "TaskStop"
-        ]))
+        Some(&serde_json::json!(["Agent", "Task"]))
     );
     assert!(
         extra_mcp(&spec).is_empty(),
@@ -429,8 +425,69 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
             "--socket",
             "/worker/subagents.sock",
             "--harness",
-            "codex"
+            "codex",
+            "--role",
+            "parent"
         ]
+    );
+}
+
+fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
+    SubagentMcpSocket {
+        path: "/worker/subagents.sock".into(),
+        role,
+    }
+}
+
+/// A child's socket carries only `handback`. It must not take the child's
+/// native delegation tools away, and a Codex child reads the server over ACP
+/// in its child role.
+#[test]
+fn a_child_socket_serves_handback_without_hiding_native_tools() {
+    let mut spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "codex-acp".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: "/workspace/app".into(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Codex,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: None,
+        stall_policy: None,
+    };
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        spec.harness = harness;
+        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap_or_default());
+        assert!(
+            meta.pointer("/claudeCode/options/disallowedTools")
+                .is_none()
+                && meta.pointer("/codex/options/disallowedTools").is_none(),
+            "{harness:?} child must keep its native tools: {meta}"
+        );
+    }
+    spec.harness = HarnessKind::Codex;
+    let servers = extra_mcp(&spec);
+    let [McpServer::Stdio(server)] = servers.as_slice() else {
+        panic!("a Codex child receives the Mjolnir sub-agent MCP server");
+    };
+    assert_eq!(server.name, "mj-agents");
+    assert_eq!(
+        server.args.iter().rev().take(2).collect::<Vec<_>>(),
+        ["child", "--role"]
     );
 }
 
@@ -4721,7 +4778,10 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
-        subagent_mcp_socket: Some(temp.path().join("subagents.sock")),
+        subagent_mcp_socket: Some(SubagentMcpSocket {
+            path: temp.path().join("subagents.sock"),
+            role: SubagentMcpRole::Parent,
+        }),
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),

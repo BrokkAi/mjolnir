@@ -1580,6 +1580,7 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,
+        handback_tool: false,
     };
     let mut dashboard = DashboardState::new(
         config(),
@@ -1674,6 +1675,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         request_key: "request-1".into(),
         created_at: first_child.created_at.clone(),
         noticed_turn: None,
+        handback_tool: false,
     };
     let mut dashboard = DashboardState::new(
         config(),
@@ -1705,6 +1707,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         request_key: "request-2".into(),
         created_at: second_child.created_at.clone(),
         noticed_turn: None,
+        handback_tool: false,
     };
     dashboard.set_state(State {
         subagents: BTreeMap::from([
@@ -4814,6 +4817,7 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
             request_key: "request".into(),
             created_at: parent.created_at.clone(),
             noticed_turn: None,
+            handback_tool: false,
         },
     );
     assert!(
@@ -4955,6 +4959,7 @@ fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
             request_key: "request".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
+            handback_tool: false,
         },
     );
     dashboard.state.sessions.insert(child.id.clone(), child);

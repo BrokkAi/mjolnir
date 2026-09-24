@@ -81,7 +81,14 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
         message: "model is unavailable".into(),
     };
     assert_eq!(
-        subagent_status(None, None, Some(&status), None, false),
+        subagent_status(
+            None,
+            None,
+            Some(&status),
+            None,
+            false,
+            &ReportState::Fallback
+        ),
         ("error".into(), Some("model is unavailable".into()), true)
     );
 }
@@ -111,13 +118,26 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
     };
 
     assert_eq!(
-        subagent_status(Some(&record), Some(&summary), None, None, false),
+        subagent_status(
+            Some(&record),
+            Some(&summary),
+            None,
+            None,
+            false,
+            &ReportState::Fallback
+        ),
         ("completed".into(), Some("the child's report".into()), true),
         "an idle child nobody is closing is finished"
     );
 
-    let (state, output, finished) =
-        subagent_status(Some(&record), Some(&summary), None, None, true);
+    let (state, output, finished) = subagent_status(
+        Some(&record),
+        Some(&summary),
+        None,
+        None,
+        true,
+        &ReportState::Fallback,
+    );
     assert_eq!(state, "stopping");
     assert_eq!(output, None);
     assert!(
@@ -132,7 +152,15 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
         message: "model is unavailable".into(),
     };
     assert!(
-        !subagent_status(Some(&record), Some(&summary), Some(&failed), None, true).2,
+        !subagent_status(
+            Some(&record),
+            Some(&summary),
+            Some(&failed),
+            None,
+            true,
+            &ReportState::Fallback
+        )
+        .2,
         "a failed child is still being torn down while its close runs"
     );
 
@@ -140,7 +168,14 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
     // just after it is no longer allowed to hold the wait open.
     record.state = SessionState::Stopped;
     assert_eq!(
-        subagent_status(Some(&record), Some(&summary), None, None, true),
+        subagent_status(
+            Some(&record),
+            Some(&summary),
+            None,
+            None,
+            true,
+            &ReportState::Fallback
+        ),
         ("stopped".into(), None, true),
         "a record that already settled to stopped ends the wait"
     );
@@ -163,8 +198,14 @@ fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
         message: "session child is Error and will not take a first prompt".into(),
     };
 
-    let (state, output, terminal) =
-        subagent_status(Some(&record), None, Some(&status), None, false);
+    let (state, output, terminal) = subagent_status(
+        Some(&record),
+        None,
+        Some(&status),
+        None,
+        false,
+        &ReportState::Fallback,
+    );
 
     assert_eq!(state, "error");
     assert!(terminal);
@@ -1094,4 +1135,292 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
         "no push remote configured"
     );
     assert_eq!(refused("", ""), "branch export was refused by the target");
+}
+
+fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
+    mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: command_id.into(),
+        accepted_ordinal: Some(3),
+        turn_start_position: Some(3),
+        completed_ordinal: 9,
+        completed_at_ms: 1,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    }
+}
+
+/// An idle child that still owes its report is not finished: Mjolnir is about
+/// to remind it. A delivered report is the child's output, not its last
+/// message, and the answer says which one it is.
+#[test]
+fn a_childs_report_decides_whether_an_idle_child_is_finished() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 4,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: Some("Done.".into()),
+        last_user_message: None,
+        last_agent_message_follows_last_user: true,
+        agent_message_latest_content_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
+    };
+    let status = |report: &ReportState| {
+        subagent_status(
+            Some(&record),
+            Some(&summary),
+            None,
+            Some("Done."),
+            false,
+            report,
+        )
+    };
+
+    let (state, _, finished) = status(&ReportState::Pending { remind: true });
+    assert_eq!((state.as_str(), finished), ("running", false));
+    assert_eq!(
+        report_source(&state, &ReportState::Pending { remind: true }),
+        None
+    );
+
+    let delivered = ReportState::Delivered("the full report".into());
+    let (state, output, finished) = status(&delivered);
+    assert_eq!(
+        (state.as_str(), output.as_deref(), finished),
+        ("completed", Some("the full report"), true)
+    );
+    assert_eq!(report_source(&state, &delivered), Some("handback"));
+
+    let (state, output, _) = status(&ReportState::Fallback);
+    assert_eq!(output.as_deref(), Some("Done."));
+    assert_eq!(
+        report_source(&state, &ReportState::Fallback),
+        Some("last_message")
+    );
+}
+
+/// Nothing to remind: the child has no tool, or its next task is already
+/// queued. Neither case reaches the store or the child.
+#[tokio::test]
+async fn a_child_without_the_tool_or_with_queued_work_is_not_reminded() {
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+    let turn = finished_turn("task");
+    assert!(
+        !backend
+            .remind_subagent_to_hand_back("child-1", false, &turn, &[])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .remind_subagent_to_hand_back("child-1", true, &turn, &["api-next".into()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        submitted.try_recv().is_err(),
+        "no prompt may reach the child"
+    );
+}
+
+const HANDBACK_TEST_CHILD: &str = "MJ_HANDBACK_TEST_CHILD";
+
+/// A child that ended its turn without a report is reminded once, with a
+/// prompt its transcript shows, and the reminder is recorded so the next look
+/// at the same turn does not send another.
+#[tokio::test]
+async fn a_child_that_owes_its_report_is_reminded_once() {
+    if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_child_that_owes_its_report_is_reminded_once",
+            ),
+        )
+        .env(HANDBACK_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: submitted_tx,
+            view: None,
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+    let turn = finished_turn("task");
+
+    assert!(
+        backend
+            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .await
+            .unwrap()
+    );
+    let (command_id, command) = submitted.recv().await.unwrap();
+    assert!(
+        mj_core::subagent::is_handback_reminder(&command_id),
+        "{command_id}"
+    );
+    let RelayCommand::Prompt { prompt } = command else {
+        panic!("the reminder is an ordinary prompt, not {command:?}");
+    };
+    let [ContentBlock::Text(text)] = prompt.as_slice() else {
+        panic!("the reminder is one text block");
+    };
+    assert_eq!(text.text, mj_core::subagent::HANDBACK_REMINDER_TEXT);
+    let recorded = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(
+        recorded.reminder.as_ref().map(|reminder| (
+            reminder.command_id.as_str(),
+            reminder.for_command_id.as_str()
+        )),
+        Some((command_id.as_str(), "task"))
+    );
+
+    assert!(
+        !backend
+            .remind_subagent_to_hand_back("child-1", true, &turn, &[])
+            .await
+            .unwrap(),
+        "one reminder per turn"
+    );
+    assert!(submitted.try_recv().is_err());
+}
+
+/// A child hands back one report per turn. The report is recorded against the
+/// turn that is running, a repeat in the same turn is refused without being an
+/// error, and a session that is not such a child cannot hand anything back.
+#[tokio::test]
+async fn a_child_hands_back_one_report_per_turn() {
+    if std::env::var_os(HANDBACK_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_child_hands_back_one_report_per_turn",
+            ),
+        )
+        .env(HANDBACK_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let mut child = parent_record("child-1", "helper");
+    child.title = "child".into();
+    crate::database::save_subagent_session(
+        &child,
+        &mj_core::subagent::SubagentRecord {
+            child_session_id: "child-1".into(),
+            parent_session_id: "parent-1".into(),
+            task_name: "audit deps".into(),
+            profile_id: "helper".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "check the lockfile".into(),
+            request_key: "request-1".into(),
+            created_at: "2026-09-24T00:00:00Z".into(),
+            noticed_turn: None,
+            handback_tool: true,
+        },
+    )
+    .unwrap();
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "task".into(),
+            accepted_ordinal: Some(3),
+            turn_start_position: 3,
+            started_at_ms: 1,
+        });
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 1,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(view),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    ));
+    let hand_back = |session: &str, message: &str| {
+        let backend = backend.clone();
+        let session = session.to_owned();
+        let message = message.to_owned();
+        async move {
+            backend
+                .execute_subagent_tool(
+                    session,
+                    mj_core::subagent::SubagentToolRequest {
+                        request_id: "request".into(),
+                        created_at_ms: 0,
+                        action: mj_core::subagent::SubagentToolAction::Handback { message },
+                    },
+                )
+                .await
+        }
+    };
+
+    let first = hand_back("child-1", "the full report").await;
+    assert!(!first.is_error, "{}", first.message);
+    assert!(
+        first.message.contains("\"delivered\": true"),
+        "{}",
+        first.message
+    );
+    let recorded = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(
+        recorded
+            .handback
+            .map(|handback| (handback.command_id, handback.message)),
+        Some(("task".to_owned(), "the full report".to_owned()))
+    );
+
+    let second = hand_back("child-1", "a second report").await;
+    assert!(!second.is_error, "{}", second.message);
+    assert!(
+        second.message.contains("already delivered"),
+        "{}",
+        second.message
+    );
+
+    let empty = hand_back("child-1", "  ").await;
+    assert!(
+        empty.is_error && empty.message.contains("cannot be empty"),
+        "{}",
+        empty.message
+    );
+
+    let stranger = hand_back("parent-1", "a report").await;
+    assert!(stranger.is_error, "{}", stranger.message);
+    assert!(
+        stranger.message.contains("only for a Mjolnir sub-agent"),
+        "{}",
+        stranger.message
+    );
 }

@@ -626,6 +626,7 @@ impl SubagentBackend for FakeBackend {
                 request_key: request.request_key,
                 created_at: "2026-09-18T00:00:00Z".to_owned(),
                 noticed_turn: None,
+                handback_tool: false,
             })
         })
     }
@@ -3164,7 +3165,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready","request_key":"probe-1"}"#,
+                r#"{"task_name":"probe","instructions":"say ready"}"#,
             ))
             .unwrap(),
         )
@@ -3176,6 +3177,35 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     let body = json_body(response).await;
     assert_eq!(body["session"]["id"], SPAWNED_CHILD);
     assert_eq!(body["task_name"], "probe");
+    assert!(body.get("request_key").is_none(), "{body}");
+}
+
+/// The caller-chosen key is gone, as it is from session creation: a request
+/// that still names it is refused rather than silently deduplicated.
+#[tokio::test]
+async fn a_spawn_naming_a_request_key_is_refused() {
+    let (app, _actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].harness_kind = "codex".to_owned();
+        });
+    let parent = {
+        let snapshot = snapshot_tx.borrow();
+        snapshot.sessions[0].id.clone()
+    };
+    let response = app
+        .oneshot(
+            bearer(Request::post(format!(
+                "/api/v1/sessions/{parent}/subagents"
+            )))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_name":"probe","instructions":"say ready","request_key":"probe-1"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -3725,4 +3755,130 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
             "{error}"
         );
     }
+}
+
+fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
+    MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: command_id.into(),
+        accepted_ordinal: Some(5),
+        turn_start_position: Some(5),
+        completed_ordinal: 9,
+        completed_at_ms: 1,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    }
+}
+
+/// A child's turn that ended without its report is not an ending, for a wait
+/// on that turn or on the newest one: Mjolnir reminds the child, and the wait
+/// answers after the reminder turn.
+#[test]
+fn a_session_wait_follows_a_child_through_its_handback_reminder() {
+    let mut observation = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        last_turn_outcome: Some(finished_child_turn("task")),
+        ..WaitObservation::default()
+    };
+    observation.apply_subagent_report(true, &mj_core::subagent::SubagentReport::default(), 0);
+    assert_eq!(observation.report_pending_for.as_deref(), Some("task"));
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+    let on_the_turn = WaitRequest {
+        turn_id: Some(5),
+        ..WaitRequest::default()
+    };
+    assert!(resolve_wait(&observation, &on_the_turn).is_none());
+
+    // The child handed back its report: the turn ends the wait.
+    let mut delivered = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        last_turn_outcome: Some(finished_child_turn("task")),
+        ..WaitObservation::default()
+    };
+    delivered.apply_subagent_report(
+        true,
+        &mj_core::subagent::SubagentReport {
+            handback: Some(mj_core::subagent::SubagentHandback {
+                command_id: "task".into(),
+                message: "the full report".into(),
+                recorded_at_ms: 1,
+            }),
+            ..Default::default()
+        },
+        0,
+    );
+    assert!(delivered.report_pending_for.is_none());
+    assert_eq!(
+        resolve_wait(&delivered, &on_the_turn).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished)
+    );
+
+    // A child without the tool ends its turn as any session does.
+    let mut plain = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        last_turn_outcome: Some(finished_child_turn("task")),
+        ..WaitObservation::default()
+    };
+    plain.apply_subagent_report(false, &mj_core::subagent::SubagentReport::default(), 0);
+    assert!(resolve_wait(&plain, &WaitRequest::default()).is_some());
+}
+
+/// `mj wait` on a child answers with what the child handed back, not the
+/// turn's last message, and says so.
+#[tokio::test]
+async fn a_session_wait_on_a_child_answers_with_its_handback() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let session = ApiSession::from(&snapshot.sessions[0]);
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
+        summary: Some(TurnSummary {
+            turn_number: 2,
+            turn_started_at_ms: 100,
+            last_changed_at_ms: 900,
+            final_message: Some("Report delivered.".into()),
+        }),
+        ..FakeBackend::default()
+    });
+    let observation = |report: mj_core::subagent::SubagentReport| {
+        let mut observation = WaitObservation {
+            execution: MaterializedExecutionState::Idle,
+            last_turn_outcome: Some(finished_child_turn("task")),
+            ..WaitObservation::default()
+        };
+        observation.apply_subagent_report(true, &report, 0);
+        observation
+    };
+    let answer = |observation: WaitObservation| {
+        let backend = backend.clone();
+        let session = session.clone();
+        async move {
+            let decision = resolve_wait(&observation, &WaitRequest::default()).unwrap();
+            finish_wait(&backend, "session-1", session, observation, decision, None)
+                .await
+                .unwrap()
+        }
+    };
+
+    let response = answer(observation(mj_core::subagent::SubagentReport {
+        handback: Some(mj_core::subagent::SubagentHandback {
+            command_id: "task".into(),
+            message: "the full report".into(),
+            recorded_at_ms: 1,
+        }),
+        ..Default::default()
+    }))
+    .await;
+    assert_eq!(response.final_message.as_deref(), Some("the full report"));
+    assert_eq!(response.report_source.as_deref(), Some("handback"));
+
+    // The reminder could not be sent: the last message stands, and says so.
+    let response = answer(observation(mj_core::subagent::SubagentReport {
+        reminder_failed_for: Some("task".into()),
+        ..Default::default()
+    }))
+    .await;
+    assert_eq!(response.final_message.as_deref(), Some("Report delivered."));
+    assert_eq!(response.report_source.as_deref(), Some("last_message"));
 }

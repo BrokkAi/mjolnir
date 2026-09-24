@@ -500,7 +500,16 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // socket inside the reviewer directory: an MCP server started by a harness
     // has no relay connection, and the dispatch is not session history.
     let dispatch_socket = serve_review_dispatch(&root, reviewer.clone())?;
-    let (subagents, _subagent_socket_guard) = if config.subagent_tools {
+    // A parent delegates through this socket and a child hands its report
+    // back through it; the daemon collects both kinds of request the same way.
+    let subagent_role = if config.subagent_tools {
+        Some(mj_core::subagent::SubagentMcpRole::Parent)
+    } else if config.handback_tool {
+        Some(mj_core::subagent::SubagentMcpRole::Child)
+    } else {
+        None
+    };
+    let (subagents, _subagent_socket_guard) = if subagent_role.is_some() {
         let (endpoint, guard) = super::subagents::serve(&root)?;
         (Some(endpoint), Some(guard))
     } else {
@@ -557,9 +566,10 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),
-            subagent_mcp_socket: subagents
-                .as_ref()
-                .map(|_| root.join(super::subagents::SUBAGENT_SOCKET)),
+            subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
+                path: root.join(super::subagents::SUBAGENT_SOCKET),
+                role,
+            }),
             project_memory: config.project_memory,
             resume_session,
             native_session_may_have_history,

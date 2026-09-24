@@ -112,6 +112,10 @@ enum WorkerCommand {
         /// `wait` may stay open. Omitted means no harness-specific ceiling.
         #[arg(long)]
         harness: Option<mj_core::config::HarnessKind>,
+        /// `parent` serves the delegation tools; `child` serves only
+        /// `handback`, a child's report to the session that started it.
+        #[arg(long, default_value_t = mj_core::subagent::SubagentMcpRole::Parent)]
+        role: mj_core::subagent::SubagentMcpRole,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -443,9 +447,11 @@ async fn run_command(command: Command) -> Result<()> {
             mj_worker::memory_mcp::run_mcp_stdio_with_history(&root, history_socket, !native_notes)
         }
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
-        WorkerCommand::SubagentMcp { socket, harness } => {
-            mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness)
-        }
+        WorkerCommand::SubagentMcp {
+            socket,
+            harness,
+            role,
+        } => mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness, role),
         WorkerCommand::Diff {
             repository,
             base,

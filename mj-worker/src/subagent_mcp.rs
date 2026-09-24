@@ -9,20 +9,44 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use mj_core::config::HarnessKind;
-use mj_core::subagent::{FileSourceRanges, SubagentToolAction, SubagentToolRequest};
+use mj_core::subagent::{
+    FileSourceRanges, SubagentMcpRole, SubagentToolAction, SubagentToolRequest,
+};
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
 const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the same child_session_ids. A child may take longer than any single wait. The user can see every child in the Sub-agents workspace.";
 
+/// A child's server instructions: its report reaches the parent only through
+/// `handback`, which is the rule Claude Code's own subagents follow.
+const CHILD_INSTRUCTIONS: &str = "You are a Mjolnir sub-agent working for another session. Deliver your final report for each task by calling handback once, as your last action, with the full report. The session that started you reads that report, not the rest of this conversation. If you need a decision from it, hand back your question and stop; its answer arrives as your next prompt.";
+
+/// A child's advice when Mjolnir has not confirmed its report. Calling again
+/// is safe: a report that did arrive is refused as already delivered.
+const HANDBACK_UNANSWERED_ADVICE: &str = "It may still be recorded; call handback again with the same report. An answer that it was already delivered means the first call arrived.";
+
+/// What the model is told when Mjolnir has not answered a request: it may
+/// still run, so repeating it blindly could spawn a second child or send the
+/// same input twice. `list_agents` shows what actually happened.
+const UNANSWERED_ADVICE: &str =
+    "It may still run; call list_agents to see the children's state before repeating this call.";
+
+/// What to do about a request Mjolnir has not answered, for this action.
+fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
+    match action {
+        SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
+        _ => UNANSWERED_ADVICE,
+    }
+}
+
 /// The degraded answer when the daemon has not completed the request within
-/// the socket ceiling. The request stays queued; the model must collect the
-/// result itself, because nothing is ever pushed into its conversation.
-fn pending_reply(request_id: &str) -> Value {
+/// the socket ceiling. The request stays queued; the model must check on it
+/// itself, because nothing is ever pushed into its conversation.
+fn pending_reply(request_id: &str, action: &SubagentToolAction) -> Value {
     json!({
         "request_id":request_id,
         "accepted":true,
-        "note":"Mjolnir has not answered this request yet; it stays queued. Repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated."
+        "note":format!("Mjolnir has not answered this request yet. {}", unanswered_advice(action))
     })
 }
 
@@ -113,8 +137,9 @@ fn unanswered_reply(
         json!({
             "request_id": request_id,
             "error": format!(
-                "Mjolnir did not answer this request within {} seconds. It may still be queued; repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated.",
-                waited.as_secs()
+                "Mjolnir did not answer this request within {} seconds. {}",
+                waited.as_secs(),
+                unanswered_advice(action)
             )
         }),
         true,
@@ -124,7 +149,7 @@ fn unanswered_reply(
 /// What the model reads for one answer. The daemon and the worker both put the
 /// answer's own JSON into `SubagentToolResult.message`, so handing the envelope
 /// back would leave the model parsing JSON out of a string inside a wrapper.
-/// Unwrap it, keeping `request_id` alongside the answer for retry advice.
+/// Unwrap it, keeping `request_id` alongside the answer.
 fn model_facing(request_id: &str, result: &Value) -> Value {
     let Some(message) = result.get("message").and_then(Value::as_str) else {
         return result.clone();
@@ -157,33 +182,43 @@ fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Opti
     ))
 }
 
-pub fn run_mcp_stdio(socket: &Path, harness: Option<HarnessKind>) -> Result<()> {
+pub fn run_mcp_stdio(
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+) -> Result<()> {
     let stdin = std::io::stdin();
-    run(stdin.lock(), std::io::stdout(), socket, harness)
+    run(stdin.lock(), std::io::stdout(), socket, harness, role)
 }
 
 /// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
 /// dispatched concurrently, each on its own socket connection, so a long
 /// `wait` never blocks a cheap `list_agents` queued after it. `harness` is the
 /// parent's own harness, whose client decides how long one call may stay open.
+/// `role` picks the tool set: a parent delegates, a child hands back.
 fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     reader: R,
     writer: W,
     socket: &Path,
     harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
+    let (instructions, tools) = match role {
+        SubagentMcpRole::Parent => (SERVER_INSTRUCTIONS, tool_definitions(harness)),
+        SubagentMcpRole::Child => (CHILD_INSTRUCTIONS, child_tool_definitions()),
+    };
     crate::mcp_stdio::serve(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
             name: "mj-agents",
-            instructions: SERVER_INSTRUCTIONS,
-            tools: tool_definitions(harness),
+            instructions,
+            tools,
             dispatch: crate::mcp_stdio::Dispatch::Concurrent,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call(&socket, harness, params, progress)
+                call(&socket, harness, role, params, progress)
             },
         },
     )
@@ -196,7 +231,10 @@ struct CallParams {
     arguments: Value,
 }
 
+/// Strict, like the schema it answers to: a model still sending the removed
+/// `request_key` is told so instead of having it silently dropped.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnArgs {
     task_name: String,
     instructions: String,
@@ -212,8 +250,6 @@ struct SpawnArgs {
     context: Option<String>,
     #[serde(default)]
     files: Vec<FileSourceRanges>,
-    #[serde(default)]
-    request_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -221,6 +257,12 @@ struct ChildArgs {
     child_session_id: String,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandbackArgs {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -233,10 +275,11 @@ struct WaitArgs {
 fn call(
     socket: &Path,
     harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
 ) -> Result<(Value, bool)> {
-    call_with_budget(socket, harness, params, progress, reply_timeout)
+    call_with_budget(socket, harness, role, params, progress, reply_timeout)
 }
 
 /// Answer one tool call, waiting for the worker as long as `budget` allows
@@ -244,73 +287,78 @@ fn call(
 fn call_with_budget(
     socket: &Path,
     harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
-    let (action, supplied_key) = match params.name.as_str() {
-        "list_profiles" => (SubagentToolAction::ListProfiles, None),
+    // Each role answers only the tools it lists.
+    match (role, params.name.as_str()) {
+        (SubagentMcpRole::Child, "handback") | (SubagentMcpRole::Parent, _) => {}
+        (SubagentMcpRole::Child, other) => {
+            bail!("unknown sub-agent tool {other:?}; a sub-agent can only call handback")
+        }
+    }
+    let action = match params.name.as_str() {
+        "list_profiles" => SubagentToolAction::ListProfiles,
         "spawn" => {
             let args: SpawnArgs = serde_json::from_value(params.arguments)?;
-            let key = args.request_key.clone();
-            (
-                SubagentToolAction::Spawn {
-                    task_name: args.task_name,
-                    instructions: args.instructions,
-                    profile_id: args.profile_id,
-                    model: args.model,
-                    effort: args.effort,
-                    working_directory: args.working_directory,
-                    context: args.context,
-                    files: args.files,
-                },
-                key,
-            )
+            SubagentToolAction::Spawn {
+                task_name: args.task_name,
+                instructions: args.instructions,
+                profile_id: args.profile_id,
+                model: args.model,
+                effort: args.effort,
+                working_directory: args.working_directory,
+                context: args.context,
+                files: args.files,
+            }
         }
-        "list_agents" => (SubagentToolAction::ListAgents, None),
+        "list_agents" => SubagentToolAction::ListAgents,
         "send_input" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
             let message = args.message.context("send_input requires message")?;
-            (
-                SubagentToolAction::SendInput {
-                    child_session_id: args.child_session_id,
-                    message,
-                },
-                None,
-            )
+            SubagentToolAction::SendInput {
+                child_session_id: args.child_session_id,
+                message,
+            }
         }
         "wait" => {
             let args: WaitArgs = serde_json::from_value(params.arguments)?;
             // Apply the harness's own ceiling once, here, so the worker and the
             // daemon work to the same deadline the caller will be answered at.
-            (
-                SubagentToolAction::WaitAgents {
-                    child_session_ids: args.child_session_ids,
-                    timeout_seconds: Some(
-                        mj_core::subagent::subagent_wait_timeout_for(harness, args.timeout_seconds)
-                            .as_secs(),
-                    ),
-                },
-                None,
-            )
+            SubagentToolAction::WaitAgents {
+                child_session_ids: args.child_session_ids,
+                timeout_seconds: Some(
+                    mj_core::subagent::subagent_wait_timeout_for(harness, args.timeout_seconds)
+                        .as_secs(),
+                ),
+            }
         }
-        "interrupt" | "close" => {
+        "interrupt" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            let action = if params.name == "interrupt" {
-                SubagentToolAction::InterruptAgent {
-                    child_session_id: args.child_session_id,
-                }
-            } else {
-                SubagentToolAction::CloseAgent {
-                    child_session_id: args.child_session_id,
-                }
-            };
-            (action, None)
+            SubagentToolAction::InterruptAgent {
+                child_session_id: args.child_session_id,
+            }
+        }
+        "close" => {
+            let args: ChildArgs = serde_json::from_value(params.arguments)?;
+            SubagentToolAction::CloseAgent {
+                child_session_id: args.child_session_id,
+            }
+        }
+        "handback" if role == SubagentMcpRole::Child => {
+            let args: HandbackArgs = serde_json::from_value(params.arguments)?;
+            SubagentToolAction::Handback {
+                message: args.message,
+            }
         }
         other => bail!("unknown sub-agent tool {other:?}"),
     };
-    let request_id = supplied_key.unwrap_or(mj_core::state::new_session_id()?);
+    // Each call is its own request. The id keeps the worker's queue and the
+    // daemon from running one request twice; it is never the model's to set.
+    let request_id = mj_core::state::new_session_id()?;
     let timeout = budget(&action);
     let request = SubagentToolRequest {
         request_id: request_id.clone(),
@@ -339,7 +387,7 @@ fn call_with_budget(
             false,
         ));
     }
-    Ok((pending_reply(&request_id), false))
+    Ok((pending_reply(&request_id, &request.action), false))
 }
 
 /// Send the request and wait for the worker's answer, reporting progress while
@@ -405,13 +453,13 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once: that means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one with a new request_key instead.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once: that means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead.",
             json!({
                 "type":"object",
                 "properties":{
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
                     "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
-                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
+                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},
                     "files":{"type":"array","description":"Source excerpts to include in the child's first prompt, grouped by file. Each entry names one relative file and a list of one or more one-based, inclusive line ranges to pull from it.","items":{"type":"object","properties":{"file":{"type":"string"},"ranges":{"type":"array","minItems":1,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["start","end"],"additionalProperties":false}}},"required":["file","ranges"],"additionalProperties":false}}
                 },
                 "required":["task_name","instructions"],"additionalProperties":false
@@ -430,7 +478,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait} and is capped at {ceiling} in this session; a child may run far longer than that, so expect to call wait more than once."
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. output is the report the child handed back, or its last message when it did not hand one back; report_source says which. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait} and is capped at {ceiling} in this session; a child may run far longer than that, so expect to call wait more than once."
             ),
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
@@ -445,6 +493,18 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
             child,
         ),
     ]
+}
+
+/// A child's only tool: its report to the session that started it.
+fn child_tool_definitions() -> Vec<Value> {
+    vec![tool(
+        "handback",
+        &format!(
+            "Deliver your final report to the session that started you. Call it once, as your last action for the task, with your full report: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If you need a decision from that session, hand back your question and stop; its answer arrives as your next prompt. At most {} characters.",
+            mj_core::subagent::MAX_HANDBACK_CHARS
+        ),
+        json!({"type":"object","properties":{"message":{"type":"string","description":"Your full report."}},"required":["message"],"additionalProperties":false}),
+    )]
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -479,13 +539,13 @@ mod tests {
     }
 
     #[test]
-    fn the_pending_reply_directs_retries_through_idempotency() {
-        let reply = pending_reply("request-1");
+    fn the_pending_reply_sends_the_model_to_list_agents_before_a_retry() {
+        let reply = pending_reply("request-1", &SubagentToolAction::ListAgents);
         assert_eq!(reply["request_id"], "request-1");
         assert_eq!(reply["accepted"], true);
         let note = reply["note"].as_str().expect("note text");
         assert!(
-            note.contains("request_key") && note.contains("list_agents"),
+            note.contains("list_agents") && !note.contains("request_key"),
             "the note must route retries safely: {note}"
         );
         assert!(
@@ -542,6 +602,7 @@ mod tests {
         let (value, is_error) = call_with_budget(
             &socket,
             None,
+            SubagentMcpRole::Parent,
             Some(&json!({"name": "list_agents"})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(200),
@@ -559,7 +620,9 @@ mod tests {
         );
         let error = value["error"].as_str().expect("error text");
         assert!(
-            error.contains("did not answer") && error.contains("request_key"),
+            error.contains("did not answer")
+                && error.contains("list_agents")
+                && !error.contains("request_key"),
             "{error}"
         );
     }
@@ -586,6 +649,7 @@ mod tests {
         let (value, is_error) = call_with_budget(
             &socket,
             None,
+            SubagentMcpRole::Parent,
             Some(&json!({
                 "name": "wait",
                 "arguments": {"child_session_ids": ["c1", "c2"], "timeout_seconds": 5}
@@ -635,15 +699,157 @@ mod tests {
     }
 
     #[test]
-    fn spawn_documents_its_idempotency_key() {
+    fn a_child_is_offered_only_handback() {
+        let tools = child_tool_definitions();
+        let names = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["handback"]);
+        assert_eq!(
+            tools[0]["inputSchema"]["required"],
+            json!(["message"]),
+            "{}",
+            tools[0]
+        );
+        assert!(
+            tool_definitions(None)
+                .iter()
+                .all(|tool| tool["name"] != "handback"),
+            "a parent has no report to hand back"
+        );
+    }
+
+    #[test]
+    fn each_role_refuses_the_other_roles_tools() {
+        let progress = crate::mcp_stdio::Progress::silent(Duration::from_millis(50));
+        let socket = Path::new("/nonexistent/subagents.sock");
+        let child = call_with_budget(
+            socket,
+            None,
+            SubagentMcpRole::Child,
+            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i"}})),
+            &progress,
+            |_| Duration::from_millis(50),
+        )
+        .expect_err("a child cannot spawn");
+        assert!(
+            format!("{child:#}").contains("only call handback"),
+            "{child:#}"
+        );
+        let parent = call_with_budget(
+            socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name": "handback", "arguments": {"message": "done"}})),
+            &progress,
+            |_| Duration::from_millis(50),
+        )
+        .expect_err("a parent cannot hand back");
+        assert!(
+            format!("{parent:#}").contains("unknown sub-agent tool"),
+            "{parent:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_sends_its_report_as_a_handback_request() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (sent, received) = std::sync::mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            let request_id = request["request_id"].clone();
+            sent.send(request).unwrap();
+            let reply = json!({"accepted": true, "result": {
+                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
+                "message": "{\"delivered\":true}"
+            }});
+            let mut body = serde_json::to_vec(&reply).unwrap();
+            body.push(b'\n');
+            let mut stream = reader.into_inner();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+        let (value, is_error) = call_with_budget(
+            &socket,
+            None,
+            SubagentMcpRole::Child,
+            Some(&json!({"name": "handback", "arguments": {"message": "the report"}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!is_error, "{value}");
+        assert_eq!(value["delivered"], true, "{value}");
+        let request = received.recv().unwrap();
+        assert_eq!(
+            request["action"],
+            json!({"action": "handback", "params": {"message": "the report"}})
+        );
+    }
+
+    #[test]
+    fn an_unanswered_handback_tells_the_child_to_call_again() {
+        let (value, is_error) = unanswered_reply(
+            "request-1",
+            &SubagentToolAction::Handback {
+                message: "r".into(),
+            },
+            Duration::from_secs(120),
+        );
+        assert!(is_error, "{value}");
+        let error = value["error"].as_str().expect("error text");
+        assert!(
+            error.contains("call handback again") && !error.contains("list_agents"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn spawn_takes_no_caller_chosen_key() {
         let spawn = tool_definitions(None)
             .into_iter()
             .find(|tool| tool["name"] == "spawn")
             .expect("spawn definition");
-        let description = spawn["inputSchema"]["properties"]["request_key"]["description"]
-            .as_str()
-            .expect("request_key description");
-        assert!(description.contains("idempotency key"));
+        assert!(
+            spawn["inputSchema"]["properties"]
+                .get("request_key")
+                .is_none(),
+            "{spawn}"
+        );
+        assert!(
+            !spawn["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("request_key"),
+            "{spawn}"
+        );
+        let refused = call_with_budget(
+            Path::new("/nonexistent/subagents.sock"),
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name": "spawn", "arguments": {
+                "task_name": "t", "instructions": "i", "request_key": "k"
+            }})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_millis(50),
+        )
+        .expect_err("a spawn naming request_key must be refused");
+        assert!(
+            format!("{refused:#}").contains("unknown field `request_key`"),
+            "{refused:#}"
+        );
     }
 
     #[test]
@@ -757,6 +963,7 @@ mod tests {
             },
             &socket,
             None,
+            SubagentMcpRole::Parent,
         )
         .unwrap();
 
@@ -804,6 +1011,7 @@ mod tests {
         let (value, is_error) = call_with_budget(
             &socket,
             None,
+            SubagentMcpRole::Parent,
             Some(&json!({"name":"close","arguments":{"child_session_id":"c1"}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(200),
@@ -864,6 +1072,7 @@ mod tests {
                 let reply = call_with_budget(
                     &socket,
                     None,
+                    SubagentMcpRole::Parent,
                     Some(&json!({"name":"close","arguments":{"child_session_id":"c1"}})),
                     &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
                     |_| Duration::from_secs(30),

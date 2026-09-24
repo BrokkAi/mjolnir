@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::DEFAULT_WAIT_SECONDS;
+use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState};
 
 use crate::quota::ProfileQuota;
 
@@ -439,16 +439,18 @@ impl ApiBackend {
                         model: selected_model.clone(),
                         effort: selected_effort.clone(),
                         working_directory: working_directory.clone(),
-                        initial_prompt: prompt.clone(),
+                        initial_prompt: prompt,
                         request_key: request.request_id.clone(),
                     })
                     .await?;
+                // Registration completes the first prompt (it names the
+                // handback tool when the child gets one), so send what it kept.
                 self.start_followup(
                     relation.child_session_id.clone(),
                     crate::server::api::StartFollowup {
                         model: selected_model,
                         effort: selected_effort,
-                        prompt: Some(prompt),
+                        prompt: Some(relation.initial_prompt.clone()),
                     },
                 )
                 .await?;
@@ -468,8 +470,9 @@ impl ApiBackend {
                     child_ids
                         .into_iter()
                         .map(|id| {
-                            crate::database::load_materialized_session_summary(&id)
-                                .map(|summary| (id, summary))
+                            let summary = crate::database::load_materialized_session_summary(&id)?;
+                            let report = load_report_state(&id)?;
+                            Ok((id, (summary, report)))
                         })
                         .collect::<Result<std::collections::BTreeMap<_, _>>>()
                 })
@@ -488,14 +491,18 @@ impl ApiBackend {
                         let record = self.exports.session_record(&relation.child_session_id);
                         // This listing reports state only; a child's report is
                         // collected through wait.
+                        let (summary, report) = summaries
+                            .get(&relation.child_session_id)
+                            .map_or((None, &ReportState::Fallback), |(summary, report)| {
+                                (summary.as_ref(), report)
+                            });
                         let (state, _, _) = subagent_status(
                             record.as_ref(),
-                            summaries
-                                .get(&relation.child_session_id)
-                                .and_then(Option::as_ref),
+                            summary,
                             starts.get(&relation.child_session_id),
                             None,
                             self.exports.close_is_requested(&relation.child_session_id),
+                            report,
                         );
                         serde_json::json!({
                             "child_session_id":relation.child_session_id,
@@ -556,19 +563,21 @@ impl ApiBackend {
                     let summaries = tokio::task::spawn_blocking(move || {
                         ids.into_iter()
                             .map(|id| {
-                                crate::database::load_materialized_session_summary(&id)
-                                    .map(|summary| (id, summary))
+                                let summary =
+                                    crate::database::load_materialized_session_summary(&id)?;
+                                let report = load_report_state(&id)?;
+                                Ok((id, summary, report))
                             })
                             .collect::<Result<Vec<_>>>()
                     })
                     .await??;
                     let mut starts = std::collections::BTreeMap::new();
-                    for (id, _) in &summaries {
+                    for (id, _, _) in &summaries {
                         if let Some(status) = self.start_status(id.clone()).await? {
                             starts.insert(id.clone(), status);
                         }
                     }
-                    let complete = summaries.iter().all(|(id, summary)| {
+                    let complete = summaries.iter().all(|(id, summary, report)| {
                         let record = self.exports.session_record(id);
                         subagent_status(
                             record.as_ref(),
@@ -576,13 +585,15 @@ impl ApiBackend {
                             starts.get(id),
                             None,
                             self.exports.close_is_requested(id),
+                            report,
                         )
                         .2
                     });
                     if complete || tokio::time::Instant::now() >= deadline {
                         // Only read now, and only here: this is the one answer
                         // that has to be the child's own report.
-                        let ids: Vec<String> = summaries.iter().map(|(id, _)| id.clone()).collect();
+                        let ids: Vec<String> =
+                            summaries.iter().map(|(id, _, _)| id.clone()).collect();
                         let reports = tokio::task::spawn_blocking(move || {
                             ids.into_iter()
                                 .map(|id| {
@@ -594,7 +605,7 @@ impl ApiBackend {
                         .await??;
                         let agents = summaries
                             .into_iter()
-                            .map(|(id, summary)| {
+                            .map(|(id, summary, report)| {
                                 let record = self.exports.session_record(&id);
                                 let (state, output, finished) = subagent_status(
                                     record.as_ref(),
@@ -602,9 +613,11 @@ impl ApiBackend {
                                     starts.get(&id),
                                     reports.get(&id).and_then(Option::as_deref),
                                     self.exports.close_is_requested(&id),
+                                    &report,
                                 );
                                 serde_json::json!({
                                     "child_session_id":id,
+                                    "report_source":report_source(&state, &report),
                                     "state":state,
                                     "finished":finished,
                                     "output":output,
@@ -674,6 +687,70 @@ impl ApiBackend {
                     .await?;
                 Ok(serde_json::json!({"child_session_id":child_session_id,"closed":true}))
             }
+            // The requester is the child itself: only a child's worker serves
+            // this action.
+            SubagentToolAction::Handback { message } => {
+                let child_id = parent_session_id.to_owned();
+                ensure!(
+                    !message.trim().is_empty(),
+                    "a report cannot be empty; call handback with your full report"
+                );
+                ensure!(
+                    message.chars().count() <= mj_core::subagent::MAX_HANDBACK_CHARS,
+                    "a report can be at most {} characters; shorten it and call handback again",
+                    mj_core::subagent::MAX_HANDBACK_CHARS
+                );
+                let record = blocking("load sub-agent record", {
+                    let child_id = child_id.clone();
+                    move || crate::database::load_subagent(&child_id)
+                })
+                .await?;
+                ensure!(
+                    record.is_some_and(|record| record.handback_tool),
+                    "handback is only for a Mjolnir sub-agent that was given the tool"
+                );
+                // The live view knows the running turn first; the store
+                // catches up a moment later.
+                let live_turn = self
+                    .session_handle(child_id.clone())
+                    .await?
+                    .and_then(|handle| handle.view().snapshot)
+                    .and_then(|snapshot| snapshot.materialized.active_turn);
+                let active_turn = match live_turn {
+                    Some(turn) => Some(turn),
+                    None => blocking("load child turn", {
+                        let child_id = child_id.clone();
+                        move || crate::database::load_materialized_turn_outcome(&child_id)
+                    })
+                    .await?
+                    .and_then(|(_, active, _)| active),
+                };
+                let turn = active_turn.context(
+                    "no turn is running, so there is nothing to report on; hand back your report \
+                     during the turn that did the work",
+                )?;
+                let recorded = blocking("record sub-agent report", {
+                    let child_id = child_id.clone();
+                    let handback = mj_core::subagent::SubagentHandback {
+                        command_id: turn.command_id,
+                        message: message.clone(),
+                        recorded_at_ms: mj_core::clock::epoch_millis(),
+                    };
+                    move || crate::database::record_subagent_handback(&child_id, &handback)
+                })
+                .await?;
+                Ok(if recorded {
+                    serde_json::json!({
+                        "delivered": true,
+                        "message": "Report delivered to the session that started you.",
+                    })
+                } else {
+                    serde_json::json!({
+                        "delivered": false,
+                        "message": "Nothing was sent: your report for this turn was already delivered. Stop now.",
+                    })
+                })
+            }
         }
     }
 
@@ -723,6 +800,91 @@ impl ApiBackend {
         )
         .await?;
         Ok(())
+    }
+
+    /// Remind a child that ended its turn without handing back a report,
+    /// once, and say whether a reminder went out. The parent's completion
+    /// notice waits for the reminder turn when one did.
+    ///
+    /// The caller passes the turn and what is queued or running from the live
+    /// snapshot it just saw: the store's copy can lag it, and deciding from an
+    /// older turn could skip a reminder a `wait` is counting on.
+    pub async fn remind_subagent_to_hand_back(
+        &self,
+        child_session_id: &str,
+        handback_tool: bool,
+        last_turn: &mj_core::state::MaterializedTurnOutcome,
+        in_flight: &[String],
+    ) -> Result<bool> {
+        // A prompt already queued or running is the child's next task; its
+        // report supersedes this turn's.
+        if !handback_tool || !in_flight.is_empty() {
+            return Ok(false);
+        }
+        let report = blocking("load sub-agent report", {
+            let child_id = child_session_id.to_owned();
+            move || crate::database::load_subagent_report(&child_id)
+        })
+        .await?;
+        let state = mj_core::subagent::report_state(
+            handback_tool,
+            &report,
+            Some(last_turn),
+            &[],
+            mj_core::clock::epoch_millis(),
+        );
+        if state != (ReportState::Pending { remind: true }) {
+            return Ok(false);
+        }
+        let command_id = new_command_id(mj_core::subagent::HANDBACK_REMINDER_PREFIX)?;
+        let submitted = async {
+            let handle = self
+                .sessions
+                .session(child_session_id.to_owned())
+                .await
+                .with_context(|| format!("session {child_session_id} is not running"))?;
+            handle
+                .submit(
+                    command_id.clone(),
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::Text(TextContent::new(
+                            mj_core::subagent::HANDBACK_REMINDER_TEXT,
+                        ))],
+                    },
+                )
+                .await
+        }
+        .await;
+        let child_id = child_session_id.to_owned();
+        let for_command_id = last_turn.command_id.clone();
+        match submitted {
+            Ok(_) => {
+                let reminder = mj_core::subagent::HandbackReminder {
+                    command_id,
+                    for_command_id,
+                    sent_at_ms: mj_core::clock::epoch_millis(),
+                };
+                blocking("record handback reminder", move || {
+                    crate::database::record_handback_reminder(&child_id, &reminder)
+                })
+                .await?;
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    child_session_id,
+                    error = format!("{error:#}"),
+                    "could not remind a sub-agent to hand back its report"
+                );
+                // Its last message stands as its report, so no wait keeps
+                // waiting for a reminder that never went out.
+                blocking("record failed handback reminder", move || {
+                    crate::database::record_handback_reminder_failed(&child_id, &for_command_id)
+                })
+                .await?;
+                Ok(false)
+            }
+        }
     }
 
     /// Forget sessions the daemon no longer holds a record for, so a
@@ -833,6 +995,7 @@ fn subagent_status(
     start: Option<&StartStatus>,
     finished_turn_message: Option<&str>,
     closing: bool,
+    report: &ReportState,
 ) -> (String, Option<String>, bool) {
     // A close the daemon admitted owns this child until it finishes, the same
     // rule `resolve_wait` applies to a session-level wait: a close ends
@@ -873,17 +1036,64 @@ fn subagent_status(
         }
         _ if start_pending => ("running".into(), None, false),
         _ => match summary {
+            // An idle child that still owes its report is not done: Mjolnir
+            // is about to remind it, or already has.
+            Some(summary)
+                if matches!(summary.execution, MaterializedExecutionState::Idle)
+                    && matches!(report, ReportState::Pending { .. }) =>
+            {
+                ("running".into(), summary.last_agent_message.clone(), false)
+            }
             Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => (
                 "completed".into(),
-                finished_turn_message
-                    .map(str::to_owned)
-                    .or_else(|| summary.last_agent_message.clone()),
+                match report {
+                    ReportState::Delivered(message) => Some(message.clone()),
+                    _ => finished_turn_message
+                        .map(str::to_owned)
+                        .or_else(|| summary.last_agent_message.clone()),
+                },
                 true,
             ),
             Some(summary) => ("running".into(), summary.last_agent_message.clone(), false),
             None => ("preparing".into(), None, false),
         },
     }
+}
+
+/// Where a child's report stands, read from the store. The sub-agent `wait`,
+/// `list_agents`, the session wait and the reminder all apply this one rule.
+pub(crate) fn load_report_state(child_id: &str) -> Result<ReportState> {
+    let Some(record) = crate::database::load_subagent(child_id)? else {
+        return Ok(ReportState::Fallback);
+    };
+    if !record.handback_tool {
+        return Ok(ReportState::Fallback);
+    }
+    let report = crate::database::load_subagent_report(child_id)?;
+    let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
+        .map(|(_, active, last)| (active, last))
+        .unwrap_or_default();
+    let in_flight = active
+        .iter()
+        .map(|turn| turn.command_id.as_str())
+        .collect::<Vec<_>>();
+    Ok(mj_core::subagent::report_state(
+        true,
+        &report,
+        last.as_ref(),
+        &in_flight,
+        mj_core::clock::epoch_millis(),
+    ))
+}
+
+/// Where a finished child's `output` came from: its handback, or the last
+/// message of its turn when it handed nothing back. Unfinished and failed
+/// children have no report yet.
+fn report_source(state: &str, report: &ReportState) -> Option<&'static str> {
+    (state == "completed").then_some(match report {
+        ReportState::Delivered(_) => "handback",
+        _ => "last_message",
+    })
 }
 
 /// Whether a session is still on its way to being usable.
@@ -1360,6 +1570,22 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn subagent_report(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<(bool, mj_core::subagent::SubagentReport)>>> {
+        Box::pin(async move {
+            blocking("load sub-agent report", move || {
+                let Some(record) = crate::database::load_subagent(&session_id)? else {
+                    return Ok(None);
+                };
+                let report = crate::database::load_subagent_report(&session_id)?;
+                Ok(Some((record.handback_tool, report)))
+            })
+            .await
+        })
+    }
+
     /// Create the workspace, then republish the list so the terminal tabs and
     /// the viewer see it without waiting for the next daemon action.
     fn create_workspace(
