@@ -51,6 +51,10 @@ pub(super) async fn run_daemon_runtime(
     tokio::task::spawn_blocking(crate::controller::pin_worker_binary_sources)
         .await
         .context("worker source snapshot task failed")??;
+    // Lock files outlive the SSH masters they guarded (launch finding R3-11).
+    tokio::task::spawn_blocking(crate::targets::SshSessions::remove_stale_master_locks)
+        .await
+        .context("SSH master lock cleanup task failed")?;
     Controller::recover_config_id_rename()?;
     let config = Config::load()?;
     crate::database::recover_interrupted_checkpointing_sessions(

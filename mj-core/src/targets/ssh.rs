@@ -1161,15 +1161,81 @@ fn lock_master_opening(socket: &Path) -> Result<fs::File> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open SSH master lock {}", path.display()))?;
-    file.lock()
-        .with_context(|| format!("lock SSH master lock {}", path.display()))?;
-    Ok(file)
+    loop {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open SSH master lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock SSH master lock {}", path.display()))?;
+        // The daemon removes stale locks when it starts. A lock taken on a
+        // file removed meanwhile serializes nothing, so take the one at the
+        // path now.
+        if is_file_at(&file, &path) {
+            return Ok(file);
+        }
+    }
+}
+
+/// Remove the master lock files in `dir` whose master is gone.
+///
+/// A lock outlives the master it guarded: ssh removes its socket when the
+/// master exits, but nothing removed `<socket>.lock` (launch finding R3-11).
+/// A lock is removed only while its socket is absent and no other process
+/// holds it, and only if the file locked is still the one at its path.
+/// [`lock_master_opening`] checks the same after it locks, so an opener that
+/// opened the file just before it was removed takes a fresh one instead.
+#[cfg(unix)]
+fn remove_stale_master_locks_in(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(directory = %dir.display(), %error, "cannot list SSH master locks");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let lock = entry.path();
+        let Some(socket) = lock
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(|name| name.strip_suffix(".lock"))
+            .map(|name| dir.join(name))
+        else {
+            continue;
+        };
+        if fs::symlink_metadata(&socket).is_ok() {
+            continue;
+        }
+        let Ok(file) = fs::OpenOptions::new().write(true).open(&lock) else {
+            continue;
+        };
+        // Held: another process is checking or opening this master now.
+        if file.try_lock().is_err() {
+            continue;
+        }
+        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(&file, &lock) {
+            continue;
+        }
+        match fs::remove_file(&lock) {
+            Ok(()) => tracing::debug!(lock = %lock.display(), "removed a stale SSH master lock"),
+            Err(error) => {
+                tracing::debug!(lock = %lock.display(), %error, "cannot remove a stale SSH master lock")
+            }
+        }
+    }
+}
+
+/// Whether `file` is the file now at `path`, rather than one removed from it.
+#[cfg(unix)]
+fn is_file_at(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), fs::metadata(path)) {
+        (Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -1353,6 +1419,15 @@ impl SshSessions {
         }
     }
 
+    /// Remove this instance's master lock files whose master has exited.
+    /// The daemon calls this when it starts; failures are only logged.
+    pub fn remove_stale_master_locks() {
+        #[cfg(unix)]
+        if let Some(dir) = control_socket_dir() {
+            remove_stale_master_locks_in(&dir);
+        }
+    }
+
     /// Count a fail-fast probe, such as a target validation or the
     /// connectivity check, on a shard of `ssh`'s connection without opening
     /// a master. See [`CommandSpec::ssh_probe_session`].
@@ -1497,6 +1572,42 @@ pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Launch finding R3-11: `*.lock` files stayed in the instance's socket
+    /// directory after their masters exited. The daemon clears, when it
+    /// starts, each lock whose master's socket is gone, and leaves a lock that
+    /// guards a live socket or that another process holds.
+    #[cfg(unix)]
+    #[test]
+    fn stale_master_locks_are_removed_but_live_or_held_ones_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("aaaaaaaaaaaaaaaa-0.lock");
+        fs::write(&stale, b"").unwrap();
+        fs::write(dir.path().join("bbbbbbbbbbbbbbbb-0"), b"").unwrap();
+        let live = dir.path().join("bbbbbbbbbbbbbbbb-0.lock");
+        fs::write(&live, b"").unwrap();
+        let held = dir.path().join("cccccccccccccccc-0.lock");
+        let holder = lock_master_opening(&dir.path().join("cccccccccccccccc-0")).unwrap();
+
+        remove_stale_master_locks_in(dir.path());
+        assert!(!stale.exists(), "a lock whose master is gone is removed");
+        assert!(live.exists(), "a lock beside a live socket stays");
+        assert!(held.exists(), "a lock another opener holds stays");
+
+        drop(holder);
+        // A process another test forks while the holder is open shares its
+        // lock until that child execs, so the sweep may find the lock still
+        // held for a few milliseconds; the daemon would try again at its next
+        // start.
+        for _ in 0..200 {
+            remove_stale_master_locks_in(dir.path());
+            if !held.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!held.exists(), "a lock nobody holds any more is removed");
+    }
 
     const BORROW_PARENT: &str = "0123456789abcdef0123456789abcdef";
     const BORROW_CHILD: &str = "fedcba9876543210fedcba9876543210";
