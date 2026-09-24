@@ -1,6 +1,7 @@
 import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
 import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
+import questionsV3 from "../../../mj-core/src/activity/verdict_questions_v3.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
@@ -29,6 +30,10 @@ interface TurnEvidence {
 }
 
 type TurnEvidenceV2 = Omit<TurnEvidence, "recent_tools"> & { transcript_summary: string };
+type TurnEvidenceV4 = TurnEvidenceV2 & { completion?: {
+  stop_reason: string;
+  diagnostic: { message: string; code?: string; http_status?: number; reset_at?: string } | null;
+} };
 
 class BodyTooLarge extends Error {}
 class UpstreamDeadline extends Error {}
@@ -74,6 +79,26 @@ function evidenceV2(value: unknown): value is TurnEvidenceV2 {
   return evidence({ ...rest, recent_tools: [] });
 }
 
+function evidenceV4(value: unknown): value is TurnEvidenceV4 {
+  if (!object(value)) return false;
+  const { completion, ...ordinary } = value;
+  if (!evidenceV2(ordinary)) return false;
+  if (completion === undefined) return true;
+  if (value.phase !== "replied" || !object(completion)
+    || Object.keys(completion).length !== 2
+    || !text(completion.stop_reason, 128)
+    || !completion.stop_reason) return false;
+  const diagnostic = completion.diagnostic;
+  if (diagnostic === null) return true;
+  if (!object(diagnostic)) return false;
+  const allowed = ["message", "code", "http_status", "reset_at"];
+  return Object.keys(diagnostic).every(key => allowed.includes(key))
+    && text(diagnostic.message, 4096)
+    && (diagnostic.code === undefined || text(diagnostic.code, 128))
+    && (diagnostic.http_status === undefined || (count(diagnostic.http_status) && diagnostic.http_status <= 599))
+    && (diagnostic.reset_at === undefined || text(diagnostic.reset_at, 256));
+}
+
 function answers(value: unknown): Record<string, unknown> | undefined {
   if (!object(value) || !object(value.answers)) return;
   const waiting = value.answers.waiting_on;
@@ -99,6 +124,14 @@ function answersV3(value: unknown): Record<string, unknown> | undefined {
     work_state: { type: "choice", choice: work.choice, confidence: work.confidence },
     needs_user_input: { type: "noul", noul: input.noul },
   };
+}
+
+function answersV4(value: unknown): Record<string, unknown> | undefined {
+  const old = answersV3(value);
+  if (!old || !object(value) || !object(value.answers)) return;
+  const retry = value.answers.retryable_server_error;
+  if (!object(retry) || retry.type !== "noul" || !probability(retry.noul)) return;
+  return { ...old, retryable_server_error: { type: "noul", noul: retry.noul } };
 }
 
 function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -145,7 +178,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest | ContinuationEvidence, key: string, v3 = false, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 = 1, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -163,14 +196,14 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : v3 ? questions : "transcript_summary" in state ? questionsV2 : questionsV1 }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 4 ? questions : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : v3 ? answersV3(body) : answers(body);
+        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -189,7 +222,7 @@ export default {
     const search = url.pathname === "/v1/help-search";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -210,13 +243,16 @@ export default {
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
-    if (continuationV2) return continuationRequestV2(state) ? classify(state, key, false, true) : error("invalid_continuation_request", 400);
+    if (continuationV2) return continuationRequestV2(state) ? classify(state, key, 1, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
     }
+    if (url.pathname === "/v4/turn-verdict") {
+      return evidenceV4(state) ? classify(state, key, 4) : error("invalid_evidence", 400);
+    }
     if (url.pathname === "/v2/turn-verdict" || url.pathname === "/v3/turn-verdict") {
-      return evidenceV2(state) ? classify(state, key, url.pathname === "/v3/turn-verdict") : error("invalid_evidence", 400);
+      return evidenceV2(state) ? classify(state, key, url.pathname === "/v3/turn-verdict" ? 3 : 2) : error("invalid_evidence", 400);
     }
     return evidence(state) ? classify(state, key) : error("invalid_evidence", 400);
   },

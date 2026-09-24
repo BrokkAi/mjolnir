@@ -106,6 +106,7 @@ fn capture_chat_preview() {
     chat.set_current_step_start(Some(mj_core::clock::epoch_millis().saturating_sub(7_000)));
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         execution: Some(mj_core::relay::RelayExecutionState::Running),
         ..Default::default()
     });
@@ -290,6 +291,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 goal: Default::default(),
 
                 capacity_retry: None,
+                retry_assessment_pending: false,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -965,7 +967,10 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -1538,7 +1543,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1558,7 +1563,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1590,8 +1595,61 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             // The chords give way before the composer's own keys, so what a
             // narrow row keeps is the key that works right here plus the two
             // hints that lead to everything else.
-            assert_eq!(text.trim_end(), "Tab pane │ : palette · ? keys");
+            // The label outranks Tab pane: without it `:` reads as a plain
+            // key, and a plain `:` types a colon (A-12).
+            assert_eq!(text.trim_end(), "ctrl+b then : palette · ? keys");
         }
+    }
+}
+
+/// A-12: the composer's footer dropped the prefix label with the first chord,
+/// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
+/// as the reader could tell. The label must ride on the first chord left.
+#[test]
+fn the_composer_footer_names_the_prefix_at_every_width() {
+    let chat = ChatState::new(&snapshot(), &[]);
+    let chords = [
+        "c create",
+        "g sessions",
+        "a read",
+        "b panes",
+        "q detach",
+        "u web",
+        ": palette",
+        "? keys",
+    ];
+    for width in [140_u16, 100, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let footer = crate::chat::ChatFooter {
+                    area,
+                    chords: &chords,
+                    chord_prefix: "ctrl+b then ",
+                    functions: &[],
+                    banner: None,
+                };
+                render_chat_footer(frame, footer, &chat, true);
+            })
+            .expect("draw footer");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let chord_group = text
+            .split('│')
+            .nth(1)
+            .unwrap_or_else(|| panic!("{width}: no chord group in {text:?}"));
+        assert!(
+            chord_group.trim_start().starts_with("ctrl+b then "),
+            "{width}: {text:?}"
+        );
+        assert!(text.contains(": palette · ? keys"), "{width}: {text:?}");
+        assert!(!text.contains("then:"), "{width}: {text:?}");
     }
 }
 
@@ -1689,7 +1747,7 @@ fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
         .collect::<String>();
 
     assert_eq!(rendered.matches("gpt-5.6-sol · high").count(), 1);
-    assert!(rendered.contains("Esc cancels"));
+    assert!(rendered.contains("Esc interrupts"));
     assert!(!rendered.contains("Running"));
     // No outer frame wraps the whole session: the transcript's own titled
     // border is the first thing on the frame, not a session title bar.
@@ -1721,9 +1779,9 @@ fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
     chat.set_prompt_in_flight(true);
     assert_eq!(
         prompt_bottom_queue_control(&chat).unwrap().to_string(),
-        " Esc cancels"
+        " Esc interrupts"
     );
-    assert!(!prompt_title(&chat).contains("Esc cancels"));
+    assert!(!prompt_title(&chat).contains("Esc interrupts"));
 }
 
 #[tokio::test]
@@ -1762,14 +1820,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                     key: "model".into(),
                     value: "next-model".into(),
                 }),
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
             (
                 Some(true),
                 None,
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
@@ -1787,7 +1845,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             );
             let mut materialized = MaterializedSession::empty("steering-session");
             let targeted = protocol.is_some_and(|version| version >= 17);
-            let hint = if targeted { hint } else { "Esc cancels" };
+            let hint = if targeted { hint } else { "Esc interrupts" };
             let sending = if targeted {
                 sending
             } else {
@@ -1881,6 +1939,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -1903,6 +1962,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -2038,6 +2098,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        checking_response: false,
         quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -2239,6 +2300,7 @@ async fn the_task_dialog_and_setup_form_are_centred_within_their_overlay_rect() 
         footer: None,
         overlay: pane,
         title_controls: 0,
+        title_lead: 0,
         pane_focused: true,
     };
     let outside_is_untouched = |terminal: &Terminal<TestBackend>, what: &str| {
@@ -2334,6 +2396,7 @@ fn the_task_dialog_claims_only_the_pointer_over_itself() {
                     footer: None,
                     overlay: pane,
                     title_controls: 0,
+                    title_lead: 0,
                     pane_focused: true,
                 },
                 false,
@@ -2379,6 +2442,7 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         footer: None,
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 
@@ -2480,10 +2544,14 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
             prompt_title.chars().count() - 3,
             "spinner occupies the upper-right title: {prompt_title}"
         );
-        assert!(
-            running[prompt_bottom].contains("Esc cancels"),
-            "{running:?}"
-        );
+        // A 16-column composer has 14 cells of border, one short of the
+        // whole hint; the border clips it there.
+        let hint = if width > 16 {
+            "Esc interrupts"
+        } else {
+            "Esc interrupt"
+        };
+        assert!(running[prompt_bottom].contains(hint), "{running:?}");
         assert_eq!(running[0], idle[0], "the transcript keeps its full height");
         assert_eq!(running[input.y as usize], idle[input.y as usize]);
         assert_eq!(
@@ -2516,6 +2584,7 @@ fn draw_in_draws_a_cursor_only_when_the_prompt_has_focus() {
         footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 
@@ -2703,4 +2772,355 @@ fn a_failed_history_conversion_is_reported_instead_of_dropped() {
         chat.notice().as_deref(),
         Some("Earlier messages failed to load: worker panicked")
     );
+}
+
+#[test]
+fn earlier_history_ignores_closed_readers_and_allows_retry_without_losing_the_draft() {
+    let mut chat = ChatState::new(
+        &mj_core::relay::WorkerSnapshot::summary("history".into(), WorkerPhase::Idle, 0),
+        &[],
+    );
+    chat.input = "unfinished draft".into();
+    chat.open_earlier_messages();
+    let retired = chat.earlier.as_ref().unwrap().generation;
+    chat.earlier_key(KeyCode::Esc);
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: retired,
+            result: Ok((None, vec![Line::raw("obsolete")])),
+        },
+    );
+    assert!(chat.earlier.is_none());
+    chat.open_earlier_messages();
+    let current = chat.earlier.as_ref().unwrap().generation;
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: retired,
+            result: Ok((None, vec![Line::raw("obsolete")])),
+        },
+    );
+    assert!(chat.earlier.as_ref().unwrap().lines.is_empty());
+    chat.earlier.as_mut().unwrap().loading = true;
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: current,
+            result: Err("database unavailable".into()),
+        },
+    );
+    assert!(!chat.earlier.as_ref().unwrap().loading);
+    assert!(
+        chat.earlier
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("database unavailable")
+    );
+    chat.earlier_key(KeyCode::Enter);
+    assert!(chat.earlier.as_ref().unwrap().requested);
+    chat.handle_terminal_paste("accidental paste");
+    assert_eq!(chat.input, "unfinished draft");
+    apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::EarlierMessages {
+            generation: current,
+            result: Ok((None, vec![Line::raw("old message")])),
+        },
+    );
+    assert!(chat.earlier.as_ref().unwrap().loaded);
+    assert!(chat.earlier.as_ref().unwrap().error.is_none());
+    assert_eq!(
+        chat.earlier.as_ref().unwrap().lines,
+        vec![Line::raw("old message")]
+    );
+}
+
+#[test]
+fn clipboard_capability_follows_initialized_session_views() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    assert!(chat.clipboard_is_text_only());
+    let mut view = managed_view(MaterializedSession::empty("clipboard-capabilities"));
+    for (wire, text_only) in [
+        (serde_json::json!({}), true),
+        (
+            serde_json::json!({"promptCapabilities": {"image": true}}),
+            false,
+        ),
+        (
+            serde_json::json!({"promptCapabilities": {"image": false}}),
+            true,
+        ),
+    ] {
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .agent_capabilities = Some(Box::new(serde_json::from_value(wire).unwrap()));
+        apply_session_view(&mut chat, Ok(view.clone()));
+        assert_eq!(chat.clipboard_is_text_only(), text_only);
+    }
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = None;
+    apply_session_view(&mut chat, Ok(view));
+    assert!(chat.clipboard_is_text_only());
+}
+
+fn clipboard_test_chat() -> ActiveChat {
+    let fixture = mj_client::session::replacement_session_test_fixture("clipboard-admission", 72);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    // Hold processing at the queue boundary so tests control completion order
+    // and never write to an actual session's attachment store.
+    chat.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    chat
+}
+
+fn clipboard_result(chat: &ActiveChat, content: ClipboardContent) -> ChatIoUpdate {
+    ChatIoUpdate::Clipboard {
+        generation: chat.state.input_generation(),
+        target: chat.state.clipboard_target(),
+        result: Ok(content),
+    }
+}
+
+#[tokio::test]
+async fn clipboard_completion_requires_image_support_and_preserves_plain_text() {
+    let mut chat = clipboard_test_chat();
+    assert!(!chat.state.prompt_images_supported);
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(super::super::tests::test_image()),
+    ));
+    assert!(chat.draft().is_empty());
+    assert!(chat.attachment_queue.is_empty());
+    assert!(
+        chat.state
+            .notice()
+            .unwrap()
+            .contains("advertised image support")
+    );
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Text("ordinary text".into()),
+    ));
+    assert_eq!(chat.draft(), "ordinary text");
+
+    chat.state.set_prompt_images_supported(true);
+    let image = super::super::tests::test_image();
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(image.clone()),
+    ));
+    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    assert_eq!(chat.state.input, "ordinary text[image 1]");
+    chat.apply_attachment_result(AttachmentResult {
+        sequence,
+        command: None,
+        result: Ok(image.clone()),
+    });
+    assert_eq!(chat.state.input_images[0].image, image);
+    assert_eq!(
+        chat.state.submit_input(),
+        ChatAction::Prompt("ordinary text[image 1]".into())
+    );
+    assert_eq!(chat.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn stale_clipboard_results_do_not_cross_capability_or_input_context_changes() {
+    use super::super::test_support::{ctrl, key};
+    for change in 0..5 {
+        let mut chat = clipboard_test_chat();
+        chat.state.set_prompt_images_supported(true);
+        let pending = clipboard_result(
+            &chat,
+            ClipboardContent::Image(super::super::tests::test_image()),
+        );
+        match change {
+            0 => chat.state.set_prompt_images_supported(false),
+            1 => {
+                chat.state.handle_key(ctrl('r'));
+            }
+            2 => {
+                chat.state
+                    .handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL));
+            }
+            3 => {
+                chat.state.turn_control_dialog_open = true;
+            }
+            _ => {
+                chat.state.handle_key(key(KeyCode::Char('x')));
+            }
+        }
+        let before = chat.state.draft_payload();
+        chat.apply_io_update(pending);
+        assert_eq!(chat.state.draft_payload(), before);
+        assert!(chat.attachment_queue.is_empty());
+        assert!(!chat.paste_in_flight);
+    }
+}
+
+#[tokio::test]
+async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_send() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    let image = super::super::tests::test_image();
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(image.clone()),
+    ));
+    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    chat.state.set_prompt_images_supported(false);
+    chat.apply_attachment_result(AttachmentResult {
+        sequence,
+        command: None,
+        result: Ok(image.clone()),
+    });
+    let draft = chat.state.draft_payload();
+    assert_eq!(chat.state.submit_input(), ChatAction::None);
+    assert_eq!(chat.state.draft_payload(), draft);
+    chat.state.set_prompt_images_supported(true);
+    assert!(matches!(chat.state.submit_input(), ChatAction::Prompt(_)));
+    assert_eq!(chat.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn clipboard_errors_keep_the_draft_and_report_the_underlying_failure() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_input("keep me".into());
+    chat.apply_io_update(ChatIoUpdate::Clipboard {
+        generation: chat.state.input_generation(),
+        target: chat.state.clipboard_target(),
+        result: Err("clipboard provider disconnected".into()),
+    });
+    assert_eq!(chat.draft(), "keep me");
+    let notice = chat.state.notice().unwrap();
+    assert!(notice.contains("clipboard provider disconnected"));
+    assert!(notice.contains("only clipboard text"));
+}
+
+#[tokio::test]
+async fn opening_a_chat_uses_the_initialized_image_capability() {
+    let fixture = mj_client::session::replacement_session_test_fixture("clipboard-open", 1);
+    let mut view = managed_view(MaterializedSession::empty("clipboard-open"));
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = Some(Box::new(
+        serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}})).unwrap(),
+    ));
+    fixture.replacement_view.send_replace(view);
+    let session = fixture.control.session("clipboard-open").await.unwrap();
+    let chat = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    assert!(!chat.state.clipboard_is_text_only());
+}
+
+#[tokio::test]
+async fn a_question_opened_during_clipboard_read_receives_no_stray_content() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    for content in [
+        ClipboardContent::Text("wrong field".into()),
+        ClipboardContent::Image(super::super::tests::test_image()),
+    ] {
+        let pending = clipboard_result(&chat, content);
+        chat.state.restore_elicitation(ElicitationRequest {
+            id: "question".into(),
+            message: "Answer".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        });
+        assert!(chat.state.clipboard_is_text_only());
+        chat.apply_io_update(pending);
+        assert!(chat.state.input_images.is_empty());
+        assert!(chat.state.input.is_empty());
+        assert!(chat.attachment_queue.is_empty());
+        chat.state.elicitation = None;
+    }
+}
+
+#[tokio::test]
+async fn removed_or_failed_pending_attachments_do_not_reappear() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    for result in [
+        Ok(super::super::tests::test_image()),
+        Err("invalid image encoding".into()),
+    ] {
+        assert!(chat.state.reserve_attachment(1));
+        chat.state.clear_input();
+        chat.apply_attachment_result(AttachmentResult {
+            sequence: 1,
+            command: None,
+            result,
+        });
+        assert!(chat.state.input_images.is_empty());
+        assert!(chat.state.input.is_empty());
+    }
+    assert!(chat.state.reserve_attachment(2));
+    chat.apply_attachment_result(AttachmentResult {
+        sequence: 2,
+        command: None,
+        result: Err("invalid image encoding".into()),
+    });
+    assert!(
+        chat.state
+            .notice()
+            .unwrap()
+            .contains("invalid image encoding")
+    );
+    assert_eq!(chat.state.submit_input(), ChatAction::None);
+}
+
+/// Launch campaign finding A-15: switching Setup's symbols to ASCII left an
+/// open transcript drawn with `❯` until a restart, because its row cache
+/// was kept across the change. The next draw uses the new symbols.
+#[test]
+fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
+    use crate::theme::{SymbolSet, with_symbols};
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::User, "hello there"));
+    let unicode = with_symbols(SymbolSet::Unicode, || drawn_transcript(&mut chat, 60, 12));
+    assert!(unicode.iter().any(|row| row.contains('❯')), "{unicode:#?}");
+    let ascii = with_symbols(SymbolSet::Ascii, || drawn_transcript(&mut chat, 60, 12));
+    assert!(ascii.iter().all(|row| !row.contains('❯')), "{ascii:#?}");
+}
+
+#[tokio::test]
+async fn empty_paste_without_image_support_reports_it_without_reading_the_clipboard() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(false);
+    chat.state.input = "draft".into();
+    chat.handle_event_result(crossterm::event::Event::Paste(String::new()));
+    assert!(!chat.paste_in_flight, "the clipboard must not be read");
+    assert_eq!(
+        chat.state.notice().as_deref(),
+        Some(super::super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE)
+    );
+    assert_eq!(chat.state.input, "draft");
 }

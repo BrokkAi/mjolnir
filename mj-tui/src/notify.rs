@@ -190,28 +190,106 @@ impl DashboardState {
         body
     }
 
+    /// Reports that a session's worker cannot be reached, in one plain
+    /// sentence. The host keeps the relay's own error and any worker
+    /// diagnostics for its log; the footer only says what happened.
+    /// `checking` is true while worker diagnostics are still being collected.
+    pub fn report_session_unreachable(&mut self, session_id: &str, checking: bool) {
+        let name = self.session_notice_name(session_id);
+        let text = if checking {
+            format!("{name} cannot be reached; checking its worker.")
+        } else {
+            format!("{name} cannot be reached. The log has the worker's details.")
+        };
+        self.set_notice(text.clone());
+        self.unreachable_notices.insert(session_id.to_owned(), text);
+    }
+
+    /// Withdraws the unreachable notice for a session whose worker answered
+    /// again, if that notice is still the one showing.
+    pub fn report_session_reachable(&mut self, session_id: &str) {
+        let Some(text) = self.unreachable_notices.remove(session_id) else {
+            return;
+        };
+        let name = self.session_notice_name(session_id);
+        self.replace_notice_if(&text, format!("{name} is reachable again."));
+    }
+
+    /// Reports that a session could not be opened, naming it, so a failure
+    /// from a restored pane says which of its sessions it was about.
+    pub fn report_open_failure(&mut self, session_id: &str, error: &str) {
+        let name = self.session_notice_name(session_id);
+        let detach = self
+            .first_key_label(crate::CommandId::QuitDetach)
+            .map(|key| format!(" {key} quits."))
+            .unwrap_or_default();
+        self.set_notice(format!(
+            "Could not open {name}: {error}. Press Enter in Sessions to retry, or select another session.{detach}"
+        ));
+    }
+
+    /// Whether a pane holding `session_id` must not attach to it: the
+    /// session is suspended (or otherwise not running) and no transition is
+    /// bringing it back.
+    pub fn pane_session_is_suspended(&self, session_id: &str) -> bool {
+        self.transition_kind(session_id).is_none()
+            && self
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| !session.state.is_active())
+    }
+
+    /// Empties the pane that held a suspended session, instead of attaching
+    /// to a session with no worker, and says so. The host saves the layout.
+    pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
+        self.set_pane_session(pane, None);
+        let name = self.session_notice_name(session_id);
+        let resume = self
+            .first_key_label(crate::CommandId::ResumeDialog)
+            .map(|key| format!(" {key} finds it to resume."))
+            .unwrap_or_default();
+        self.set_notice(format!(
+            "{name} is suspended, so it was unpinned from its pane.{resume}"
+        ));
+    }
+
+    pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
+        self.state.sessions.get(session_id).map_or_else(
+            || format!("Session {}", &session_id[..session_id.len().min(8)]),
+            |session| format!("Session {}", session.display_title()),
+        )
+    }
+
     /// The terminal title the host should show: `mj` alone when nothing
-    /// needs a person, otherwise `mj · 2 waiting · 1 unread`. `None` when
+    /// needs a person, otherwise counts such as `mj · 1 unreachable · 2 waiting
+    /// · 1 unread`. `None` when
     /// the configuration keeps the title alone.
     pub fn terminal_title(&self) -> Option<String> {
         if !self.config.notify.title {
             return None;
         }
-        let (waiting, unread) =
-            self.attention_queue()
-                .into_iter()
-                .fold((0, 0), |(waiting, unread), entry| match entry.level {
-                    AttentionLevel::Waiting
-                    | AttentionLevel::Unreachable
-                    | AttentionLevel::Failed => (waiting + 1, unread),
-                    _ => (waiting, unread + 1),
-                });
-        let mut title = String::from("mj");
-        if waiting > 0 {
-            title.push_str(&format!(" · {waiting} waiting"));
+        // Questions, unreachable workers and failures each get their own
+        // word, most urgent first: "waiting" means a question for a person.
+        let (mut failed, mut unreachable, mut waiting, mut unread) = (0, 0, 0, 0);
+        for entry in self.attention_queue() {
+            match entry.level {
+                AttentionLevel::Failed => failed += 1,
+                AttentionLevel::Unreachable => unreachable += 1,
+                AttentionLevel::Waiting => waiting += 1,
+                _ => unread += 1,
+            }
         }
-        if unread > 0 {
-            title.push_str(&format!(" · {unread} unread"));
+        let mut title = String::from("mj");
+        for (count, word) in [
+            (failed, "failed"),
+            (unreachable, "unreachable"),
+            (waiting, "waiting"),
+            (unread, "unread"),
+        ] {
+            if count > 0 {
+                title.push_str(&format!(" · {count} {word}"));
+            }
         }
         Some(title)
     }
@@ -409,5 +487,40 @@ mod tests {
         config.notify.title = false;
         dashboard.set_config(config);
         assert_eq!(dashboard.terminal_title(), None);
+    }
+
+    #[test]
+    fn the_title_names_an_unreachable_worker_apart_from_questions() {
+        let mut dashboard = dashboard();
+        dashboard.state.sessions.get_mut("done").unwrap().state =
+            mj_core::state::SessionState::Disconnected;
+        assert_eq!(
+            dashboard.terminal_title().as_deref(),
+            Some("mj · 1 unreachable · 1 waiting")
+        );
+    }
+
+    #[test]
+    fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
+        let mut dashboard = dashboard();
+        let title = dashboard.state.sessions["done"].display_title().to_owned();
+        dashboard.report_session_unreachable("done", true);
+        let notice = dashboard.notice().unwrap();
+        assert_eq!(
+            notice,
+            format!("Session {title} cannot be reached; checking its worker.")
+        );
+        dashboard.report_session_unreachable("done", false);
+        assert!(!dashboard.notice().unwrap().contains("stderr"));
+        dashboard.report_session_reachable("done");
+        assert_eq!(
+            dashboard.notice().unwrap(),
+            format!("Session {title} is reachable again.")
+        );
+        // A later, unrelated notice is left alone by another recovery.
+        dashboard.report_session_unreachable("done", false);
+        dashboard.set_notice("Profile quotas refreshed.");
+        dashboard.report_session_reachable("done");
+        assert_eq!(dashboard.notice().unwrap(), "Profile quotas refreshed.");
     }
 }

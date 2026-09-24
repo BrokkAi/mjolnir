@@ -13,10 +13,11 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, PodmanProbe, ProcessExecutor,
-    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, failed_podman_probe,
-    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
-    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
+    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanProbe,
+    ProcessExecutor, SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
+    failed_podman_probe, podman_probe_observation, run_setup_smoke_test, ssh_command,
+    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
+    verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, TargetTemplate,
@@ -196,6 +197,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(build_cache_checks(config, executor));
     checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(config));
     checks.push(daemon_build_check());
@@ -210,6 +212,63 @@ pub fn run_with_config_path(
     checks
 }
 
+fn build_cache_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    crate::controller::doctor_host_mbx(config, executor)
+        .into_iter()
+        .map(|host| {
+            let id = format!("build-cache.{}", host.host);
+            let title = format!("Build cache on {}", host.host);
+            let targets = host.targets.join(", ");
+            match host.status {
+                crate::controller::DoctorHostMbxStatus::Absent => DoctorCheck::ready(
+                    id,
+                    title,
+                    format!(
+                        "No native mbx is installed; targets {targets} can use Mjolnir's mbx {}.",
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::Compatible(version) => DoctorCheck::ready(
+                    id,
+                    title,
+                    format!(
+                        "Host mbx {version} is compatible with Mjolnir's mbx {} for targets {targets}.",
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::TooOld(version) => DoctorCheck::warning(
+                    id,
+                    title,
+                    format!(
+                        "Host mbx {version} is older than Mjolnir's mbx {}; sessions on targets {targets} run without the shared build cache.",
+                        crate::controller::MBX_VERSION
+                    ),
+                    format!(
+                        "Upgrade mbx on {} to {} or newer, then rerun `mj doctor`.",
+                        host.host,
+                        crate::controller::MBX_VERSION
+                    ),
+                ),
+                crate::controller::DoctorHostMbxStatus::Unknown(error) => DoctorCheck::warning(
+                    id,
+                    title,
+                    format!("Could not check host mbx for targets {targets}: {error}"),
+                    format!(
+                        "Check access to {} and run `mbx --version` there, then rerun `mj doctor`.",
+                        host.host
+                    ),
+                ),
+            }
+        })
+        .collect()
+}
+
 fn harness_discovery_check(
     config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
@@ -222,12 +281,14 @@ fn harness_discovery_check(
     harness_discovery_check_from(
         &discovered,
         config.is_ok_and(|config| !config.profiles.is_empty()),
+        &settings_key(config.ok()),
     )
 }
 
 fn harness_discovery_check_from(
     discovered: &[DiscoveredHome],
     has_configured_profiles: bool,
+    settings_key: &str,
 ) -> DoctorCheck {
     if discovered.is_empty() {
         return if has_configured_profiles {
@@ -241,7 +302,9 @@ fn harness_discovery_check_from(
                 "harness.discovery",
                 "Harness home discovery",
                 "No Codex, Claude Code, Kimi Code, or Grok Build home was found in the default or environment-overridden locations.",
-                "Install and sign in to a supported harness, then open F7 Settings → Agent Profiles.",
+                format!(
+                    "Install and sign in to a supported harness, then open Mjolnir, press {settings_key} for Settings, and choose Agent Profiles."
+                ),
             )
         };
     }
@@ -269,6 +332,17 @@ fn harness_discovery_check_from(
     )
 }
 
+/// The key that opens Settings, as the help overlay labels it (`ctrl+b s`
+/// by default). Without a readable configuration the default bindings apply.
+fn settings_key(config: Option<&Config>) -> String {
+    let keybinds = config.map_or_else(mj_core::config::Keybinds::default, Config::keybinds);
+    keybinds
+        .labels(mj_core::config::KeyAction::OpenSettings)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "the Settings command in the command palette".to_owned())
+}
+
 pub fn all_ready(checks: &[DoctorCheck]) -> bool {
     checks
         .iter()
@@ -294,8 +368,8 @@ pub fn render_human(checks: &[DoctorCheck], output: &mut impl Write) -> Result<(
 pub fn setup_instructions(platform: InstructionsPlatform) -> String {
     match platform {
         InstructionsPlatform::Linux => format!(
-            "# Hel setup instructions for Linux\n\n\
-This page is self-contained. Follow this exact loop as the user who will run Hel:\n\n\
+            "# Mjolnir setup instructions for Linux\n\n\
+This page is self-contained. Follow this exact loop as the user who will run `mj`:\n\n\
 1. Run `mj doctor --json`.\n\
 2. Follow every `fixable` remediation from its JSON output.\n\
 3. Run `mj doctor --json` again. Repeat until no check is `fixable`.\n\
@@ -303,35 +377,49 @@ This page is self-contained. Follow this exact loop as the user who will run Hel
    image end to end, and resolve anything it reports as `fixable`.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
+## Local bare runtime\n\n\
+A local bare runtime runs the agent directly on this machine. It needs the\n\
+native `mj-worker` installed beside `mj`; the release installer and the npm\n\
+package include it. The worker installs the pinned harness version itself.\n\
+Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
+need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
+prerequisites.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
         ),
         InstructionsPlatform::Macos => format!(
-            "# Hel setup instructions for macOS\n\n\
-This page is self-contained. Follow this exact loop as the user who will run Hel:\n\n\
+            "# Mjolnir setup instructions for macOS\n\n\
+This page is self-contained. Follow this exact loop as the user who will run `mj`:\n\n\
 1. Run `mj doctor --json`.\n\
 2. Follow every `fixable` remediation from its JSON output.\n\
 3. Run `mj doctor --json` again. Repeat until no check is `fixable`.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
+## Local bare runtime\n\n\
+A local bare runtime runs the agent directly on this machine. It needs the\n\
+native `mj-worker` installed beside `mj`; the release installer and the npm\n\
+package include it. The worker installs the pinned harness version itself.\n\
+Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
+need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
+prerequisites.\n\n\
 ## Apple container runtime\n\n\
-Hel's Apple container target requires Apple silicon and macOS 26 or newer.\n\
-On an Intel Mac or an older macOS release, the target is unsupported; use a\n\
-local Podman, SSH, or AWS target instead.\n\n\
+Mjolnir's Apple container target requires Apple silicon and macOS 26 or newer.\n\
+On an Intel Mac or an older macOS release, the target is unsupported; use the\n\
+local bare runtime, an SSH target, or an AWS target instead.\n\n\
 If the `container` command is absent, install only the official signed package:\n\n\
 <https://github.com/apple/container#initial-install>\n\n\
-Hel never downloads or installs that package. If doctor reports a stopped\n\
+Mjolnir never downloads or installs that package. If doctor reports a stopped\n\
 daemon, run exactly:\n\n```console\ncontainer system start\n```\n\n\
 Finish with the opt-in disposable runtime test in JSON mode:\n\n```console\nmj doctor --json --smoke\n```\n\n\
 Apple container is ready only when that smoke test creates a disposable\n\
 container, executes `true` in it, and removes it successfully. Use the image\n\
 configured by an `apple-container` target; without one, doctor uses\n\
 `{DEFAULT_CONTAINER_IMAGE}` for the smoke test.\n\n\
-## Shared Hel prerequisites\n\n\
+## Shared Mjolnir prerequisites\n\n\
 `mj doctor --json` also checks the configuration, each configured harness home\n\
 and authentication marker, selected container worker binaries, and any relevant\n\
-Podman prerequisites. Resolve every `fixable` status before starting a session."
+Podman prerequisites. Resolve every `fixable` status before starting a session.\n"
         ),
     }
 }
@@ -377,7 +465,10 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "config",
                 "Mjolnir configuration",
                 format!("{} does not exist", path.display()),
-                "Open Mjolnir and press F7 for Settings to add an agent profile.",
+                format!(
+                    "Open Mjolnir and press {} for Settings to add an agent profile.",
+                    settings_key(None)
+                ),
             )],
         );
     }
@@ -406,12 +497,24 @@ fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>,
                 "Mjolnir configuration",
                 format!("{} is valid", path.display()),
             )];
-            if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
+            // A bundle only names a set of repositories to start from; a
+            // session can start from any project directory without one, so
+            // only the missing profile keeps sessions from starting.
+            if config.enabled_profiles().next().is_none() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
                     "Session configuration",
-                    "An enabled profile and project bundle are required for configured bundle sessions. Local targets are supplied automatically.",
-                    "Open F7 Settings to add or enable agent profiles and projects.",
+                    "No agent profile is enabled, so no session can start. Local targets are supplied automatically.",
+                    format!(
+                        "Open Mjolnir and press {} for Settings to add or enable an agent profile.",
+                        settings_key(Some(&config))
+                    ),
+                ));
+            } else if config.bundles.is_empty() {
+                checks.push(DoctorCheck::ready(
+                    "config.session-prerequisites",
+                    "Session configuration",
+                    "An agent profile is enabled. No project bundle is configured; sessions start from a project directory, and a bundle is only needed to start from a saved set of repositories.",
                 ));
             } else {
                 checks.push(DoctorCheck::ready(
@@ -458,7 +561,10 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
             "harness.profiles",
             "Harness profiles",
             "No harness profiles are configured.",
-            "Open F7 Settings → Agent Profiles to detect accounts or add a profile.",
+            format!(
+                "Open Mjolnir, press {} for Settings, and choose Agent Profiles to detect accounts or add a profile.",
+                settings_key(Some(config))
+            ),
         )];
     }
     config
@@ -618,13 +724,73 @@ fn podman_checks(
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let preflight = podman_check(config, executor);
+    let effective = config.map(|config| config.clone().with_local_targets());
+    let effective = effective.as_ref().map_err(|gap| *gap);
+    let explicit = config.is_ok_and(|config| !local_podman_targets(config).is_empty());
+    let preflight = builtin_target_availability(
+        podman_check(effective, executor),
+        explicit,
+        "Podman",
+        "podman",
+    );
     let preflight_passed = preflight.status == CheckStatus::Ready;
     let mut checks = vec![preflight];
     if preflight_passed {
-        checks.extend(podman_image_checks(config, executor, smoke));
+        checks.extend(
+            podman_image_checks(effective, executor, smoke)
+                .into_iter()
+                .map(|(id, check)| builtin_image_check(config, &id, check)),
+        );
     }
     checks
+}
+
+/// An image check for a standard local target the user never configured.
+/// The dashboard downloads that image itself when it starts, so a missing
+/// image is a warning rather than a fault.
+fn builtin_image_check(
+    config: ConfigStatus<'_>,
+    target_id: &str,
+    check: DoctorCheck,
+) -> DoctorCheck {
+    let explicit = config.is_ok_and(|config| config.targets.contains_key(target_id));
+    if explicit || check.status != CheckStatus::Fixable {
+        return check;
+    }
+    DoctorCheck::warning(
+        check.id,
+        check.title,
+        format!(
+            "{} (built-in `{target_id}` target; the dashboard downloads its image when it starts)",
+            check.detail
+        ),
+        check.remediation.unwrap_or_default(),
+    )
+}
+
+/// Doctor checks the same target set the dashboard lists: the configured
+/// targets plus the standard local ones [`Config::with_local_targets`]
+/// supplies whether or not their engine is installed. A standard target whose
+/// engine is missing or not running is reported as unavailable, as the
+/// dashboard's Targets pane marks it, rather than as a fault to fix: nobody
+/// asked for it. A target the user configured keeps the fixable result.
+fn builtin_target_availability(
+    check: DoctorCheck,
+    explicit: bool,
+    engine: &str,
+    target_id: &str,
+) -> DoctorCheck {
+    if explicit || check.status != CheckStatus::Fixable {
+        return check;
+    }
+    DoctorCheck::unsupported(
+        check.id,
+        check.title,
+        format!(
+            "{engine} is not available, so the built-in `{target_id}` target is marked unavailable: {}",
+            check.detail
+        ),
+    )
 }
 
 fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> DoctorCheck {
@@ -664,15 +830,12 @@ pub fn local_podman_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
             "Rootless Podman",
             format!("Podman {} has a valid rootless UID map.", preflight.version),
         ),
-        Err(error) => {
-            let detail = format!("{error:#}");
-            DoctorCheck::fixable(
-                "runtime.podman",
-                "Rootless Podman",
-                detail,
-                podman_remediation(&error),
-            )
-        }
+        Err(error) => DoctorCheck::fixable(
+            "runtime.podman",
+            "Rootless Podman",
+            podman_failure_detail(&error),
+            podman_remediation(&error),
+        ),
     }
 }
 
@@ -691,13 +854,18 @@ fn podman_image_checks(
     config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
-) -> Vec<DoctorCheck> {
+) -> Vec<(String, DoctorCheck)> {
     let Ok(config) = config else {
         return Vec::new();
     };
     local_podman_targets(config)
         .into_iter()
-        .map(|(id, container)| podman_image_check(id, &container.image, executor, smoke))
+        .map(|(id, container)| {
+            (
+                id.clone(),
+                podman_image_check(id, &container.image, executor, smoke),
+            )
+        })
         .collect()
 }
 
@@ -784,7 +952,9 @@ fn docker_checks(
             )];
         }
     };
-    let targets = local_docker_targets(config);
+    let explicit = !local_docker_targets(config).is_empty();
+    let effective = config.clone().with_local_targets();
+    let targets = local_docker_targets(&effective);
     if targets.is_empty() {
         return vec![DoctorCheck::unsupported(
             "runtime.docker",
@@ -792,16 +962,23 @@ fn docker_checks(
             "No local-docker target is configured.",
         )];
     }
-    let preflight = local_docker_runtime_check(executor);
+    let preflight = builtin_target_availability(
+        local_docker_runtime_check(executor),
+        explicit,
+        "Docker",
+        "docker",
+    );
     if preflight.status != CheckStatus::Ready {
         return vec![preflight];
     }
     let mut checks = vec![preflight];
-    checks.extend(
-        targets
-            .into_iter()
-            .map(|(id, container)| docker_image_check(id, &container.image, executor, smoke)),
-    );
+    checks.extend(targets.into_iter().map(|(id, container)| {
+        builtin_image_check(
+            Ok(config),
+            id,
+            docker_image_check(id, &container.image, executor, smoke),
+        )
+    }));
     checks
 }
 
@@ -1157,11 +1334,13 @@ fn ssh_podman_runtime_check(
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
         Err(error) => {
-            let detail = format!("{error:#}");
+            let detail = podman_failure_detail(&error);
             let remediation = match podman_remediation_match(&error) {
-                Some(remediation) => format!("On {destination}: {remediation}"),
+                Some(remediation) => {
+                    format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
+                }
                 None => format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4 or newer there (see docs/PODMAN.md)."
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.3 or newer there. See {PODMAN_DOCUMENTATION_URL}."
                 ),
             };
             return DoctorCheck::fixable(check_id, title, detail, remediation);
@@ -1579,10 +1758,16 @@ fn doctor_smoke_id() -> String {
     )
 }
 
-fn podman_remediation(error: &anyhow::Error) -> &'static str {
-    podman_remediation_match(error).unwrap_or(
+fn podman_remediation(error: &anyhow::Error) -> String {
+    let fix = podman_remediation_match(error).unwrap_or(
         "Install Podman with `sudo apt update && sudo apt install -y podman uidmap` (Debian/Ubuntu) or `sudo dnf install -y podman shadow-utils` (Fedora).",
-    )
+    );
+    format!("{fix} See {PODMAN_DOCUMENTATION_URL}.")
+}
+
+/// A Podman failure without its fix, which the check reports separately.
+fn podman_failure_detail(error: &anyhow::Error) -> String {
+    podman_probe_observation(error).map_or_else(|| format!("{error:#}"), str::to_owned)
 }
 
 /// Map a Podman preflight failure to its specific remediation, if one applies.

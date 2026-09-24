@@ -9,6 +9,13 @@ impl ChatState {
         let chained = std::mem::take(&mut self.chain_kill);
         let keypad = key.state.contains(KeyEventState::KEYPAD);
         let (code, modifiers) = normalize_key(key.code, key.modifiers);
+        if self.earlier.is_some() {
+            return self.earlier_key(code);
+        }
+        if code == KeyCode::PageUp && modifiers.contains(KeyModifiers::CONTROL) {
+            self.open_earlier_messages();
+            return ChatAction::None;
+        }
 
         // Leaving the view is never an answer to the agent, so these two come
         // before the elicitation dialog. A pending elicitation is durable
@@ -194,18 +201,7 @@ impl ChatState {
                 }
                 return ChatAction::None;
             }
-            // Only a prompt of ours can be cancelled. A turn the harness
-            // started on its own also reads as Running, and the relay refuses
-            // to cancel it, so Esc must not claim to.
-            return if self.prompt_in_flight
-                || matches!(
-                    self.session_activity.state().last_known(),
-                    mj_core::activity::ActivityState::CheckingContinuation
-                )
-                || (self.session_activity.capacity_retry.is_some()
-                    || self.session_activity.quota_recovery.is_some())
-                || !self.active_user_shells.is_empty()
-            {
+            return if self.turn_interruptible() {
                 ChatAction::Cancel
             } else {
                 ChatAction::None

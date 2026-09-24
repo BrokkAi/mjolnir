@@ -151,35 +151,3 @@ reconstruct the transcript only while the worker retains its full event history.
 After a verified checkpoint allows older events to be pruned, recovery also
 requires that checkpoint archive; retain the original controller data or import
 its checkpoint instead of adopting into an empty database.
-
-## Disposable EC2 validation
-
-The opt-in runners under `tests/e2e` can validate SSH Docker without installing
-Docker on the controller. They create a new EC2 instance using the default AWS
-profile in `us-east-1`, install Docker there, and record exact resource IDs in a
-private ledger. Live coding checks use the existing `codex3` profile through
-Mjolnir's normal credential staging.
-
-Build the host CLI and portable worker first:
-
-```console
-cargo build -p brokk-mjolnir --bin mj
-cargo build -p brokk-mj-worker --bin mj-worker --target x86_64-unknown-linux-musl
-```
-
-Run each acceptance phase in a fresh artifact directory:
-
-```console
-python3 tests/e2e/ssh_docker_lab.py create --artifact-dir target/ssh-docker-e2e/my-run
-python3 tests/e2e/ssh_docker_acceptance.py run --ledger target/ssh-docker-e2e/my-run/ledger.json --artifact-dir target/ssh-docker-e2e/my-run/lifecycle
-python3 tests/e2e/ssh_docker_acceptance.py extra --ledger target/ssh-docker-e2e/my-run/ledger.json --artifact-dir target/ssh-docker-e2e/my-run/recovery
-python3 tests/e2e/ssh_docker_lab.py collect --artifact-dir target/ssh-docker-e2e/my-run
-python3 tests/e2e/ssh_docker_lab.py cleanup --artifact-dir target/ssh-docker-e2e/my-run
-```
-
-Always run `collect` and `cleanup`, including after acceptance failures. The
-acceptance driver stops its isolated controller; the lab's `cleanup` command
-terminates EC2 and removes its disk, security group, and imported SSH key. Cleanup
-can be repeated from the same ledger. A four-hour shutdown timer is a backstop;
-it does not replace checking the ledger for successful cleanup. Artifact
-directories contain private session state and should not be published.

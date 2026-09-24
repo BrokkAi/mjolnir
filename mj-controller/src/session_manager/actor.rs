@@ -975,10 +975,7 @@ pub(super) async fn deliver_submit(
     // hear "accepted" needs it first: the caller has an ordinal, and the view
     // it would read is published below anyway.
     if reply
-        .send(result.map_err(|error| mj_client::session::SubmitFailure {
-            unconfirmed: !is_final_rejection(&error),
-            message: format!("{error:#}"),
-        }))
+        .send(result.map_err(|error| submit_failure(&error)))
         .is_err()
     {
         tracing::debug!(
@@ -1027,6 +1024,25 @@ pub(super) async fn deliver_submit(
 /// A refusal is a completed round trip, so the connection is healthy. Dropping
 /// it would discard whatever that connection owns on the worker, including a
 /// checkpoint barrier a controller is still holding.
+/// What the submitter is told. A final rejection is the relay's own reason,
+/// such as "/clear requires an idle session…"; the relay version, operation,
+/// and error code stay in the log written above (I1-12).
+pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+    match error
+        .downcast_ref::<RelayRejected>()
+        .filter(|rejected| !rejected.is_retryable())
+    {
+        Some(rejected) => mj_client::session::SubmitFailure {
+            unconfirmed: false,
+            message: rejected.0.message.clone(),
+        },
+        None => mj_client::session::SubmitFailure {
+            unconfirmed: true,
+            message: format!("{error:#}"),
+        },
+    }
+}
+
 pub(super) fn is_final_rejection(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RelayRejected>()
@@ -1282,11 +1298,17 @@ pub(super) fn publish_view(
 /// and the transcript deserialization behind it are synchronous and grow with
 /// the conversation, so a long session must not stall a worker thread that
 /// other actors share.
-pub(super) async fn load_projection(session_id: &str) -> Result<MaterializedSession> {
+pub(super) async fn load_projection(
+    session_id: &str,
+) -> Result<(MaterializedSession, mj_core::state::ProjectionWindow)> {
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<MaterializedSession> {
-        let loaded = crate::database::load_materialized_session(&session_id)?;
-        Ok(loaded.unwrap_or_else(|| MaterializedSession::empty(session_id)))
+    tokio::task::spawn_blocking(move || {
+        let loaded = crate::database::load_materialized_actor_projection(&session_id)?;
+        Ok(loaded.unwrap_or_else(|| {
+            let materialized = MaterializedSession::empty(session_id);
+            let window = mj_core::state::ProjectionWindow::of(&materialized);
+            (materialized, window)
+        }))
     })
     .await
     .context("controller projection load task failed")?

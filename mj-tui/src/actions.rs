@@ -85,6 +85,9 @@ pub enum CommandId {
     CycleSpinner,
     ToggleTranscriptRendering,
     ToggleDictation,
+    OpenSubagents,
+    SessionActions,
+    InterruptTurn,
     Help,
 }
 
@@ -423,6 +426,39 @@ fn attention_footer(dashboard: &DashboardState) -> Option<String> {
     ))
 }
 
+/// The selected session (or, from the composer, the conversation's) must
+/// have sub-agents to show. With none, the command stays listed and says why,
+/// so a search for "sub-agent" always finds it.
+fn subagents_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    if dashboard.subagent_count_for(session) > 0 {
+        Availability::Ready
+    } else {
+        Availability::Blocked("this session has no sub-agents")
+    }
+}
+
+/// A turn can be interrupted only while one is running. Otherwise the
+/// command stays listed, greyed with the reason, so a search for "interrupt"
+/// always finds it.
+fn interrupt_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    if dashboard.attention_level(session) == crate::AttentionLevel::Working {
+        Availability::Ready
+    } else {
+        Availability::Blocked("no turn is running")
+    }
+}
+
+/// Named in the footer only while there are sub-agents to open.
+fn subagents_footer(dashboard: &DashboardState) -> Option<String> {
+    (subagents_available(dashboard) == Availability::Ready).then(|| "sub-agents".to_owned())
+}
+
 fn operation_in_flight(dashboard: &DashboardState) -> Availability {
     match cancel_footer(dashboard) {
         Some(_) => Availability::Ready,
@@ -514,7 +550,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ClosePane,
         label: "Close pane",
-        description: "Remove the conversation pane you are in; the last one is emptied instead.",
+        description: "Remove the conversation pane you are in; the last one is emptied instead. The Browse pane cannot be closed; move it with Swap pane.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::ClosePane),
@@ -526,7 +562,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::FocusPaneLeft,
         label: "Focus pane left",
-        description: "Move the keyboard to the conversation pane left this one.",
+        description: "Move the keyboard to the conversation pane left of this one.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneLeft),
@@ -562,7 +598,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::FocusPaneRight,
         label: "Focus pane right",
-        description: "Move the keyboard to the conversation pane right this one.",
+        description: "Move the keyboard to the conversation pane right of this one.",
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneRight),
@@ -879,6 +915,42 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: live_session,
     },
     CommandSpec {
+        id: CommandId::InterruptTurn,
+        label: "Interrupt turn",
+        description: "Stop the agent's running turn, as Esc does in the composer. The session keeps running.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::InterruptTurn),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: interrupt_available,
+    },
+    CommandSpec {
+        id: CommandId::SessionActions,
+        label: "Session actions…",
+        description: "Open the selected session's actions menu, the same one the ⋯ on its row opens.",
+        scope: Scope::Session,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
+        action: Some(KeyAction::SessionActions),
+        footer: footer_word!("actions"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 2,
+        available: selected_session_ready,
+    },
+    CommandSpec {
+        id: CommandId::OpenSubagents,
+        label: "Sub-agents",
+        description: "Open the sub-agents of this session in their own list. Esc or the X on the workspace strip returns to the parent.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::OpenSubagents),
+        footer: subagents_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 2,
+        available: subagents_available,
+    },
+    CommandSpec {
         id: CommandId::ContainerSettings,
         label: "Container settings",
         description: "Edit CPU, memory, and mounts for the next time the container is created.",
@@ -942,7 +1014,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
         action: None,
-        footer: footer_word!("edit profile"),
+        footer: footer_word!("rename profile"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: profiles_present,
@@ -1378,15 +1450,27 @@ impl DashboardState {
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
         let saved = self.command_session_override.clone();
-        if spec(id).scope == Scope::Session && saved.is_none() && self.focus == Focus::Prompt {
-            let Some(session) = self.current_session_id().map(str::to_owned) else {
-                return DashboardAction::None;
-            };
+        // From the composer a session command acts on the conversation it
+        // writes to. With the pane still empty (a launch whose attach has not
+        // finished) there is no such conversation, so the command acts on the
+        // session selected in Sessions, as it would from there.
+        if spec(id).scope == Scope::Session
+            && saved.is_none()
+            && self.focus == Focus::Prompt
+            && let Some(session) = self.current_session_id().map(str::to_owned)
+        {
             self.command_session_override = Some(session);
         }
         let action = self.dispatch_command_inner(id);
         self.command_session_override = saved;
         action
+    }
+
+    /// Puts a command at the head of the palette's Recent group.
+    pub(crate) fn remember_command(&mut self, id: CommandId) {
+        self.recent_commands.retain(|recent| *recent != id);
+        self.recent_commands.push_front(id);
+        self.recent_commands.truncate(RECENT_COMMANDS);
     }
 
     fn dispatch_command_inner(&mut self, id: CommandId) -> DashboardAction {
@@ -1417,11 +1501,10 @@ impl DashboardState {
             return DashboardAction::None;
         }
         // Commands a person reaches for by name are worth remembering; the
-        // pane keys and the palette itself are not.
+        // pane keys and the palette itself are not. The palette records
+        // whatever it runs itself, pane keys included.
         if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
-            self.recent_commands.retain(|recent| *recent != id);
-            self.recent_commands.push_front(id);
-            self.recent_commands.truncate(RECENT_COMMANDS);
+            self.remember_command(id);
         }
         if matches!(id, CommandId::SuspendSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {
@@ -1485,17 +1568,22 @@ impl DashboardState {
                         .count();
                     let interrupting =
                         self.attention_level(&session.id) == crate::AttentionLevel::Working;
-                    if !interrupting && active_children == 0 {
+                    let unverified_clone = session.publication_state().is_some();
+                    if !interrupting && active_children == 0 && !unverified_clone {
                         return DashboardAction::Suspend {
                             session_id: session.id.clone(),
+                            acknowledge_unpublished_work: false,
                         };
                     }
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+                    self.mode = crate::Mode::Confirm(
+                        ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session.id.clone(),
                             active_children,
                             interrupting,
-                        }));
+                            unverified_clone,
+                        })
+                        .naming_session(session.display_title()),
+                    );
                 }
                 DashboardAction::None
             }
@@ -1506,17 +1594,22 @@ impl DashboardState {
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
             CommandId::RestartSession => {
-                let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+                let Some((session_id, name)) = self
+                    .selected_session()
+                    .map(|s| (s.id.clone(), s.display_title().to_owned()))
+                else {
                     return DashboardAction::None;
                 };
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
                 if self.attention_level(&session_id) == crate::AttentionLevel::Working {
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                    self.mode = crate::Mode::Confirm(
+                        ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
                             restart: true,
-                        }));
+                        })
+                        .naming_session(&name),
+                    );
                     return DashboardAction::None;
                 }
                 DashboardAction::RestartSession { session_id }
@@ -1544,15 +1637,59 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
+            CommandId::InterruptTurn => match interrupt_available(self) {
+                Availability::Ready => self
+                    .command_session_id()
+                    .map(str::to_owned)
+                    .map_or(DashboardAction::None, |session_id| {
+                        DashboardAction::InterruptTurn { session_id }
+                    }),
+                Availability::Blocked(reason) => {
+                    self.set_notice(crate::help::sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
+            CommandId::SessionActions => {
+                if self.command_session_id().is_some() {
+                    self.begin_session_palette();
+                }
+                DashboardAction::None
+            }
+            CommandId::OpenSubagents => match subagents_available(self) {
+                Availability::Ready => self
+                    .command_session_id()
+                    .map(str::to_owned)
+                    .map_or(DashboardAction::None, |parent_id| {
+                        DashboardAction::OpenSubagents { parent_id }
+                    }),
+                Availability::Blocked(reason) => {
+                    self.set_notice(crate::help::sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
             CommandId::MoveSession => self.begin_move(),
             CommandId::DestroySession => {
-                let Some(session_id) = self.selected_session().map(|session| session.id.clone())
+                let Some((session_id, name)) = self
+                    .selected_session()
+                    .map(|session| (session.id.clone(), session.display_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
-                self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
-                    session_id,
-                }));
+                let delete_branch_available = self
+                    .selected_session()
+                    .and_then(|session| session.managed_worktree.as_ref())
+                    .is_some_and(|owned| {
+                        owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                    });
+                self.mode = crate::Mode::Confirm(
+                    ConfirmDialog::new(Confirmation::ForceDestroy {
+                        session_id,
+                        delete_branch_available,
+                    })
+                    .naming_session(&name),
+                );
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
@@ -1572,9 +1709,16 @@ impl DashboardState {
                     self.session_operation_kind(&session.id)
                         .map(|kind| (session.id.clone(), kind))
                 });
-                operation.map_or(DashboardAction::None, |(session_id, kind)| {
-                    DashboardAction::CancelOperation { session_id, kind }
-                })
+                match operation {
+                    Some((session_id, kind)) => {
+                        DashboardAction::CancelOperation { session_id, kind }
+                    }
+                    None => {
+                        // A key that does nothing silently reads as broken.
+                        self.set_notice("Nothing to cancel");
+                        DashboardAction::None
+                    }
+                }
             }
             CommandId::ToggleProject => {
                 self.toggle_selected_project();
@@ -1738,6 +1882,145 @@ mod tests {
             (spec(CommandId::SuspendSession).available)(&dashboard),
             Availability::Blocked(_)
         ));
+    }
+
+    /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
+    /// lower border. It is a registry command now, so the help overlay, the
+    /// palette, a default chord, and the footer all reach it.
+    #[test]
+    fn sub_agents_open_from_a_chord_and_are_listed_for_help_and_the_palette() {
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        dashboard.focus_sessions();
+        assert_eq!(
+            dashboard.key_labels(CommandId::OpenSubagents),
+            vec!["ctrl+b shift+a".to_owned()]
+        );
+        assert_eq!(
+            (spec(CommandId::OpenSubagents).available)(&dashboard),
+            Availability::Ready
+        );
+        assert!(!hidden_from_palette(CommandId::OpenSubagents));
+        assert!(spec(CommandId::OpenSubagents).label.contains("Sub-agents"));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(footer.contains("shift+a sub-agents"), "{footer}");
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::OpenSubagents),
+            DashboardAction::OpenSubagents {
+                parent_id: parent.clone()
+            }
+        );
+
+        // Esc in the sub-agents' Sessions list goes back to the parent, as
+        // the X on the workspace strip does.
+        dashboard.open_subagent_workspace(parent);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Esc)),
+            DashboardAction::ExitSubagentWorkspace
+        );
+
+        // A session without sub-agents keeps the command listed, greyed with
+        // the reason, so a search for it still finds it.
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert!(matches!(
+            (spec(CommandId::OpenSubagents).available)(&dashboard),
+            Availability::Blocked(_)
+        ));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(!footer.contains("sub-agents"), "{footer}");
+    }
+
+    /// A-8 / B-1: the row's ⋯ menu had no keyboard route. "Session
+    /// actions…" opens the same menu from a chord, from `.` on the Sessions
+    /// pane, and from the palette, and the Sessions footer names it.
+    #[test]
+    fn session_actions_open_the_row_menu_from_the_keyboard() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(
+            dashboard.key_labels(CommandId::SessionActions),
+            vec![".".to_owned(), "ctrl+b .".to_owned()]
+        );
+        assert!(!hidden_from_palette(CommandId::SessionActions));
+        let footer = crate::render::combined_footer_text(&dashboard, 400);
+        assert!(footer.contains(". actions"), "{footer}");
+
+        dashboard.handle_key(key(KeyCode::Char('.')));
+        let crate::Mode::Palette(menu) = &dashboard.mode else {
+            panic!("the row menu opens");
+        };
+        let from_key = menu.entries.clone();
+        dashboard.mode = crate::Mode::Dashboard;
+        // The mouse's ⋯ opens the same menu.
+        dashboard.begin_session_palette();
+        let crate::Mode::Palette(menu) = &dashboard.mode else {
+            panic!("the row menu opens");
+        };
+        assert_eq!(from_key, menu.entries);
+
+        // From the composer the chord opens the menu for the conversation's
+        // session.
+        dashboard.mode = crate::Mode::Dashboard;
+        dashboard.focus_prompt();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
+    }
+
+    /// B-16: the terminal said "Interrupt turn" nowhere. The command is in
+    /// the palette at all times, greyed with the reason while no turn runs,
+    /// and it runs only while the session is working.
+    #[test]
+    fn interrupt_turn_is_listed_always_and_runs_only_during_a_turn() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(spec(CommandId::InterruptTurn).label, "Interrupt turn");
+        assert_eq!(
+            dashboard.key_labels(CommandId::InterruptTurn),
+            vec!["ctrl+b i".to_owned()]
+        );
+        assert!(!hidden_from_palette(CommandId::InterruptTurn));
+        assert_eq!(
+            (spec(CommandId::InterruptTurn).available)(&dashboard),
+            Availability::Blocked("no turn is running")
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptTurn),
+            DashboardAction::None
+        );
+
+        crate::test_support::set_working(&mut dashboard, "session-1");
+        assert_eq!(
+            (spec(CommandId::InterruptTurn).available)(&dashboard),
+            Availability::Ready
+        );
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptTurn),
+            DashboardAction::InterruptTurn {
+                session_id: "session-1".into()
+            }
+        );
+    }
+
+    /// A-16 and A-18: the help text reads as sentences, and Close pane says
+    /// the one pane it refuses to close.
+    #[test]
+    fn pane_help_text_reads_as_sentences_and_names_the_browse_exception() {
+        assert!(
+            spec(CommandId::FocusPaneLeft)
+                .description
+                .contains("pane left of this one")
+        );
+        assert!(
+            spec(CommandId::FocusPaneRight)
+                .description
+                .contains("pane right of this one")
+        );
+        let close = spec(CommandId::ClosePane).description;
+        assert!(
+            close.contains("The Browse pane cannot be closed"),
+            "{close}"
+        );
+        assert!(close.contains("Swap pane"), "{close}");
     }
 
     #[test]

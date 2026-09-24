@@ -453,6 +453,25 @@ pub(super) fn retain_workspace_sessions(
     Ok(())
 }
 
+/// The top level of the Git worktree `mj` was started in, or `None` outside
+/// one. The new-session wizard offers it as the local project.
+fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    let directory = std::env::current_dir().ok()?;
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&directory)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let top_level = String::from_utf8(output.stdout).ok()?;
+    let top_level = top_level.trim();
+    (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
+}
+
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
@@ -482,6 +501,12 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.restore_upgrade(resume).await;
     }
     let mut restart_executable = None;
+    if go.is_none() {
+        let launch = tokio::task::spawn_blocking(launch_repository_top_level)
+            .await
+            .context("find the repository mj was started in")?;
+        context.dashboard.set_launch_project_directory(launch);
+    }
     if let Some((mode, setup)) = go {
         let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
             .await
@@ -741,16 +766,14 @@ pub(crate) async fn run_dashboard_for_workspace(
                                 context.request_shutdown();
                             }
                         }
-                        crate::daemon::DaemonPresence::Attached => context
-                            .dashboard
-                            .set_notice("Mjolnir daemon is running again."),
+                        crate::daemon::DaemonPresence::Attached => {
+                            show_daemon_reattached(&mut context.dashboard);
+                        }
                         // The reason is already in the log. The notice bar is
                         // one line, so it carries the action instead.
                         crate::daemon::DaemonPresence::Missing(reason) => {
                             tracing::warn!(%reason, "the Mjolnir daemon is not running");
-                            context.dashboard.set_failure_notice(
-                                "Mjolnir daemon is unavailable; waiting to reconnect.",
-                            );
+                            context.dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
                         }
                     }
                 }
@@ -802,6 +825,14 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_prerequisite_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
+            // A wizard that just opened reads the stored project and mount
+            // history again: this run's sessions may have added to it.
+            if let Some(refresh) = context.dashboard.take_mount_history_refresh() {
+                actions::apply_dashboard_action(&mut context, refresh).await?;
+            }
+            if let Some(check) = context.dashboard.take_target_availability_check() {
+                actions::apply_dashboard_action(&mut context, check).await?;
+            }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
@@ -838,6 +869,21 @@ pub(crate) async fn run_dashboard_for_workspace(
     if let Err(error) = context.layout_persistence.finish().await {
         tracing::warn!(%error, "workspace layout final flush failed");
         eprintln!("{error:#}");
+    }
+    // The next `mj` opens the most recently opened workspace. A tab switch
+    // does not count as opening, so mark the workspace shown at exit, or the
+    // restart would return to the one this dashboard started in.
+    if let Some(workspace_id) = context.dashboard.active_workspace_id().map(str::to_owned) {
+        match crate::daemon::connect_existing().await {
+            Ok(mut daemon) => {
+                if let Err(error) = daemon.touch_workspace(workspace_id).await {
+                    tracing::warn!(%error, "could not record the workspace shown at exit");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "daemon unavailable to record the workspace shown at exit");
+            }
+        }
     }
     if let Some(shutdown) = context.worker_shutdown.take() {
         let result = shutdown
@@ -1008,8 +1054,6 @@ impl DashboardContext {
         }
         let browse = self.dashboard.browse_pane();
         let Some(new_pane) = self.dashboard.split_conversation_pane(browse, direction) else {
-            self.dashboard
-                .set_notice("Not enough room to split this pane.");
             return;
         };
         self.pin_session_in(session_id, browse);
@@ -1029,8 +1073,6 @@ impl DashboardContext {
             .split_conversation_pane(target, direction)
             .is_none()
         {
-            self.dashboard
-                .set_notice("Not enough room to split this pane.");
             return;
         }
         self.selection.clear();
@@ -1381,6 +1423,18 @@ impl DashboardContext {
             BTreeMap::new(),
         );
         dashboard.set_workspace_names(workspace_names);
+        // Tabs follow creation order, which a restart does not change; the
+        // listing itself leads with the most recently opened workspace.
+        let mut by_creation = workspaces.iter().collect::<Vec<_>>();
+        by_creation.sort_by(|left, right| {
+            (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
+        });
+        dashboard.order_workspaces(
+            &by_creation
+                .into_iter()
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>(),
+        );
         for (id, sizes) in &layouts {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
         }
@@ -1944,6 +1998,27 @@ fn route_selection_event(
         }
         event => SelectionRouting::Forward(event),
     }
+}
+
+const DAEMON_UNAVAILABLE_NOTICE: &str = "Mjolnir daemon is unavailable; waiting to reconnect.";
+const DAEMON_RUNNING_AGAIN_NOTICE: &str = "Mjolnir daemon is running again.";
+
+/// Report that the keep-alive reached a daemon again.
+///
+/// The unavailable notice is a failure notice, which a plain notice cannot
+/// replace until it has been readable for a while. A daemon restart is often
+/// shorter than that, so a plain `set_notice` was dropped and the stale
+/// failure stayed up while the dashboard was live. The reconnect is exactly
+/// the event that makes that failure false, so it replaces it directly, also
+/// when it is shown inside a count of stacked failures.
+fn show_daemon_reattached(dashboard: &mut DashboardState) {
+    if let Some(current) = dashboard.notice()
+        && current.ends_with(DAEMON_UNAVAILABLE_NOTICE)
+        && dashboard.replace_notice_if(&current, DAEMON_RUNNING_AGAIN_NOTICE)
+    {
+        return;
+    }
+    dashboard.set_notice(DAEMON_RUNNING_AGAIN_NOTICE);
 }
 
 #[cfg(test)]

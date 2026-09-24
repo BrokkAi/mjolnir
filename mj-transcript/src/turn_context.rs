@@ -298,6 +298,7 @@ impl TurnContext {
             } else {
                 state.assistant_text_tail.clone()
             },
+            completion: None,
         };
         let mut limit = 48 * 1024;
         while serde_json::to_vec(&evidence)

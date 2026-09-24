@@ -36,5 +36,9 @@
         ]
       }
     }
+  },
+  "retryable_server_error": {
+    "type": "noul",
+    "instructions": "For a completed turn only, did the current attempt fail because the remote model/provider service is temporarily unavailable, overloaded, returning a temporary server error, or temporarily throttling requests, so a later Continue prompt is appropriate? Use completion.stop_reason and completion.diagnostic together with the latest assistant reply and current user request. A standalone final reply saying the selected model is at capacity is a current retriable provider failure, even if it suggests choosing a different model and completion.stop_reason says EndTurn: capacity can free after a delay, and a model-switch suggestion is optional advice, not evidence that a delayed retry is inappropriate. When the latest reply consists only of the provider capacity refusal and the user request remains unmet, this is conclusive current failure: score retryable_server_error 1.0. A suggestion to switch models does not lower that score. The harness ending normally does not mean the requested work succeeded. Treat similarly clear temporary 5xx and short throttling failures as YES, whether they appear in structured diagnostics or only in the final reply; score an unambiguous current provider failure high. Answer NO when completion is absent, the text is a quote or historical example, the work succeeded, the user needs to supply information or approval, a subscription/session/weekly quota is exhausted, authentication or input is invalid, or a local tool/process/network/transport failure occurred. Do not equate every error, 5xx reference, or mention of capacity with a current retriable provider failure. When evidence is ambiguous, score low."
   }
 }

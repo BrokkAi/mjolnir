@@ -775,24 +775,31 @@ fn target_label(target: &TargetTemplate) -> &'static str {
     }
 }
 
-fn resource_allocation_label(
-    allocation: Option<&SessionResourceAllocation>,
-    error: Option<&str>,
-) -> String {
-    let allocation = match allocation {
+/// The compute a session gets, on its own, as the review's Compute row shows it.
+fn resource_allocation_description(allocation: Option<&SessionResourceAllocation>) -> String {
+    match allocation {
         Some(SessionResourceAllocation::Container { cpus, memory_bytes }) => {
-            format!(" · {cpus} CPU / {}", format_resource_bytes(*memory_bytes))
+            format!("{cpus} CPU / {}", format_resource_bytes(*memory_bytes))
         }
         Some(SessionResourceAllocation::AwsEc2 {
             instance_type,
             vcpus,
             memory_bytes,
         }) => format!(
-            " · {instance_type} · {vcpus} CPU / {}",
+            "{instance_type} · {vcpus} CPU / {}",
             format_resource_bytes(*memory_bytes)
         ),
-        None => " · fixed/default resources".into(),
-    };
+        None => "fixed/default resources".into(),
+    }
+}
+
+/// The compute description as a suffix for a target-list row, with any
+/// sizing error after it.
+fn resource_allocation_label(
+    allocation: Option<&SessionResourceAllocation>,
+    error: Option<&str>,
+) -> String {
+    let allocation = format!(" · {}", resource_allocation_description(allocation));
     match error {
         Some(error) => format!("{allocation} · {error}"),
         None => allocation,

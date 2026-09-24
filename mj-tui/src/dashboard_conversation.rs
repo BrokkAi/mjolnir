@@ -5,6 +5,10 @@ use ratatui::layout::Direction;
 
 use crate::tile_layout::{NavDirection, PaneId, TileLayout, find_in_direction};
 
+/// The notice a refused split leaves on the bar. A later split that succeeds
+/// clears it, because it no longer describes the last split attempt.
+pub const SPLIT_REFUSED_NOTICE: &str = "Not enough room to split this pane.";
+
 /// How much of a split a single resize step moves.
 const RESIZE_STEP: f32 = 0.05;
 
@@ -97,7 +101,8 @@ impl DashboardState {
 
     /// Split the focused pane and show `session` in the new leaf, which takes
     /// the focus. `None` means the conversation area is too small to split,
-    /// in which case nothing changes.
+    /// in which case the layout is unchanged and [`SPLIT_REFUSED_NOTICE`]
+    /// is shown.
     pub fn split_focused_pane(
         &mut self,
         direction: Direction,
@@ -119,12 +124,16 @@ impl DashboardState {
         target: PaneId,
         direction: Direction,
     ) -> Option<PaneId> {
-        let pane = self.conversation_layout.split_pane(
-            target,
-            direction,
-            0.5,
-            self.conversation_area(),
-        )?;
+        let Some(pane) =
+            self.conversation_layout
+                .split_pane(target, direction, 0.5, self.conversation_area())
+        else {
+            self.set_notice(SPLIT_REFUSED_NOTICE);
+            return None;
+        };
+        if self.notice().as_deref() == Some(SPLIT_REFUSED_NOTICE) {
+            self.clear_notice();
+        }
         self.conversation_zoomed = false;
         self.browse_pane = Some(pane);
         self.conversation_layout.focus_pane(pane);

@@ -11,6 +11,7 @@ mod active;
 mod attachments;
 mod autocomplete;
 mod config_picker;
+mod earlier;
 mod elicitation;
 mod feedback;
 mod history;
@@ -176,6 +177,10 @@ pub struct ChatRegions<'a> {
     pub footer: Option<ChatFooter<'a>>,
     pub overlay: Rect,
     pub title_controls: u16,
+    /// How many columns the host draws its own label into at the left of the
+    /// transcript's title row. The title starts after them, so the label does
+    /// not cover the title's first words.
+    pub title_lead: u16,
     pub pane_focused: bool,
 }
 
@@ -188,6 +193,10 @@ pub struct ChatRegions<'a> {
 pub struct ChatFooter<'a> {
     pub area: Rect,
     pub chords: &'a [&'a str],
+    /// The words that lead the chord group — `ctrl+b then `. The renderer
+    /// puts them on the first chord that fits, so a narrow row never shows
+    /// chord keys as if they were plain keys.
+    pub chord_prefix: &'a str,
     pub functions: &'a [&'a str],
     pub banner: Option<&'a Line<'static>>,
 }
@@ -337,7 +346,7 @@ enum TurnControlIntent {
 impl TurnControlIntent {
     fn escape_hint(self) -> &'static str {
         match self {
-            Self::Cancel => "Esc cancels",
+            Self::Cancel => "Esc interrupts",
             Self::Steer => "Esc steers next",
         }
     }
@@ -481,12 +490,15 @@ pub struct TranscriptPosition(TranscriptAnchor);
 
 pub struct ChatState {
     pub(crate) clear_context_supported: bool,
+    pub(crate) prompt_images_supported: bool,
     session_id: String,
     bundle_id: Option<String>,
     phase: WorkerPhase,
     latest_seq: u64,
     last_compaction_seq: u64,
     entries: Vec<ChatEntry>,
+    earlier: Option<earlier::EarlierMessages>,
+    earlier_generation: u64,
     pending_diffstats: VecDeque<ToolDiffstatRequest>,
     scheduled_diffstats: BTreeSet<(String, u64)>,
     /// Leading transcript items that are not converted to entries yet, because
@@ -603,6 +615,10 @@ pub struct ChatState {
     /// On entry, reveal the response advertised by the session list when later
     /// tool activity would otherwise push it above the first viewport.
     reveal_latest_agent_on_draw: bool,
+    /// The revealed reply's `start_seq` and the newest entry's `start_seq`
+    /// when the reveal happened, while the view still rests there. Newer
+    /// content then returns the view to the tail.
+    revealed_anchor: Option<(u64, u64)>,
     last_viewport_height: usize,
     render_mode: TranscriptRenderMode,
     render_cache: TranscriptRenderCache,
@@ -637,6 +653,8 @@ pub struct ChatState {
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     subagent_count: usize,
+    /// The session runs with Mjolnir sub-agents, whether or not any exist.
+    subagents_enabled: bool,
     subagent_working_count: usize,
     subagent_control_focused: bool,
     subagent_control_area: Option<Rect>,
@@ -659,8 +677,8 @@ pub struct ChatState {
     detailed_activity_clocks: bool,
     activity_reachable: bool,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
-    /// turn the harness started on its own, which the relay refuses to cancel,
-    /// so cancellation and the composer's cancel hint key on this instead.
+    /// turn the harness started on its own, so cancellation and the
+    /// composer's cancel hint key on this and on `harness_turn_stoppable`.
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
     targeted_turn_control_supported: bool,
@@ -707,12 +725,15 @@ impl ChatState {
     pub fn new(snapshot: &WorkerSnapshot, events: &[SequencedEvent]) -> Self {
         let mut state = Self {
             clear_context_supported: false,
+            prompt_images_supported: false,
             session_id: snapshot.session_id.clone(),
             bundle_id: None,
             phase: snapshot.phase,
             latest_seq: 0,
             last_compaction_seq: 0,
             entries: Vec::new(),
+            earlier: None,
+            earlier_generation: 0,
             pending_diffstats: VecDeque::new(),
             scheduled_diffstats: BTreeSet::new(),
             unconverted_prefix: 0,
@@ -779,6 +800,7 @@ impl ChatState {
             config_picker: None,
             anchor: TranscriptAnchor::Bottom,
             reveal_latest_agent_on_draw: true,
+            revealed_anchor: None,
             last_viewport_height: 0,
             render_mode: TranscriptRenderMode::Rich,
             render_cache: TranscriptRenderCache::default(),
@@ -802,6 +824,7 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             subagent_count: 0,
+            subagents_enabled: false,
             subagent_working_count: 0,
             subagent_control_focused: false,
             subagent_control_area: None,

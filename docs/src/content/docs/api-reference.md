@@ -85,6 +85,7 @@ A failure is a JSON object with one field:
 | `401` | No bearer token and no valid viewer cookie. |
 | `404` | No such session, or no transcript recorded for it. |
 | `409` | The session cannot do this now: no prompt capability, no live target, a turn still running, no commits to bundle, no recorded base for a diff, no push remote configured. |
+| `429` | Concurrent action limit: retry after the running action finishes. |
 | `500` | The operation was attempted and failed. The message says what failed. |
 | `503` | The daemon is shutting down, or the controller is not accepting actions. |
 
@@ -214,6 +215,75 @@ The same object, plus `last_turn_outcome` when a prompt has finished on it:
 or `interrupted` with a `message`. The list route omits the field: it is built
 from the dashboard projection, which carries no turn identity.
 
+### List launch options
+
+```text
+GET /api/v1/options
+```
+
+```json
+{
+  "revision": 1790192456730219,
+  "profiles": [{ "id": "codex", "harness": "codex" }],
+  "targets": [
+    {
+      "id": "localhost",
+      "kind": "local-bare",
+      "requires_project_directory": true,
+      "availability": "ready",
+      "host": "local"
+    },
+    {
+      "id": "docker",
+      "kind": "local-docker",
+      "requires_project_directory": false,
+      "availability": "ready",
+      "host": "local"
+    }
+  ],
+  "bundles": [
+    {
+      "id": "fixture",
+      "primary_repository": "fixture",
+      "repositories": [{ "id": "fixture", "destination": "fixture" }]
+    }
+  ],
+  "hosts": [
+    {
+      "id": "local",
+      "label": "local",
+      "targets": ["docker", "localhost"],
+      "stale": false,
+      "refreshing": false,
+      "has_error": false
+    }
+  ],
+  "default": { "profile_id": "codex", "target_id": "localhost" }
+}
+```
+
+This route lists the profiles, targets, and bundles a new session can use,
+without reading `config.toml`. It never fails.
+
+- `revision` identifies the configuration the lists came from. Two replies
+  with the same revision describe the same configuration.
+- `profiles[].harness` is the harness kind, such as `codex` or `claude`.
+- `targets[].requires_project_directory` is `true` when the target needs an
+  existing Git directory (`project_directory` on create) instead of a bundle.
+- `targets[].availability` is `ready` (the last check passed), `stale` (the
+  reading is old), `unavailable` (the last check failed), or `unknown` (no
+  check yet, normal just after startup). An `unavailable` target may carry
+  `unavailable_reason`, a sentence for a person.
+- `bundles[].repositories[].github` appears only for a repository with a
+  GitHub source.
+- `hosts` has one entry per host that has reported capacity. It is omitted
+  when empty.
+- `default` is the profile and target a create request uses when it names
+  none. It is omitted when no default has been saved.
+
+The reply contains no credentials, harness homes, SSH hosts or keys, container
+environments, AWS details, or controller paths.
+
 ### Create a session
 
 ```text
@@ -227,6 +297,7 @@ POST /api/v1/sessions
   "target_id": "local",
   "bundle_id": "bundle-1",
   "project_directory": "/home/you/project",
+  "launch_branch": "main",
   "launch_base": "origin/main",
   "title": "add a README line",
   "model": "gpt-5",
@@ -235,11 +306,12 @@ POST /api/v1/sessions
 }
 ```
 
-`profile_id` and `target_id` are required. Supply `bundle_id`, or
+`profile_id` and `target_id` may be omitted; each then follows the saved
+default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. `launch_base` starts the session at that Git
-revision instead of HEAD (managed worktree) or the remote default branch
-(bundle session) and becomes the session's diff base. A bundle session resolves
+viewer's own form does it. `launch_branch` selects the branch checked out in an
+isolated clone; otherwise the remote default is used. `launch_base` records a
+separate Git revision for the session's diff base. A bundle session resolves
 it in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`.
 Everything else is optional. `idempotency_key` is no
 longer accepted: a request that still carries it is rejected as an unknown
@@ -403,6 +475,20 @@ shape to change between Mjolnir versions.
 The transcript is read from the durable projection, so it answers the same way
 while the session runs and long after it was suspended.
 
+### Read earlier messages
+
+`GET /api/v1/sessions/{session_id}/history` returns up to 128 stored items in
+chronological order as `{ "items": [{ "role": "agent", "text": "..." }],
+"before": { "position": 123, "stable_id": "agent:123" }, "frontier": 456 }`.
+The first request returns the newest page. For the preceding page, pass both
+`before_position` and `before_id` from `before`. A null `before` means the
+beginning of the conversation. The cursor is exclusive and uses the original
+message position, so new messages and streaming revisions do not shift pages.
+
+The browser's **Earlier messages** reader and the terminal's **Ctrl+PgUp**
+reader use this durable history. Live views retain recent complete turns;
+checkpoints still contain the complete conversation.
+
 ### Suspend, destroy, or interrupt a turn
 
 ```text
@@ -417,13 +503,14 @@ suspension. An idle conversation alone says nothing about lifecycle completion.
 
 Suspend saves a verified recovery copy before releasing the environment. With
 active sub-agents, supply `{"acknowledge_active_subagents": true}` to suspend them
-first. A failed suspension reports its error and preserves recoverable resources;
+first. For an independent clone whose publication is unverified, also supply
+`{"acknowledge_unpublished_work": true}` after reviewing the warning. A failed suspension reports its error and preserves recoverable resources;
 it never silently switches to destruction.
 
 Destroy permanently removes the environment, recovery archive, and session
-record, including sub-agents. The optional `{"delete_branch": true}` body also
-deletes the managed branch in the source repository. Keeping that branch does
-not preserve work held only in the environment. Once destruction completes,
+record, including sub-agents. The optional `{"delete_branch": true}` body applies
+only to older linked-worktree sessions and deletes their managed source branch.
+New managed clones have no source branch to delete. Once destruction completes,
 `GET /sessions/{id}` returns `404`.
 
 Interrupt turn keeps the environment and session available for further prompts.
@@ -530,7 +617,7 @@ Preconditions, all answering `409` with the reason:
 | `diff`, `files`, `branch` | A live target. A suspended session has none; use the bundle. |
 | `branch` | An idle session — a push mid-turn would publish a tree the agent is still changing — a valid branch name, and a configured push remote. |
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
-| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
+| `bundle` | Commits beyond the session base. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this export also works after the target is gone. |
 
 ## CLI equivalents
 

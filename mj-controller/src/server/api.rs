@@ -68,7 +68,7 @@ use mj_core::state::{
     MaterializedExecutionState, MaterializedTurn, MaterializedTurnOutcome, TurnOutcomeKind,
 };
 
-use mj_core::relay::{CapacityRetry, is_capacity_stop_reason};
+use mj_core::relay::CapacityRetry;
 
 use mj_client::session::{BoxFuture, SessionHandle};
 

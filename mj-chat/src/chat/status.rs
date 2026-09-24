@@ -176,6 +176,38 @@ impl ChatState {
         self.prompt_in_flight
     }
 
+    /// Whether a turn Claude Code started on its own is running, which Stop
+    /// interrupts. A Codex turn of this kind is a native goal, which has its
+    /// own controls.
+    pub(crate) fn harness_turn_stoppable(&self) -> bool {
+        self.session_activity.harness_turn_started_at_ms.is_some()
+            && !self.session_activity.pursuing_goal
+    }
+
+    /// Whether Esc (or the host's Interrupt turn command) has a turn to
+    /// interrupt. A prompt of ours, or a turn Claude Code started on its own
+    /// after a background task, can be interrupted. A Codex goal turn also
+    /// reads as Running but has its own controls.
+    pub(crate) fn turn_interruptible(&self) -> bool {
+        self.prompt_in_flight
+            || self.harness_turn_stoppable()
+            || matches!(
+                self.session_activity.state().last_known(),
+                mj_core::activity::ActivityState::CheckingContinuation
+            )
+            || (self.session_activity.capacity_retry.is_some()
+                || self.session_activity.quota_recovery.is_some())
+            || !self.active_user_shells.is_empty()
+    }
+
+    /// Whether a turn-control request is already on its way, when a second
+    /// interrupt would do nothing.
+    pub(crate) fn turn_control_pending(&self) -> bool {
+        self.turn_control_submitting
+            || self.turn_control_awaiting_state.is_some()
+            || self.cancelling_prompt_id.is_some()
+    }
+
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
         if self.targeted_turn_control_supported
             && self.prompt_in_flight
@@ -231,6 +263,13 @@ impl ChatState {
 
     pub fn set_subagent_working_count(&mut self, count: usize) {
         self.subagent_working_count = count;
+    }
+
+    /// Records whether this session was created with Mjolnir sub-agents, so
+    /// the composer can show where they will appear before the first one
+    /// exists.
+    pub fn set_subagents_enabled(&mut self, enabled: bool) {
+        self.subagents_enabled = enabled;
     }
 
     pub fn set_subagent_count(&mut self, count: usize) {

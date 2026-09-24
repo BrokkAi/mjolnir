@@ -87,6 +87,7 @@ impl RuntimeState {
                 SessionLaunchOptions {
                     create_managed_worktree: request.create_managed_worktree,
                     launch_base: request.launch_base,
+                    launch_branch: request.launch_branch,
                     mjolnir_subagents: request.mjolnir_subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
@@ -96,6 +97,17 @@ impl RuntimeState {
                     session_title_override: request.session_title_override,
                 },
             )?;
+            // Every surface creates sessions through here, so the dashboard,
+            // the phone, `mj new`, and `mj acp` all leave a default pair
+            // behind for the next caller that names none. A preference that
+            // cannot be written does not undo a session that was created.
+            if let Err(error) = mj_core::go::GoPreferences::remember_first_pair(
+                &mj_core::go::GoPreferences::path(),
+                &request.profile_id,
+                &request.target_template_id,
+            ) {
+                tracing::warn!(%error, "could not save the default profile and target");
+            }
             let session = controller
                 .state
                 .sessions

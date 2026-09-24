@@ -193,6 +193,12 @@ pub struct WikiSessionInfo {
     pub harness: Option<mj_core::config::HarnessKind>,
     pub title: String,
     pub project: String,
+    /// Set for an archived Mjolnir row whose transcript holds no prompt,
+    /// which `mj resume --wiki` has nothing to restore from. Sent only when
+    /// set, so a daemon that predates it and a client that predates it both
+    /// read every other row unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nothing_to_restore: bool,
 }
 
 /// Start a new session carrying a compacted hand-off from an archived one.
@@ -345,6 +351,8 @@ pub struct CreateSessionRequest {
     /// Git revision the session starts at, as the caller typed it.
     #[serde(default)]
     pub launch_base: Option<String>,
+    #[serde(default)]
+    pub launch_branch: Option<String>,
     /// None follows the global `[subagents] enabled` setting at launch time.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
@@ -604,6 +612,8 @@ pub enum DaemonAction {
     },
     SuspendSession {
         session_id: String,
+        #[serde(default)]
+        acknowledge_unpublished_work: bool,
     },
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
@@ -647,6 +657,30 @@ pub struct RequestEnvelope {
     pub request_id: u64,
     pub token: String,
     pub action: DaemonAction,
+}
+
+/// The daemon answered a request with an error. Unlike a lost connection,
+/// this is a complete round trip: the daemon read the request and said why it
+/// did not carry it out.
+#[derive(Debug)]
+pub struct DaemonRefusal(pub String);
+
+impl std::fmt::Display for DaemonRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DaemonRefusal {}
+
+impl DaemonRefusal {
+    /// Whether the daemon itself could not confirm delivery. Its message is
+    /// then led by `session::DeliveryUnconfirmed`.
+    #[must_use]
+    pub fn delivery_unconfirmed(&self) -> bool {
+        self.0
+            .starts_with(&crate::session::DeliveryUnconfirmed.to_string())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -778,7 +812,24 @@ impl std::fmt::Display for WebViewerStatus {
 /// Treating a zombie as gone is also safe in the direction that matters: a
 /// zombie's PID cannot be reused until it is reaped, so nothing else can be
 /// occupying that number while this returns true.
-#[cfg(unix)]
+///
+/// On Linux this reads the one `/proc/<pid>/stat` file. `sysinfo` scans every
+/// process on the machine for a single-PID refresh, so it is not used here:
+/// this probe runs every 250 ms while an upgrade waits on an older daemon.
+#[cfg(target_os = "linux")]
+pub fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The command name in parentheses may itself contain ") ", so the state
+    // is the first field after the last closing parenthesis.
+    stat.iter()
+        .rposition(|byte| *byte == b')')
+        .and_then(|end| stat.get(end + 2))
+        .is_some_and(|state| *state == b'Z')
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn process_is_zombie(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -893,9 +944,47 @@ pub fn read_metadata() -> Result<DaemonMetadata> {
     Ok(metadata)
 }
 
+/// No daemon has published its endpoint: `daemon.json` does not exist.
+///
+/// This is the ordinary stopped state, not a failure. A daemon removes the
+/// file when it stops, so callers show "not running" rather than the raw
+/// file error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonNotRunning {
+    /// Where the endpoint would be, which also names the instance.
+    pub metadata_path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for DaemonNotRunning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the Mjolnir daemon is not running")
+    }
+}
+
+impl std::error::Error for DaemonNotRunning {}
+
+/// The stopped state, if `error` reports it anywhere in its chain.
+pub fn daemon_not_running(error: &anyhow::Error) -> Option<&DaemonNotRunning> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<DaemonNotRunning>())
+}
+
 pub fn read_metadata_any() -> Result<DaemonMetadata> {
-    let path = metadata_path();
-    let body = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    read_metadata_at(&metadata_path())
+}
+
+fn read_metadata_at(path: &std::path::Path) -> Result<DaemonMetadata> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(DaemonNotRunning {
+                metadata_path: path.to_owned(),
+            }
+            .into());
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
     let metadata: DaemonMetadata =
         serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))?;
     Ok(metadata)
@@ -1010,7 +1099,9 @@ impl DaemonClient {
             response.request_id == request_id,
             "daemon crossed request IDs"
         );
-        response.result.map_err(anyhow::Error::msg)
+        response
+            .result
+            .map_err(|message| anyhow::Error::new(DaemonRefusal(message)))
     }
 
     pub async fn status(&mut self) -> Result<DaemonStatus> {
@@ -1655,8 +1746,19 @@ impl DaemonClient {
     }
 
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
+        self.suspend_session_with_ack(session_id, false).await
+    }
+
+    pub async fn suspend_session_with_ack(
+        &mut self,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::SuspendSession { session_id })
+            .request(DaemonAction::SuspendSession {
+                session_id,
+                acknowledge_unpublished_work,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1901,6 +2003,20 @@ mod tests {
     use super::*;
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
+
+    #[test]
+    fn a_missing_endpoint_file_reads_as_a_stopped_daemon() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.json");
+        let error = read_metadata_at(&path).unwrap_err();
+        let stopped = daemon_not_running(&error).expect("stopped, not an I/O failure");
+        assert_eq!(stopped.metadata_path, path);
+        assert_eq!(format!("{error:#}"), "the Mjolnir daemon is not running");
+
+        std::fs::write(&path, b"not json").unwrap();
+        let error = read_metadata_at(&path).unwrap_err();
+        assert!(daemon_not_running(&error).is_none());
+    }
 
     #[tokio::test]
     async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {

@@ -16,7 +16,7 @@ use std::time::Duration;
 /// diagnoses; the user decides whether to trust a key.
 ///
 /// Those overrides are also why the probe joins a shared master but never
-/// opens one (see `push_connection_reuse_args`): as the master it would hold
+/// opens one (see [`CommandSpec::ssh_probe_session`]): as the master it would hold
 /// them over every later session on that connection, and a plain `mj doctor`
 /// would leave an `ssh` process behind for the whole `ControlPersist` window
 /// even though the user asked only for a diagnosis.
@@ -28,13 +28,12 @@ pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
         "StrictHostKeyChecking=yes".to_owned(),
     ];
     args.extend(ssh.ssh_args.iter().cloned());
-    // The socket is named after the target as configured, not after these
-    // probe-only overrides, so the probe finds the daemon's master.
-    push_connection_reuse_args(&mut args, ssh);
     args.push(ssh.destination.clone());
     args.push(join_remote_command(&["true".to_owned()]));
+    // The socket is named after the target as configured, not after these
+    // probe-only overrides, so the probe finds the daemon's master.
     CommandSpec::new("ssh", args)
-        .ssh_destination(ssh.destination.clone())
+        .ssh_probe_session(ssh)
         .purpose("verify SSH connectivity")
 }
 
@@ -440,10 +439,9 @@ pub fn ssh_validation_command(
         "-o".into(),
         "ServerAliveCountMax=1".into(),
     ]);
-    push_connection_reuse_args(&mut args, ssh);
     args.extend([ssh.destination.clone(), join_remote_command(&remote_args)]);
     CommandSpec::new("ssh", args)
-        .ssh_destination(ssh.destination.clone())
+        .ssh_probe_session(ssh)
         .purpose(purpose)
 }
 
@@ -691,10 +689,55 @@ const TRANSPORT_REJECTION_MARKERS: [&str; 4] = [
 /// The remote command never started in this case, so the caller may retry the
 /// whole invocation without worrying about repeating a side effect.
 pub fn is_transport_rejection(status: i32, stderr: &str) -> bool {
-    status == SSH_TRANSPORT_EXIT_STATUS
-        && TRANSPORT_REJECTION_MARKERS
-            .iter()
-            .any(|marker| stderr.contains(marker))
+    ssh_refusal(status, stderr).is_some()
+}
+
+/// What `ssh` prints when the server refuses a new session on an existing,
+/// authenticated shared connection. `sshd` does this once the connection
+/// carries `MaxSessions` sessions.
+const SESSION_REFUSAL_MARKER: &str = "Session open refused by peer";
+
+/// Why the SSH server turned an `ssh` invocation away before its remote
+/// command started. Either way the command never ran, so it may be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshRefusal {
+    /// The server dropped a new connection before authentication, which is
+    /// what `MaxStartups` does, and a dead shared master looks the same to a
+    /// session bound to it.
+    BeforeAuthentication,
+    /// The shared connection is up and authenticated, but the server refused
+    /// one more session on it (`MaxSessions`).
+    SessionLimit,
+}
+
+impl SshRefusal {
+    /// A log message that names this refusal.
+    pub fn retry_message(self) -> &'static str {
+        match self {
+            Self::BeforeAuthentication => {
+                "the SSH server closed the connection before authentication; retrying"
+            }
+            Self::SessionLimit => {
+                "the SSH server refused another session on a shared connection (MaxSessions); retrying"
+            }
+        }
+    }
+}
+
+/// Classify a finished `ssh` process that the server turned away. A refused
+/// session is checked first: a session bound to its master with
+/// `ProxyCommand=false` also reports a closed connection after the refusal.
+pub fn ssh_refusal(status: i32, stderr: &str) -> Option<SshRefusal> {
+    if status != SSH_TRANSPORT_EXIT_STATUS {
+        return None;
+    }
+    if stderr.contains(SESSION_REFUSAL_MARKER) {
+        return Some(SshRefusal::SessionLimit);
+    }
+    TRANSPORT_REJECTION_MARKERS
+        .iter()
+        .any(|marker| stderr.contains(marker))
+        .then_some(SshRefusal::BeforeAuthentication)
 }
 
 /// Default number of `ssh` processes this daemon will have in flight against
@@ -892,6 +935,29 @@ impl SessionLedger {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Count one session on the lowest shard of `key` with room, adding a
+    /// shard when all are full. Returns the shard and its opening lock.
+    fn reserve(&self, key: &str) -> (usize, Arc<Mutex<()>>) {
+        let mut connections = self.connections();
+        let shards = connections.entry(key.to_owned()).or_default();
+        let index = match shards
+            .iter()
+            .position(|shard| shard.leased < self.per_connection)
+        {
+            Some(index) => index,
+            None => {
+                shards.push(Shard {
+                    leased: 0,
+                    verified_at: None,
+                    opening: Arc::new(Mutex::new(())),
+                });
+                shards.len() - 1
+            }
+        };
+        shards[index].leased += 1;
+        (index, Arc::clone(&shards[index].opening))
+    }
+
     /// Lease a session on the lowest shard with room, opening that shard's
     /// master first when it is not known to be running.
     fn lease(
@@ -901,26 +967,7 @@ impl SessionLedger {
         executor: &dyn CommandExecutor,
     ) -> Result<SshSessionLease> {
         let key = connection_key(ssh);
-        let (shard, opening) = {
-            let mut connections = self.connections();
-            let shards = connections.entry(key.clone()).or_default();
-            let index = match shards
-                .iter()
-                .position(|shard| shard.leased < self.per_connection)
-            {
-                Some(index) => index,
-                None => {
-                    shards.push(Shard {
-                        leased: 0,
-                        verified_at: None,
-                        opening: Arc::new(Mutex::new(())),
-                    });
-                    shards.len() - 1
-                }
-            };
-            shards[index].leased += 1;
-            (index, Arc::clone(&shards[index].opening))
-        };
+        let (shard, opening) = self.reserve(&key);
         // From here on the slot is released on drop, including on error.
         let slot = LeasedSlot {
             ledger: Arc::clone(self),
@@ -939,7 +986,32 @@ impl SessionLedger {
                 slot.set_verified(Some(Instant::now()));
             }
         }
-        Ok(SshSessionLease { slot: Some(slot) })
+        Ok(SshSessionLease {
+            slot: Some(slot),
+            probe: false,
+        })
+    }
+
+    /// Count a fail-fast probe on the lowest shard with room, without
+    /// checking or opening that shard's master.
+    ///
+    /// The probe joins the master when it is up and otherwise connects on
+    /// its own, so its short timeouts never become a master's settings. It
+    /// still uses one of the master's sessions while it runs, and a probe
+    /// that was not counted could take the session a leased command was
+    /// promised.
+    fn lease_probe(self: &Arc<Self>, ssh: &SshTarget, dir: &Path) -> SshSessionLease {
+        let key = connection_key(ssh);
+        let (shard, _) = self.reserve(&key);
+        SshSessionLease {
+            slot: Some(LeasedSlot {
+                ledger: Arc::clone(self),
+                key,
+                shard,
+                socket: dir.join(control_socket_name(ssh, shard)),
+            }),
+            probe: true,
+        }
     }
 }
 
@@ -950,6 +1022,14 @@ impl SessionLedger {
 /// an error naming the destination instead of a direct connection.
 #[cfg(unix)]
 fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor) -> Result<()> {
+    // Another process of this instance (the old daemon during a restart)
+    // may be checking and opening the same socket. Without this lock both
+    // find no master and both open one; the second finds the socket bound,
+    // prints "already exists, disabling multiplexing", and keeps a plain
+    // background connection that no ControlPersist ever closes (J-18). The
+    // lock also keeps one process from removing, as stale, a socket the
+    // other has just bound.
+    let _opening = lock_master_opening(socket)?;
     if master_running(ssh, socket, executor)? {
         return Ok(());
     }
@@ -985,6 +1065,26 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
         "could not open a shared SSH connection to {}: {detail}",
         ssh.destination
     )
+}
+
+/// Take the file lock that serializes checking and opening the master on
+/// `socket` across processes. It is held until the returned file is dropped.
+/// The lock file sits beside the socket as `<socket>.lock`; `ssh` binds a
+/// new master at `<socket>.<16 random characters>`, so the names never meet.
+#[cfg(unix)]
+fn lock_master_opening(socket: &Path) -> Result<fs::File> {
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".lock");
+    let path = PathBuf::from(path);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open SSH master lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock SSH master lock {}", path.display()))?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -1092,6 +1192,10 @@ impl Drop for LeasedSlot {
 pub struct SshSessionLease {
     #[cfg(unix)]
     slot: Option<LeasedSlot>,
+    /// A counted fail-fast probe: it joins the master when one is up and
+    /// otherwise connects directly, so it carries no `ProxyCommand=false`.
+    #[cfg(unix)]
+    probe: bool,
 }
 
 impl std::fmt::Debug for SshSessionLease {
@@ -1108,6 +1212,8 @@ impl SshSessionLease {
         Self {
             #[cfg(unix)]
             slot: None,
+            #[cfg(unix)]
+            probe: false,
         }
     }
 
@@ -1161,6 +1267,31 @@ impl SshSessions {
             Ok(SshSessionLease::unshared())
         }
     }
+
+    /// Count a fail-fast probe, such as a target validation or the
+    /// connectivity check, on a shard of `ssh`'s connection without opening
+    /// a master. See [`CommandSpec::ssh_probe_session`].
+    ///
+    /// In a process other than the daemon (`mj doctor`) the ledger is empty,
+    /// so the probe joins the first master; the two sessions per master that
+    /// the daemon leaves free are for these.
+    pub fn lease_probe(ssh: &SshTarget) -> SshSessionLease {
+        #[cfg(unix)]
+        {
+            if user_configures_sharing(&ssh.ssh_args) {
+                return SshSessionLease::unshared();
+            }
+            let Some(dir) = control_socket_dir() else {
+                return SshSessionLease::unshared();
+            };
+            SessionLedger::global().lease_probe(ssh, &dir)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ssh;
+            SshSessionLease::unshared()
+        }
+    }
 }
 
 /// Options for a command that runs as one session on an already open
@@ -1168,6 +1299,9 @@ impl SshSessions {
 /// direct connection: a multiplexed client never runs the proxy command, and
 /// a client that fails to reach the master exits 255 instead of connecting on
 /// its own. Appends nothing for a lease without a socket.
+///
+/// A probe lease gets only `ControlMaster=no` and the `ControlPath`: it joins
+/// the master when one is up and otherwise connects on its own.
 pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
     if let Some(socket) = lease.control_path() {
         args.extend([
@@ -1175,9 +1309,14 @@ pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
             "ControlMaster=no".to_owned(),
             "-o".to_owned(),
             format!("ControlPath={}", socket.display()),
-            "-o".to_owned(),
-            "ProxyCommand=false".to_owned(),
         ]);
+        #[cfg(unix)]
+        let probe = lease.probe;
+        #[cfg(not(unix))]
+        let probe = false;
+        if !probe {
+            args.extend(["-o".to_owned(), "ProxyCommand=false".to_owned()]);
+        }
     }
 }
 
@@ -1553,17 +1692,14 @@ mod tests {
                 socket_dir.path().to_path_buf(),
             )));
             let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test");
+            let validation = spawned_args(&validation, Some(socket_dir.path()), &masters);
             let command = ssh_command(&ssh, ["true"]);
             let args = spawned_args(&command, Some(socket_dir.path()), &masters);
             assert_eq!(args, command.args, "user args {user:?}");
             let socket_dir_text = socket_dir.path().display().to_string();
             assert!(
-                !validation
-                    .args
-                    .iter()
-                    .any(|arg| arg.contains(&socket_dir_text)),
-                "user args {user:?}: {:?}",
-                validation.args
+                !validation.iter().any(|arg| arg.contains(&socket_dir_text)),
+                "user args {user:?}: {validation:?}"
             );
         }
         assert_eq!(masters.commands(), 0);
@@ -1626,7 +1762,21 @@ mod tests {
             destination: "host".to_owned(),
             ssh_args: Vec::new(),
         };
-        let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test").args;
+        let masters = FakeMasters::default();
+        let validation = spawned_args(
+            &ssh_validation_command(&ssh, vec!["true".to_owned()], "test"),
+            Some(socket_dir.path()),
+            &masters,
+        );
+        assert_eq!(
+            masters.commands(),
+            0,
+            "a probe never checks or opens a master"
+        );
+        assert!(!validation.contains(&"ProxyCommand=false".to_owned()));
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
         let executor = RecordingExecutor::default();
         crate::path_completion::ssh_completions(
             &ssh,
@@ -1654,11 +1804,10 @@ mod tests {
                 .iter()
                 .position(|arg| arg == "ControlMaster=no")
                 .expect("sharing options");
-            let alive = args
-                .iter()
-                .position(|arg| arg == "ServerAliveCountMax=1")
-                .expect("its own keepalive");
-            assert!(alive < master, "{args:?}");
+            assert!(
+                args.contains(&"ServerAliveCountMax=1".to_owned()),
+                "its own keepalive: {args:?}"
+            );
             assert!(
                 master
                     < args
@@ -1688,9 +1837,14 @@ mod tests {
             destination: "host".to_owned(),
             ssh_args: Vec::new(),
         };
-        let args = ssh_connectivity_probe(&ssh).args;
-        set_ssh_connection_sharing_for_test(None);
+        let masters = FakeMasters::default();
+        let args = spawned_args(
+            &ssh_connectivity_probe(&ssh),
+            Some(socket_dir.path()),
+            &masters,
+        );
 
+        assert_eq!(masters.commands(), 0, "a probe never opens a master");
         assert!(args.contains(&"ControlMaster=no".to_owned()), "{args:?}");
         assert!(
             args.contains(&format!(
@@ -1712,7 +1866,7 @@ mod tests {
             .iter()
             .position(|arg| arg == "StrictHostKeyChecking=yes")
             .expect("its own host key policy");
-        assert!(strict < master, "{args:?}");
+        assert!(master < strict, "{args:?}");
     }
 
     #[test]
@@ -1727,9 +1881,11 @@ mod tests {
         };
         let masters = FakeMasters::default();
         let args = spawned_args(&ssh_command(&ssh, ["true"]), None, &masters);
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
-        let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test").args;
-        set_ssh_connection_sharing_for_test(None);
+        let validation = spawned_args(
+            &ssh_validation_command(&ssh, vec!["true".to_owned()], "test"),
+            None,
+            &masters,
+        );
         assert_eq!(args, ["sharing-off-host", "'true'"]);
         assert!(!validation.iter().any(|arg| arg.starts_with("Control")));
         assert_eq!(masters.commands(), 0);
@@ -1921,6 +2077,7 @@ mod tests {
                         shard: 9,
                         socket: socket_dir.path().join(control_socket_name(&ssh, 9)),
                     }),
+                    probe: false,
                 },
             ))
             .stdin(std::process::Stdio::null())
@@ -2131,6 +2288,41 @@ mod tests {
         assert_eq!(masters.openers(), 2);
     }
 
+    /// Target validation and the connectivity probe run in the daemon while
+    /// other sessions are being provisioned. Each one uses a session on the
+    /// master it joins, so each is counted: a burst of probes cannot push a
+    /// master past the server's `MaxSessions`. A probe never opens a master.
+    #[test]
+    #[cfg(unix)]
+    fn probes_are_counted_on_the_shard_they_join_without_opening_it() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(2);
+        let ssh = plain_target("probe-host");
+        let masters = FakeMasters::default();
+
+        let session = ledger.lease(&ssh, dir.path(), &masters).expect("session");
+        let probe = ledger.lease_probe(&ssh, dir.path());
+        assert_eq!(leases_per_shard(&ledger, &ssh), [2]);
+        let second_probe = ledger.lease_probe(&ssh, dir.path());
+        assert_eq!(
+            [&session, &probe, &second_probe].map(shard_of),
+            ["0", "0", "1"].map(str::to_owned)
+        );
+        assert_eq!(masters.openers(), 1, "a probe never opens a master");
+
+        let mut args = Vec::new();
+        push_session_args(&mut args, &probe);
+        assert!(
+            !args.contains(&"ProxyCommand=false".to_owned()),
+            "a probe may connect directly when its master is down: {args:?}"
+        );
+        drop(probe);
+        drop(second_probe);
+        assert_eq!(leases_per_shard(&ledger, &ssh), [1, 0]);
+        let next = ledger.lease(&ssh, dir.path(), &masters).expect("next");
+        assert_eq!(shard_of(&next), "0");
+    }
+
     #[test]
     #[cfg(unix)]
     fn separate_connections_are_counted_separately() {
@@ -2198,6 +2390,68 @@ mod tests {
         masters.refuse_open.set(None);
         let lease = ledger.lease(&ssh, dir.path(), &masters).expect("opens");
         assert_eq!(shard_of(&lease), "0");
+    }
+
+    /// A stand-in for `ssh` shared by two threads that play two daemon
+    /// processes (the old and new daemon during a restart). An opener takes a
+    /// while to authenticate; if the socket is bound when it finishes, real
+    /// `ssh` prints "already exists, disabling multiplexing" and keeps a plain
+    /// background connection that nothing will ever close.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct RacingMasters {
+        bound: Mutex<BTreeSet<String>>,
+        masters: AtomicUsize,
+        orphans: AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl CommandExecutor for RacingMasters {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let socket = FakeMasters::socket(command);
+            let status = if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
+                if self.bound.lock().unwrap().contains(&socket) {
+                    0
+                } else {
+                    255
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+                if self.bound.lock().unwrap().insert(socket) {
+                    self.masters.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.orphans.fetch_add(1, Ordering::SeqCst);
+                }
+                0
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    /// Two daemon processes that lease on the same instance's sockets at
+    /// once (J-18) must open one master between them, not one master and one
+    /// orphaned plain connection.
+    #[test]
+    #[cfg(unix)]
+    fn two_processes_opening_one_socket_open_one_master() {
+        let dir = sharing_socket_dir();
+        let ssh = plain_target("racing-host");
+        let fake = RacingMasters::default();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    // Each process has its own ledger.
+                    let ledger = SessionLedger::new(8);
+                    ledger.lease(&ssh, dir.path(), &fake).expect("lease");
+                });
+            }
+        });
+        assert_eq!(fake.masters.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.orphans.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2319,6 +2573,32 @@ mod tests {
             assert!(args.is_empty());
         }
         assert_eq!(masters.commands(), 0);
+    }
+
+    /// A session refused on a live shared connection is told apart from a
+    /// connection dropped before authentication, even though a session bound
+    /// with `ProxyCommand=false` prints a closed connection after the refusal.
+    #[test]
+    fn a_refused_session_is_named_apart_from_a_pre_authentication_hangup() {
+        assert_eq!(
+            ssh_refusal(
+                255,
+                "mux_client_request_session: session request failed: Session open refused by peer\n\
+                 kex_exchange_identification: Connection closed by remote host\n\
+                 Connection closed by UNKNOWN port 65535"
+            ),
+            Some(SshRefusal::SessionLimit)
+        );
+        assert_eq!(
+            ssh_refusal(255, "Connection closed by 192.168.1.77 port 22"),
+            Some(SshRefusal::BeforeAuthentication)
+        );
+        assert_eq!(ssh_refusal(1, "Session open refused by peer"), None);
+        assert!(
+            !SshRefusal::SessionLimit
+                .retry_message()
+                .contains("before authentication")
+        );
     }
 
     #[test]

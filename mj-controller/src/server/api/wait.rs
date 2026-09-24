@@ -108,6 +108,8 @@ pub(super) async fn wait(
                     turn_number: None,
                     elapsed_ms: None,
                     capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    server_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    retry_assessment_pending: observation.retry_assessment_pending,
                     quota_recovery: observation.quota_recovery.clone(),
                     relay,
                     session: ApiSession::from(session),
@@ -156,6 +158,7 @@ pub(super) fn build_observation(
             .filter(|error| mj_core::state::is_public_lifecycle_error(error))
             .filter(|_| session.operation.is_none())
             .cloned(),
+        cannot_take_prompt: !session.capabilities.prompt,
         launch_failed: snapshot
             .launch_failures
             .iter()
@@ -192,6 +195,7 @@ pub(super) fn build_observation(
         observation
             .capacity_retry
             .clone_from(&snapshot.operational.capacity_retry);
+        observation.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
         observation.quota_recovery = snapshot
             .operational
             .continuation
@@ -235,6 +239,14 @@ pub(super) async fn finish_wait(
         .as_ref()
         .and_then(|turn| turn.diagnostic.clone());
     session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
+    // The published view is a step behind the live actor the decision was
+    // read from, so a wait that ended with the turn could report the session
+    // as still running (F-12). The live execution state is the newer fact.
+    if observation.execution == MaterializedExecutionState::Idle
+        && session.chat_phase == crate::server::ViewerChatPhase::Running
+    {
+        session.chat_phase = crate::server::ViewerChatPhase::Idle;
+    }
     let summary = match decision.turn {
         Some(turn) => Some(backend.turn_summary(session_id.to_owned(), turn).await?),
         None => None,
@@ -277,6 +289,11 @@ pub(super) async fn finish_wait(
             .capacity_retry
             .as_ref()
             .map(WaitCapacityRetry::from),
+        server_retry: observation
+            .capacity_retry
+            .as_ref()
+            .map(WaitCapacityRetry::from),
+        retry_assessment_pending: observation.retry_assessment_pending,
         relay,
         session,
     })

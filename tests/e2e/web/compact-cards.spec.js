@@ -70,6 +70,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     available_commands: [],
     subagent_session_ids: options.subagentSessionIds || [],
     subagent_parent_id: options.subagentParentId,
+    managed_checkout_kind: options.managedCheckoutKind ?? null,
     capabilities,
   };
 }
@@ -920,7 +921,7 @@ test('suspension remains pending after acceptance and exposes failure after reco
   page.once('dialog', dialog => dialog.accept());
   await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
   await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true });
+  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true, acknowledge_unpublished_work: true });
   await expect(current.locator('.session-activity')).toHaveText('Suspending…');
   await current.locator('button[aria-label^="Actions for"]').click();
   await expect(current.getByRole('menuitem', { name: 'Suspend session…' })).toBeDisabled();
@@ -934,7 +935,7 @@ test('suspension remains pending after acceptance and exposes failure after reco
 });
 
 test('destroy is separately confirmed and defaults to keeping the branch', async ({ page }) => {
-  const state = await mount(page, [session('destroy-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
+  const state = await mount(page, [session('destroy-me', 'project', 'Project', { managedCheckoutKind: 'worktree', capabilities: { suspend: true, destroy: true } })]);
   const current = card(page, 'destroy-me');
   await current.locator('button[aria-label^="Actions for"]').click();
   await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
@@ -955,7 +956,7 @@ test('destroy is separately confirmed and defaults to keeping the branch', async
 });
 
 test('destroying retained history offers explicit branch deletion', async ({ page }) => {
-  const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
+  const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', managedCheckoutKind: 'worktree', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
   await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}/resume/retained`);
   await page.getByRole('button', { name: 'Destroy session…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Destroy session' });
@@ -986,3 +987,52 @@ for (const queued of [0, 1]) {
     expect(state.actions[0]).toEqual({ action: 'interrupt-turn', session_id: 'old-worker' });
   });
 }
+
+test('earlier messages page backwards, retry errors, and preserve the live draft', async ({ page }) => {
+  await mount(page, [session('history', 'alpha', 'Alpha', { capabilities: { prompt: true } })]);
+  const queries = [];
+  await page.route('**/api/v1/sessions/history/history*', async route => {
+    const query = new URL(route.request().url()).search;
+    queries.push(query);
+    if (queries.length === 2) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'History temporarily unavailable' }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(queries.length === 1 ? {
+      items: [{ role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
+    } : { items: [{ role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
+  });
+  await card(page, 'history').click();
+  await page.locator('#prompt-text').fill('Keep my draft');
+  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
+  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
+  await expect(reader).toContainText('Recent stored request');
+  await reader.getByRole('button', { name: 'Load earlier page' }).click();
+  await expect(reader.getByRole('status')).toContainText('History temporarily unavailable');
+  await reader.getByRole('button', { name: 'Retry' }).click();
+  await expect(reader).toContainText('First stored answer');
+  await expect(reader).not.toContainText('Recent stored request');
+  await expect(reader).toContainText('Beginning of conversation');
+  expect(queries).toEqual(['', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
+  await reader.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(reader).toHaveCount(0);
+  await expect(page.locator('#prompt-text')).toHaveText('Keep my draft');
+});
+
+test('earlier messages can be dismissed while loading', async ({ page }) => {
+  await mount(page, [session('history', 'alpha', 'Alpha')]);
+  let release;
+  let entered = false;
+  await page.route('**/api/v1/sessions/history/history*', async route => {
+    entered = true;
+    await new Promise(resolve => { release = resolve; });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [{role: 'agent', text: 'Late answer'}], before: null, frontier: 1 }) });
+  });
+  await card(page, 'history').click();
+  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
+  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
+  await expect(reader.getByRole('status')).toContainText('Loading');
+  await expect.poll(() => entered).toBe(true);
+  await reader.press('Escape');
+  await expect(reader).toHaveCount(0);
+  release();
+  await renderAfterFrame(page);
+  await expect(page.getByText('Late answer', { exact: true })).toHaveCount(0);
+});

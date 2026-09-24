@@ -22,6 +22,8 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::CommandQueued { .. }
         | RelayObservation::CommandStarted { .. }
         | RelayObservation::CommandCompleted { .. }
+        | RelayObservation::RetryAssessmentStarted { .. }
+        | RelayObservation::RetryAssessmentResolved { .. }
         | RelayObservation::CommandRejected { .. }
         | RelayObservation::CommandInterrupted { .. }
         | RelayObservation::ConfigurationUpdated { .. }
@@ -191,6 +193,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.quota_suppressed = true;
                 }
             }
+            if cancels_capacity_retry(command)
+                || matches!(
+                    command,
+                    RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ClearContext
+                        | RelayCommand::BeginCheckpoint { .. }
+                )
+            {
+                snapshot.retry_assessment = None;
+            }
             if cancels_capacity_retry(command) {
                 if let Some(retry) = snapshot.capacity_retry.as_mut()
                     && retry.command_id == *command_id
@@ -357,24 +369,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 {
                     snapshot.continuation.suppressed = true;
                 }
-                let accepted = snapshot.handled_commands[command_id].accepted_ordinal;
-                let superseded = snapshot.handled_commands.values().any(|handled| {
-                    handled.accepted_ordinal > accepted && cancels_capacity_retry(&handled.command)
-                });
-                let attempt = snapshot
-                    .capacity_retry
+                if snapshot
+                    .retry_assessment
                     .as_ref()
-                    .filter(|retry| retry.command_id == *command_id)
-                    .map_or(1, |retry| retry.attempt.saturating_add(1));
-                snapshot.capacity_retry = if stop_reason == CAPACITY_STOP_REASON && !superseded {
-                    Some(CapacityRetry::new(
-                        attempt,
-                        event.ordinal,
-                        event.recorded_at_ms,
-                    ))
-                } else {
-                    None
-                };
+                    .is_none_or(|assessment| assessment.command_id != *command_id)
+                {
+                    snapshot.capacity_retry = None;
+                }
             }
             match (command, outcome) {
                 (
@@ -648,6 +649,59 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
             }
         }
+        RelayObservation::RetryAssessmentStarted {
+            command_id,
+            evidence,
+        } => {
+            let handled = snapshot
+                .handled_commands
+                .get(command_id)
+                .ok_or_else(|| anyhow!("retry assessment for unknown command {command_id}"))?;
+            if !matches!(
+                handled.command,
+                RelayCommand::Prompt { .. }
+                    | RelayCommand::ContinueAuthorizedWork { .. }
+                    | RelayCommand::ResumeAfterQuota { .. }
+            ) {
+                bail!("retry assessment requires a prompt command");
+            }
+            let superseded = snapshot.handled_commands.values().any(|other| {
+                other.accepted_ordinal > handled.accepted_ordinal
+                    && cancels_capacity_retry(&other.command)
+            });
+            if !superseded {
+                snapshot.retry_assessment = Some(RetryAssessment {
+                    command_id: command_id.clone(),
+                    ordinal: event.ordinal,
+                    evidence: (**evidence).clone(),
+                });
+            }
+        }
+        RelayObservation::RetryAssessmentResolved {
+            command_id,
+            assessment_ordinal,
+            retryable,
+        } => {
+            if snapshot.retry_assessment.as_ref().is_some_and(|pending| {
+                pending.command_id == *command_id && pending.ordinal == *assessment_ordinal
+            }) {
+                snapshot.retry_assessment = None;
+                if *retryable {
+                    let attempt = snapshot
+                        .capacity_retry
+                        .as_ref()
+                        .filter(|retry| retry.command_id == *command_id)
+                        .map_or(1, |retry| retry.attempt.saturating_add(1));
+                    snapshot.capacity_retry = Some(CapacityRetry::new(
+                        attempt,
+                        event.ordinal,
+                        event.recorded_at_ms,
+                    ));
+                } else {
+                    snapshot.capacity_retry = None;
+                }
+            }
+        }
         RelayObservation::CommandRejected {
             command_id,
             command: observed_command,
@@ -658,6 +712,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command: observed_command,
             message,
         } => {
+            if snapshot
+                .retry_assessment
+                .as_ref()
+                .is_some_and(|pending| pending.command_id == *command_id)
+            {
+                snapshot.retry_assessment = None;
+            }
             let state = if matches!(event.observation, RelayObservation::CommandRejected { .. }) {
                 RelayDispatchState::Rejected
             } else {
@@ -851,11 +912,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::Closing => {
+            snapshot.retry_assessment = None;
             snapshot.capacity_retry = None;
             snapshot.harness_turn = None;
             snapshot.execution = RelayExecutionState::Closing;
         }
         RelayObservation::Closed => {
+            snapshot.retry_assessment = None;
             snapshot.capacity_retry = None;
             snapshot.activity_turn_started_at_ms = None;
             snapshot.harness_turn = None;

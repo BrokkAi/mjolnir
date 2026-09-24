@@ -75,7 +75,8 @@ fn group(id: CommandId) -> &'static str {
         | CloseWorkspace => GROUPS[1],
         OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
         | ContainerSettings | MoveSession | DestroySession | MarkAllRead | FilterSessions
-        | NextAttention | PreviousAttention | CancelOperation | ToggleProject => GROUPS[2],
+        | NextAttention | PreviousAttention | CancelOperation | ToggleProject | OpenSubagents
+        | SessionActions | InterruptTurn => GROUPS[2],
         PinSession
         | UnpinSession
         | OpenSessionSplitRight
@@ -115,8 +116,9 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ),
     ("Shift-Enter / Alt-Enter", "start a new line"),
     ("Tab", "accept a completion, or move to the next pane"),
-    ("Esc", "cancel the running turn or shell command"),
+    ("Esc", "interrupt the running turn or shell command"),
     ("PgUp / PgDn", "scroll the transcript"),
+    ("Ctrl+PgUp", "browse earlier conversation pages"),
     (
         "Up / Down",
         "walk prompt history, or move within the prompt",
@@ -179,15 +181,21 @@ fn entries(dashboard: &DashboardState) -> Vec<HelpEntry> {
     entries
 }
 
+/// A row matches when the whole query appears in one field (so a chord such
+/// as "ctrl+b q" still matches its key column), or when every word of the
+/// query appears somewhere in the row, in any order.
 fn literal(entry: &HelpEntry, needle: &str) -> bool {
-    [
+    let fields = [
         &entry.keys,
         &entry.text.label,
         &entry.text.description,
         &entry.text.category,
     ]
-    .iter()
-    .any(|field| field.to_lowercase().contains(needle))
+    .map(|field| field.to_lowercase());
+    fields.iter().any(|field| field.contains(needle))
+        || needle
+            .split_whitespace()
+            .all(|word| fields.iter().any(|field| field.contains(word)))
 }
 
 impl DashboardState {
@@ -485,23 +493,40 @@ fn entry_lines(entry: &HelpEntry, width: usize, related: bool) -> Vec<Line<'stat
         lines
     };
     let reason = match entry.availability {
-        Availability::Ready => "",
-        Availability::Hidden => "Not available here.",
-        Availability::Blocked(reason) => reason,
+        Availability::Ready => None,
+        Availability::Hidden => Some("Not available here.".to_owned()),
+        Availability::Blocked(reason) => Some(sentence(reason)),
     };
-    let description = [&*entry.text.description, reason]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let description = &entry.text.description;
+    let mut spans = Vec::new();
     if !description.is_empty() {
-        lines.extend(wrap_styled_line(
-            Line::styled(format!("    {description}"), theme::muted()),
-            width,
-            4,
+        spans.push(Span::styled(format!("    {description}"), theme::muted()));
+    }
+    if let Some(reason) = reason {
+        let separator = if spans.is_empty() { "    " } else { " — " };
+        spans.push(Span::styled(
+            format!("{separator}{reason}"),
+            theme::muted().add_modifier(Modifier::DIM),
         ));
     }
+    if !spans.is_empty() {
+        lines.extend(wrap_styled_line(Line::from(spans), width, 4));
+    }
     lines
+}
+
+/// Availability reasons are written as fragments for other surfaces; in
+/// help each one stands as its own capitalised sentence.
+pub(crate) fn sentence(reason: &str) -> String {
+    let mut chars = reason.chars();
+    let mut text: String = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !text.is_empty() && !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
 }
 
 fn help_lines(
@@ -584,7 +609,7 @@ pub(crate) fn render_help(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let prefix = format!(
-        "prefix: {}   (edit [keys] in config.toml)",
+        "prefix: {}   (change it in Setup → Interface)",
         dashboard.keybinds().prefix_label()
     );
     let header = wrap_styled_line(
@@ -658,7 +683,7 @@ pub(crate) fn render_help(
         format!("{count} text matches · Searching related shortcuts…")
     } else if needle.is_empty() {
         format!(
-            "{} shortcuts · / search by key, name, or intent",
+            "{} shortcuts · Type to search by key, name, or intent",
             catalog.len()
         )
     } else {
@@ -730,8 +755,16 @@ mod tests {
         // The overlay leads with the prefix, because every chord below it is
         // meaningless to a reader who does not know which key starts one.
         assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
+        // Launch campaign finding A-2: the prefix is set in Setup now, and
+        // the filter is focused on open, so neither line may send the
+        // reader to config.toml or to a `/` key.
         assert!(
-            rendered.contains("(edit [keys] in config.toml)"),
+            rendered.contains("(change it in Setup → Interface)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("config.toml"), "{rendered}");
+        assert!(
+            rendered.contains("shortcuts · Type to search by key, name, or intent"),
             "{rendered}"
         );
         // The palette is a command like any other, so the reference names it
@@ -1051,6 +1084,51 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("No matching shortcuts"), "{rendered}");
+    }
+
+    /// Launch campaign finding A-1: a query of several words matches a row
+    /// when each word appears somewhere in it, in any order, so "split pane"
+    /// finds "Split right" in the Panes group even offline.
+    #[test]
+    fn help_filter_matches_each_word_anywhere_in_the_row() {
+        let mut dashboard = dashboard_with_session(running_session());
+        for query in ["split pane", "panes split"] {
+            filter(&mut dashboard, query);
+            let id = dashboard.help_search_generation().unwrap();
+            dashboard.apply_help_search_result(id, Err("offline".into()));
+            let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+            assert!(rendered.contains("Split right"), "{query}: {rendered}");
+            assert!(!rendered.contains("No matching shortcuts"), "{rendered}");
+            assert!(!rendered.contains("Command palette"), "{rendered}");
+        }
+    }
+
+    /// Launch campaign finding A-3: an unavailability reason is its own
+    /// clause, set off from the description and capitalised, the same way
+    /// "Not available here." reads.
+    #[test]
+    fn help_rows_set_unavailability_reasons_apart_from_the_description() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        filter(&mut dashboard, "unpin session");
+        let rendered = drawn(&mut dashboard, 200, 40).join("\n");
+        assert!(
+            rendered.contains(
+                "Leave this pane empty without stopping its session. — This session is not pinned."
+            ),
+            "{rendered}"
+        );
+        let catalog = entries(&dashboard);
+        let unpin = catalog
+            .iter()
+            .find(|entry| entry.text.label == "Unpin session")
+            .unwrap();
+        let reason = entry_lines(unpin, 200, false)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .find(|span| span.content.contains("This session is not pinned"))
+            .expect("the reason span");
+        assert!(reason.style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

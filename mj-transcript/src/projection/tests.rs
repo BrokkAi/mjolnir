@@ -535,6 +535,50 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
 }
 
+/// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
+/// reader can tell a cut-off reply from a finished one. A finished turn gets
+/// no such row.
+#[test]
+fn a_cancelled_turn_ends_with_an_interrupted_row() {
+    for (stop_reason, marked) in [("cancelled", true), ("end_turn", false)] {
+        let mut session = MaterializedSession::empty("session");
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: "prompt".into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("write a story")],
+                },
+                created_at_ms: 10,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandStarted {
+                command_id: "prompt".into(),
+                started_at_ms: 20,
+            },
+        );
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandCompleted {
+                command_id: "prompt".into(),
+                outcome: RelayCommandOutcome::Prompt {
+                    stop_reason: stop_reason.into(),
+                    usage: None,
+                    diagnostic: None,
+                },
+            },
+        );
+        let last = session.transcript.last().expect("a transcript row");
+        let is_marker = matches!(
+            &last.body,
+            TranscriptBody::System { text } if text == crate::transcript::TURN_INTERRUPTED_TEXT
+        );
+        assert_eq!(is_marker, marked, "{stop_reason}: {:?}", session.transcript);
+    }
+}
+
 #[test]
 fn session_restarts_project_as_distinct_durable_system_lines() {
     let mut session = MaterializedSession::empty("session");
@@ -2021,6 +2065,28 @@ fn rejected_close_rolls_closing_projection_back_to_idle() {
 }
 
 #[test]
+fn a_rejected_command_notice_does_not_show_the_command_id() {
+    let mut session = MaterializedSession::empty("session-1");
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            command_id: "set-config-0123abcd".into(),
+            command: RelayCommandKind::SetConfig,
+            message: "\"gpt-9\" is not an available model value".into(),
+        },
+    );
+    let notices = session
+        .transcript
+        .iter()
+        .filter_map(|item| match &item.body {
+            TranscriptBody::System { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices, ["\"gpt-9\" is not an available model value"]);
+}
+
+#[test]
 fn control_command_outcomes_do_not_end_an_active_prompt() {
     let mut session = MaterializedSession::empty("session-1");
     session.applied_event_ordinal = 2;
@@ -2479,4 +2545,126 @@ fn classifier_notice_is_shown_without_warning_prefix() {
     assert!(
         matches!(&session.transcript[0].body, TranscriptBody::System { text } if text == message)
     );
+}
+
+#[test]
+fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_history() {
+    use agent_client_protocol::schema::v1::ToolCallStatus;
+    let mut full = MaterializedSession::empty("window-stream");
+    // Multiple settled turns, with enough text to exceed a pipe buffer too.
+    for turn in 0..12 {
+        let command_id = format!("prompt-{turn}");
+        apply_observation(
+            &mut full,
+            RelayObservation::CommandQueued {
+                command_id: command_id.clone(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("continue")],
+                },
+                created_at_ms: 0,
+            },
+        );
+        apply_observation(
+            &mut full,
+            RelayObservation::CommandStarted {
+                command_id,
+                started_at_ms: 0,
+            },
+        );
+        for _ in 0..100 {
+            apply_observation(
+                &mut full,
+                RelayObservation::Notice {
+                    message: "recorded context ".repeat(20),
+                },
+            );
+        }
+    }
+    apply_observation(
+        &mut full,
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCall(
+                ToolCall::new("current-tool", "read file").status(ToolCallStatus::InProgress),
+            )),
+        },
+    );
+    apply_observation(&mut full, untagged_agent_chunk("first "));
+    let mut live = full.clone();
+    let mut window = mj_core::state::ProjectionWindow::of(&live);
+    window.trim(&mut live, 1024);
+    assert!(window.omitted_items > 0);
+    assert!(live.transcript.len() < full.transcript.len());
+    for observation in [
+        untagged_agent_chunk("second"),
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "current-tool",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            ))),
+        },
+    ] {
+        let next = event(&full, observation);
+        apply(&mut full, next.clone());
+        apply(&mut live, next);
+        window.trim(&mut live, 1024);
+        for item in &live.transcript {
+            let durable = full
+                .transcript
+                .iter()
+                .find(|candidate| candidate.stable_id == item.stable_id)
+                .unwrap();
+            assert_eq!(item, durable);
+        }
+        assert_eq!(
+            live.transcript.len() + window.omitted_items,
+            full.transcript.len()
+        );
+    }
+    let TranscriptBody::Agent { chunks, .. } = &live.transcript.last().unwrap().body else {
+        panic!("agent stream")
+    };
+    assert_eq!(
+        crate::transcript::materialized_chunks_text(chunks),
+        "first second"
+    );
+    let tool = live
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == "tool:current-tool")
+        .unwrap();
+    let TranscriptBody::Tool { call, .. } = &tool.body else {
+        panic!("tool")
+    };
+    assert_eq!(call["status"], "completed");
+}
+
+#[test]
+fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
+    let mut session = MaterializedSession::empty("session");
+    for command in [
+        mj_core::relay::RelayCommandKind::BeginCheckpoint,
+        mj_core::relay::RelayCommandKind::ReleaseCheckpoint,
+    ] {
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandInterrupted {
+                command_id: "worker-upgrade-0123abcd".into(),
+                command,
+                message: "relay restarted without the controller that owned the checkpoint barrier"
+                    .into(),
+            },
+        );
+    }
+    assert!(session.transcript.is_empty(), "{:?}", session.transcript);
+
+    // A person's own command still reports its failure.
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandRejected {
+            command_id: "clear".into(),
+            command: mj_core::relay::RelayCommandKind::ClearContext,
+            message: "busy".into(),
+        },
+    );
+    assert_eq!(session.transcript.len(), 1);
 }

@@ -157,6 +157,7 @@ async function request(url, options = {}) {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
   if (response.status === 401) {
+    await drainBody(response);
     // Authentication expired. Every route has to reach the login swap, not
     // only the snapshot refresh, or a phone sits on a dead page issuing
     // requests that will never succeed.
@@ -171,8 +172,19 @@ async function request(url, options = {}) {
     failure.status = response.status;
     throw failure;
   }
-  if (response.status === 202 || response.status === 204) return null;
+  if (response.status === 202 || response.status === 204) {
+    await drainBody(response);
+    return null;
+  }
   return response.json();
+}
+
+/// Read a response body nobody needs to its end. Chromium reports a fetch
+/// whose body is left unread as `net::ERR_ABORTED` once the response is
+/// dropped, although the server completed it; cancelling the body would
+/// abort it outright.
+async function drainBody(response) {
+  await response.arrayBuffer().catch(() => {});
 }
 
 /// Upload one image as raw bytes. JSON action requests have a deliberately
@@ -501,6 +513,9 @@ let openSessionMenuTrigger = null;
 let suppressedSessionClickId = null;
 let activeSessionPress = null;
 let snapshotReceivedAtMs = 0;
+/// Set while the login form is up because the server refused this browser,
+/// so waking the page does not send protected requests that can only fail.
+let signedOut = false;
 let dashboardOrderSeeded = false;
 
 function reconcileChildren(parent, desired) {
@@ -796,6 +811,70 @@ async function openNativeHistory(owner, agent) {
   await load();
 }
 
+document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
+
+function openConversationHistory(sessionId) {
+  if (!sessionId) return;
+  const generation = conversationGeneration;
+  const modal = el('dialog', 'native-agent-history');
+  modal.setAttribute('aria-label', 'Earlier messages');
+  const close = button('Close');
+  const earlier = button('Load earlier page');
+  const status = el('p'); status.setAttribute('role', 'status');
+  const content = el('div');
+  modal.append(el('h2', '', 'Earlier messages'), close, earlier, status, content);
+  document.body.append(modal);
+  const controller = new AbortController();
+  let before = null;
+  let loading = false;
+  const navigationChanged = () => modal.close();
+  close.onclick = () => modal.close();
+  modal.addEventListener('close', () => {
+    controller.abort();
+    window.removeEventListener('hashchange', navigationChanged);
+    modal.remove();
+  }, { once: true });
+  window.addEventListener('hashchange', navigationChanged);
+  modal.showModal();
+  async function load() {
+    if (loading) return;
+    loading = true; earlier.disabled = true; status.textContent = 'Loading earlier messages…';
+    try {
+      const query = new URLSearchParams();
+      if (before) {
+        query.set('before_position', String(before.position));
+        query.set('before_id', before.stable_id);
+      }
+      const suffix = query.size ? `?${query}` : '';
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/history${suffix}`, {
+        signal: controller.signal,
+      });
+      if (!modal.open || currentSession !== sessionId || conversationGeneration !== generation) {
+        if (modal.open) modal.close();
+        return;
+      }
+      content.replaceChildren(...page.items.map(item => {
+        const row = el('section'); row.append(el('h3', '', item.role), renderMarkdown(item.text)); return row;
+      }));
+      before = page.before;
+      earlier.textContent = 'Load earlier page';
+      earlier.hidden = !before;
+      status.textContent = before ? 'Showing an earlier page.' : 'Beginning of conversation.';
+      if (!page.items.length) status.textContent = 'No recorded messages.';
+      modal.scrollTop = 0;
+    } catch (error) {
+      if (modal.open && !controller.signal.aborted) {
+        status.textContent = `Could not load earlier messages: ${error.message}`;
+        earlier.textContent = 'Retry';
+      }
+    } finally {
+      loading = false; earlier.disabled = false;
+    }
+  }
+  earlier.onclick = load;
+  void load();
+}
+
 /// One session row.
 ///
 /// Every control here appears because a capability the daemon published says
@@ -1007,8 +1086,9 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   }
   if (session.capacity_retry) {
     const seconds = Math.max(0, Math.ceil((session.capacity_retry.retry_at_ms - now) / 1000));
-    return `Model at capacity · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+    return `Provider unavailable · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
   }
+  if (session.retry_assessment_pending) return 'Checking response';
   const details = session.activity_details || {};
   const kind = details.kind;
   const turnStarted = epochMs(details.turn_started_at_ms);
@@ -1405,7 +1485,7 @@ function renderNewForm() {
     }
     case 'project': {
       if (targetIsBare(newDraft.targetId)) {
-        body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create a managed worktree before launching.'));
+        body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create an isolated clone before launching.'));
         const recents = snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories || [];
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
@@ -1525,10 +1605,10 @@ function renderNewForm() {
         newDraft.createManagedWorktree = checkbox.checked;
         renderNewForm();
       };
-      worktree.append(checkbox, document.createTextNode('Create managed worktree'));
+      worktree.append(checkbox, document.createTextNode('Create isolated checkout'));
       body.append(worktree, el('p', 'dim', !targetIsBare(newDraft.targetId)
         ? 'The target provides its own isolated workspace.'
-        : checkbox.checked ? 'Create a separate session-owned checkout from the selected checkout’s HEAD.'
+        : checkbox.checked ? 'Create a separate session-owned clone on the selected or default branch.'
           : 'Use the selected directory directly.'));
       if (subagentChoiceApplies()) {
         const subagents = el('label', 'field-inline');
@@ -1973,8 +2053,10 @@ function resumeRow(session) {
   const row = button('', 'resume-session-row session', { resumeSession: session.id });
   row.type = 'button';
   row.dataset.sessionId = session.id;
+  const publicationMarker = session.publication_state === 'unpublished' ? '↑ '
+    : session.publication_state === 'unknown' ? '? ' : '';
   row.append(
-    el('span', 'resume-session-title', session.title || session.id),
+    el('span', 'resume-session-title', publicationMarker + (session.title || session.id)),
     el('span', 'resume-session-meta', [
       session.display_location || session.project_label || session.target_id || '',
       session.profile_id || '',
@@ -1982,7 +2064,7 @@ function resumeRow(session) {
     el('span', 'resume-session-recent', resumeRecencyLabel(session)),
     el('span', 'resume-session-snippet hidden'),
   );
-  row.setAttribute('aria-label', `Resume ${session.title || session.id}`);
+  row.setAttribute('aria-label', `Resume ${session.title || session.id}${publicationMarker ? `, ${session.publication_state} publication status` : ''}`);
   row.onclick = () => {
     const state = resumeListState(session.workspace_id);
     state.focusSessionId = session.id;
@@ -3285,6 +3367,7 @@ function startEvents() {
 }
 
 function showLogin() {
+  signedOut = true;
   cancelVoiceInput();
   snapshot = undefined;
   currentSession = null;
@@ -3340,8 +3423,10 @@ function confirmSessionDestruction(session) {
     const branch = el('input');
     branch.type = 'checkbox';
     branch.checked = false;
-    label.append(branch, document.createTextNode(' Also delete the managed branch'));
-    dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
+    if (session.managed_checkout_kind === 'worktree') {
+      label.append(branch, document.createTextNode(' Also delete the managed branch'));
+      dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
+    }
     const controls = el('div', 'row');
     const cancel = button('Cancel', 'secondary');
     const destroy = button('Destroy session', 'danger');
@@ -3360,6 +3445,7 @@ function confirmSessionDestruction(session) {
 async function refresh() {
   try {
     snapshot = await request('/api/snapshot');
+    signedOut = false;
     snapshotReceivedAtMs = Date.now();
     reconcileLifecycleActions();
     seedDashboardOrders(snapshot);
@@ -3392,12 +3478,32 @@ async function refresh() {
   }
 }
 
+/// True only when the server says this browser is signed out. Asking first
+/// keeps a signed-out load from sending a protected request that the browser
+/// logs as a failed 401. Any other answer, including a server without the
+/// route, falls through to the snapshot request, which still reaches the
+/// login form on a 401.
+async function knownSignedOut() {
+  try {
+    const response = await upgradeAwareFetch('/auth/session', { cache: 'no-store' });
+    if (!response.ok) return false;
+    const body = await response.json();
+    return body?.signed_in === false;
+  } catch {
+    return false;
+  }
+}
+
 /// Load the snapshot first, then honour the URL.
 ///
 /// A protected route must stay a login page while the snapshot request is
 /// unauthorized: rendering it first would dereference a snapshot that is not
 /// there.
 async function restoreRoute() {
+  if (await knownSignedOut()) {
+    showLogin();
+    return;
+  }
   if (!(await refresh())) return;
   applyRoute();
 }
@@ -5940,6 +6046,7 @@ async function runSessionAction(dataset, errorNode, extra) {
       .map(id => snapshot.sessions.find(item => item.id === id))
       .filter(child => child && ['live', 'starting', 'suspending'].includes(child.lifecycle));
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
+      + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
       + (activeChildren.length ? `\n\nThis also suspends ${activeChildren.length} active sub-agent(s) first.` : '');
     if (!confirm(question)) return false;
@@ -5980,7 +6087,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (lifecycle) {
       await request(`/api/v1/sessions/${dataset.id}/${dataset.action}`, {
         method: 'POST', body: JSON.stringify(dataset.action === 'suspend'
-          ? { acknowledge_active_subagents: true } : { delete_branch: extra.delete_branch }),
+          ? { acknowledge_active_subagents: true, acknowledge_unpublished_work: true } : { delete_branch: extra.delete_branch }),
       });
     } else {
       await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
@@ -6343,6 +6450,7 @@ function setConnection(next) {
 }
 
 function reconnect() {
+  if (signedOut) return;
   setConnection('reconnecting');
   startEvents();
   // A reconnect reconciles by full snapshot rather than assuming the deltas

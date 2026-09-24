@@ -14,25 +14,83 @@ checkpoint barrier, the recovery boundary — is right without further changes.
 
 ## The adapter contract
 
-Observed on `@agentclientprotocol/claude-agent-acp@0.73.0`, the version pinned
-at `src/hel_controller/worker_binary.rs` (`CLAUDE_AGENT_ACP_FALLBACK_VERSION`).
-It is **observed behaviour, not a documented protocol**, so Hel treats it as a
+Checked on `@agentclientprotocol/claude-agent-acp@0.81.0` with Claude Code
+2.1.280, the versions pinned in `mj-core/src/harness_runtime.rs`. It is
+**observed behaviour, not a documented protocol**, so Hel treats it as a
 per-harness contract and degrades to its previous behaviour wherever it is
 absent.
 
 - The adapter streams a cycle through ordinary `session/update` notifications.
-- It settles every SDK turn with a `usage_update` carrying `cost` and
-  `_meta["_claude/origin"] = { kind: ... }`. The observed kinds are `human` on
-  a turn a prompt drove and `task-notification` on a cycle the harness started
-  itself.
-- Hel treats **any** origin kind as a settle marker: the marker means an SDK
-  turn ended, whatever began it.
+- Claude Code ends every model cycle with one SDK `result` message. New and
+  resumed sessions ask for it through `_meta.claudeCode.emitRawSDKMessages`
+  (`{"type":"result"}`, beside the background-task level), and the adapter
+  forwards it as `_claude/sdkMessage` before it does anything else with it.
+  The result names its origin: `human` (or no origin, on older Claude Code)
+  for a cycle that answered the user, and `task-notification`, `peer`,
+  `coordinator`, `observer`, or `observer-activity` for a cycle Claude Code
+  started itself.
+- The adapter also sends a `usage_update` carrying `cost` and
+  `_meta["_claude/origin"] = { kind: ... }` after most results, but it leaves
+  that marker out when the cycle produced no assistant usage. Hel no longer
+  reads the marker as a turn boundary.
+- The adapter answers `session/prompt` when it decides the prompt is over, and
+  it holds that reply while background subagents the prompt started are still
+  running, and after a steer until Claude Code reports `idle`, which it does
+  only once all background work has drained. There is no option to turn the
+  hold off.
+
+## Where a prompt ends
+
+`mj-worker/src/acp/drive.rs` parses each result into
+`mj_core::acp::ClaudeTurnResult` (`mj-core/src/acp/claude_result.rs`), stamps
+it with its arrival position on the connection, and sends it as
+`RuntimeEvent::ClaudeTurnResult` on the same ordered stream as the session
+updates. The relay coordinator (`mj-worker/src/worker_runtime/unix/dispatch.rs`)
+therefore sees a result only after everything the adapter sent before it.
+
+When a prompt is in flight and `ClaudeTurnResult::prompt_stop_reason` gives a
+stop reason, the coordinator sends `CommandRequest::ReleasePrompt` to the
+prompt loop in `mj-worker/src/acp/session.rs`. The loop ends the prompt with
+that stop reason and the result's usage, unless a cancel is in flight, an
+approved plan is being handed to its continuation prompt, or the result
+arrived before the current `session/prompt` was sent. It then keeps the
+adapter's reply alive in a task owned by the connection and discards it when
+it comes: dropping the reply future would make the ACP crate send
+`$/cancel_request`, which the adapter treats as a cancel of the live turn. The
+loop, not the coordinator, emits `PromptFinished`, so a prompt completes once
+whichever of the result and the reply reaches it first.
+
+A result gives no stop reason, and the adapter's reply still ends the prompt,
+when:
+
+- its origin is not `human` (a background cycle);
+- `queued_turn_count` is above zero, meaning another user cycle follows, which
+  is how the cycle a steer interrupted ends;
+- it is an interruption report: `is_error` with an `[ede_diagnostic]` text
+  containing `result_type=user`, which Claude Code sends for a cycle that a
+  steer, a plan answer, or a cancel interrupted;
+- the cycle made no model call (`num_turns == 0`, a local command such as
+  `/context`) or, on a success, produced no output tokens (a replayed answer).
+  The adapter sends the text of such a cycle after the result and before its
+  reply, and never holds that reply;
+- it is a failure (`is_error`, other than `max_tokens`) or a sign-in failure.
+  The adapter fails the prompt at once, and its error carries what the
+  worker's failure handling and credential recovery read;
+- it is a refusal (`stop_reason: "refusal"`, the safety classifier blocked
+  the reply). The adapter sends the classifier's explanation as agent text
+  after the result and before its reply, so the reply ends the prompt with
+  that text inside the turn.
+
+The stop reason follows the adapter's own mapping (`max_tokens`, `end_turn`,
+`max_turn_requests`), spelled as the reply's is recorded (`MaxTokens`,
+`EndTurn`, `MaxTurnRequests`).
 
 ## What Hel records
 
-`HarnessTurnPolicy` (`src/hel_worker.rs`) selects this behaviour. The runtime
-sets it to `ClaudeAdapter` for `HarnessKind::Claude` right after
-`DurableRelay::open` (`src/hel_worker_runtime/unix.rs`); every other harness,
+`HarnessTurnPolicy` (`mj-worker/src/relay.rs`) selects this behaviour. The
+runtime sets it to `ClaudeAdapter` for `HarnessKind::Claude` right after
+`DurableRelay::open` (`mj-worker/src/worker_runtime/unix.rs`); Codex gets
+`CodexAdapter`, whose turns follow its native goal state; every other harness,
 and the reviewer's sidecar relay, stays `Disabled` and behaves exactly as it
 did before harness turns existed.
 
@@ -46,9 +104,11 @@ observations:
   `usage_update`, `user_message_chunk`, `available_commands_update`,
   `current_mode_update`, `config_option_update`, `session_info_update` — never
   opens a turn.
-- `harness_turn_settled { origin }`, appended **after** a `usage_update`
-  carrying the origin marker while a turn is open. `origin` is kept for
-  diagnostics only.
+- `harness_turn_settled { origin }`, appended by
+  `DurableRelay::claude_turn_result` when a result that the prompt loop was not
+  asked to take arrives while a turn is open. Any result settles the turn,
+  whatever started its cycle. `origin` is the result's origin (`human` when
+  absent) and is kept for diagnostics only.
 
 Both are transcript events on the ordinary journal, so a controller replaying
 the journal reaches the same state.
@@ -57,7 +117,7 @@ the journal reaches the same state.
 
 A harness turn ends on any of:
 
-1. the settle marker;
+1. a Claude Code result that does not end a prompt;
 2. a prompt terminal outcome — `CommandCompleted` for a prompt, or the active
    prompt being rejected or interrupted — because a prompt result means the SDK
    reached a turn boundary;
@@ -78,15 +138,16 @@ session was running.
 ## What downstream reads
 
 - The transcript gets one system line, `Agent continued on its own`, with the
-  stable id `harness-turn:{ordinal}` (`src/hel_transcript.rs`).
+  stable id `harness-turn:{ordinal}` (`mj-core/src/transcript.rs`).
 - That item is a **turn start**, alongside a user message
   (`TranscriptItem::is_turn_start`). The recovery boundary,
   `latest_completed_turn_ordinal`, and the scope of a plan update all key on the
   newest turn start, so autonomous work is covered by the next recovery copy
   and a plan produced in a cycle does not overwrite the previous turn's plan.
   Three implementations must agree: `ProjectionWindow::of`, the position-only
-  query `last_materialized_turn_start` in `src/hel_database.rs`, and the free
-  function `latest_completed_turn_ordinal` in `src/hel_state.rs`.
+  query `last_materialized_turn_start` in
+  `mj-controller/src/database/materialized.rs`, and the free function
+  `latest_completed_turn_ordinal` in `mj-core/src/state.rs`.
 - `RelayOperationalState` exposes `harness_turn` (open turns only) and
   `last_harness_turn_started_ordinal` (monotonic), so a checkpoint can tell
   whether a cycle began during its capture window.
@@ -94,13 +155,18 @@ session was running.
   for a prompt. A **prompt** does not wait: `promote_next_queued_command` gates
   on `active_prompt`, not on execution state, so a prompt typed mid-cycle
   dispatches at once and the adapter queues it.
+- Stop works during a Claude harness turn. The chat's Esc, the phone's
+  interrupt, `CancelTurn`, and the older `Cancel` all reach the adapter as
+  `session/cancel`, which interrupts the running cycle; that cycle's result
+  then settles the turn. A Codex turn of this kind is a native goal and keeps
+  its own controls, so the relay still refuses `Cancel` for it.
 
 ## Background work the agent leaves running
 
 `RelayOperationalState.background_commands` reports commands the agent started
 and then stopped waiting on, oldest first. Harness families produce that
 evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
-(set beside the harness-turn policy in `src/hel_worker_runtime/unix.rs`):
+(set beside the harness-turn policy in `mj-worker/src/worker_runtime/unix.rs`):
 
 - `HostedTerminals` (Kimi and other harnesses without a dedicated policy). Hel
   spawned the process, so `active_agent_terminals` is exact: an entry leaves the
@@ -108,9 +174,9 @@ evidence differently, and `BackgroundWorkPolicy` picks which one a relay reads
   while no prompt and no harness turn is open; until then it is the turn's own
   work.
 - `ClaudeTasks` (Claude). Includes hosted terminals plus the SDK's full live
-  background-task list. New and resumed Claude sessions opt into only the
-  `system/background_tasks_changed` raw SDK message through
-  `_meta.claudeCode.emitRawSDKMessages`. The adapter forwards it as
+  background-task list. New and resumed Claude sessions opt into the
+  `system/background_tasks_changed` raw SDK message (and the `result` message
+  described above) through `_meta.claudeCode.emitRawSDKMessages`. The adapter forwards it as
   `_claude/sdkMessage`; Hel excludes tasks marked `ambient` (SDK housekeeping),
   replaces its task map on each notification, and
   preserves the first observation time of IDs still present. An empty list
@@ -197,20 +263,29 @@ Validation on 2026-09-05 passed: `cargo fmt --all -- --check`, the full
 `cargo test --quiet` suite, and `cargo clippy --all-targets -- -D warnings`.
 
 Every surface renders the same three states from one pair of helpers in
-`src/usage_format.rs`: `format_activity_columns` for wide rows, the chat pane
+`mj-client/src/usage_format.rs`: `format_activity_columns` for wide rows, the chat pane
 title and the phone, and `format_activity_clock` for the minimized grid.
 Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
 
 ## Known limitations
 
-- **A stray chunk with no marker leaves the session Running.** An agent chunk
-  that arrives at idle and is never followed by a settling `usage_update` holds
-  the turn open until a prompt result or a restart clears it. That is visible in
-  the UI as a running session, and no recovery copies happen meanwhile — the
-  same exposure as a prompt that never returns. The one such chunk Hel
-  itself provokes, the `**Task stopped by user:** <name>.` acknowledgement of a
-  stop it requested, is paired with the pending stop and handled (see
-  `ClaudeTasks` above). Other unmarked chunks still hold the turn open.
+- **Agent output with no result after it leaves the session Running.** Every
+  model cycle ends with a result, so this now needs output that belongs to no
+  cycle. The one such chunk Hel itself provokes, the `**Task stopped by user:**
+  <name>.` acknowledgement of a stop it requested, is paired with the pending
+  stop and handled (see `ClaudeTasks` above).
+- **A steer that lands just as a cycle ends can run as a harness turn.** If
+  Claude Code finishes the cycle before it reads the steered message, the
+  result reports no queued user message and ends the prompt, and the steered
+  message then runs as a cycle of its own. It is recorded as a harness turn
+  rather than as part of the prompt. The echo that would identify it is not
+  forwarded by the adapter.
+- **Replies are still awaited in a few cases.** Where Hel leaves the end of a
+  prompt to the adapter's reply and the adapter holds that reply because
+  background subagents run, the prompt still waits for them: a "keep planning"
+  answer to a plan review, the planning part of a plan hand-off (the loop sends
+  the continuation prompt only after the planning reply), and any cycle on a
+  backend that omits token counts.
 - **Grok goal mode has no marker.** It streams a whole autonomous turn as
   trailing chunks after a prompt completes and never settles it, so it keeps
   today's behaviour: the policy stays `Disabled` and the projection's idle-time
@@ -223,9 +298,6 @@ Running clocks read `43m36s`, not `00:43:36` (`format_clock`).
   with an origin.
 - **Codex does not re-invoke itself** when a background process finishes
   (openai/codex#29865), so it needs no harness turn.
-- **Cancelling a self-started turn is not supported.** ACP `session/cancel` is
-  prompt-scoped, so the relay rejects `Cancel` while only a harness turn is
-  open, and says so.
 - **A periodic re-evaluation in the recovery coordinator is still missing.** It
   is event-driven, so a real failure on a session that then goes quiet is only
   retried at that session's next event.

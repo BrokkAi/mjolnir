@@ -370,6 +370,25 @@ impl Controller {
             bail!("session {session_id} is not provisioning");
         }
         let preparation = (|| {
+            let selected = self
+                .config
+                .targets
+                .get(&session.target_template_id)
+                .context("target template disappeared before provisioning")?;
+            let runtime = mj_core::state::TargetRuntimeSettings::from(selected);
+            if let Some(recorded) = &session.target_runtime {
+                ensure!(
+                    recorded == &runtime,
+                    "target access settings changed before provisioning; retry with the selected target"
+                );
+            } else {
+                self.state
+                    .sessions
+                    .get_mut(session_id)
+                    .unwrap()
+                    .target_runtime = Some(runtime);
+                self.persist_session_state(session_id)?;
+            }
             let template = self
                 .config
                 .targets

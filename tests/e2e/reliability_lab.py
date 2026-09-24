@@ -287,7 +287,15 @@ class Lab:
         self.scenario = scenario
         self.seed = seed
         self.repo_root = pathlib.Path(__file__).resolve().parents[2]
-        artifact_parent = self.repo_root / "target" / "reliability-artifacts"
+        # `target/` may be a managed build directory that the build cache
+        # evicts on its own schedule; a campaign that must keep its evidence
+        # points this at a directory outside it.
+        artifact_override = os.environ.get("MJ_RELIABILITY_ARTIFACTS")
+        artifact_parent = (
+            pathlib.Path(artifact_override).expanduser().resolve()
+            if artifact_override
+            else self.repo_root / "target" / "reliability-artifacts"
+        )
         artifact_parent.mkdir(parents=True, exist_ok=True)
         stamp = f"{scenario}-seed-{seed}-{os.getpid()}"
         self.root = artifact_parent / stamp
@@ -440,6 +448,22 @@ def send(payload):
     sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\\n")
     sys.stdout.flush()
 
+def report_execution(status, goal_cleared=False):
+    # The pinned adapter reports its execution state, and on a new or loaded
+    # session that no goal is set. Without both the worker cannot call a Codex
+    # session's goal state synchronized and defers every recovery checkpoint.
+    meta = {"execution": {"version": 1, "status": status}}
+    if goal_cleared:
+        meta["goal"] = None
+    send({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {"sessionUpdate": "session_info_update", "_meta": meta},
+        },
+    })
+
 def log(payload):
     with open(log_path, "a", encoding="utf-8") as output:
         output.write(json.dumps(payload, sort_keys=True) + "\\n")
@@ -511,6 +535,7 @@ for line in sys.stdin:
         memory_end = "</mj-project-memory>"
         if memory_end in text:
             text = text.rsplit(memory_end, 1)[1].strip()
+        report_execution("running")
         # Swallow this prompt: accept it, report a successful turn, and do
         # nothing it asked for. The banner variant is the shape issue #970
         # reported, where a bridge streams its own compaction progress into
@@ -529,6 +554,7 @@ for line in sys.stdin:
                             },
                         },
                     })
+            report_execution("idle")
             send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
             continue
         send({
@@ -561,7 +587,11 @@ for line in sys.stdin:
         continue
     else:
         result = {}
+    if method == "session/prompt":
+        report_execution("idle")
     send({"jsonrpc": "2.0", "id": ident, "result": result})
+    if method in ("session/new", "session/load"):
+        report_execution("idle", goal_cleared=True)
 """
         )
         bridge.chmod(0o700)
@@ -663,6 +693,20 @@ destination = "fixture"
 
 [targets.localhost]
 kind = "bare"
+
+# The standard local container targets exist whether or not the file names
+# them, and by default the daemon refreshes their image on startup. On a host
+# with an engine that is a real registry pull, and its notice replaces the
+# dashboard's footer. The lab never runs a container, so it never pulls.
+[targets.podman]
+kind = "podman"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+pull_policy = "never"
+
+[targets.docker]
+kind = "docker"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+pull_policy = "never"
 '''
         (self.config / "config.toml").write_text(config)
         self.record_action("prepared", port=port)
@@ -798,7 +842,13 @@ kind = "bare"
         helpers of its own behind — rootless Podman's pause process is one —
         and those keep the daemon's environment while belonging to the engine,
         not to this run. So ownership is decided by what a process runs: the
-        binary under test, or something under this run's runtime root.
+        binary under test with this run's environment, or something under this
+        run's runtime root.
+
+        The runtime root alone is enough for the second kind. A worker re-execs
+        itself with a cleared environment, so it no longer carries this run's
+        directories, yet it runs the copy staged under this run's data
+        directory and is exactly the process a worker crash hook names.
         """
         owned: list[tuple[int, str]] = []
         expected = {
@@ -810,9 +860,6 @@ kind = "bare"
             if not entry.name.isdigit() or int(entry.name) == os.getpid():
                 continue
             try:
-                environment = set((entry / "environ").read_bytes().split(b"\0"))
-                if not expected.issubset(environment):
-                    continue
                 command = (
                     (entry / "cmdline")
                     .read_bytes()
@@ -820,16 +867,15 @@ kind = "bare"
                     .replace("\0", " ")
                     .strip()
                 )
+                executable = ""
+                with contextlib.suppress(OSError):
+                    executable = os.readlink(entry / "exe")
+                ours = executable.startswith(runtime) or str(self.runtime_root) in command
+                if not ours and executable == str(self.hel):
+                    environment = set((entry / "environ").read_bytes().split(b"\0"))
+                    ours = expected.issubset(environment)
             except (FileNotFoundError, PermissionError, ProcessLookupError):
                 continue
-            executable = ""
-            with contextlib.suppress(OSError):
-                executable = os.readlink(entry / "exe")
-            ours = (
-                executable == str(self.hel)
-                or executable.startswith(runtime)
-                or str(self.runtime_root) in command
-            )
             if ours:
                 owned.append((int(entry.name), f"exe={executable} cmd={command}"))
         return sorted(owned)
@@ -863,19 +909,36 @@ kind = "bare"
     def preserve_runtime(self) -> None:
         destination = self.root / "runtime"
         if self.runtime_root.exists():
-            def ignore_sockets(directory: str, names: list[str]) -> list[str]:
+            workers = self.data / "workers"
+
+            # Sockets cannot be copied, and the worker executables staged under
+            # the data directory are copies of a binary this run did not build
+            # and dwarf everything else: a soak that kept one per iteration ran
+            # the runner out of disk.
+            def ignore_uncopied(directory: str, names: list[str]) -> list[str]:
+                staged = pathlib.Path(directory).is_relative_to(workers)
                 return [
                     name
                     for name in names
-                    if pathlib.Path(directory, name).is_socket()
+                    if pathlib.Path(directory, name).is_socket() or (staged and name == "hel")
                 ]
 
-            shutil.copytree(
-                self.runtime_root,
-                destination,
-                dirs_exist_ok=True,
-                ignore=ignore_sockets,
-            )
+            # A worker that is still shutting down removes its own directory,
+            # so a file can vanish mid-copy. Keep what was copied and record
+            # the rest instead of replacing the run's real outcome. Symlinks
+            # stay links, so the fixture's interpreter is not copied either.
+            try:
+                shutil.copytree(
+                    self.runtime_root,
+                    destination,
+                    symlinks=True,
+                    dirs_exist_ok=True,
+                    ignore=ignore_uncopied,
+                )
+            except shutil.Error as error:
+                (self.root / "runtime-copy-errors.txt").write_text(
+                    "".join(f"{source}: {reason}\n" for source, _, reason in error.args[0])
+                )
         daemon_log = self.data / "daemon.log"
         if daemon_log.exists():
             shutil.copy2(daemon_log, self.root / "daemon.log")

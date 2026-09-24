@@ -42,17 +42,12 @@ impl RelayClient {
                 handshake_timeout,
             )
             .await;
-            let error = match outcome {
+            let (error, refusal) = match outcome {
                 Ok(client) => return Ok(client),
-                Err(ConnectFailure {
-                    error,
-                    transport_rejected,
-                }) => {
-                    if attempt == SSH_RETRY_ATTEMPTS || !transport_rejected {
-                        return Err(error);
-                    }
-                    error
-                }
+                Err(ConnectFailure { error, refusal }) => match refusal {
+                    Some(refusal) if attempt < SSH_RETRY_ATTEMPTS => (error, refusal),
+                    _ => return Err(error),
+                },
             };
             let delay = mj_core::targets::ssh_retry_delay(attempt);
             tracing::warn!(
@@ -63,7 +58,8 @@ impl RelayClient {
                 attempts = SSH_RETRY_ATTEMPTS,
                 delay_ms = delay.as_millis() as u64,
                 error = %error,
-                "relay proxy was refused by the SSH server before authentication; retrying"
+                "relay proxy: {}",
+                refusal.retry_message()
             );
             tokio::time::sleep(delay).await;
         }
@@ -259,18 +255,21 @@ impl RelayClient {
                     None => None,
                 };
                 let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
-                let transport_rejected = permit.is_some()
-                    && status
-                        .is_some_and(|status| is_transport_rejection(status, &tail.join("\n")));
+                let refusal = permit
+                    .as_ref()
+                    .and(status)
+                    .and_then(|status| ssh_refusal(status, &tail.join("\n")));
                 drop(permit);
                 // A session turned away by the transport usually means its
                 // master died; make the retry check and reopen it.
-                if transport_rejected && let Some(lease) = &client.ssh_session {
+                if refusal == Some(SshRefusal::BeforeAuthentication)
+                    && let Some(lease) = &client.ssh_session
+                {
                     lease.invalidate();
                 }
                 Err(ConnectFailure {
                     error: Self::attach_proxy_stderr(error, tail),
-                    transport_rejected,
+                    refusal,
                 })
             }
         }

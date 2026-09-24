@@ -445,22 +445,7 @@ pub fn verify_repository_bundles_streaming(path: &Path) -> Result<VerifiedReposi
 /// payload before using it.
 pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointRepositoryBundle>> {
     let mut archive = open_archive(path)?;
-    let manifest_bytes = {
-        let mut entry = archive
-            .by_name(MANIFEST_PATH)
-            .with_context(|| format!("archive is missing {MANIFEST_PATH}"))?;
-        ensure!(!entry.is_dir(), "archive manifest is a directory entry");
-        ensure!(
-            entry.size() <= MAX_MANIFEST_BYTES,
-            "archive manifest is too large"
-        );
-        let mut bytes = Vec::with_capacity(entry.size().min(usize::MAX as u64) as usize);
-        entry
-            .read_to_end(&mut bytes)
-            .context("read archive manifest")?;
-        bytes
-    };
-    let manifest = parse_archive_manifest(&manifest_bytes)?;
+    let manifest = read_checkpoint_manifest_from(&mut archive)?;
     let repositories = manifest
         .repositories
         .iter()
@@ -486,6 +471,31 @@ pub fn read_checkpoint_repository_bundles(path: &Path) -> Result<Vec<CheckpointR
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(repositories)
+}
+
+/// Read the manifest of an archive that the caller has already verified.
+pub fn read_checkpoint_manifest(path: &Path) -> Result<ArchiveManifest> {
+    let mut archive = open_archive(path)?;
+    read_checkpoint_manifest_from(&mut archive)
+}
+
+fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<ArchiveManifest> {
+    let manifest_bytes = {
+        let mut entry = archive
+            .by_name(MANIFEST_PATH)
+            .with_context(|| format!("archive is missing {MANIFEST_PATH}"))?;
+        ensure!(!entry.is_dir(), "archive manifest is a directory entry");
+        ensure!(
+            entry.size() <= MAX_MANIFEST_BYTES,
+            "archive manifest is too large"
+        );
+        let mut bytes = Vec::with_capacity(entry.size().min(usize::MAX as u64) as usize);
+        entry
+            .read_to_end(&mut bytes)
+            .context("read archive manifest")?;
+        bytes
+    };
+    parse_archive_manifest(&manifest_bytes)
 }
 
 fn read_checkpoint_payload(
@@ -709,7 +719,11 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if input.canonical_session.current_context_start() > 0 {
+        schema_version: if repositories.iter().any(|repo| {
+            !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
+        }) {
+            ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+        } else if input.canonical_session.current_context_start() > 0 {
             ARCHIVE_SCHEMA_VERSION_CONTEXT
         } else {
             expected_schema_version(&descriptors)
@@ -1282,7 +1296,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
         header.schema_version == ARCHIVE_SCHEMA_VERSION
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_SHARDED
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1307,10 +1322,18 @@ fn expected_schema_version(payloads: &[PayloadDescriptor]) -> u32 {
 }
 
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
-    let expected_schema = expected_schema_version(&manifest.payloads);
+    let expected_schema =
+        if manifest.repositories.iter().any(|repo| {
+            !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
+        }) {
+            ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+        } else {
+            expected_schema_version(&manifest.payloads)
+        };
     ensure!(
         manifest.schema_version == expected_schema
-            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT,
+            || (expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+                && manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT),
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         manifest.schema_version,
         expected_schema

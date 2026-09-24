@@ -102,7 +102,8 @@ async fn completed_turn_response(
         }
         let body = serde_json::json!({"answers": {
             "work_state": {"type":"choice", "choice":if choice == "user" { "background_work" } else { choice }, "confidence":confidence},
-            "needs_user_input": {"type":"noul", "noul":if choice == "user" { confidence } else { 0.01 }}
+            "needs_user_input": {"type":"noul", "noul":if choice == "user" { confidence } else { 0.01 }},
+            "retryable_server_error": {"type":"noul", "noul":0.01}
         }})
         .to_string();
         stream
@@ -380,6 +381,7 @@ fn ask_once_without_a_classifier() {
         })
         .unwrap();
         let evidence = mj_core::activity::verdict::TurnEvidence {
+            completion: None,
             harness: mj_core::config::HarnessKind::Codex,
             phase: mj_core::activity::verdict::TurnPhase::Replied,
             silent_for_s: 0,

@@ -69,6 +69,10 @@ async fn run_relay_coordinator_with_verdict(
                 .replied_verdict_is_current(*generation)
         });
         if let Some(generation) = invalidated_generation {
+            let mut locked = relay.lock().expect("relay state lock poisoned");
+            let assessment = locked.retry_assessment_identity();
+            locked.resolve_retry_assessment(assessment, false)?;
+            drop(locked);
             tracing::info!(target: "mj_jev", generation, phase = "replied",
                 session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
                 reason = "evidence_or_lifecycle_changed", outcome = "cancelled", "Jev request invalidated");
@@ -79,7 +83,7 @@ async fn run_relay_coordinator_with_verdict(
             .lock()
             .expect("relay state lock poisoned")
             .pending_replied_verdict();
-        if let Some((generation, evidence)) = pending {
+        if let Some((generation, evidence, assessment)) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
                 verdict_generation = Some(generation);
@@ -92,13 +96,15 @@ async fn run_relay_coordinator_with_verdict(
                     async move {
                         let (attempt, answer) =
                             client.ask_logged(&session, generation, &evidence).await;
-                        (generation, attempt, answer)
+                        (generation, assessment, attempt, answer)
                     }
                     .with_current_subscriber(),
                 );
             } else {
+                let mut relay = relay.lock().expect("relay state lock poisoned");
+                relay.resolve_retry_assessment(assessment, false)?;
                 tracing::info!(target: "mj_jev", generation, phase = "replied", outcome = "skipped",
-                    session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
+                    session = %relay.turn_context().session_id(),
                     reason = "classifier_unavailable", "Jev classification skipped");
             }
         }
@@ -131,6 +137,7 @@ async fn run_relay_coordinator_with_verdict(
                     if record_queued_runtime_events(
                         &relay,
                         &mut in_flight,
+                        &commands,
                         &mut events,
                         &mut session_configured,
                         &mut user_shells,
@@ -162,6 +169,7 @@ async fn run_relay_coordinator_with_verdict(
                 if record_runtime_event_batch(
                     &relay,
                     &mut in_flight,
+                    &commands,
                     event,
                     &mut events,
                     &mut session_configured,
@@ -199,18 +207,23 @@ async fn run_relay_coordinator_with_verdict(
             _ = verdict_poll.tick(), if verdict.is_some() => {}
             result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() => {
                 match result {
-                    Some(Ok((generation, mut attempt, answer))) => {
+                    Some(Ok((generation, assessment, mut attempt, answer))) => {
                         use mj_core::activity::verdict::{Decision, TurnPhase, decide};
                         if verdict_generation == Some(generation) {
                             verdict_generation = None;
                         }
                         let mut relay = relay.lock().expect("relay state lock poisoned");
                         if !relay.replied_verdict_is_current(generation) {
+                            relay.resolve_retry_assessment(assessment, false)?;
                             attempt.finish("discarded", "activity_or_generation_changed");
                             continue;
                         }
                         match answer {
                             Ok(answer) => {
+                                if relay.resolve_retry_assessment(assessment, answer.should_retry_server_error())? {
+                                    attempt.finish("applied", "server_retry_armed");
+                                    continue;
+                                }
                                 let decision = decide(TurnPhase::Replied, &answer);
                                 let reason = match relay.apply_replied_decision(generation, decision, mj_core::clock::epoch_millis()) {
                                     Ok(reason) => reason,
@@ -225,6 +238,7 @@ async fn run_relay_coordinator_with_verdict(
                                 }
                             }
                             Err(_) => {
+                                relay.resolve_retry_assessment(assessment, false)?;
                                 attempt.finish("unchanged", "request_failed");
                                 relay.retry_replied_verdict(generation);
                             }
@@ -233,7 +247,10 @@ async fn run_relay_coordinator_with_verdict(
                     Some(Err(error)) if !error.is_cancelled() => {
                         tracing::warn!(target: "mj_jev", %error, "completed-turn classifier task failed");
                         if let Some(generation) = verdict_generation.take() {
-                            relay.lock().expect("relay state lock poisoned").retry_replied_verdict(generation);
+                            let mut relay = relay.lock().expect("relay state lock poisoned");
+                            let assessment = relay.retry_assessment_identity();
+                            relay.resolve_retry_assessment(assessment, false)?;
+                            relay.retry_replied_verdict(generation);
                         }
                     }
                     _ => {}
@@ -269,9 +286,11 @@ pub(crate) async fn run_relay_coordinator(
 /// admitting a checkpoint barrier. A command event may itself materialize
 /// several durable observations, and queued notification events belong to
 /// the cut ahead of any waiting barrier.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_runtime_event_batch(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     mut first: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
@@ -280,13 +299,20 @@ pub(crate) async fn record_runtime_event_batch(
 ) -> Result<bool> {
     prepare_kimi_runtime_event(kimi_tasks, relay, &mut first).await?;
     track_user_shell_completion(user_shells, &first);
-    if record_runtime_event_and_track_configuration(relay, in_flight, first, session_configured)? {
+    if record_runtime_event_and_track_configuration(
+        relay,
+        in_flight,
+        commands,
+        first,
+        session_configured,
+    )? {
         return Ok(true);
     }
     let queued = events.len();
     record_queued_runtime_events(
         relay,
         in_flight,
+        commands,
         events,
         session_configured,
         user_shells,
@@ -296,9 +322,11 @@ pub(crate) async fn record_runtime_event_batch(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_queued_runtime_events(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
@@ -313,6 +341,7 @@ pub(crate) async fn record_queued_runtime_events(
                 if record_runtime_event_and_track_configuration(
                     relay,
                     in_flight,
+                    commands,
                     event,
                     session_configured,
                 )? {
@@ -348,6 +377,7 @@ pub(crate) fn track_user_shell_completion(
 pub(crate) fn record_runtime_event_and_track_configuration(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     event: RuntimeEvent,
     session_configured: &mut bool,
 ) -> Result<bool> {
@@ -361,12 +391,13 @@ pub(crate) fn record_runtime_event_and_track_configuration(
         *session_configured = false;
     }
     *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
-    record_runtime_event(relay, in_flight, event)
+    record_runtime_event(relay, in_flight, commands, event)
 }
 
 pub(crate) fn record_runtime_event(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     event: RuntimeEvent,
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
@@ -453,6 +484,11 @@ pub(crate) fn record_runtime_event(
         }
         RuntimeEvent::ClaudeAsyncTaskControlChanged { task_id, can_stop } => {
             relay.claude_async_task_control_changed(task_id, can_stop)?;
+        }
+        RuntimeEvent::ClaudeTurnResult(result) => {
+            if !nominate_claude_prompt_result(in_flight, commands, &result) {
+                relay.claude_turn_result(&result)?;
+            }
         }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
@@ -672,6 +708,48 @@ pub(crate) fn record_runtime_event(
         }
     }
     Ok(stopped)
+}
+
+/// Hand a Claude Code result that answers the running prompt to the prompt
+/// loop, and say whether it was handed over.
+///
+/// The loop ends the prompt unless its own state says this cycle is not the
+/// prompt's last, and it reports the completion itself. The loop, not this
+/// coordinator, emits `PromptFinished`, so a prompt still completes exactly
+/// once however the result and the adapter's reply race. Everything the
+/// adapter sent before the result is already recorded, because results travel
+/// on the same ordered stream as session updates. A result that is not handed
+/// over ends a turn Claude Code started on its own, if one is open.
+fn nominate_claude_prompt_result(
+    in_flight: &BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
+    result: &mj_core::acp::ClaudeTurnResult,
+) -> bool {
+    let running_prompt = in_flight
+        .iter()
+        .find(|(_, command)| command.kind() == mj_core::relay::RelayCommandKind::Prompt)
+        .map(|(command_id, _)| command_id.clone());
+    if let (Some(request_id), Some(stop_reason)) = (running_prompt, result.prompt_stop_reason()) {
+        match commands.try_reserve() {
+            Ok(permit) => {
+                permit.send(CommandRequest::ReleasePrompt {
+                    request_id,
+                    received: result.received,
+                    stop_reason,
+                    usage: Some(result.usage.token_usage()),
+                });
+                return true;
+            }
+            // The adapter's reply still ends the prompt, as it did before
+            // results were read; it is only later while background work runs.
+            Err(error) => tracing::warn!(
+                %request_id,
+                %error,
+                "could not hand a Claude result to the prompt loop; the adapter's reply will end the prompt"
+            ),
+        }
+    }
+    false
 }
 
 pub(crate) fn interrupt_in_flight(

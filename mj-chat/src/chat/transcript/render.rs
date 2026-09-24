@@ -2,6 +2,8 @@ use super::*;
 
 /// `title_controls` is the number of columns the host reserves at the right
 /// of the title row for its own chips; the title stops short of them.
+/// `title_lead` is the number of columns the host draws its own label into
+/// at the left of the title row; the title starts after them.
 /// `pane_focused` draws the border in the focused style, which is how a host
 /// with several panes shows which one has the keyboard.
 pub(crate) fn render_transcript(
@@ -10,6 +12,7 @@ pub(crate) fn render_transcript(
     chat: &mut ChatState,
     gesture_active: bool,
     title_controls: u16,
+    title_lead: u16,
     pane_focused: bool,
 ) {
     let render_started = std::time::Instant::now();
@@ -24,7 +27,12 @@ pub(crate) fn render_transcript(
     chat.anchor = window.anchor;
     let at_tail = window.anchor == TranscriptAnchor::Bottom;
     let top = window.top;
-    let title = transcript_title(chat, mj_core::clock::epoch_seconds());
+    let mut title = transcript_title(chat, mj_core::clock::epoch_seconds());
+    if title_lead > 0 {
+        title
+            .spans
+            .insert(0, Span::raw(" ".repeat(usize::from(title_lead))));
+    }
     let block = block.title(truncate_line_to_width(
         title,
         usize::from(area.width.saturating_sub(2).saturating_sub(title_controls)),

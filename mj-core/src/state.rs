@@ -17,6 +17,9 @@ use crate::targets::{AdditionalMount, validate_additional_mounts};
 
 pub const STATE_VERSION: u32 = 1;
 
+mod target_runtime;
+pub use target_runtime::{TargetConnection, TargetRuntimeSettings};
+
 mod session_move;
 pub use session_move::*;
 
@@ -199,7 +202,6 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
         "awaitinginput" => PromptCompletion::InputRequired,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
-        _ if crate::relay::is_capacity_stop_reason(stop_reason) => PromptCompletion::QuotaLimit,
         _ => PromptCompletion::Error,
     }
 }
@@ -471,6 +473,43 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
+    /// Keep complete turns around the tail target. Unsettled content can still
+    /// change after a newer turn starts, so retain its turn as well.
+    pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
+        let observed = Self::of(session);
+        if self.provisional_title.is_none() {
+            self.provisional_title = observed.provisional_title;
+        }
+        self.latest_turn_start_position = observed
+            .latest_turn_start_position
+            .or(self.latest_turn_start_position);
+        let mut boundary = session.transcript.len().saturating_sub(target.max(1));
+        for (index, item) in session.transcript.iter().enumerate() {
+            let mutable = match &item.body {
+                TranscriptBody::Agent { streaming, .. }
+                | TranscriptBody::Thought { streaming, .. } => *streaming,
+                TranscriptBody::Tool { call, .. } => matches!(
+                    call.get("status").and_then(serde_json::Value::as_str),
+                    Some("pending" | "in_progress")
+                ),
+                _ => false,
+            };
+            if mutable || Some(item.position) == self.latest_turn_start_position {
+                boundary = boundary.min(index);
+            }
+        }
+        let cut = session
+            .transcript
+            .iter()
+            .take(boundary + 1)
+            .rposition(|item| item.is_turn_start())
+            .unwrap_or(0);
+        if cut > 0 {
+            session.transcript.drain(..cut);
+            self.omitted_items += cut;
+        }
+    }
+
     /// The window of a projection that omits nothing.
     #[must_use]
     pub fn of(session: &MaterializedSession) -> Self {
@@ -725,6 +764,73 @@ pub enum TargetLocator {
     },
 }
 
+impl ManagedWorktreeTarget {
+    /// Whether `other` reaches the same checkout: the same kind and, over
+    /// SSH, the same destination, port, and login user.
+    ///
+    /// The other `ssh` options (keys, `ControlPath`, keepalives, host-key
+    /// policy) say how to connect, not where the worktree lives, so they
+    /// follow the machine's current configuration and never make a
+    /// suspended session unable to resume.
+    pub fn same_location(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local, Self::Local) => true,
+            (
+                Self::Ssh {
+                    destination,
+                    ssh_args,
+                },
+                Self::Ssh {
+                    destination: other_destination,
+                    ssh_args: other_args,
+                },
+            ) => {
+                destination == other_destination
+                    && ssh_location_option(ssh_args, 'p', "port")
+                        == ssh_location_option(other_args, 'p', "port")
+                    && ssh_location_option(ssh_args, 'l', "user")
+                        == ssh_location_option(other_args, 'l', "user")
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The value `ssh` would use for an option that has both a short flag
+/// (`-p 22`, `-p22`) and an `-o` spelling (`-o Port=22`, `-oPort 22`). OpenSSH
+/// keeps the first value it sees.
+fn ssh_location_option(args: &[String], flag: char, option: &str) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(argument) = args.next() {
+        let Some(rest) = argument.strip_prefix('-') else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let Some(name) = chars.next() else { continue };
+        if name != flag && name != 'o' {
+            continue;
+        }
+        let inline = chars.as_str();
+        let value = if inline.is_empty() {
+            args.next().cloned()
+        } else {
+            Some(inline.to_owned())
+        };
+        if name == flag {
+            return value;
+        }
+        if let Some(setting) = value {
+            let (key, found) = setting
+                .split_once(['=', ' ', '\t'])
+                .unwrap_or((setting.as_str(), ""));
+            if key.trim().eq_ignore_ascii_case(option) {
+                return Some(found.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ManagedWorktreeTarget {
@@ -747,6 +853,9 @@ pub struct ManagedWorktreeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedWorktree {
+    /// Old records are linked worktrees. New isolated raw sessions own a clone.
+    #[serde(default, skip_serializing_if = "ManagedCheckoutKind::is_worktree")]
+    pub kind: ManagedCheckoutKind,
     pub source_project_directory: PathBuf,
     pub source_repository: PathBuf,
     pub worktree_root: PathBuf,
@@ -757,6 +866,20 @@ pub struct ManagedWorktree {
     /// fall back to the branch reflog, which expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedCheckoutKind {
+    #[default]
+    Worktree,
+    Clone,
+}
+
+impl ManagedCheckoutKind {
+    fn is_worktree(&self) -> bool {
+        matches!(self, Self::Worktree)
+    }
 }
 
 impl ManagedWorktree {
@@ -779,13 +902,19 @@ impl ManagedWorktree {
         let expected_root = self
             .source_repository
             .join(".mj")
-            .join("worktrees")
+            .join(match self.kind {
+                ManagedCheckoutKind::Worktree => "worktrees",
+                ManagedCheckoutKind::Clone => "clones",
+            })
             .join(session_id);
         if self.worktree_root != expected_root {
             bail!("managed worktree root does not match the session-owned path");
         }
-        if self.branch != format!("mj/{session_id}") {
+        if self.kind == ManagedCheckoutKind::Worktree && self.branch != format!("mj/{session_id}") {
             bail!("managed worktree branch does not match the session id");
+        }
+        if self.kind == ManagedCheckoutKind::Clone && self.branch.trim().is_empty() {
+            bail!("managed clone has no starting branch");
         }
         let relative = self
             .source_project_directory
@@ -915,6 +1044,28 @@ pub struct CheckpointMetadata {
     pub sha256: String,
     pub created_at: String,
     pub event_frontier: u64,
+}
+
+/// Whether every saved Git change has a verified durable copy outside mj.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationState {
+    Published,
+    Unpublished,
+    Unknown,
+}
+
+/// Evidence for one exact checkpoint. A newer checkpoint invalidates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationAssessment {
+    pub checkpoint_sha256: String,
+    pub state: PublicationState,
+    pub dirty: bool,
+    pub stashed: bool,
+    pub saved_commits: Vec<String>,
+    pub destinations: Vec<String>,
+    pub checked_at: String,
+    pub reason: Option<String>,
 }
 
 impl CheckpointMetadata {
@@ -1067,6 +1218,12 @@ pub struct SessionRecord {
     /// `managed_worktree.base_commit` or in the clone's `mj.baseCommit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_base: Option<String>,
+    /// Branch selected for a new isolated checkout, independently of its base commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_branch: Option<String>,
+    /// Last verified publication verdict, tied to its checkpoint digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationAssessment>,
     /// None follows the global `[subagents] enabled` setting at launch time;
     /// Some(true) and Some(false) are explicit per-session choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1103,6 +1260,9 @@ pub struct SessionRecord {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetLocator>,
+    /// Connection and worker settings captured when this target was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_runtime: Option<TargetRuntimeSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1189,6 +1349,59 @@ pub fn target_label(config: &Config, target_id: &str, project: Option<&Path>) ->
 }
 
 impl SessionRecord {
+    /// Cached verdict for an independent clone. Active checkouts are unknown
+    /// until a new checkpoint binds an assessment to their exact contents.
+    pub fn publication_state(&self) -> Option<PublicationState> {
+        let independent_clone = self
+            .managed_worktree
+            .as_ref()
+            .is_some_and(|owned| owned.kind == ManagedCheckoutKind::Clone)
+            || (self.managed_worktree.is_none() && self.project_directory.is_none());
+        if !independent_clone {
+            return None;
+        }
+        if self.state.is_active() {
+            return Some(PublicationState::Unknown);
+        }
+        Some(
+            self.checkpoint
+                .as_ref()
+                .zip(self.publication.as_ref())
+                .filter(|(checkpoint, assessment)| {
+                    assessment.checkpoint_sha256 == checkpoint.sha256
+                })
+                .map_or(PublicationState::Unknown, |(_, assessment)| {
+                    if assessment.dirty || assessment.stashed {
+                        PublicationState::Unpublished
+                    } else {
+                        assessment.state
+                    }
+                }),
+        )
+    }
+
+    pub fn target_runtime_settings<'a>(
+        &'a self,
+        config: &Config,
+    ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+        if let Some(runtime) = &self.target_runtime {
+            return Ok(std::borrow::Cow::Borrowed(runtime));
+        }
+        let template = config.targets.get(&self.target_template_id).ok_or_else(|| {
+            crate::refusal::Refusal::precondition(format!(
+                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
+                self.id, self.target_template_id))
+        })?;
+        let runtime = TargetRuntimeSettings::from(template);
+        if let Some(locator) = &self.target {
+            crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
+                locator, runtime: Some(&runtime), session_id: &self.id,
+            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
+                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", self.id, self.target_template_id)))?;
+        }
+        Ok(std::borrow::Cow::Owned(runtime))
+    }
+
     /// The recorded failure that is safe to publish whatever state this
     /// session is in, because the controller wrote it for the person rather
     /// than copying an error chain into it.
@@ -1217,7 +1430,7 @@ impl SessionRecord {
         if self.project_directory.is_none() && !config.bundles.contains_key(&self.bundle_id) {
             issues.push(format!("missing bundle {:?}", self.bundle_id));
         }
-        if !config.targets.contains_key(&self.target_template_id) {
+        if self.target_runtime.is_none() && !config.targets.contains_key(&self.target_template_id) {
             issues.push(format!(
                 "missing target template {:?}",
                 self.target_template_id
@@ -1231,7 +1444,7 @@ impl SessionRecord {
 
     pub fn validate_configuration(&self, config: &Config) -> Result<()> {
         if let Some(issue) = self.configuration_issue(config) {
-            bail!("{issue}");
+            return Err(crate::refusal::Refusal::precondition(issue).into());
         }
         Ok(())
     }
@@ -1731,12 +1944,35 @@ impl State {
                             != Some(target.without_launch_only_settings())
                     });
             if protected || bundle_changed || target_changed {
+                // Named as the screen names them: the session by its title,
+                // the project by its name rather than the internal bundle
+                // id, and only the parts this change touches.
+                let mut used = Vec::new();
+                if protected {
+                    used.push(format!("agent profile {:?}", session.last_profile));
+                }
+                if bundle_changed {
+                    used.push(format!("project {:?}", session.project_name(before)));
+                }
+                if target_changed {
+                    used.push(format!("runtime {:?}", session.target_template_id));
+                }
+                let used = match used.as_slice() {
+                    [only] => only.clone(),
+                    [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                    [] => unreachable!("something changed"),
+                };
+                let title = session.display_title();
+                let named = if title == session.id {
+                    format!(
+                        "a running session in project {:?}",
+                        session.project_name(before)
+                    )
+                } else {
+                    format!("the running session {title:?}")
+                };
                 bail!(
-                    "Setup would change configuration used by active session {:?}. Keep its profile {:?}, bundle {:?}, and target {:?}; add a separate entry for new settings, or stop the session before editing its configuration.",
-                    session.id,
-                    session.last_profile,
-                    session.bundle_id,
-                    session.target_template_id
+                    "Setup would change the {used} that {named} uses. Save the new settings under a new name, or stop the session first."
                 );
             }
         }

@@ -125,6 +125,10 @@ pub struct CommandSpec {
     /// contain them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_session: Option<SshTarget>,
+    /// The session is a fail-fast probe: it is counted on a shard but never
+    /// opens a master (see [`CommandSpec::ssh_probe_session`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ssh_session_probe: bool,
     /// Input that must reach the child without becoming part of its arguments,
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
@@ -148,6 +152,7 @@ impl CommandSpec {
             creates_target: false,
             ssh_destination: None,
             ssh_session: None,
+            ssh_session_probe: false,
             sensitive_stdin: None,
         }
     }
@@ -185,6 +190,18 @@ impl CommandSpec {
         self
     }
 
+    /// Record that this command is a fail-fast `ssh` probe, such as a target
+    /// validation, that joins `ssh`'s shared connection without ever opening
+    /// a master. Its short timeouts and keepalives belong to the probe alone:
+    /// a master opened by it would impose them on every later session. The
+    /// probe still uses one of the master's sessions while it runs, so the
+    /// executor counts it in the session ledger like any other session.
+    pub fn ssh_probe_session(mut self, ssh: &SshTarget) -> Self {
+        self = self.ssh_session(ssh);
+        self.ssh_session_probe = true;
+        self
+    }
+
     /// Lease the SSH session this command asks for and return the command as
     /// it must be spawned, with the lease that must outlive the child.
     ///
@@ -197,9 +214,14 @@ impl CommandSpec {
                 lease: None,
             });
         };
-        let lease = SshSessions::lease(ssh, executor)?;
+        let lease = if self.ssh_session_probe {
+            SshSessions::lease_probe(ssh)
+        } else {
+            SshSessions::lease(ssh, executor)?
+        };
         let mut command = self.clone();
         command.ssh_session = None;
+        command.ssh_session_probe = false;
         command.args = session_command_args(&self.program, &self.args, ssh, &lease);
         Ok(SessionCommand {
             command: std::borrow::Cow::Owned(command),
@@ -574,13 +596,19 @@ fn with_ssh_admission(
             let _permit = SshAdmission::acquire(destination);
             run(session.command())?
         };
-        let rejected =
-            is_transport_rejection(output.status, &String::from_utf8_lossy(&output.stderr));
-        if rejected && let Some(lease) = session.lease() {
+        let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr));
+        // A refused session found its master alive; any other refusal may
+        // mean the master is gone.
+        if refusal == Some(SshRefusal::BeforeAuthentication)
+            && let Some(lease) = session.lease()
+        {
             lease.invalidate();
         }
         drop(session);
-        if attempt == SSH_RETRY_ATTEMPTS || !rejected {
+        let Some(refusal) = refusal else {
+            return Ok(output);
+        };
+        if attempt == SSH_RETRY_ATTEMPTS {
             return Ok(output);
         }
         let delay = ssh_retry_delay(attempt);
@@ -591,7 +619,8 @@ fn with_ssh_admission(
             attempts = SSH_RETRY_ATTEMPTS,
             delay_ms = delay.as_millis() as u64,
             stderr = String::from_utf8_lossy(&output.stderr).trim(),
-            "ssh was refused by the server before authentication; retrying"
+            "{}",
+            refusal.retry_message()
         );
         if !sleep_unless_cancelled(delay, is_cancelled) {
             bail!("operation cancelled while {}", command.purpose);
@@ -1950,7 +1979,10 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
     })
 }
 mod convert;
-pub use convert::{StoredTarget, TargetConversionError, ssh_args_with_identity};
+pub use convert::{
+    RecordedTarget, StoredTarget, TargetConversionError, locator_needs_connection,
+    ssh_args_with_identity,
+};
 
 mod ssh;
 pub use ssh::*;

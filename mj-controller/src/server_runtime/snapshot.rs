@@ -202,10 +202,14 @@ pub(super) fn session_capabilities(
             && session.lifecycle == ViewerLifecycleCategory::Live,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
+        // A turn Claude Code started on its own after a background task can
+        // be stopped too. A Codex turn of that kind is a native goal, which
+        // has its own controls.
         interrupt_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| {
                 state.active_prompt.is_some()
+                    || (state.harness_turn.is_some() && !state.goal.active())
                     || state.capacity_retry.is_some()
                     || state
                         .continuation
@@ -452,6 +456,24 @@ pub(super) fn viewer_snapshot(
             name: workspace.name.clone(),
         })
         .collect();
+    // The published list comes from the workspace table, which omits an
+    // empty `default` and can predate a session created since (`mj new`
+    // makes one without any dashboard opening its workspace). The browser
+    // draws its tabs from this list, so a session whose workspace is missing
+    // would have no tab at all. List each such workspace by its id.
+    for session in &snapshot.sessions {
+        if !session.workspace_id.is_empty()
+            && !snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == session.workspace_id)
+        {
+            snapshot.workspaces.push(crate::server::ViewerWorkspace {
+                id: session.workspace_id.clone(),
+                name: session.workspace_id.clone(),
+            });
+        }
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -551,6 +573,17 @@ pub(super) fn viewer_snapshot(
         {
             session.transitioning = true;
         }
+        if session.state == mj_core::state::SessionState::Disconnected.as_str()
+            && session.operation.as_ref().is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    crate::server::ViewerOperationKind::Create
+                        | crate::server::ViewerOperationKind::Resume
+                )
+            })
+        {
+            session.state = crate::server::LAUNCHING_STATE.to_owned();
+        }
         let live = operational.get(&session.id);
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
@@ -625,6 +658,7 @@ pub(super) fn viewer_snapshot(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
+            session.retry_assessment_pending = state.retry_assessment_pending;
             session.quota_recovery = state
                 .continuation
                 .quota_recovery

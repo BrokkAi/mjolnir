@@ -20,6 +20,83 @@ impl DashboardState {
         }
     }
 
+    /// Start readiness checks for those of `target_ids` with no current
+    /// result, sharing one generation. A check in flight is never repeated.
+    pub(in crate::wizards) fn begin_target_readiness_checks(
+        &mut self,
+        target_ids: Vec<String>,
+    ) -> Option<DashboardAction> {
+        let now = Instant::now();
+        let target_ids: Vec<_> = target_ids
+            .into_iter()
+            .filter(|id| {
+                self.config.targets.get(id).is_some_and(|template| {
+                    self.target_readiness
+                        .get(id)
+                        .is_none_or(|check| &check.template != template || check.is_stale(now))
+                })
+            })
+            .collect();
+        if target_ids.is_empty() {
+            return None;
+        }
+        self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
+        let generation = self.target_readiness_generation;
+        for id in &target_ids {
+            self.target_readiness.insert(
+                id.clone(),
+                TargetReadiness {
+                    template: self.config.targets[id].clone(),
+                    generation,
+                    result: None,
+                    recorded_at: now,
+                },
+            );
+        }
+        Some(DashboardAction::CheckTargetReadiness {
+            generation,
+            target_ids,
+        })
+    }
+
+    /// Check the local container targets the Targets pane lists. The standard
+    /// ones exist whether or not their engine is installed
+    /// (`Config::with_local_targets` offers them as candidates that callers
+    /// must check), so the pane has to find out which of them can run. Only
+    /// local container engines are probed here: each check is a quick local
+    /// command, while SSH and AWS targets would open connections.
+    pub fn take_target_availability_check(&mut self) -> Option<DashboardAction> {
+        let target_ids: Vec<_> = self
+            .capacity_details
+            .values()
+            .filter(|detail| detail.target.local)
+            .flat_map(|detail| detail.target.target_ids.iter())
+            .filter(|id| {
+                matches!(
+                    self.config.targets.get(*id),
+                    Some(
+                        TargetTemplate::LocalPodman { .. }
+                            | TargetTemplate::LocalDocker { .. }
+                            | TargetTemplate::AppleContainer { .. }
+                    )
+                )
+            })
+            .cloned()
+            .collect();
+        self.begin_target_readiness_checks(target_ids)
+    }
+
+    /// Whether the last readiness check of `target_id` failed. A target not
+    /// yet checked is not called unavailable.
+    pub(crate) fn target_known_unavailable(&self, target_id: &str) -> bool {
+        let Some(template) = self.config.targets.get(target_id) else {
+            return false;
+        };
+        self.target_readiness.get(target_id).is_some_and(|check| {
+            &check.template == template && matches!(check.result, Some(Err(_)))
+        })
+    }
+
     pub fn apply_target_readiness(
         &mut self,
         generation: u64,

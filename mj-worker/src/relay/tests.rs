@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::background::{
-    CLAUDE_ORIGIN_META_KEY, CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text,
-};
+use super::background::{CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text};
 use super::*;
 
 #[test]
@@ -761,7 +759,7 @@ fn idle_clock_starts_at_settlement_survives_reopen_and_ignores_metadata() {
     relay.record_session_update(tool_call_update()).unwrap();
     assert_eq!(relay.operational_state().idle_since_ms, None);
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     let idle_since = relay.operational_state().idle_since_ms;
     assert!(idle_since.is_some());
@@ -812,7 +810,7 @@ fn idle_clock_waits_for_background_work_and_persists_its_completion() {
         })
         .unwrap();
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     assert_eq!(relay.operational_state().idle_since_ms, None);
     assert_eq!(
@@ -2085,16 +2083,29 @@ fn tool_call_update() -> SessionUpdate {
     ))
 }
 
-/// The `usage_update` the Claude adapter sends when an SDK turn ends.
-fn settling_usage_update(origin: &str) -> SessionUpdate {
+/// The `usage_update` the Claude adapter sends when an SDK cycle ends and
+/// the cycle produced assistant usage.
+fn origin_marker(origin: &str) -> SessionUpdate {
     let mut usage = agent_client_protocol::schema::v1::UsageUpdate::new(10, 200);
     usage.meta = Some(
         serde_json::from_value(serde_json::json!({
-            CLAUDE_ORIGIN_META_KEY: {"kind": origin},
+            "_claude/origin": {"kind": origin},
         }))
         .unwrap(),
     );
     SessionUpdate::UsageUpdate(usage)
+}
+
+/// The SDK `result` that ends a Claude Code model cycle.
+fn cycle_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
+    mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+        "stop_reason": "end_turn", "result": "done",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "origin": {"kind": origin},
+    }))
+    .unwrap()
+    .unwrap()
 }
 
 fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
@@ -2107,7 +2118,7 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 }
 
 #[test]
-fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() {
+fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
@@ -2129,7 +2140,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
     ));
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     let settled = relay.operational_state();
@@ -2149,7 +2160,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
         Some(RelayObservation::HarnessTurnSettled { origin, .. })
             if origin.as_deref() == Some("task-notification")
     ));
-    let (_, evidence) = relay
+    let (_, evidence, _) = relay
         .pending_replied_verdict()
         .expect("settled harness turn is classified");
     assert_eq!(
@@ -2157,6 +2168,115 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
         mj_core::activity::verdict::TurnPhase::Replied
     );
     assert!(relay.pending_replied_verdict().is_none());
+}
+
+/// The adapter's origin marker is left out when a cycle produced no
+/// assistant usage, so it cannot be what ends a Claude turn. The result can:
+/// Claude Code sends one for every cycle.
+#[test]
+fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    relay
+        .record_session_update(origin_marker("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(
+        state.harness_turn.is_some(),
+        "the marker alone settles nothing"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Running);
+
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // A cycle that streams text but sends no marker still ends.
+    relay
+        .record_session_update(agent_text_chunk("One more thing."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+    relay.claude_turn_result(&cycle_result("human")).unwrap();
+    assert!(relay.operational_state().harness_turn.is_none());
+    assert!(matches!(
+        observations(&relay).last(),
+        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false })
+            if origin.as_deref() == Some("human")
+    ));
+
+    // A result with no turn open records nothing.
+    let before = relay.operational_state().latest_ordinal;
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert_eq!(relay.operational_state().latest_ordinal, before);
+}
+
+/// Stop while Claude Code works on its own after a background task sends
+/// `session/cancel`; the interrupted cycle's result then ends the turn. With
+/// nothing running, or during a Codex goal turn, Stop is still refused.
+#[test]
+fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_ends_it() {
+    let refused = |relay: &mut DurableRelay, command_id: &str| {
+        let response = relay.handle(relay_request(
+            &format!("request-{command_id}"),
+            RelayRequest::Submit {
+                command_id: command_id.to_owned(),
+                command: RelayCommand::Cancel,
+            },
+        ));
+        match response.body {
+            RelayResponseBody::Error { error } => error.message,
+            body => panic!("Stop must be refused: {body:?}"),
+        }
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    assert_eq!(
+        refused(&mut relay, "cancel-idle"),
+        "there is no active prompt to cancel"
+    );
+
+    relay
+        .record_session_update(agent_text_chunk("Summarizing the agent's findings"))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+    submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "cancel-harness-turn");
+    relay
+        .record_command_completed("cancel-harness-turn", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(
+        relay.operational_state().harness_turn.is_some(),
+        "the turn runs until Claude Code reports the interrupted cycle"
+    );
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    let codex = tempfile::tempdir().unwrap();
+    let mut codex = DurableRelay::open(codex.path(), SESSION, "1.0.0").unwrap();
+    codex.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    codex
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+        .unwrap();
+    assert!(codex.operational_state().harness_turn.is_some());
+    assert_eq!(
+        refused(&mut codex, "cancel-codex"),
+        "the agent is working on its own after a background task; there is no prompt to cancel"
+    );
 }
 
 #[test]
@@ -2176,7 +2296,7 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     );
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     let claimed = relay.claim_pending_commands(true).unwrap();
@@ -2724,7 +2844,7 @@ fn a_terminal_the_agent_left_running_is_background_work_once_the_turn_ends() {
     );
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
 
     assert_eq!(
@@ -3062,7 +3182,7 @@ fn claude_background_levels_do_not_open_turns_or_enter_the_transcript() {
         RelayExecutionState::Running
     );
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     assert_eq!(
         relay.operational_state().execution,
@@ -3417,9 +3537,8 @@ fn harness_turns_are_off_for_other_harnesses() {
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 
     relay.record_session_update(tool_call_update()).unwrap();
-    relay
-        .record_session_update(settling_usage_update("human"))
-        .unwrap();
+    relay.record_session_update(origin_marker("human")).unwrap();
+    relay.claude_turn_result(&cycle_result("human")).unwrap();
 
     let state = relay.operational_state();
     assert_eq!(state.execution, RelayExecutionState::Idle);
@@ -3587,7 +3706,7 @@ fn cancel_turn_bypasses_a_pending_checkpoint_for_an_autonomous_turn() {
     assert_eq!(queued_command_ids(&relay), vec!["queued-prompt"]);
 
     relay
-        .record_session_update(settling_usage_update("task-notification"))
+        .claude_turn_result(&cycle_result("task-notification"))
         .unwrap();
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
@@ -4151,7 +4270,7 @@ fn finished_turn_queues_only_one_replied_classification() {
             },
         )
         .unwrap();
-    let (_, evidence) = relay.pending_replied_verdict().unwrap();
+    let (_, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert_eq!(
         evidence.phase,
         mj_core::activity::verdict::TurnPhase::Replied
@@ -4487,4 +4606,72 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     let after = evidence(&relay);
     assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
     assert_eq!(after.transcript_summary, before.transcript_summary);
+}
+
+/// I1-11: a finished turn leaves its completed dispatch in the ledger until the
+/// daemon acknowledges its events. That record is history, not work, so it
+/// must not make `/clear` think the session is busy.
+#[test]
+fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(&mut relay, "finished-turn", prompt("Remember PINEAPPLE"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "finished-turn",
+            RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.snapshot.dispatches.contains_key("finished-turn"));
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Idle
+    );
+    let accepted = relay
+        .submit_command("clear-request", RelayCommand::ClearContext)
+        .unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+/// I1-13: a rejected `/clear` stays in the ledger until its events are
+/// acknowledged. The session must accept prompts again at once instead of
+/// saying the context is still being cleared.
+#[test]
+fn a_rejected_clear_does_not_block_later_prompts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    assert!(
+        relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok()
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected("clear-request", "restore model after clear failed")
+        .unwrap();
+    assert!(relay.snapshot.dispatches.contains_key("clear-request"));
+    assert_eq!(relay.clear_context_started_at_ms(), None);
+    let accepted = relay
+        .submit_command("after-clear", prompt("still usable"))
+        .unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+/// I1-11: the refusal still holds while a turn is running.
+#[test]
+fn clear_is_refused_while_a_turn_is_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(&mut relay, "running-turn", prompt("Write a story"));
+    relay.claim_pending_commands(true).unwrap();
+    let refused = relay
+        .submit_command("clear-request", RelayCommand::ClearContext)
+        .unwrap();
+    assert!(refused.is_err());
 }

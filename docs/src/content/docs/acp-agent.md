@@ -135,7 +135,10 @@ while it is still being written.
 The adapter exits with status 0 when every session was retired as asked. When
 any was not — the daemon refused, the operation failed, or it did not finish in
 time — the adapter exits with a non-zero status and an error on standard error
-that names each such session, what went wrong, and the state it was left in. A failed suspension leaves the session live, and a session
+that names each such session, what went wrong, and the state it was left in. A suspension is refused
+for a clone whose Git work is not verified as pushed, since releasing it could
+lose that work; `mj suspend --session <id> --acknowledge-unpublished-work`
+releases it once you have checked. A failed suspension leaves the session live, and a session
 that was not destroyed is still there; either way `mj sessions --session <id>`
 shows it and `mj suspend` or `mj destroy` retries. A creation still in flight
 when the program leaves is waited for, so its session is retired too; a creation

@@ -38,7 +38,7 @@ enum CommandSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CommandChoice {
-    name: String,
+    pub(super) name: String,
     description: String,
     input_hint: Option<String>,
     source: CommandSource,
@@ -370,7 +370,7 @@ pub(super) fn builtin_command_choices() -> Vec<CommandChoice> {
         ),
         (
             "attach",
-            "add an image file to the current prompt",
+            "add an image file (PNG, JPEG or WebP) to the prompt",
             Some("path"),
         ),
     ]
@@ -525,6 +525,7 @@ mod tests {
     #[test]
     fn attach_command_preserves_the_path_for_background_processing() {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("/attach photos/one.png".into());
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter)),
@@ -689,7 +690,7 @@ mod tests {
 
         chat.input = "/plan".into();
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert_eq!(chat.input, "/plan");
+        assert!(chat.input.is_empty());
 
         chat.input = "/goal ship the release".into();
         assert_eq!(
@@ -854,7 +855,7 @@ mod tests {
                     assert!(chat.input.is_empty());
                 } else {
                     assert_eq!(result, ChatAction::None);
-                    assert_eq!(chat.input, command);
+                    assert!(chat.input.is_empty());
                     assert!(chat.feedback.current().unwrap().contains("not supported"));
                 }
             }
@@ -889,6 +890,7 @@ mod tests {
     #[test]
     fn goal_control_keeps_attached_drafts_and_bypasses_pending_plan_transition() {
         let mut chat = goal_chat(&["clear"]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("/goal clear ".into());
         assert!(chat.reserve_attachment(1));
         let draft = chat.input.clone();

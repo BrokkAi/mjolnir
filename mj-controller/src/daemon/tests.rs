@@ -836,7 +836,10 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -2312,6 +2315,7 @@ fn ready_startup_view() -> ManagedSessionView {
         inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
+        retry_assessment_pending: false,
         activity_turn_started_at_ms: None,
         idle_since_ms: None,
         store_id: None,

@@ -514,8 +514,13 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::SuspendSession { session_id } => {
-            state.suspend_session(session_id).await?;
+        DaemonAction::SuspendSession {
+            session_id,
+            acknowledge_unpublished_work,
+        } => {
+            state
+                .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
+                .await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::StartCreateSession(request) => Ok(DaemonReply::RegisteredSession(Box::new(

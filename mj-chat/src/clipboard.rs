@@ -196,6 +196,27 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
 }
 "#;
 
+#[cfg(target_os = "linux")]
+const WSL_WRITE_TEXT_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$bytes = [Convert]::FromBase64String([Console]::In.ReadToEnd())
+$text = [System.Text.Encoding]::UTF8.GetString($bytes)
+for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    try {
+        if ($text.Length -eq 0) {
+            [System.Windows.Forms.Clipboard]::Clear()
+        } else {
+            [System.Windows.Forms.Clipboard]::SetText($text)
+        }
+        break
+    } catch [System.Runtime.InteropServices.ExternalException] {
+        if ($attempt -eq 2) { throw }
+        Start-Sleep -Milliseconds 50
+    }
+}
+"#;
+
 fn arc_str_is_empty(value: &Arc<str>) -> bool {
     value.is_empty()
 }
@@ -312,7 +333,7 @@ fn with_clipboard<T>(operation: impl FnOnce(&mut arboard::Clipboard) -> Result<T
     operation(clipboard.as_mut().expect("clipboard was initialized"))
 }
 
-/// Read the clipboard, preferring a PNG image whenever one is present.
+/// Read the clipboard, preferring an image whenever one is present.
 ///
 /// On WSL this invokes Windows PowerShell in a single-threaded apartment, as
 /// required by `System.Windows.Forms.Clipboard`, and captures PNG bytes on
@@ -335,18 +356,22 @@ pub fn read_text() -> Result<String> {
             ClipboardContent::Image(_) => bail!("clipboard contains an image, not text"),
         };
     }
-    with_clipboard(|clipboard| {
-        clipboard
-            .get_text()
-            .context("read text from system clipboard")
+    with_clipboard(|clipboard| match read_native_content(clipboard, true)? {
+        ClipboardContent::Text(text) => Ok(text),
+        ClipboardContent::Image(_) => unreachable!("text-only clipboard reader returned an image"),
     })
 }
 
 /// Writes `text` to the system clipboard.
 ///
+/// On WSL, PowerShell writes directly to Windows without a WSLg connection.
 /// Callers must run this off the render loop: opening the platform clipboard
 /// blocks.
 pub fn write_text(text: &str) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if running_under_wsl() {
+        return write_wsl_clipboard(text);
+    }
     with_clipboard(|clipboard| {
         clipboard
             .set_text(text)
@@ -354,21 +379,83 @@ pub fn write_text(text: &str) -> Result<()> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn write_wsl_clipboard(text: &str) -> Result<()> {
+    let executable = wsl_powershell_executable()
+        .context("Windows PowerShell is unavailable; cannot write the WSL clipboard")?;
+    let command = mj_core::targets::CommandSpec::new(
+        executable.to_string_lossy(),
+        [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Sta",
+            "-Command",
+            WSL_WRITE_TEXT_SCRIPT,
+        ],
+    )
+    .purpose("write Windows clipboard text");
+    write_wsl_clipboard_with_command(text, command)
+}
+
+#[cfg(target_os = "linux")]
+fn write_wsl_clipboard_with_command(
+    text: &str,
+    command: mj_core::targets::CommandSpec,
+) -> Result<()> {
+    // Base64 preserves Unicode, leading BOM characters, and line endings
+    // independently of Windows console encoding. Keep the payload out of logs.
+    let input = base64::engine::general_purpose::STANDARD
+        .encode(text)
+        .into_bytes();
+    let output = mj_core::targets::CancellableProcessExecutor::with_timeout(WSL_CLIPBOARD_TIMEOUT)
+        .execute(&command.with_sensitive_stdin(input))
+        .context("write clipboard through Windows PowerShell")?;
+    if output.status != 0 {
+        bail!(
+            "Windows clipboard writer exited with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+// Keep the platform access boundary small so format precedence can be tested
+// without replacing the user's actual desktop clipboard.
+trait NativeClipboard {
+    fn get_image(&mut self) -> std::result::Result<arboard::ImageData<'static>, arboard::Error>;
+    fn get_text(&mut self) -> std::result::Result<String, arboard::Error>;
+}
+
+impl NativeClipboard for arboard::Clipboard {
+    fn get_image(&mut self) -> std::result::Result<arboard::ImageData<'static>, arboard::Error> {
+        arboard::Clipboard::get_image(self)
+    }
+
+    fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
+        arboard::Clipboard::get_text(self)
+    }
+}
+
 fn read_native_clipboard() -> Result<ClipboardContent> {
-    with_clipboard(|clipboard| {
-        // arboard's image API returns raw RGBA pixels. Convert them to PNG so
-        // the ACP payload is portable and matches the WSL path.
-        if let Ok(image) = clipboard.get_image() {
-            return encode_native_image(image).map(ClipboardContent::Image);
-        }
-        let text = clipboard
-            .get_text()
-            .context("read text from system clipboard")?;
-        if text.is_empty() {
-            bail!("clipboard contains neither an image nor text");
-        }
-        Ok(ClipboardContent::Text(text))
-    })
+    with_clipboard(|clipboard| read_native_content(clipboard, false))
+}
+
+fn read_native_content(
+    clipboard: &mut impl NativeClipboard,
+    text_only: bool,
+) -> Result<ClipboardContent> {
+    // arboard returns raw RGBA pixels; the shared optimizer chooses the ACP encoding.
+    if !text_only && let Ok(image) = clipboard.get_image() {
+        return encode_native_image(image).map(ClipboardContent::Image);
+    }
+    let text = clipboard
+        .get_text()
+        .context("read text from system clipboard")?;
+    if !text_only && text.is_empty() {
+        bail!("clipboard contains neither an image nor text");
+    }
+    Ok(ClipboardContent::Text(text))
 }
 
 fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> {
@@ -438,9 +525,7 @@ fn read_wsl_clipboard_with_script(script: &str) -> Result<ClipboardContent> {
             );
         }
         if detail.contains("ExternalException") {
-            bail!(
-                "Windows clipboard is unavailable after retries; try again from an unlocked Windows desktop"
-            );
+            bail!("Windows clipboard is busy or locked; try again");
         }
         bail!("Windows clipboard helper failed: {detail}");
     }
@@ -546,6 +631,134 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeClipboard {
+        image: Option<arboard::ImageData<'static>>,
+        text: Option<String>,
+    }
+
+    impl NativeClipboard for FakeClipboard {
+        fn get_image(
+            &mut self,
+        ) -> std::result::Result<arboard::ImageData<'static>, arboard::Error> {
+            self.image.take().ok_or(arboard::Error::ContentNotAvailable)
+        }
+        fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
+            self.text.take().ok_or(arboard::Error::ContentNotAvailable)
+        }
+    }
+
+    fn clipboard_with_both_formats() -> FakeClipboard {
+        FakeClipboard {
+            image: Some(arboard::ImageData {
+                width: 1,
+                height: 1,
+                bytes: std::borrow::Cow::Owned(vec![255, 0, 0, 255]),
+            }),
+            text: Some("image caption".into()),
+        }
+    }
+
+    #[test]
+    fn native_mixed_clipboard_prefers_images_only_when_allowed() {
+        let mut clipboard = clipboard_with_both_formats();
+        let ClipboardContent::Image(image) = read_native_content(&mut clipboard, false).unwrap()
+        else {
+            panic!("image-capable paste must select the image representation");
+        };
+        assert!(image.mime_type.starts_with("image/"));
+        assert!(!image.data_base64.is_empty());
+        assert_eq!(clipboard.text.as_deref(), Some("image caption"));
+        let mut clipboard = clipboard_with_both_formats();
+        assert!(matches!(read_native_content(&mut clipboard, true).unwrap(),
+            ClipboardContent::Text(text) if text == "image caption"));
+        assert!(
+            clipboard.image.is_some(),
+            "text-only paste must not request image pixels"
+        );
+    }
+
+    #[test]
+    fn native_text_only_clipboard_and_missing_text_keep_their_meaning() {
+        let mut clipboard = FakeClipboard {
+            image: None,
+            text: Some("ordinary text".into()),
+        };
+        assert!(
+            matches!(read_native_content(&mut clipboard, false).unwrap(),
+            ClipboardContent::Text(text) if text == "ordinary text")
+        );
+        let mut clipboard = clipboard_with_both_formats();
+        clipboard.text = None;
+        let error = read_native_content(&mut clipboard, true).unwrap_err();
+        assert!(format!("{error:#}").contains("read text from system clipboard"));
+        assert!(clipboard.image.is_some());
+    }
+
+    #[test]
+    fn invalid_native_image_is_reported_without_silently_selecting_text() {
+        let mut clipboard = clipboard_with_both_formats();
+        clipboard.image.as_mut().unwrap().bytes = std::borrow::Cow::Owned(Vec::new());
+        assert!(read_native_content(&mut clipboard, false).is_err());
+        assert_eq!(clipboard.text.as_deref(), Some("image caption"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn windows_clipboard_writer_streams_large_unicode_text_and_drains_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let captured = directory.path().join("stdin");
+        let text = "\u{feff}日本語 🦀 café\r\nsecond line\n$(`literal`)\n".repeat(4096);
+        let command = mj_core::targets::CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                "head -c 131072 /dev/zero; cat > \"$1\"",
+                "clipboard-test",
+                captured.to_str().unwrap(),
+            ],
+        );
+        write_wsl_clipboard_with_command(&text, command).unwrap();
+        let bytes = std::fs::read(captured).unwrap();
+        assert!(bytes.len() > 64 * 1024);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(bytes)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), text);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn windows_clipboard_writer_reports_helper_failure() {
+        let command = mj_core::targets::CommandSpec::new(
+            "sh",
+            ["-c", "cat >/dev/null; echo 'clipboard denied' >&2; exit 7"],
+        );
+        let error = write_wsl_clipboard_with_command("text", command).unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("status 7"), "{detail}");
+        assert!(detail.contains("clipboard denied"), "{detail}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires WSL and temporarily replaces Windows clipboard text"]
+    fn windows_clipboard_round_trip_preserves_large_unicode_text() {
+        assert!(running_under_wsl());
+        // Refuse to replace a non-text clipboard; restore the original text
+        // before checking the result, including when the write/read fails.
+        let ClipboardContent::Text(original) = read_wsl_clipboard().unwrap() else {
+            panic!("round trip requires a text clipboard to restore");
+        };
+        let text = "\u{feff}日本語 🦀 café\r\nsecond line\n$(`literal`)\n".repeat(4096);
+        let result = write_text(&text).and_then(|()| read_text());
+        write_wsl_clipboard(&original).expect("restore Windows clipboard text");
+        let received = result.unwrap();
+        assert!(
+            received == text,
+            "Windows clipboard changed the copied text"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

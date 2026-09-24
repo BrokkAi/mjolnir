@@ -146,25 +146,7 @@ impl Controller {
                     "The Rust build cache is unavailable: {error:#}; this session builds without it."
                 ));
             })?;
-        let configuration = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .map(|template| {
-                crate::controller::backend::backend_target(
-                    template,
-                    session.resource_allocation.as_ref(),
-                    crate::controller::backend::ContainerOverrides::for_session(session),
-                )
-            })
-            .transpose()?
-            .and_then(|target| {
-                crate::controller::mbx::host_configuration(
-                    &target,
-                    &self.config.build_cache,
-                    executor,
-                )
-            });
+        let configuration = crate::controller::mbx::host_configuration(backend, executor)?;
         install_mbx_files(
             executor,
             backend,
@@ -274,11 +256,7 @@ impl Controller {
             .is_none()
             .then(|| self.config.bundles.get(&session.bundle_id))
             .flatten();
-        let target = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target template is missing")?;
+        let target = session.target_runtime_settings(&self.config)?;
         let subagent = crate::database::load_subagent(session_id)?;
         // A sub-agent child shares its parent's container, so it works in the
         // parent's workspace. The parent record is authoritative for that path.
@@ -300,7 +278,7 @@ impl Controller {
             backend,
             &workspace_session_id,
             workspace_container.as_deref(),
-            target,
+            &target,
         )?;
         launch.subagent_tools =
             subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
@@ -338,11 +316,7 @@ impl Controller {
                 .profiles
                 .get(&parent.last_profile)
                 .context("sub-agent parent profile is missing")?;
-            let parent_target = self
-                .config
-                .targets
-                .get(&parent.target_template_id)
-                .context("sub-agent parent target template is missing")?;
+            let parent_target = parent.target_runtime_settings(&self.config)?;
             let parent_locator = parent
                 .target
                 .as_ref()
@@ -360,7 +334,7 @@ impl Controller {
                 &parent_backend,
                 &parent.id,
                 parent.container_workspace.as_deref(),
-                parent_target,
+                &parent_target,
             )?;
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
                 parent_launch.cwd
@@ -495,12 +469,12 @@ pub(super) fn worker_launch_config(
     backend: &targets::TargetLocator,
     workspace_session_id: &str,
     workspace_container: Option<&Path>,
-    target: &mj_core::config::TargetTemplate,
+    target: &mj_core::state::TargetRuntimeSettings,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
     let session_id = session.id.as_str();
     let execution_policy = profile
         .kind
-        .effective_execution_policy(target.execution_policy());
+        .effective_execution_policy(target.execution_policy);
     let target_profile_home = target_profile_home(backend, session_id, profile);
     let workspace = if let Some(project_directory) = &session.project_directory {
         (project_directory.to_string_lossy().into_owned(), Vec::new())
@@ -526,16 +500,7 @@ pub(super) fn worker_launch_config(
         );
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
-    use mj_core::config::TargetTemplate;
-    let target_environment = match target {
-        TargetTemplate::LocalPodman { container }
-        | TargetTemplate::LocalDocker { container }
-        | TargetTemplate::AppleContainer { container }
-        | TargetTemplate::SshPodman { container, .. }
-        | TargetTemplate::SshDocker { container, .. } => container.environment.clone(),
-        _ => Default::default(),
-    };
-    let mut target_environment = target_environment;
+    let mut target_environment = target.environment.clone();
     // The turn bounds are read by the worker process, which re-execs with a
     // cleared environment, so a value set for the daemon cannot reach it by
     // inheritance. Carry the two knobs explicitly when the daemon was started

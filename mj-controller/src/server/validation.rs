@@ -361,6 +361,7 @@ fn validate_action_against(
             dirty_ack,
             create_managed_worktree,
             launch_base: _,
+            launch_branch: _,
             mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {
@@ -438,7 +439,7 @@ fn validate_action_against(
         }
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
-        | ControllerAction::Suspend { session_id }
+        | ControllerAction::Suspend { session_id, .. }
         | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::StartReview { session_id } => {

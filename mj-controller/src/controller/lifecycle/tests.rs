@@ -704,7 +704,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
         .unwrap_err();
 
     assert!(
-        error.to_string().contains("close it gracefully"),
+        error.to_string().contains("suspend it instead"),
         "{error:#}"
     );
     assert_eq!(

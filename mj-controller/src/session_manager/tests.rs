@@ -3,6 +3,30 @@ use super::*;
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 
+/// I1-12: a relay's final rejection reaches the user as the relay's reason
+/// alone, not "relay 2.20.0 could not perform submit: relay rejected request
+/// (InvalidState): …", and is not reported as unconfirmed.
+#[test]
+fn a_final_rejection_tells_the_submitter_only_the_relays_reason() {
+    let rejected = anyhow::Error::new(crate::worker_client::RelayRejected(
+        mj_core::relay::relay_protocol_error(
+            mj_core::relay::RelayErrorCode::InvalidState,
+            "/clear requires an idle session",
+            false,
+            None,
+        ),
+    ))
+    .context("relay 2.20.0 could not perform submit");
+    let failure = actor::submit_failure(&rejected);
+    assert!(!failure.unconfirmed);
+    assert_eq!(failure.message, "/clear requires an idle session");
+
+    let lost = anyhow::anyhow!("connection reset").context("relay 2.20.0 could not perform submit");
+    let failure = actor::submit_failure(&lost);
+    assert!(failure.unconfirmed);
+    assert!(failure.message.contains("connection reset"));
+}
+
 fn recovery_source_target() -> mj_core::state::TargetLocator {
     mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/test-worker").join(LEASED_RELAY_SESSION),
@@ -825,6 +849,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 inferred_idle_since_ms: None,
                 goal: Default::default(),
                 capacity_retry: None,
+                retry_assessment_pending: false,
                 activity_turn_started_at_ms: None,
                 store_id: None,
                 idle_since_ms: None,
@@ -1861,7 +1886,10 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 #[cfg(unix)]
 fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
+        target_runtime: None,
         launch_base: None,
+        launch_branch: None,
+        publication: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

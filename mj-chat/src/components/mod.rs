@@ -24,7 +24,9 @@ pub use scope::{
     ControlKind, DOUBLE_CLICK_INTERVAL, EventResult, FieldEdit, Form, Interaction, ListActivation,
     apply_field_edit,
 };
-pub use scrollbar::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
+pub use scrollbar::{
+    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_scrollbar, scrollbar_geometry,
+};
 pub use text_layout::{
     Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,
 };

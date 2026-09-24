@@ -281,6 +281,7 @@ impl Controller {
             &source.last_profile,
             &source.target_template_id,
             &source.target,
+            &source.target_runtime,
             &source.native_session_id,
             &source.resource_allocation,
             &source.additional_mounts,

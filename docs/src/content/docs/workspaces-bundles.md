@@ -31,8 +31,8 @@ mj --workspace "Release work"
 bordered three-row Workspaces pane sits above Sessions. Its right-hand `☰`
 button opens the workspace manager. From the keyboard, focus the Workspaces
 pane, move from the tabs to `☰` with `Tab` or `Right`, then press `Enter`;
-`Shift-Tab` from the Sessions pane also lands on it. The command palette does
-not list the command, because the button is always visible. Selecting a tab, or
+`Shift-Tab` from the Sessions pane also lands on it. The command palette also
+lists **Workspaces** (`prefix+shift+n`). Selecting a tab, or
 pressing an arrow while the workspace tabs have focus, changes the live-session
 filter immediately. Tabs are local
 views, so sessions in other workspaces continue running independently. The web
@@ -151,9 +151,8 @@ Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a
 configured bundle.
 When the selected path is a primary checkout, Mjolnir creates a session-specific
-linked worktree under the repository's `.mj/worktrees/` tree so the primary
-checkout is not used directly. Before it can do that, the primary checkout must
-be completely clean: no staged, unstaged, or untracked files. Selecting an
+clone under the repository's `.mj/clones/` tree so the primary
+checkout is not used directly. Source working-tree changes stay there. Selecting an
 existing linked worktree keeps that worktree. See
 [Targets](/targets/#bare-runtimes).
 
@@ -179,9 +178,8 @@ with their containers.
 ## Local paths and network remotes
 
 A `local` bundle member is a controller-side path used to resolve its network
-fetch and push configuration. Mjolnir creates an independent target clone from
-the fetch remote's advertised default branch, then creates the session branch
-`mj/<session-id>`. The target's `origin` keeps the fetch URL and the configured
+fetch and push configuration. Mjolnir creates an independent target clone on
+the fetch remote's advertised default branch. The target's `origin` keeps the fetch URL and the configured
 push destination(s), including a separate push repository when one is set.
 
 The source checkout is never mounted or copied into the target, and Mjolnir does

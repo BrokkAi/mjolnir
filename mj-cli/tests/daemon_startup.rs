@@ -152,12 +152,30 @@ fn old_daemon_fixture() {
                             // decode the frame: it fails the request and drops
                             // the connection. The client must fall back to the
                             // notice that names no work.
-                            if matches!(request.action, DaemonAction::UpgradeBlockers) { break; }
-                            let stopping = matches!(request.action, DaemonAction::Stop | DaemonAction::PrepareUpgrade) && !busy;
+                            // A daemon that has it names the work it counts.
+                            let blockers = std::env::var("MJ_TEST_OLD_BLOCKERS").ok();
+                            if matches!(request.action, DaemonAction::UpgradeBlockers) && blockers.is_none() { break; }
+                            // 2.18–2.20 count every open HTTP request as work;
+                            // stopping such a daemon cancels none of its own.
+                            let only_open_requests = blockers.as_deref().is_some_and(|labels| {
+                                labels.split(',').all(|label| label.starts_with("HTTP request"))
+                            });
+                            let stopping = matches!(request.action, DaemonAction::Stop)
+                                || (matches!(request.action, DaemonAction::PrepareUpgrade) && !busy);
                             let reply = match request.action {
                                 DaemonAction::Ping => DaemonReply::Pong,
+                                DaemonAction::UpgradeBlockers => DaemonReply::UpgradeBlockers(
+                                    if busy {
+                                        blockers.unwrap().split(',').map(str::to_owned).collect()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                ),
                                 DaemonAction::Stop => {
-                                    assert!(!busy, "automatic upgrade cancelled accepted work");
+                                    assert!(
+                                        !busy || only_open_requests,
+                                        "automatic upgrade cancelled accepted work"
+                                    );
                                     DaemonReply::Done
                                 }
                                 DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
@@ -198,6 +216,8 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     let mut old = OldDaemon(
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            // 2.18.0 has the atomic handoff gate this test exercises; the
+            // database fixture below still has the 2.15.0 schema.
             .env("MJ_TEST_OLD_DAEMON_VERSION", "2.18.0")
             .env(
                 "MJ_TEST_OLD_PROTOCOL",
@@ -246,6 +266,88 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     });
     assert!(old.0.wait().unwrap().success());
     assert_upgraded(&path);
+}
+
+/// 2.18.0 through 2.20.0 count an open HTTP request, such as a long
+/// `mj wait`, as upgrade work, so their `PrepareUpgrade` refuses until it
+/// ends. Later daemons do not count it. The new client must replace such a
+/// daemon as soon as open requests are all that remain, and must keep waiting
+/// while the daemon names any other work.
+#[test]
+fn upgrade_from_a_daemon_counting_open_requests_does_not_wait_for_them() {
+    use std::time::{Duration, Instant};
+    for (version, blockers, replaced) in [
+        ("2.19.0", "HTTP request x2", true),
+        ("2.20.0", "HTTP request", true),
+        ("2.19.0", "HTTP request,session lifecycle", false),
+    ] {
+        let storage = upgrade_storage();
+        let path = old_store(&storage);
+        let busy = storage.path().join("work-in-flight");
+        fs::write(&busy, "open requests").unwrap();
+        let mut old = OldDaemon(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "old_daemon_fixture", "--nocapture"])
+                .env("MJ_TEST_OLD_DAEMON_VERSION", version)
+                .env(
+                    "MJ_TEST_OLD_PROTOCOL",
+                    mj_client::daemon::PROTOCOL_VERSION.to_string(),
+                )
+                .env("MJ_TEST_OLD_BLOCKERS", blockers)
+                .env("MJ_TEST_UPGRADE_BUSY_FILE", &busy)
+                .env("MJ_INSTANCE", "upgrade-test")
+                .env("MJ_DATA_DIR", storage.path().join("data"))
+                .env("MJ_CONFIG_DIR", storage.path().join("config"))
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !storage.path().join("data/daemon.json").exists() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut upgrade = upgrade_command(&storage)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        if replaced {
+            let status = loop {
+                if let Some(status) = upgrade.try_wait().unwrap() {
+                    break status;
+                }
+                if started.elapsed() > Duration::from_secs(20) {
+                    upgrade.kill().unwrap();
+                    upgrade.wait().unwrap();
+                    panic!("{version}: the client waited on open requests");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(upgrade.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+            assert!(status.success(), "{version}: {stderr}");
+            assert!(old.0.wait().unwrap().success());
+            assert!(busy.exists(), "the requests were still open");
+            assert_upgraded(&path);
+        } else {
+            while !busy.with_extension("observed").exists() {
+                assert!(Instant::now() < deadline, "client did not ask for handoff");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            assert!(
+                old.0.try_wait().unwrap().is_none(),
+                "lifecycle work must still hold the handoff"
+            );
+            fs::remove_file(&busy).unwrap();
+            assert!(upgrade.wait().unwrap().success());
+            assert!(old.0.wait().unwrap().success());
+            assert_upgraded(&path);
+        }
+    }
 }
 
 #[test]

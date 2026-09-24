@@ -567,6 +567,9 @@ pub(super) fn collect_checkpoint_repositories(
                     repair_origin_refs(git, &path, &repository.id)?;
                     (GitHistoryMode::SessionDelta, None)
                 }
+                CheckpointRepositoryCapture::ManagedClone { base_commit } => {
+                    (GitHistoryMode::CloneFrom(base_commit.clone()), None)
+                }
                 CheckpointRepositoryCapture::DeltaFrom { base_commit } => {
                     (GitHistoryMode::DeltaFrom(base_commit.clone()), None)
                 }
@@ -580,7 +583,7 @@ pub(super) fn collect_checkpoint_repositories(
                             )
                         })?;
                     (
-                        GitHistoryMode::DeltaFrom(base_commit.clone()),
+                        GitHistoryMode::CloneFrom(base_commit.clone()),
                         Some(base_commit),
                     )
                 }

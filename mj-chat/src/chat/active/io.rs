@@ -229,6 +229,10 @@ impl ActiveChat {
                 let _ = acknowledged.send(());
                 return;
             }
+            ChatIoUpdate::ReviewerNotice(notice) => {
+                self.state.conversation_notice(notice);
+                return;
+            }
             ChatIoUpdate::ReviewerStarted(result) => {
                 if let Err(error) = result {
                     if let Some(view) = self.state.second_opinion_mut() {
@@ -247,9 +251,15 @@ impl ActiveChat {
                 self.apply_turn_review_role_events(role, result);
                 return;
             }
-            ChatIoUpdate::Clipboard { generation, result } => {
+            ChatIoUpdate::Clipboard {
+                generation,
+                target,
+                result,
+            } => {
                 self.paste_in_flight = false;
-                if generation != self.state.input_generation() {
+                if generation != self.state.input_generation()
+                    || target != self.state.clipboard_target()
+                {
                     return;
                 }
                 match result {
@@ -259,7 +269,13 @@ impl ActiveChat {
                     Ok(content) => self.state.handle_clipboard_content(content),
                     Err(error) => {
                         tracing::warn!(%error, "clipboard read failed and was shown in the UI");
-                        self.state.set_notice(format!("Paste failed: {error}"));
+                        let policy = if self.state.prompt_images_supported {
+                            ""
+                        } else {
+                            "; this agent accepts only clipboard text"
+                        };
+                        self.state
+                            .set_notice(format!("Paste failed: {error}{policy}"));
                     }
                 }
                 return;

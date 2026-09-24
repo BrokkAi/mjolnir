@@ -46,6 +46,24 @@ pub enum EntryCollapse {
 pub const BROWSER_TRANSCRIPT_LINES: usize = 1_000;
 pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 
+/// The historical reader uses the canonical text interpretation on both
+/// surfaces, without the live feed's presentation collapse or tail clipping.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryEntry {
+    pub role: &'static str,
+    pub text: String,
+}
+
+pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<HistoryEntry> {
+    page.items
+        .iter()
+        .map(|item| HistoryEntry {
+            role: mj_core::transcript::transcript_item_role(&item.body),
+            text: mj_transcript::transcript::transcript_item_text(item),
+        })
+        .collect()
+}
+
 pub fn browser_transcript(
     source_entries: &[ChatEntry],
     latest_seq: u64,
@@ -478,7 +496,7 @@ pub fn user_label(entry: &ChatEntry) -> &'static str {
         .and_then(|item| item.stable_id.strip_prefix("user:"))
         .is_some_and(mj_core::relay::is_capacity_retry_command)
     {
-        "Automatic · capacity retry"
+        "Automatic · server retry"
     } else {
         "You"
     }

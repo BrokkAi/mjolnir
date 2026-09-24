@@ -49,6 +49,9 @@ pub struct Dialog<K: Copy + Eq> {
     submission_pending: bool,
     pending_dismissal: Option<Interaction<K>>,
     confirmation: Form<bool>,
+    /// What the discard prompt says will be lost, when the owner can say
+    /// more than "your changes".
+    confirmation_message: Option<String>,
     menu: bool,
     bounds: Rect,
 }
@@ -74,6 +77,7 @@ impl<K: Copy + Eq> Dialog<K> {
             submission_pending: false,
             pending_dismissal: None,
             confirmation: Form::new(),
+            confirmation_message: None,
             menu: false,
             bounds: Rect::default(),
         }
@@ -114,6 +118,12 @@ impl<K: Copy + Eq> Dialog<K> {
     /// Prevents duplicate submission while a supervised operation is pending.
     pub fn set_submission_pending(&mut self, pending: bool) {
         self.submission_pending = pending;
+    }
+
+    /// Says in the discard prompt which changes it discards. Without one
+    /// the prompt says only that the changes have not been saved.
+    pub fn set_confirmation_message(&mut self, message: Option<String>) {
+        self.confirmation_message = message;
     }
 
     pub fn set_dirty(&mut self, dirty: bool) {
@@ -399,7 +409,12 @@ impl<K: Copy + Eq> Dialog<K> {
         frame.render_widget(block, popup);
         let layout = DialogShell::layout(inner, 1);
         frame.render_widget(
-            Paragraph::new("Your changes have not been saved.").wrap(Wrap { trim: false }),
+            Paragraph::new(
+                self.confirmation_message
+                    .as_deref()
+                    .unwrap_or("Your changes have not been saved."),
+            )
+            .wrap(Wrap { trim: false }),
             layout.body,
         );
         self.confirmation.begin_frame();

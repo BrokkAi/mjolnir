@@ -11,6 +11,7 @@ pub use capacity::*;
 pub use protocol::*;
 use serde::{Deserialize, Serialize};
 pub use snapshot::*;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -49,7 +50,7 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// session and replace the worker with the current build once it is quiet.
 /// Until then, a request the older worker cannot decode is refused on the
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
-pub const RELAY_PROTOCOL_VERSION: u32 = 21;
+pub const RELAY_PROTOCOL_VERSION: u32 = 22;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
@@ -64,7 +65,7 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-pub const RELAY_STATE_VERSION: u32 = 11;
+pub const RELAY_STATE_VERSION: u32 = 12;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -170,6 +171,12 @@ pub struct RestoredRelaySeed {
     /// restore spec's queue disposition.
     #[serde(default)]
     pub queued_prompts: Vec<CanonicalQueuedPrompt>,
+    /// The model and effort the archived session had accepted, when the
+    /// restore continues its native conversation. The restored worker pins
+    /// them on its first bridge start, as it does after any restart, so a
+    /// resume keeps the session's model instead of the harness default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_config: BTreeMap<String, String>,
 }
 
 impl RestoredRelaySeed {

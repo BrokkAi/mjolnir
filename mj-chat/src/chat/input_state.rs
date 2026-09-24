@@ -1,5 +1,32 @@
 use super::*;
 
+/// The command name when `text` is shaped like a slash command: a slash
+/// followed by a word of letters, digits, `-`, `_`, `:` or `.`. A path such as
+/// `/tmp/log is empty` is not a command.
+fn slash_command_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    let name = rest.split(char::is_whitespace).next()?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+    .then_some(name)
+}
+
+pub(super) const ATTACH_UNSUPPORTED_NOTICE: &str =
+    "/attach adds image files only, and this agent does not accept images";
+pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
+    "This agent does not accept images; only text can be pasted";
+pub(super) const IMAGE_CAPABILITY_NOTICE: &str = "This agent has not advertised image support; paste text or remove image markers before sending";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ClipboardTarget {
+    Composer,
+    Search,
+    Answer(String),
+    Unavailable,
+}
+
 impl ChatState {
     pub fn apply_events(&mut self, events: &[SequencedEvent]) {
         for event in events {
@@ -25,6 +52,7 @@ impl ChatState {
         self.autocomplete = None;
         self.anchor = TranscriptAnchor::Bottom;
         self.reveal_latest_agent_on_draw = true;
+        self.revealed_anchor = None;
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
         self.transcript_scrollbar.clear();
@@ -113,6 +141,9 @@ impl ChatState {
     }
 
     pub(crate) fn handle_clipboard_content(&mut self, content: ClipboardContent) {
+        if self.clipboard_target() == ClipboardTarget::Unavailable {
+            return;
+        }
         if self.elicitation.is_some() {
             match content {
                 ClipboardContent::Text(text) => self.handle_paste(&text),
@@ -134,6 +165,9 @@ impl ChatState {
         match content {
             ClipboardContent::Text(text) => self.handle_paste(&text),
             ClipboardContent::Image(image) => {
+                if !self.allow_image_attachment() {
+                    return;
+                }
                 if self.input_images.len() >= MAX_IMAGES {
                     self.set_notice(format!("A prompt can contain at most {MAX_IMAGES} images"));
                     return;
@@ -156,6 +190,9 @@ impl ChatState {
     }
 
     pub(crate) fn reserve_attachment(&mut self, sequence: u64) -> bool {
+        if !self.allow_image_attachment() {
+            return false;
+        }
         if self.input_images.len() >= MAX_IMAGES {
             self.set_notice(format!("A prompt can contain at most {MAX_IMAGES} images"));
             return false;
@@ -220,8 +257,48 @@ impl ChatState {
         }
     }
 
+    pub(crate) fn set_prompt_images_supported(&mut self, supported: bool) {
+        if self.prompt_images_supported != supported {
+            self.prompt_images_supported = supported;
+            // Invalidate reads made under the previous capability policy.
+            self.input_generation = self.input_generation.wrapping_add(1);
+        }
+    }
+
+    pub(super) fn clipboard_target(&self) -> ClipboardTarget {
+        if self.earlier.is_some()
+            || (!self.reviewer_elicitation_open()
+                && (self.second_opinion_active() || self.turn_review_active()))
+        {
+            ClipboardTarget::Unavailable
+        } else if let Some(dialog) = &self.elicitation {
+            ClipboardTarget::Answer(dialog.request().id.clone())
+        } else if self.turn_control_dialog_open
+            || self.task_dialog_open
+            || self.config_picker_active()
+        {
+            ClipboardTarget::Unavailable
+        } else if self.history_search.is_some() {
+            ClipboardTarget::Search
+        } else {
+            ClipboardTarget::Composer
+        }
+    }
+
     pub(crate) fn clipboard_is_text_only(&self) -> bool {
-        self.elicitation.is_some() || self.history_search.is_some()
+        !self.prompt_images_supported || self.clipboard_target() != ClipboardTarget::Composer
+    }
+
+    fn allow_image_attachment(&mut self) -> bool {
+        if !self.prompt_images_supported {
+            self.set_notice(IMAGE_CAPABILITY_NOTICE);
+            return false;
+        }
+        if self.clipboard_target() != ClipboardTarget::Composer {
+            self.set_notice("Image paste is unavailable in this input field");
+            return false;
+        }
+        true
     }
 
     pub(crate) fn take_submitting_images(&mut self) -> Vec<PromptImage> {
@@ -386,6 +463,44 @@ impl ChatState {
     }
 
     pub(crate) fn submit_input(&mut self) -> ChatAction {
+        let draft = self.input.clone();
+        let command = slash_command_name(draft.trim()).map(str::to_owned);
+        let action = self.submit_draft();
+        // A slash command the chat refused leaves nothing for the user to
+        // edit: keeping it in the draft only makes the next command append
+        // to it ("/model/effort high"). Clear it, keep it in history, and
+        // name the command in the notice. /clear keeps its own handling, and
+        // a draft holding images or waiting for a session is kept.
+        let Some(command) = command else {
+            return action;
+        };
+        if !matches!(action, ChatAction::None)
+            || command == "clear"
+            || self.standby
+            || !self.input_images.is_empty()
+            || self.input != draft
+        {
+            return action;
+        }
+        let Some(notice) = self.notice() else {
+            return action;
+        };
+        self.record_prompt_history(draft.trim());
+        self.clear_input();
+        let named = format!("/{command}");
+        if notice.contains(&named) {
+            self.set_notice(notice);
+        } else {
+            self.set_notice(format!("{named}: {notice}"));
+        }
+        action
+    }
+
+    fn submit_draft(&mut self) -> ChatAction {
+        if !self.input_images.is_empty() && !self.prompt_images_supported {
+            self.set_notice(IMAGE_CAPABILITY_NOTICE);
+            return ChatAction::None;
+        }
         let prompt = self.input.trim().to_owned();
         let command_input = if self.input_images.is_empty() {
             prompt.clone()
@@ -642,6 +757,13 @@ impl ChatState {
                     };
                 }
                 LocalCommand::Attach => {
+                    if !self.prompt_images_supported {
+                        self.set_notice(ATTACH_UNSUPPORTED_NOTICE);
+                        return ChatAction::None;
+                    }
+                    if !self.allow_image_attachment() {
+                        return ChatAction::None;
+                    }
                     if args.is_empty() {
                         self.set_notice("usage: /attach <path>");
                         return ChatAction::None;
@@ -722,6 +844,21 @@ impl ChatState {
                     }
                 }
             };
+        }
+        if let Some(name) = slash_command_name(&command_input)
+            && !self.command_choices.iter().any(|choice| {
+                choice.name.eq_ignore_ascii_case(name)
+                    || choice
+                        .name
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|first| first.eq_ignore_ascii_case(name))
+            })
+        {
+            self.set_notice(format!(
+                "/{name} is not a Mjolnir or agent command; it was not sent"
+            ));
+            return ChatAction::None;
         }
         self.submit_prompt(prompt)
     }

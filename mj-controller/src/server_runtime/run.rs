@@ -145,7 +145,17 @@ pub async fn run_server(
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
+    // Publish a pin only for a certificate the operator configured. A
+    // Tailscale certificate chains to a public CA and renews in place, so a
+    // pin taken now would go stale while ordinary verification keeps working.
+    let mut certificate_sha256 = None;
     if let Some((cert, key)) = resolved.tls_files {
+        if resolved.tailscale.is_none() {
+            let pem = tokio::fs::read(&cert)
+                .await
+                .with_context(|| format!("read web viewer TLS certificate {}", cert.display()))?;
+            certificate_sha256 = Some(crate::server::api::served_certificate_sha256(&pem)?);
+        }
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
             .await
             .context("load web viewer TLS certificate")?;
@@ -178,6 +188,7 @@ pub async fn run_server(
         viewer_code: options.viewer_code().to_owned(),
         qr_login_url,
         fallback_reason,
+        certificate_sha256,
     };
 
     let mut serve = ViewerServer::spawn({
@@ -627,7 +638,7 @@ pub async fn run_server(
                         let pending = materialized.pending_elicitations.clone();
                         let active_shells = operational_state.active_user_shells.clone();
                         let prompt_images_supported =
-                            agent_accepts_prompt_images(&operational_state);
+                            operational_state.accepts_prompt_images();
                         active_user_shells.insert(
                             update.session_id.clone(),
                             active_shells,
@@ -1306,7 +1317,7 @@ pub async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    if let ControllerAction::Suspend { session_id } = &request.action {
+                    if let ControllerAction::Suspend { session_id, .. } = &request.action {
                         if !closing_actions.contains_key(session_id) {
                             request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         }
@@ -1347,7 +1358,7 @@ pub async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
-                    if let ControllerAction::Suspend { session_id } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
+                    if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()
@@ -1391,7 +1402,7 @@ pub async fn run_server(
                             let _upgrade_blocking = upgrade_blocking;
                             let mut suspension_reply = suspension_reply;
                             let result = (|| -> Result<()> {
-                                if let ControllerAction::Suspend { session_id } = &action {
+                                if let ControllerAction::Suspend { session_id, .. } = &action {
                                     mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
                                     if let Some(reply) = suspension_reply.take() {
                                         let _ = reply.send(ActionOutcome::accepted());

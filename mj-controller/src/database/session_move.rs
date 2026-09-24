@@ -240,7 +240,18 @@ mod tests {
     fn move_boundaries_survive_database_reopen_and_retain_the_source_locator() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
-        let session = super::super::tests::session("move-reopen", "project");
+        let mut session = super::super::tests::session("move-reopen", "project");
+        let template: mj_core::config::TargetTemplate = serde_json::from_str(
+            r#"{"kind":"ssh-podman","host":"original.test","image":"test","user":"builder"}"#,
+        )
+        .unwrap();
+        session.target_runtime = Some((&template).into());
+        session.target = Some(mj_core::state::TargetLocator::SshPodman {
+            host: "original.test".into(),
+            container_id: "source-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        });
         save_session_to(&path, &session).unwrap();
         let mut intent = operation(&session);
         for phase in [

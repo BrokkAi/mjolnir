@@ -97,8 +97,35 @@ def run_command(
     return result
 
 
+def first_broken_symlink(path: pathlib.Path) -> pathlib.Path | None:
+    """Return the first ancestor of ``path`` (``path`` included) that is a
+    symlink pointing at a location that no longer exists, or ``None``."""
+    for candidate in (path, *path.parents):
+        if candidate.is_symlink() and not candidate.exists():
+            return candidate
+    return None
+
+
+def mkdir_or_explain(path: pathlib.Path) -> None:
+    # ``Path.mkdir(parents=True, exist_ok=True)`` raises FileExistsError when
+    # an ancestor component is a dangling symlink: the directory entry exists
+    # (so mkdir fails with EEXIST) but ``is_dir()`` is false (so pathlib does
+    # not treat it as already satisfied).  Name the broken symlink instead of
+    # surfacing that confusing FileExistsError.
+    broken = first_broken_symlink(path)
+    if broken is not None:
+        raise LabError(
+            f"cannot create {path}: {broken} is a broken symlink to a location "
+            "that no longer exists"
+        )
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as error:
+        raise LabError(f"cannot create {path}: {error}") from error
+
+
 def atomic_write(path: pathlib.Path, content: str, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_or_explain(path.parent)
     path.parent.chmod(0o700)
     temporary: pathlib.Path | None = None
     try:
@@ -123,7 +150,7 @@ def atomic_write(path: pathlib.Path, content: str, *, mode: int = 0o600) -> None
 
 
 def ensure_private_directory(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    mkdir_or_explain(path)
     path.chmod(0o700)
 
 
@@ -474,6 +501,65 @@ def discover_owned_security_group(aws: Aws, run_tag: str) -> str | None:
         raise LabError(f"run tag {run_tag} matched multiple security groups")
     group_id = groups[0].get("GroupId") if groups else None
     return group_id if isinstance(group_id, str) else None
+
+
+def discover_owned_key_pair(aws: Aws, run_tag: str) -> str | None:
+    response = aws.optional_json(
+        "ec2",
+        "describe-key-pairs",
+        "--filters",
+        f"Name=tag:mj-ssh-docker-run,Values={run_tag}",
+    )
+    keys = (response or {}).get("KeyPairs", [])
+    if len(keys) > 1:
+        raise LabError(f"run tag {run_tag} matched multiple key pairs")
+    key_name = keys[0].get("KeyName") if keys else None
+    return key_name if isinstance(key_name, str) else None
+
+
+def discover_candidate_run_tags(aws: Aws) -> list[str]:
+    """List distinct ``mj-ssh-docker-run`` tag values present anywhere in the
+    account/region, across every resource type this tool creates.  Used to
+    point an operator at ``cleanup --run-tag`` when a ledger is lost."""
+    found: set[str] = set()
+
+    def collect(response: dict[str, Any] | None, items_key: str) -> list[dict[str, Any]]:
+        return (response or {}).get(items_key, [])
+
+    instances_response = aws.optional_json(
+        "ec2", "describe-instances", "--filters", "Name=tag-key,Values=mj-ssh-docker-run"
+    )
+    for reservation in collect(instances_response, "Reservations"):
+        for instance in reservation.get("Instances", []):
+            value = tag_map(instance).get("mj-ssh-docker-run")
+            if value:
+                found.add(value)
+
+    volumes_response = aws.optional_json(
+        "ec2", "describe-volumes", "--filters", "Name=tag-key,Values=mj-ssh-docker-run"
+    )
+    for volume in collect(volumes_response, "Volumes"):
+        value = tag_map(volume).get("mj-ssh-docker-run")
+        if value:
+            found.add(value)
+
+    groups_response = aws.optional_json(
+        "ec2", "describe-security-groups", "--filters", "Name=tag-key,Values=mj-ssh-docker-run"
+    )
+    for group in collect(groups_response, "SecurityGroups"):
+        value = tag_map(group).get("mj-ssh-docker-run")
+        if value:
+            found.add(value)
+
+    keys_response = aws.optional_json(
+        "ec2", "describe-key-pairs", "--filters", "Name=tag-key,Values=mj-ssh-docker-run"
+    )
+    for key in collect(keys_response, "KeyPairs"):
+        value = tag_map(key).get("mj-ssh-docker-run")
+        if value:
+            found.add(value)
+
+    return sorted(found)
 
 
 def recover_owned_instance_ids(
@@ -1012,7 +1098,97 @@ def open_lab(args: argparse.Namespace) -> tuple[pathlib.Path, dict[str, Any], pa
     return artifact_dir, ledger, path
 
 
+def build_ledger_from_tag(args: argparse.Namespace, run_tag: str) -> dict[str, Any]:
+    """A minimal, schema-1-compatible ledger seeded from nothing but the
+    ``mj-ssh-docker-run`` tag, for cleaning up a run whose real ledger was
+    lost.  ``cleanup_by_run_tag`` fills in ``resources`` by discovery before
+    handing this to ``cleanup_ledger``, which needs no changes to accept it."""
+    return {
+        "schema": 1,
+        "run_id": run_tag,
+        "run_tag": run_tag,
+        "created_at": utc_now(),
+        "profile": args.profile,
+        "region": args.region,
+        "resources": {
+            "instance_id": None,
+            "volume_id": None,
+            "security_group_id": None,
+            "key_name": None,
+            "instance_tag": run_tag,
+        },
+        "connection": {
+            "user": DEFAULT_USER,
+            "private_key": None,
+            "known_hosts": None,
+            "address": None,
+        },
+        "state": "recovered-by-tag",
+        "recovered_by_tag": True,
+        "cleanup_errors": [],
+    }
+
+
+def cleanup_by_run_tag(args: argparse.Namespace, run_tag: str) -> int:
+    if args.artifact_dir is None:
+        run_id_hint = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:10]}"
+        artifact_dir = DEFAULT_ARTIFACT_ROOT / f"recovered-{run_id_hint}"
+    else:
+        artifact_dir = args.artifact_dir
+    ensure_private_directory(artifact_dir)
+    path = ledger_path(artifact_dir)
+    if path.exists():
+        raise LabError(
+            f"a ledger already exists at {path}; run 'cleanup' without --run-tag, "
+            "or pass a different --artifact-dir to hold the tag-based recovery record"
+        )
+    ledger = build_ledger_from_tag(args, run_tag)
+    # Write the recovery record before any discovery or destructive call, the
+    # same durability discipline the normal ledger follows: an interrupted
+    # cleanup must still leave a record of exactly which IDs were found.
+    save_ledger(path, ledger)
+
+    aws = Aws(args.profile, args.region, args.command_timeout)
+    recover_owned_instance_ids(aws, ledger, path)
+    recover_owned_security_group(aws, ledger, path)
+    key_name = discover_owned_key_pair(aws, run_tag)
+    if key_name:
+        ledger["resources"]["key_name"] = key_name
+        mark(path, ledger, key_imported=True)
+
+    resources = ledger["resources"]
+    if not any(
+        resources.get(field)
+        for field in ("instance_id", "volume_id", "security_group_id", "key_name")
+    ):
+        raise LabError(
+            f"no resources tagged mj-ssh-docker-run={run_tag} were found in "
+            f"{args.region} (profile {args.profile})"
+        )
+    return 0 if cleanup_ledger(args, artifact_dir, ledger) else 1
+
+
 def cleanup(args: argparse.Namespace) -> int:
+    if args.run_tag:
+        return cleanup_by_run_tag(args, args.run_tag)
+    if args.artifact_dir is None:
+        raise LabError("--artifact-dir or --run-tag is required for cleanup")
+    path = ledger_path(args.artifact_dir)
+    if not path.exists():
+        aws = Aws(args.profile, args.region, args.command_timeout)
+        candidates = discover_candidate_run_tags(aws)
+        if candidates:
+            listing = ", ".join(candidates)
+            raise LabError(
+                f"no ledger at {path}; pass --run-tag <tag> to clean up by AWS "
+                f"tag instead. candidate run tags found in {args.region} "
+                f"(profile {args.profile}): {listing}"
+            )
+        raise LabError(
+            f"no ledger at {path}; pass --run-tag <tag> to clean up by AWS tag "
+            f"instead. no mj-ssh-docker-run tags were found in {args.region} "
+            f"(profile {args.profile})"
+        )
     artifact_dir, ledger, _ = open_lab(args)
     return 0 if cleanup_ledger(args, artifact_dir, ledger) else 1
 
@@ -1057,6 +1233,14 @@ def parser() -> argparse.ArgumentParser:
     add_common_options(collect_parser, suppress_defaults=True)
     cleanup_parser = commands.add_parser("cleanup", help="terminate and remove exactly this run's resources")
     add_common_options(cleanup_parser, suppress_defaults=True)
+    cleanup_parser.add_argument(
+        "--run-tag",
+        default=None,
+        help=(
+            "recover and clean up by mj-ssh-docker-run tag instead of a ledger "
+            "file, for when --artifact-dir (and its ledger) was lost"
+        ),
+    )
     return root
 
 

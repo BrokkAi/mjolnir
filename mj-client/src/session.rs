@@ -206,6 +206,12 @@ pub struct ReviewState {
 }
 
 pub trait SessionHandleBackend: Send + Sync {
+    fn transcript_history(
+        &self,
+        _before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> BoxFuture<'_, Result<mj_core::storage::TranscriptHistoryPage>> {
+        Box::pin(async { anyhow::bail!("earlier conversation history is unavailable") })
+    }
     fn search_prompts(
         &self,
         bundle_id: String,
@@ -253,6 +259,13 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    pub async fn transcript_history(
+        &self,
+        before: Option<mj_core::storage::TranscriptCursor>,
+    ) -> Result<mj_core::storage::TranscriptHistoryPage> {
+        self.backend.transcript_history(before).await
+    }
+
     pub async fn search_prompts(
         &self,
         bundle_id: String,
@@ -570,6 +583,7 @@ pub struct ReplacementSessionTestFixture {
     pub stopped: SessionHandle,
     pub control: SessionControl,
     pub submitted: tokio::sync::mpsc::UnboundedReceiver<RelayCommand>,
+    pub replacement_view: Arc<tokio::sync::watch::Sender<ManagedSessionView>>,
 }
 
 #[derive(Clone)]
@@ -732,6 +746,7 @@ pub fn replacement_session_test_fixture(
     });
 
     let (view_tx, view) = tokio::sync::watch::channel(ManagedSessionView::default());
+    let view_tx = Arc::new(view_tx);
     let (submitted_tx, submitted) = tokio::sync::mpsc::unbounded_channel();
     let replacement = SessionHandle::new(ReplacementTestSession {
         #[cfg(test)]
@@ -741,7 +756,7 @@ pub fn replacement_session_test_fixture(
         accepted_ordinal,
         submitted: Some(submitted_tx),
         view,
-        _view_guard: Some(Arc::new(view_tx)),
+        _view_guard: Some(view_tx.clone()),
     });
     let control = SessionControl::new(ReplacementTestControl {
         session_id: session_id.to_owned(),
@@ -751,6 +766,7 @@ pub fn replacement_session_test_fixture(
         stopped,
         control,
         submitted,
+        replacement_view: view_tx,
     }
 }
 
