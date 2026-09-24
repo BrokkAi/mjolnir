@@ -409,6 +409,13 @@ impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOut
 }
 
 impl DashboardContext {
+    /// How a notice names a session: the title the session list shows, or
+    /// the short id when the session has no title or its record is gone
+    /// (launch finding B-3).
+    pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
+        session_notice_name(&self.controller.state, session_id)
+    }
+
     fn replace_controller(&mut self, mut controller: Controller) {
         super::read_receipts::preserve_read_positions(
             &mut controller.state.sessions,
@@ -589,6 +596,7 @@ impl DashboardContext {
                             },
                         );
                         if applies {
+                            let name = self.session_notice_name(&session_id);
                             let notice = match state {
                                 SessionState::Error => {
                                     let session = self
@@ -602,7 +610,7 @@ impl DashboardContext {
                                     session.updated_at = updated_at;
                                     format!(
                                         "Session {} cannot reach its managed target; its last verified checkpoint is ready to resume",
-                                        short_id(&session_id)
+                                        name
                                     )
                                 }
                                 // The daemon discards a lost session's record
@@ -613,7 +621,7 @@ impl DashboardContext {
                                     self.controller.state.subagents.remove(&session_id);
                                     format!(
                                         "Session {} was lost because its managed target no longer exists; its record was removed.",
-                                        short_id(&session_id)
+                                        name
                                     )
                                 }
                                 _ => unreachable!("a missing target persisted as {state:?}"),
@@ -627,7 +635,7 @@ impl DashboardContext {
                     (WorkerRecordPersistence::TargetMissing { session_id, .. }, Err(error)) => {
                         self.dashboard.set_notice(format!(
                             "Could not record missing target for {}: {error}",
-                            short_id(&session_id)
+                            self.session_notice_name(&session_id)
                         ))
                     }
                     (
@@ -865,7 +873,7 @@ impl DashboardContext {
                     self.dashboard.restore_standby_prompt(&session_id, &text);
                     self.dashboard.set_failure_notice(format!(
                         "Could not queue the prompt for session {}: {error}",
-                        short_id(&session_id)
+                        self.session_notice_name(&session_id)
                     ));
                 }
             }
@@ -896,12 +904,12 @@ impl DashboardContext {
                     self.refresh_chat_context();
                     self.dashboard.set_notice(format!(
                         "Container settings saved for {}; applies when it is next recreated.",
-                        short_id(&session_id)
+                        self.session_notice_name(&session_id)
                     ));
                 }
                 Err(error) => self.dashboard.set_notice(format!(
                     "Container settings failed for {}: {error}",
-                    short_id(&session_id)
+                    self.session_notice_name(&session_id)
                 )),
             },
             DashboardIoUpdate::MountHistory(result) => match result {
@@ -1128,7 +1136,7 @@ impl DashboardContext {
                 Err(error) => {
                     let message = format!(
                         "Could not confirm saved draft and read status for {}: {error}",
-                        short_id(&session_id)
+                        self.session_notice_name(&session_id)
                     );
                     self.draft_save_failures.insert(session_id, message.clone());
                     self.dashboard.set_notice(message);
@@ -1197,7 +1205,7 @@ impl DashboardContext {
                 if let Err(error) = result {
                     self.dashboard.set_failure_notice(format!(
                         "Could not cancel operation for {}: {error}",
-                        short_id(&session_id)
+                        self.session_notice_name(&session_id)
                     ));
                 }
             }
@@ -1426,8 +1434,10 @@ impl DashboardContext {
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.
                 self.dashboard.focus_prompt();
-                self.dashboard
-                    .set_notice(format!("Launching {}…", short_id(&session_id)));
+                self.dashboard.set_notice(format!(
+                    "Launching {}…",
+                    self.session_notice_name(&session_id)
+                ));
                 self.lifecycle_operations.insert(
                     session_id,
                     ActiveLifecycleOperation {
@@ -1450,6 +1460,8 @@ impl DashboardContext {
     fn apply_lifecycle_reloaded(&mut self, reloaded: LifecycleReloaded) {
         let LifecycleReload { update, operation } = reloaded.reload;
         let session_id = update.session_id;
+        // Taken before the reload: a destroy removes the record.
+        let name = self.session_notice_name(&session_id);
         let loaded = match reloaded.result {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -1474,7 +1486,7 @@ impl DashboardContext {
                     self.dashboard.finish_new_session(&session_id);
                 }
                 self.dashboard
-                    .set_notice(format!("Session {} is ready", short_id(&session_id)));
+                    .set_notice(format!("Session {} is ready", name));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Resumed {
@@ -1490,10 +1502,8 @@ impl DashboardContext {
                     self.request_transcript_tail_seed(&session_id);
                     self.open_chat_session(&session_id);
                 }
-                self.dashboard.set_notice(format!(
-                    "Resumed {} with {profile_id} on {target_id}",
-                    short_id(&session_id)
-                ));
+                self.dashboard
+                    .set_notice(format!("Resumed {} with {profile_id} on {target_id}", name));
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
@@ -1506,34 +1516,29 @@ impl DashboardContext {
                     .set_notice(if outcome.outcome == "unchanged" {
                         format!(
                             "Move of {} unchanged on {destination} (operation {})",
-                            short_id(&session_id),
-                            outcome.operation_id
+                            name, outcome.operation_id
                         )
                     } else {
                         format!(
                             "Moved {} to {destination}; ready and idle (operation {})",
-                            short_id(&session_id),
-                            outcome.operation_id
+                            name, outcome.operation_id
                         )
                     });
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Closed) => {
-                self.dashboard
-                    .set_notice(format!("Suspended {}", short_id(&session_id)));
+                self.dashboard.set_notice(format!("Suspended {}", name));
             }
             Ok(LifecycleSuccess::ForceStopped) => self.dashboard.set_notice(format!(
                 "Suspended {} using the confirmed recovery copy; newer changes discarded",
-                short_id(&session_id)
+                name
             )),
-            Ok(LifecycleSuccess::DestroyedStopped) => self.dashboard.set_notice(format!(
-                "Permanently destroyed suspended session {}",
-                short_id(&session_id)
-            )),
-            Ok(LifecycleSuccess::ForceDestroyed) => self.dashboard.set_notice(format!(
-                "Permanently destroyed session {}",
-                short_id(&session_id)
-            )),
+            Ok(LifecycleSuccess::DestroyedStopped) => self
+                .dashboard
+                .set_notice(format!("Permanently destroyed suspended session {}", name)),
+            Ok(LifecycleSuccess::ForceDestroyed) => self
+                .dashboard
+                .set_notice(format!("Permanently destroyed session {}", name)),
             Err(error) => {
                 if operation
                     .as_ref()
@@ -1598,11 +1603,42 @@ impl DashboardContext {
     }
 }
 
+/// How a notice names a session: its display title, or its short id when it
+/// has no title or its record is gone (launch finding B-3).
+pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
+    match state.sessions.get(session_id) {
+        Some(session) if session.display_title() != session.id => {
+            session.display_title().to_owned()
+        }
+        _ => short_id(session_id).to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
     use mj_core::config::{HarnessKind, ProjectRepository};
+
+    #[test]
+    fn notices_name_a_titled_session_by_its_title_and_others_by_short_id() {
+        let mut titled = lifecycle_session("5e0fb24c-titled", "default", SessionState::Stopped);
+        titled.session_title_override = Some("Fix the parser".into());
+        let untitled = lifecycle_session("a1a8109b-untitled", "default", SessionState::Stopped);
+        let state = State {
+            sessions: BTreeMap::from([
+                (titled.id.clone(), titled),
+                (untitled.id.clone(), untitled),
+            ]),
+            ..State::default()
+        };
+        assert_eq!(
+            session_notice_name(&state, "5e0fb24c-titled"),
+            "Fix the parser"
+        );
+        assert_eq!(session_notice_name(&state, "a1a8109b-untitled"), "a1a8109b");
+        assert_eq!(session_notice_name(&state, "0badc0de-gone"), "0badc0de");
+    }
 
     #[test]
     fn setup_save_refuses_to_remove_an_active_sessions_target_without_writing() {

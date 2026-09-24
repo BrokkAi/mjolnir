@@ -1774,7 +1774,7 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
         };
-        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::DestroyStopped {
+        self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::DestroyStopped {
             session_id,
             reopen: Some(Box::new(dialog)),
         }));
