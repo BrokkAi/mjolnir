@@ -1857,6 +1857,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
                     accepted_ordinal: Some(5),
                     turn_start_position: 6,
                     started_at_ms: 10,
+                    steered_into: None,
                 }),
                 last_turn_outcome: None,
             }),
@@ -1970,6 +1971,7 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
                 accepted_ordinal: Some(5),
                 turn_start_position: 6,
                 started_at_ms: 10,
+                steered_into: None,
             }),
             last_turn_outcome: None,
         })]),
@@ -2101,6 +2103,7 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
             accepted_ordinal: Some(7),
             turn_start_position: 8,
             started_at_ms: 1,
+            steered_into: None,
         }),
         ..WaitObservation::default()
     };
@@ -2350,6 +2353,7 @@ fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
             accepted_ordinal: Some(12),
             turn_start_position: 13,
             started_at_ms: 1,
+            steered_into: None,
         }),
         ..idle(Some(completed(10, "end_turn")))
     };

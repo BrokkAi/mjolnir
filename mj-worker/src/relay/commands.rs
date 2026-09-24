@@ -751,6 +751,7 @@ impl DurableRelay {
         for id in stale {
             self.record_command_rejected(&id, "The requested turn is no longer running")?;
         }
+        self.submit_automatic_steer()?;
         self.promote_next_queued_command()?;
         if self
             .snapshot
@@ -884,6 +885,68 @@ impl DurableRelay {
             self.commit_snapshot(next_snapshot)?;
         }
         Ok(claimed)
+    }
+
+    /// Steer the head of the queue into the running prompt without being
+    /// asked. It goes through admission like an Escape steer, so the journal
+    /// and every client see the same steering operation.
+    fn submit_automatic_steer(&mut self) -> Result<()> {
+        let Some((active_prompt_id, queued_prompt_id)) = self.automatic_steer_target() else {
+            return Ok(());
+        };
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow!("generate automatic steer id: {error}"))?;
+        let command_id = format!("auto-steer-{}", mj_core::hex::lower_hex(random));
+        if let Err(error) = self.submit_command(
+            &command_id,
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            },
+        )? {
+            // Admission saw something the target check did not; the prompt
+            // simply stays queued, as it would without automatic steering.
+            tracing::debug!(?error, "automatic steer was not admitted");
+        }
+        Ok(())
+    }
+
+    /// The running prompt and the queued prompt to steer into it, when the
+    /// bridge would return the prompt instead of starting a turn and nothing
+    /// is waiting for the running turn to end.
+    fn automatic_steer_target(&self) -> Option<(String, String)> {
+        if !self.automatic_steering || self.checkpoint_only {
+            return None;
+        }
+        let active = &self.snapshot.active_prompt.as_ref()?.command_id;
+        if self.snapshot.cancelling_prompt_id.is_some()
+            || self.snapshot.checkpoint_barrier.is_some()
+            || self.next_queued_checkpoint().is_some()
+            || self.pending_close_barrier_id().is_some()
+        {
+            return None;
+        }
+        // One steer at a time, and none after a steer into this same turn
+        // failed or came back: that turn is ending or cannot take input.
+        if let Some(steering) = &self.snapshot.steering
+            && (steering.holds_queue()
+                || (steering.active_prompt_id == *active
+                    && steering.status != mj_core::relay::SteeringStatus::Applied))
+        {
+            return None;
+        }
+        let head = self.snapshot.queued_prompts.first()?;
+        let StoredQueuedRelayPayload::Prompt { prompt } = &head.payload else {
+            return None;
+        };
+        // Commands run at turn boundaries, not inside another turn.
+        if mj_core::acp::prompt_is_slash_command(prompt)
+            || self.snapshot.dispatches.get(&head.command_id)?.state != RelayDispatchState::Queued
+        {
+            return None;
+        }
+        Some((active.clone(), head.command_id.clone()))
     }
 
     /// Advance only lifecycle commands after the old owning process was stopped.

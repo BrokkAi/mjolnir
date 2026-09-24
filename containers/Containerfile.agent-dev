@@ -81,9 +81,9 @@ RUN apt-get update \
 # pins" in AGENTS.md). Kimi and Grok are not in the image; they install on
 # demand.
 RUN npm install --global --no-audit --no-fund \
-        @brokkai/codex-acp@1.11.5 \
+        @brokkai/codex-acp@1.13.2 \
         @agentclientprotocol/claude-agent-acp@0.81.0 \
-        @openai/codex@0.155.1 \
+        @openai/codex@0.156.1 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version

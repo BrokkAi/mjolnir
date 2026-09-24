@@ -408,6 +408,7 @@ pub(crate) fn record_runtime_event(
             capabilities: Some(capabilities),
             agent_info,
             steering_supported,
+            steering_returns_idle_input,
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-initialized");
@@ -417,6 +418,9 @@ pub(crate) fn record_runtime_event(
                 agent_info,
             })?;
             relay.set_steering_supported(steering_supported);
+            relay.set_automatic_steering(
+                steering_supported == Some(true) && steering_returns_idle_input,
+            );
         }
         RuntimeEvent::Connected { .. } => {
             relay.record_observation(RelayObservation::Warning {
@@ -600,6 +604,16 @@ pub(crate) fn record_runtime_event(
             relay.record_command_completed(
                 &request_id,
                 RelayCommandOutcome::Steered { queued_command_id },
+            )?;
+        }
+        RuntimeEvent::SteerReturned {
+            request_id,
+            queued_command_id,
+        } => {
+            in_flight.remove(&request_id);
+            relay.record_command_completed(
+                &request_id,
+                RelayCommandOutcome::SteeringReturned { queued_command_id },
             )?;
         }
         RuntimeEvent::CloseApplied { request_id } => {

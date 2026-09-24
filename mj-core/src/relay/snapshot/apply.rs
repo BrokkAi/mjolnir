@@ -540,6 +540,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         context.attached_command_id.as_deref() != Some(queued_command_id.as_str())
                     });
                 }
+                (
+                    RelayCommand::Cancel | RelayCommand::Steer { .. },
+                    RelayCommandOutcome::SteeringReturned { .. },
+                ) => {
+                    // The turn it targeted had already ended, so nothing was
+                    // delivered and there is nothing for the user to decide:
+                    // the prompt runs next from the queue.
+                    if let Some(steering) = snapshot.steering.as_mut()
+                        && steering.command_id == *command_id
+                    {
+                        steering.status = SteeringStatus::Resolved;
+                        steering.message = None;
+                    }
+                }
                 (RelayCommand::Close { .. }, RelayCommandOutcome::Closed) => {
                     snapshot.execution = RelayExecutionState::Closed;
                     snapshot.active_prompt = None;

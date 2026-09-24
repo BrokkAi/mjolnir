@@ -1425,6 +1425,22 @@ pub(super) fn steering_supported_from_meta(
         .unwrap_or(false)
 }
 
+/// Whether the bridge returns a steer it cannot inject (`promptRequired`)
+/// instead of starting a turn of its own. Codex bridges advertise it; the
+/// pinned Claude bridge (claude-agent-acp 0.81.0) honors it in `steer` without
+/// advertising it.
+pub(super) fn steering_returns_idle_input(
+    meta: Option<&agent_client_protocol::schema::v1::Meta>,
+    harness: HarnessKind,
+) -> bool {
+    let advertised = meta
+        .and_then(|meta| meta.get("steering"))
+        .and_then(|steering| steering.get("idleBehaviors"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|behaviors| behaviors.iter().any(|b| b == "promptRequired"));
+    advertised || harness == HarnessKind::Claude
+}
+
 pub(super) struct PendingSteer {
     pub(super) request_id: String,
     pub(super) queued_command_id: String,
@@ -1498,6 +1514,19 @@ pub(super) async fn settle_steer(
             .await?;
             Ok(())
         }
+        // Sent with `idleBehavior: "promptRequired"`: the turn ended before
+        // the bridge could inject, so the prompt stays queued for the next one.
+        Some("promptRequired") => {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::SteerReturned {
+                    request_id: pending.request_id,
+                    queued_command_id: pending.queued_command_id,
+                },
+            )
+            .await?;
+            Ok(())
+        }
         _ if outcome.as_ref().is_err_and(|error| {
             !matches!(
                 error.code,
@@ -1509,7 +1538,7 @@ pub(super) async fn settle_steer(
         }) || outcome.as_ref().is_ok_and(|v| {
             !matches!(
                 v.get("outcome").and_then(serde_json::Value::as_str),
-                Some("failed" | "promptRequired")
+                Some("failed")
             )
         }) =>
         {

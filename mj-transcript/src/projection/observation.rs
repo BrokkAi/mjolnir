@@ -190,6 +190,7 @@ pub(super) fn project_observation(
                         accepted_ordinal: entry_accepted_ordinal,
                         turn_start_position: event.ordinal,
                         started_at_ms: *started_at_ms,
+                        steered_into: None,
                     }));
                 }
             }
@@ -274,7 +275,7 @@ pub(super) fn project_observation(
                     let active = current
                         .active_turn
                         .as_ref()
-                        .filter(|turn| turn.command_id == *command_id);
+                        .filter(|turn| turn.belongs_to(command_id));
                     mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
                         diagnostic: diagnostic.clone(),
                         usage: usage.clone(),
@@ -329,6 +330,13 @@ pub(super) fn project_observation(
                         accepted_ordinal: entry.accepted_ordinal,
                         turn_start_position: event.ordinal,
                         started_at_ms: event.recorded_at_ms,
+                        // The relay keeps the original prompt in flight, and
+                        // its completion is what ends this turn.
+                        steered_into: current.active_turn.as_ref().map(|turn| {
+                            turn.steered_into
+                                .clone()
+                                .unwrap_or_else(|| turn.command_id.clone())
+                        }),
                     }));
                     close_streams(index, mutation, event.recorded_at_ms);
                     upsert(
@@ -355,7 +363,9 @@ pub(super) fn project_observation(
                 | mj_core::relay::RelayCommandOutcome::CheckpointReleased
                 | mj_core::relay::RelayCommandOutcome::RecoveryFloorAdvanced
                 | mj_core::relay::RelayCommandOutcome::NoticeRecorded
-                | mj_core::relay::RelayCommandOutcome::UserShellCancelled => {}
+                | mj_core::relay::RelayCommandOutcome::UserShellCancelled
+                // The returned prompt keeps its queue entry.
+                | mj_core::relay::RelayCommandOutcome::SteeringReturned { .. } => {}
             }
             if queue != current.queued_prompts {
                 mutation.queued_prompts = Some(queue);
@@ -402,7 +412,7 @@ pub(super) fn project_observation(
                 let active = current
                     .active_turn
                     .as_ref()
-                    .filter(|turn| turn.command_id == *command_id);
+                    .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
                     diagnostic: None,
