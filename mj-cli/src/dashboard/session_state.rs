@@ -132,11 +132,15 @@ impl DashboardContext {
             }
         }
         // A transition finishing may make an assigned conversation attachable.
-        // Selection changes from refresh never assign a different session.
+        // Selection changes from refresh never assign a different session. A
+        // suspend also finishes a transition, but leaves no worker to attach
+        // to (R4-11), so its pane lets the session go instead.
         for (pane, session) in self.dashboard.pane_sessions() {
-            if self.dashboard.transition_kind(&session).is_none()
-                && self.dashboard.transition_failure_kind(&session).is_none()
-                && !self.dashboard.session_failed(&session)
+            if self.dashboard.pane_session_is_suspended(&session) {
+                self.release_suspended_pane(pane, &session);
+                continue;
+            }
+            if self.dashboard.pane_session_can_attach(&session)
                 && self.attachments.entry(pane).or_default().select(&session)
             {
                 self.open_chat_session_into(pane, &session);
@@ -164,6 +168,20 @@ impl DashboardContext {
         self.attachments.entry(pane).or_default().cancel();
         self.opening_chat_sessions.remove(&pane);
         self.sync_opening_session();
+    }
+
+    /// Lets a pane go of a suspended session instead of attaching to it. A
+    /// pinned pane says so, as before; Browse just empties, since it shows
+    /// whatever is selected and the suspended row has left the list.
+    pub(crate) fn release_suspended_pane(&mut self, pane: PaneId, session_id: &str) {
+        self.cancel_chat_open_in(pane);
+        if pane == self.dashboard.browse_pane() {
+            self.dashboard.set_pane_session(pane, None);
+        } else {
+            self.dashboard.release_suspended_pane(pane, session_id);
+        }
+        self.retire_chats_outside_the_layout();
+        self.save_active_workspace_layout();
     }
 
     /// Gives up this pane's attach in a way that allows one fresh

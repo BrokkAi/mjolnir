@@ -1118,7 +1118,13 @@ impl DashboardState {
             .is_some_and(|id| visible.contains(id))
             && !self.selection_is_hidden_by_state()
         {
+            let displaced = self.selected_session_id.take();
             self.selected_session_id = visible.into_iter().next();
+            if let Some(displaced) = displaced
+                && self.selected_session_id.as_ref() != Some(&displaced)
+            {
+                self.displaced_selection = Some((displaced, self.selected_session_id.clone()));
+            }
         }
         let project_keys = self.project_keys();
         self.collapsed_project_keys

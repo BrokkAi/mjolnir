@@ -240,6 +240,17 @@ impl DashboardState {
                 .is_some_and(|session| !session.state.is_active())
     }
 
+    /// Whether a pane showing `session_id` may start attaching to it: no
+    /// lifecycle owns it, it has not failed, and it still has a worker. A
+    /// suspended session has none, so an attach would only wait out its
+    /// timeout and report "Session opening did not respond" (R4-11).
+    pub fn pane_session_can_attach(&self, session_id: &str) -> bool {
+        self.transition_kind(session_id).is_none()
+            && self.transition_failure_kind(session_id).is_none()
+            && !self.session_failed(session_id)
+            && !self.pane_session_is_suspended(session_id)
+    }
+
     /// Empties the pane that held a suspended session, instead of attaching
     /// to a session with no worker, and says so. The host saves the layout.
     pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {

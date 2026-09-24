@@ -2731,6 +2731,47 @@ fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
     assert_eq!(dashboard.focus(), Focus::Sessions);
 }
 
+/// R4-11: a Kimi session made in the wizard took about 30 seconds to launch
+/// and then did not open; the selection sat on the first row, which is where
+/// the clamp puts it when a refresh does not carry the selected session.
+/// Nobody chose that row, so finishing the launch still opens the session.
+#[test]
+fn a_finished_launch_opens_the_session_a_refresh_displaced() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.select_active_session("session-2");
+    let mut refreshed = dashboard.state.clone();
+    let launching = refreshed
+        .sessions
+        .remove("session-2")
+        .expect("the launching session");
+    dashboard.set_state(refreshed.clone());
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    refreshed.sessions.insert(launching.id.clone(), launching);
+    dashboard.set_state(refreshed);
+
+    dashboard.finish_new_session("session-2");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.focus(), Focus::Prompt);
+}
+
+/// R4-11: after a suspend, the dashboard reported "Could not open Session
+/// claude-b: Session opening did not respond within 15 seconds" although
+/// nothing asked to open it. The pane still named the suspended session, and
+/// the end of its lifecycle re-armed an attach to a session with no worker.
+#[test]
+fn a_suspended_session_is_not_attached_to() {
+    let mut dashboard = dashboard_with_two_sessions();
+    assert!(dashboard.pane_session_can_attach("session-1"));
+    dashboard
+        .state
+        .sessions
+        .get_mut("session-1")
+        .expect("session")
+        .state = SessionState::Stopped;
+    assert!(!dashboard.pane_session_can_attach("session-1"));
+}
+
 /// When the selection is still on the launching session, finishing the
 /// launch opens it for its first prompt, as before.
 #[test]

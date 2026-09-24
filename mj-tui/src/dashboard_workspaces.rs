@@ -191,7 +191,18 @@ impl DashboardState {
     /// must not move the selection or the keyboard, or the next session
     /// command would act on a session the user did not choose.
     pub fn finish_new_session(&mut self, session_id: &str) {
-        if self
+        // A refresh that briefly lacked the launching session moved the
+        // selection to the first row (the clamp does that); nobody chose that
+        // row, so it does not keep the new session closed (R4-11).
+        let displaced_by_refresh =
+            self.displaced_selection
+                .as_ref()
+                .is_some_and(|(displaced, stand_in)| {
+                    displaced == session_id && *stand_in == self.selected_session_id
+                });
+        if displaced_by_refresh {
+            self.displaced_selection = None;
+        } else if self
             .selected_session_id
             .as_deref()
             .is_some_and(|selected| selected != session_id)

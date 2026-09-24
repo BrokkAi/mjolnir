@@ -795,6 +795,10 @@ pub struct DashboardState {
     /// pane shows different row sets at different explicit sizes, so a
     /// position could silently point at a different session after resizing.
     pub(crate) selected_session_id: Option<String>,
+    /// The session a refresh took the selection away from, and the row the
+    /// clamp put in its place. Nobody chose that row, so a launch finishing
+    /// for the displaced session may still take the selection back (R4-11).
+    pub(crate) displaced_selection: Option<(String, Option<String>)>,
     pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
@@ -1046,6 +1050,7 @@ impl DashboardState {
             target_readiness_generation: 0,
             mount_history_refresh_pending: false,
             selected_session_id: None,
+            displaced_selection: None,
             command_session_override: None,
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
