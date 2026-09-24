@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
 # mj-desktop stays out of the default set: plain builds produce the headless
-# controller/worker, while its own GNU/Linux CI job and the macOS/Windows
-# matrix build the separate native application explicitly.
+# controller/worker, while its GNU/Linux and Windows CI jobs and the macOS
+# lane build the separate native application explicitly.
 members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli", "mj-desktop", "voice-worker"]
 default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj-worker", "mj-client", "mj-controller", "mj-chat", "mj-tui", "mj-cli"]
 

@@ -257,6 +257,12 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             )?;
         }
     }
+    // A report outlives nothing: it goes with its child's relation.
+    tx.execute(
+        "DELETE FROM subagent_handbacks
+         WHERE child_session_id NOT IN (SELECT child_session_id FROM subagent_sessions)",
+        [],
+    )?;
     for session_id in existing_sessions {
         if !state.sessions.contains_key(&session_id) {
             tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;

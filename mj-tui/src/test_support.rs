@@ -429,6 +429,7 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,
+        handback_tool: false,
     };
     let mut dashboard = dashboard_with_session(parent.clone());
     let mut state = dashboard.state.clone();

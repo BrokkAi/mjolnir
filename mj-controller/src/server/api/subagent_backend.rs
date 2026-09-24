@@ -133,6 +133,15 @@ pub trait SubagentBackend: Send + Sync {
     /// Durable turn state for a session with no live actor.
     fn turn_state(&self, session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>>;
 
+    /// A sub-agent child's recorded report, and whether it has the handback
+    /// tool. `None` for a session that is not a Mjolnir sub-agent.
+    fn subagent_report(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<(bool, mj_core::subagent::SubagentReport)>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Summarize the turn that covers these transcript positions.
     fn turn_summary(
         &self,

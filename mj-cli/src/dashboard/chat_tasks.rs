@@ -89,6 +89,26 @@ impl DashboardContext {
     /// Sub-agents command both come here.
     pub(crate) fn open_subagents(&mut self, parent_id: String) {
         self.capture_composer_draft(&parent_id);
+        // Stopped children are not among the live sessions whose summaries
+        // load at startup, so their rows would say "No messages yet". Read
+        // theirs now.
+        let stopped = self
+            .controller
+            .state
+            .subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_id)
+            .filter_map(|child| self.controller.state.sessions.get(&child.child_session_id))
+            .filter(|session| !session.state.is_active())
+            .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
+            .collect::<Vec<_>>();
+        for (session_id, viewed_through_event_ordinal) in stopped {
+            spawn_stored_session_summary(
+                session_id,
+                viewed_through_event_ordinal,
+                self.dashboard_io_tx.clone(),
+            );
+        }
         self.dashboard.open_subagent_workspace(parent_id);
         if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
             self.open_chat_session(&child_id);

@@ -56,6 +56,46 @@ pub struct WaitObservation {
     pub retry_assessment_pending: bool,
     pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub start_status: Option<StartStatus>,
+    /// This session is a Mjolnir sub-agent child, whose answer says where its
+    /// report came from.
+    pub subagent: bool,
+    /// The finished turn, by command id, whose child still owes its report.
+    /// Mjolnir reminds the child to hand it back, so like an armed retry the
+    /// turn is not an ending yet.
+    pub report_pending_for: Option<String>,
+    /// The report a child handed back, and the turn it answers.
+    pub handback: Option<(String, String)>,
+}
+
+impl WaitObservation {
+    /// Fold a child's recorded report into this observation, judged against
+    /// the turn this observation saw finish.
+    pub fn apply_subagent_report(
+        &mut self,
+        handback_tool: bool,
+        report: &mj_core::subagent::SubagentReport,
+        now_ms: i64,
+    ) {
+        self.subagent = true;
+        let Some(turn) = self.last_turn_outcome.as_ref() else {
+            return;
+        };
+        let in_flight = self
+            .active_turn
+            .iter()
+            .map(|turn| turn.command_id.as_str())
+            .collect::<Vec<_>>();
+        match mj_core::subagent::report_state(handback_tool, report, Some(turn), &in_flight, now_ms)
+        {
+            mj_core::subagent::ReportState::Pending { .. } => {
+                self.report_pending_for = Some(turn.command_id.clone());
+            }
+            mj_core::subagent::ReportState::Delivered(message) => {
+                self.handback = Some((turn.command_id.clone(), message));
+            }
+            mj_core::subagent::ReportState::Fallback => {}
+        }
+    }
 }
 
 /// The transcript positions one finished turn covers.
@@ -230,7 +270,8 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         ));
     }
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
-        observation.retry_assessment_pending
+        observation.report_pending_for.as_deref() == Some(outcome.command_id.as_str())
+            || observation.retry_assessment_pending
             || observation.capacity_retry.is_some()
             || observation.quota_recovery.as_ref().is_some_and(|r| {
                 r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id

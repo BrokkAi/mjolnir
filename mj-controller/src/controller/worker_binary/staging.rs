@@ -106,8 +106,14 @@ pub(super) fn configure_kimi_project_memory_mcp(
 
 /// Claude reads MCP servers from its private profile rather than ACP. Parent
 /// sessions always use an isolated staged profile, including on local bare
-/// targets, so this never modifies the user's source profile.
-pub(super) fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &str) -> Result<()> {
+/// targets, so this never modifies the user's source profile. A child gets the
+/// same server in its `child` role, which serves only `handback`; registration
+/// gives a Claude child the tool only when it owns its home.
+pub(super) fn configure_claude_subagent_mcp(
+    profile_stage: &Path,
+    worker_root: &str,
+    role: mj_core::subagent::SubagentMcpRole,
+) -> Result<()> {
     let path = profile_stage.join(".claude.json");
     edit_staged_json_object(&path, "staged Claude configuration", |root| {
         let servers = root
@@ -135,7 +141,9 @@ pub(super) fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &
                     // advertised wait. Naming the harness anyway keeps both
                     // delivery paths explicit.
                     "--harness",
-                    mj_core::config::HarnessKind::Claude.id()
+                    mj_core::config::HarnessKind::Claude.id(),
+                    "--role",
+                    role.id()
                 ]
             }),
         );

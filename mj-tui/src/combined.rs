@@ -880,6 +880,14 @@ fn render_combined_themed(
             dashboard.render_native_agent(frame, &id, transcript_area, prompt_area);
             continue;
         }
+        let stopped_id = dashboard
+            .pane_session(pane_id)
+            .filter(|id| dashboard.is_stopped_subagent(id))
+            .map(str::to_owned);
+        if let Some(id) = stopped_id {
+            dashboard.render_stopped_subagent(frame, &id, transcript_area, prompt_area);
+            continue;
+        }
         if !pane_focused {
             // Every pane but the last carries a close chip, and an unfocused
             // pane only exists while there are several.

@@ -105,6 +105,11 @@ pub struct WorkerLaunchConfig {
     /// delegation MCP tools and native-subagent suppression.
     #[serde(default)]
     pub subagent_tools: bool,
+    /// Whether this is a sub-agent child that hands its report back through
+    /// the `mj-agents` MCP server's `handback` tool. A child keeps its
+    /// harness's native tools.
+    #[serde(default)]
+    pub handback_tool: bool,
     /// Whether a turn review can ever run for this session, which is the only
     /// reason to spend anything on capturing the working tree.
     ///

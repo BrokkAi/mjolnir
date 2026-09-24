@@ -525,6 +525,54 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: a sub-agent record can now say its child has the `handback`
+    // tool, and older readers refuse the unknown field. The reports themselves
+    // live in their own table, because a full state save rewrites every
+    // sub-agent record from whatever copy the saving controller holds.
+    if version < 49 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS subagent_handbacks (
+                 child_session_id TEXT PRIMARY KEY,
+                 handback_command_id TEXT,
+                 handback_message TEXT,
+                 handback_recorded_at_ms INTEGER,
+                 reminder_command_id TEXT,
+                 reminder_for_command_id TEXT,
+                 reminder_sent_at_ms INTEGER,
+                 reminder_failed_for_command_id TEXT
+             );
+             UPDATE schema_compatibility SET minimum_compatible_version = 49 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (49, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 49;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: a new nullable column that only this build reads. Older
+    // readers ignore it, and older writers name their columns, so an update
+    // from one keeps it.
+    if version < 50 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "subagent_handbacks",
+            "awaited_ordinal",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE subagent_handbacks ADD COLUMN awaited_ordinal INTEGER;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (50, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 50;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -683,9 +731,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 48 stores returned steering and steered
-    /// turn identity.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 48;
+    /// `SCHEMA_VERSION`. Migration 49 adds sub-agent handback records.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 49;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -734,13 +781,13 @@ mod reader_tests {
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
-        assert_eq!(schema.revision, 48);
-        assert_eq!(schema.minimum_compatible, Some(48));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let error = schema.ensure_supported_by(47).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 48
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
             }
         ));
         drop(upgraded);

@@ -203,6 +203,11 @@ pub enum SubagentToolAction {
     CloseAgent {
         child_session_id: String,
     },
+    /// A child's report for the session that started it. Only a child's
+    /// worker serves this action; the daemon runs it for the requesting child.
+    Handback {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +249,11 @@ pub struct SubagentRecord {
         rename = "delivered_turn"
     )]
     pub noticed_turn: Option<u64>,
+    /// Whether this child was given the `handback` tool. It is decided once,
+    /// when the child is registered. A child recorded before the tool existed
+    /// reads as false and keeps reporting through its last message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handback_tool: bool,
 }
 
 /// Lifecycle group used by the tool and both user interfaces.
@@ -266,9 +276,447 @@ impl SubagentRecord {
     }
 }
 
+/// Which tools a worker's `mj-agents` MCP server offers. A parent delegates;
+/// a child only hands its report back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentMcpRole {
+    #[default]
+    Parent,
+    Child,
+}
+
+impl SubagentMcpRole {
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Child => "child",
+        }
+    }
+}
+
+impl std::fmt::Display for SubagentMcpRole {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.id())
+    }
+}
+
+impl std::str::FromStr for SubagentMcpRole {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "parent" => Ok(Self::Parent),
+            "child" => Ok(Self::Child),
+            other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
+        }
+    }
+}
+
+/// Command id prefix of the one prompt that reminds a child to hand back its
+/// report. A turn whose command id carries it is that reminder, which is how
+/// [`report_state`] tells it from the task it follows up.
+pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
+
+/// The reminder itself, sent as an ordinary prompt so the child's transcript
+/// shows it.
+pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your report has not been delivered. Call the mj-agents handback tool now with your full report, then stop.";
+
+/// What a child's first prompt opens with when it has the tool. It leads the
+/// prompt rather than trailing a parent's long instructions, where live runs
+/// showed children skipping it.
+pub const HANDBACK_PROMPT_NOTE: &str = "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your full report: the session that started you reads only that report, not the rest of this conversation.";
+
+/// How long a sent reminder may be neither queued, running nor finished before
+/// the child's report stops waiting for it. Someone removed it from the queue,
+/// or it never reached the child; either way it is not coming.
+pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
+
+/// The longest report a child can hand back: the same limit as a prompt.
+pub const MAX_HANDBACK_CHARS: usize = 65_536;
+
+/// Whether a command id names a handback reminder.
+#[must_use]
+pub fn is_handback_reminder(command_id: &str) -> bool {
+    command_id
+        .strip_prefix(HANDBACK_REMINDER_PREFIX)
+        .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// A report a child handed back during the turn `command_id` names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentHandback {
+    pub command_id: String,
+    pub message: String,
+    pub recorded_at_ms: i64,
+}
+
+/// The reminder Mjolnir sent after the turn `for_command_id` ended without a
+/// report. `command_id` is the reminder prompt's own command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandbackReminder {
+    pub command_id: String,
+    pub for_command_id: String,
+    pub sent_at_ms: i64,
+}
+
+/// Everything recorded about one child's report. Each part keeps only its
+/// latest value: a report answers the newest task, and each task gets at most
+/// one reminder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentReport {
+    pub handback: Option<SubagentHandback>,
+    pub reminder: Option<HandbackReminder>,
+    /// The turn whose reminder could not be sent.
+    pub reminder_failed_for: Option<String>,
+    /// Acceptance ordinal of the newest prompt the parent gave this child.
+    /// The child has not answered it until a finished turn reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaited_ordinal: Option<u64>,
+}
+
+/// Whether the parent's newest prompt has yet to be answered: no finished
+/// turn has reached its acceptance ordinal. The store learns of a new turn a
+/// moment after the prompt is accepted, and in that gap an idle child would
+/// otherwise read as finished with the previous turn's report, or none.
+#[must_use]
+pub fn awaiting_prompt(
+    awaited_ordinal: Option<u64>,
+    last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+) -> bool {
+    awaited_ordinal.is_some_and(|awaited| {
+        last_turn
+            .and_then(|turn| turn.accepted_ordinal)
+            .is_none_or(|answered| answered < awaited)
+    })
+}
+
+/// How a child's last finished turn failed, if it did: `interrupted` for a
+/// cancelled or interrupted turn, `failed` for an error, a refusal or a quota
+/// stop, with the most specific reason recorded. A turn that finished or
+/// stopped to ask for input did not fail.
+#[must_use]
+pub fn failed_turn(
+    turn: &crate::state::MaterializedTurnOutcome,
+    last_message: Option<&str>,
+) -> Option<(&'static str, String)> {
+    use crate::state::{PromptCompletion, TurnOutcomeKind, classify_prompt_completion};
+    let (state, fallback) = match &turn.outcome {
+        TurnOutcomeKind::Completed { stop_reason } => match classify_prompt_completion(stop_reason)
+        {
+            PromptCompletion::Finished | PromptCompletion::InputRequired => return None,
+            PromptCompletion::Cancelled => ("interrupted", "the turn was cancelled".to_owned()),
+            PromptCompletion::QuotaLimit | PromptCompletion::Error => (
+                "failed",
+                format!("the turn ended with stop reason {stop_reason:?}"),
+            ),
+        },
+        TurnOutcomeKind::Interrupted { message } => ("interrupted", message.clone()),
+        TurnOutcomeKind::Rejected { message } => ("failed", message.clone()),
+    };
+    let reason = turn
+        .diagnostic
+        .as_ref()
+        .map(|diagnostic| diagnostic.message.clone())
+        .filter(|message| !message.trim().is_empty())
+        .or_else(|| {
+            last_message
+                .filter(|message| !message.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or(fallback);
+    Some((state, reason))
+}
+
+/// Where a child's report stands after its last finished turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportState {
+    /// The child handed back this report for its last turn.
+    Delivered(String),
+    /// The child owes a report. `remind` says no reminder has been sent for
+    /// this turn yet; otherwise one is on its way.
+    Pending { remind: bool },
+    /// No handback is coming: report the turn's last message, as before.
+    Fallback,
+}
+
+/// The one rule for a child's report, shared by the sub-agent `wait`, the
+/// session wait and the reminder.
+///
+/// `in_flight` names the commands queued or running on the child, so a sent
+/// reminder is known to be on its way. A child without the tool, and a turn
+/// that did not finish normally, fall back to the last message; a child that
+/// already had its one reminder does too.
+#[must_use]
+pub fn report_state(
+    handback_tool: bool,
+    report: &SubagentReport,
+    last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    in_flight: &[&str],
+    now_ms: i64,
+) -> ReportState {
+    let Some(turn) = last_turn.filter(|_| handback_tool) else {
+        return ReportState::Fallback;
+    };
+    if let Some(handback) = report
+        .handback
+        .as_ref()
+        .filter(|handback| handback.command_id == turn.command_id)
+    {
+        return ReportState::Delivered(handback.message.clone());
+    }
+    let finished = matches!(
+        &turn.outcome,
+        crate::state::TurnOutcomeKind::Completed { stop_reason }
+            if crate::state::classify_prompt_completion(stop_reason)
+                == crate::state::PromptCompletion::Finished
+    );
+    if !finished
+        || is_handback_reminder(&turn.command_id)
+        || report.reminder_failed_for.as_deref() == Some(turn.command_id.as_str())
+    {
+        return ReportState::Fallback;
+    }
+    match report
+        .reminder
+        .as_ref()
+        .filter(|reminder| reminder.for_command_id == turn.command_id)
+    {
+        None => ReportState::Pending { remind: true },
+        Some(reminder)
+            if in_flight.contains(&reminder.command_id.as_str())
+                || now_ms.saturating_sub(reminder.sent_at_ms) < HANDBACK_REMINDER_GRACE_MS =>
+        {
+            ReportState::Pending { remind: false }
+        }
+        Some(_) => ReportState::Fallback,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
+        crate::state::MaterializedTurnOutcome {
+            diagnostic: None,
+            usage: None,
+            command_id: command_id.to_owned(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(1),
+            completed_ordinal: 2,
+            completed_at_ms: 10,
+            outcome: crate::state::TurnOutcomeKind::Completed {
+                stop_reason: stop_reason.to_owned(),
+            },
+        }
+    }
+
+    fn handback(command_id: &str) -> Option<SubagentHandback> {
+        Some(SubagentHandback {
+            command_id: command_id.to_owned(),
+            message: "the report".to_owned(),
+            recorded_at_ms: 5,
+        })
+    }
+
+    fn reminder(for_command_id: &str) -> Option<HandbackReminder> {
+        Some(HandbackReminder {
+            command_id: "handback-reminder-r".to_owned(),
+            for_command_id: for_command_id.to_owned(),
+            sent_at_ms: 1_000,
+        })
+    }
+
+    #[test]
+    fn a_child_without_the_tool_or_a_turn_reports_its_last_message() {
+        let turn = finished("task", "end_turn");
+        let report = SubagentReport::default();
+        assert_eq!(
+            report_state(false, &report, Some(&turn), &[], 0),
+            ReportState::Fallback
+        );
+        assert_eq!(
+            report_state(true, &report, None, &[], 0),
+            ReportState::Fallback
+        );
+    }
+
+    #[test]
+    fn a_handback_for_the_last_turn_is_the_report_whatever_the_turn_did() {
+        let report = SubagentReport {
+            handback: handback("task"),
+            ..SubagentReport::default()
+        };
+        for stop_reason in ["end_turn", "cancelled", "refusal"] {
+            assert_eq!(
+                report_state(true, &report, Some(&finished("task", stop_reason)), &[], 0),
+                ReportState::Delivered("the report".to_owned()),
+                "{stop_reason}"
+            );
+        }
+        // A report for an earlier task does not answer this one.
+        assert_eq!(
+            report_state(true, &report, Some(&finished("next", "end_turn")), &[], 0),
+            ReportState::Pending { remind: true }
+        );
+    }
+
+    #[test]
+    fn only_a_normally_finished_task_turn_is_owed_a_reminder() {
+        let report = SubagentReport::default();
+        assert_eq!(
+            report_state(true, &report, Some(&finished("task", "end_turn")), &[], 0),
+            ReportState::Pending { remind: true }
+        );
+        for stop_reason in ["cancelled", "awaiting_input", "quota_limit", "max_tokens"] {
+            assert_eq!(
+                report_state(true, &report, Some(&finished("task", stop_reason)), &[], 0),
+                ReportState::Fallback,
+                "{stop_reason}"
+            );
+        }
+        let mut interrupted = finished("task", "end_turn");
+        interrupted.outcome = crate::state::TurnOutcomeKind::Interrupted {
+            message: "stopped".to_owned(),
+        };
+        assert_eq!(
+            report_state(true, &report, Some(&interrupted), &[], 0),
+            ReportState::Fallback
+        );
+    }
+
+    #[test]
+    fn a_child_gets_one_reminder_and_then_reports_its_last_message() {
+        let reminded = SubagentReport {
+            reminder: reminder("task"),
+            ..SubagentReport::default()
+        };
+        let task = finished("task", "end_turn");
+        // Sent and queued, or sent a moment ago: it is on its way.
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&task),
+                &["handback-reminder-r"],
+                60_000
+            ),
+            ReportState::Pending { remind: false }
+        );
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&task),
+                &[],
+                1_000 + HANDBACK_REMINDER_GRACE_MS - 1
+            ),
+            ReportState::Pending { remind: false }
+        );
+        // Neither queued, running nor finished long after it was sent.
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&task),
+                &[],
+                1_000 + HANDBACK_REMINDER_GRACE_MS
+            ),
+            ReportState::Fallback
+        );
+        // The reminder turn itself ended without a report.
+        assert_eq!(
+            report_state(
+                true,
+                &reminded,
+                Some(&finished("handback-reminder-r", "end_turn")),
+                &[],
+                2_000
+            ),
+            ReportState::Fallback
+        );
+        // A reminder that could not be sent.
+        let failed = SubagentReport {
+            reminder_failed_for: Some("task".to_owned()),
+            ..SubagentReport::default()
+        };
+        assert_eq!(
+            report_state(true, &failed, Some(&task), &[], 0),
+            ReportState::Fallback
+        );
+    }
+
+    #[test]
+    fn a_child_is_not_done_until_a_finished_turn_reaches_the_newest_prompt() {
+        let mut turn = finished("task", "end_turn");
+        turn.accepted_ordinal = Some(20);
+        assert!(!awaiting_prompt(None, Some(&turn)));
+        assert!(awaiting_prompt(Some(45), None), "no turn has finished yet");
+        assert!(
+            awaiting_prompt(Some(45), Some(&turn)),
+            "the finished turn is older"
+        );
+        // A prompt steered into the running turn is answered by that turn,
+        // which then carries the steered prompt's ordinal.
+        turn.accepted_ordinal = Some(45);
+        assert!(!awaiting_prompt(Some(45), Some(&turn)));
+    }
+
+    #[test]
+    fn a_failed_turn_says_why_and_a_finished_one_did_not_fail() {
+        assert_eq!(failed_turn(&finished("t", "end_turn"), Some("done")), None);
+        assert_eq!(
+            failed_turn(&finished("t", "awaiting_input"), Some("?")),
+            None
+        );
+        let mut error = finished("t", "error");
+        assert_eq!(
+            failed_turn(&error, Some("You've hit your usage limit.")),
+            Some(("failed", "You've hit your usage limit.".to_owned()))
+        );
+        error.diagnostic = Some(crate::diagnostic::TurnDiagnostic {
+            message: "usageLimitExceeded".into(),
+            code: None,
+            http_status: None,
+            reset_at: None,
+        });
+        assert_eq!(
+            failed_turn(&error, Some("You've hit your usage limit.")),
+            Some(("failed", "usageLimitExceeded".to_owned()))
+        );
+        assert_eq!(
+            failed_turn(&finished("t", "cancelled"), None),
+            Some(("interrupted", "the turn was cancelled".to_owned()))
+        );
+    }
+
+    #[test]
+    fn only_the_reminder_prefix_names_a_reminder() {
+        assert!(is_handback_reminder("handback-reminder-0a1b"));
+        assert!(!is_handback_reminder("handback-reminderx-0a1b"));
+        assert!(!is_handback_reminder("api-0a1b"));
+    }
+
+    #[test]
+    fn a_record_without_the_tool_flag_reads_as_having_no_tool() {
+        let record: SubagentRecord = serde_json::from_str(
+            r#"{"child_session_id":"c","parent_session_id":"p","task_name":"t","profile_id":"pr","working_directory":".","initial_prompt":"i","request_key":"k","created_at":"2026-09-15"}"#,
+        )
+        .expect("records written before the tool existed remain readable");
+        assert!(!record.handback_tool);
+        let encoded = serde_json::to_value(&record).expect("record encodes");
+        assert!(encoded.get("handback_tool").is_none(), "{encoded}");
+    }
+
+    #[test]
+    fn the_mcp_role_round_trips_through_its_argument() {
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
+            assert_eq!(role.id().parse::<SubagentMcpRole>().unwrap(), role);
+        }
+        assert!("grandchild".parse::<SubagentMcpRole>().is_err());
+    }
 
     #[test]
     fn noticed_turn_keeps_the_stored_delivered_turn_field_name() {

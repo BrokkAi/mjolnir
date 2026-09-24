@@ -936,6 +936,9 @@ pub struct DashboardState {
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
     subagent_parent_id: Option<String>,
     pub(crate) native_agents: BTreeMap<String, native_agents::NativeAgentPane>,
+    /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
+    /// read-only because there is no worker to attach to.
+    pub(crate) stopped_subagents: BTreeMap<String, stopped_subagents::StoppedSubagentPane>,
     /// Dashboard-only state retained while the user switches tabs.
     workspace_views: BTreeMap<String, WorkspaceViewState>,
     /// A pane-size update from the controller may not overwrite a local edit
@@ -1002,6 +1005,7 @@ pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
 mod native_agents;
+mod stopped_subagents;
 
 impl DashboardState {
     pub fn finish_spinner_style_save(&mut self) {
@@ -1098,6 +1102,7 @@ impl DashboardState {
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
             subagent_parent_id: None,
             native_agents: BTreeMap::new(),
+            stopped_subagents: BTreeMap::new(),
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_layouts_modified: BTreeSet::new(),

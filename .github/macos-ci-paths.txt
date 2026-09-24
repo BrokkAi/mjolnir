@@ -1,0 +1,41 @@
+# The one maintained list of macOS-sensitive paths for CI.
+#
+# Any changed path that matches a pattern below starts the macOS lane
+# immediately in .github/workflows/ci.yml.
+#
+# Files whose old or new content contains a macOS cfg gate
+# (`target_os = "macos"`, `target_vendor = "apple"`, or
+# `not(target_os = "linux")`) are matched automatically by
+# scripts/macos-ci-paths.sh. So list here the paths whose
+# macOS behavior that scan cannot see: modules that wrap macOS behavior
+# without naming it, dependencies, and build and CI inputs.
+#
+# When you add a new macOS-specific module or wrapper, add its path in the
+# same change.
+#
+# Everything else is covered by the nightly run in
+# .github/workflows/macos-nightly.yml. Blank lines and `#` lines are ignored.
+
+# CI definitions for the macOS lane and for this filter.
+.github/workflows/*
+.github/actions/*
+.github/macos-ci-paths.txt
+scripts/macos-ci-paths.sh
+scripts/test-macos-ci-paths.sh
+
+# Toolchain, dependencies, lint config, and build scripts.
+Cargo.toml
+*/Cargo.toml
+Cargo.lock
+rust-toolchain*
+.cargo/*
+clippy.toml
+build.rs
+*/build.rs
+
+# Native desktop app, built on AppKit and WebKit on macOS.
+mj-desktop/*
+
+# Dictation: CoreAudio capture through cpal, and the client transport that runs it.
+voice-worker/*
+mj-chat/src/speech.rs

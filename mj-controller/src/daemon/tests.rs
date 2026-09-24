@@ -913,6 +913,7 @@ pub(super) fn runtime_test_subagent(
         request_key: format!("request-{child_session_id}"),
         created_at: "2026-09-03T00:00:00Z".into(),
         noticed_turn: None,
+        handback_tool: false,
     }
 }
 

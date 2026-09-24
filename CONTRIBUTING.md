@@ -191,8 +191,16 @@ rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
 CI runs workspace lint/tests, portable Linux musl worker checks, and desktop
-checks in independent jobs. Linux and macOS execute the workspace tests;
-Windows compiles them. Separate jobs check formatting, older GNU/Linux
+checks in independent jobs. On every check-in, Linux executes the workspace
+tests and Windows compiles them. The macOS lane
+(`.github/workflows/macos.yml`) runs the workspace tests, the desktop
+application, and the voice worker on macOS. It runs nightly and on manual
+dispatch (`.github/workflows/macos-nightly.yml`), and on check-in only when a
+change touches a path in `.github/macos-ci-paths.txt` or a file with a macOS
+cfg gate, such as `target_os = "macos"`. When you add a macOS-specific module, or code that
+wraps macOS behavior without such a gate, add its path to that list in the same
+change. A failing nightly run opens or reopens one tracking issue, and the next
+passing run closes it. Separate jobs check formatting, older GNU/Linux
 compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with

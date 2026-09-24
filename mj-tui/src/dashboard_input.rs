@@ -392,6 +392,9 @@ impl DashboardState {
         if let Some(action) = self.native_agent_key(key) {
             return action;
         }
+        if let Some(action) = self.stopped_subagent_key(key) {
+            return action;
+        }
         let command = dashboard_accelerator(key.modifiers);
         let plain = !key
             .modifiers
@@ -596,7 +599,8 @@ impl DashboardState {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
-        if self.is_native_agent(&session.id) {
+        // A stopped sub-agent is read, not resumed: its parent owns it.
+        if self.is_native_agent(&session.id) || self.is_stopped_subagent(&session.id) {
             return DashboardAction::Open {
                 session_id: session.id.clone(),
             };

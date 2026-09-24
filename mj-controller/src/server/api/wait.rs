@@ -22,6 +22,7 @@ pub(super) async fn wait(
 
     loop {
         let start_status = backend.start_status(session_id.clone()).await?;
+        let child_report = backend.subagent_report(session_id.clone()).await?;
         let live = handle.as_ref().map(SessionHandle::view);
         let relay = live.as_ref().map(RelayHealth::from);
         let durable = match live.as_ref().and_then(|view| view.snapshot.as_ref()) {
@@ -31,13 +32,20 @@ pub(super) async fn wait(
         let (session_facts, observation) = {
             let snapshot = snapshot_rx.borrow();
             let session = require_session_record(&snapshot, &session_id)?;
-            let observation = build_observation(
+            let mut observation = build_observation(
                 &snapshot,
                 session,
                 live.as_ref(),
                 durable.as_ref(),
                 start_status,
             );
+            if let Some((handback_tool, report)) = &child_report {
+                observation.apply_subagent_report(
+                    *handback_tool,
+                    report,
+                    mj_core::clock::epoch_millis(),
+                );
+            }
             (ApiSession::from(session), observation)
         };
         if let Some(decision) = resolve_wait(&observation, &request) {
@@ -102,6 +110,7 @@ pub(super) async fn wait(
                         None => format!("the turn was still running after {timeout} seconds"),
                     }),
                     final_message: None,
+                    report_source: None,
                     turn_id: request.turn_id.or_else(|| {
                         observation.active_turn.as_ref().and_then(|turn| turn.accepted_ordinal)
                     }),
@@ -251,6 +260,27 @@ pub(super) async fn finish_wait(
         Some(turn) => Some(backend.turn_summary(session_id.to_owned(), turn).await?),
         None => None,
     };
+    // A child's report is what it handed back for the turn this answer is
+    // about; without one it is that turn's last message, as for any session.
+    let decided_turn = observation.last_turn_outcome.as_ref().filter(|turn| {
+        turn.turn_start_position.is_some()
+            && turn.turn_start_position == decision.turn.map(|turn| turn.start_position)
+    });
+    let handback = observation
+        .handback
+        .as_ref()
+        .and_then(|(command_id, message)| {
+            decided_turn
+                .is_some_and(|turn| &turn.command_id == command_id)
+                .then(|| message.clone())
+        });
+    let report_source = (observation.subagent && decision.turn.is_some()).then(|| {
+        if handback.is_some() {
+            "handback".to_owned()
+        } else {
+            "last_message".to_owned()
+        }
+    });
     Ok(WaitResponse {
         diagnostic: observation
             .last_turn_outcome
@@ -276,9 +306,12 @@ pub(super) async fn finish_wait(
         outcome: decision.outcome,
         stop_reason: decision.stop_reason,
         message: decision.message,
-        final_message: summary
-            .as_ref()
-            .and_then(|summary| summary.final_message.clone()),
+        final_message: handback.or_else(|| {
+            summary
+                .as_ref()
+                .and_then(|summary| summary.final_message.clone())
+        }),
+        report_source,
         turn_id: decision.turn_id,
         turn_number: summary.as_ref().map(|summary| summary.turn_number),
         elapsed_ms: summary

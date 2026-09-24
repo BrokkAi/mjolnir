@@ -86,8 +86,20 @@ impl Controller {
             )?;
             append_hel_target_environment(profile.kind, &profile_stage, backend)?;
             apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
-            if launch.subagent_tools && profile.kind == mj_core::config::HarnessKind::Claude {
-                configure_claude_subagent_mcp(&profile_stage, worker_root)?;
+            if profile.kind == mj_core::config::HarnessKind::Claude {
+                if launch.subagent_tools {
+                    configure_claude_subagent_mcp(
+                        &profile_stage,
+                        worker_root,
+                        mj_core::subagent::SubagentMcpRole::Parent,
+                    )?;
+                } else if launch.handback_tool {
+                    configure_claude_subagent_mcp(
+                        &profile_stage,
+                        worker_root,
+                        mj_core::subagent::SubagentMcpRole::Child,
+                    )?;
+                }
             }
             stage_memory_replica(
                 &project_memory,
@@ -283,6 +295,8 @@ impl Controller {
         apply_jev_switch(&mut launch, self.config.jev.enabled);
         launch.subagent_tools =
             subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        // Registration decided whether this child can be given the tool.
+        launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         // Claude reads Mjolnir's delegation server from a configuration file in
         // its harness home, never over ACP, so a session running out of the
         // user's own home has no way to be given one. Leaving the flag set
@@ -607,6 +621,7 @@ pub(super) fn worker_launch_config(
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagent_tools: false,
+            handback_tool: false,
             review_capture: false,
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),

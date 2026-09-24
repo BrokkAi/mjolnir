@@ -4497,6 +4497,7 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
             request_key: "probe-1".into(),
             created_at: "2026-09-18T00:00:00Z".into(),
             noticed_turn: None,
+            handback_tool: false,
         },
     );
     save_state_to(path, &state).unwrap();
@@ -5225,5 +5226,69 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record
+    );
+}
+
+/// A child's report is recorded once per turn and replaced by the next turn's,
+/// and it goes away with the child's relation.
+#[test]
+fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (_parent, child) = subagent_pair(&path);
+    let handback = |command_id: &str, message: &str| mj_core::subagent::SubagentHandback {
+        command_id: command_id.into(),
+        message: message.into(),
+        recorded_at_ms: 1,
+    };
+    assert_eq!(
+        load_subagent_report_from(&path, &child.id).unwrap(),
+        mj_core::subagent::SubagentReport::default()
+    );
+    assert!(record_subagent_handback_to(&path, &child.id, &handback("turn-1", "first")).unwrap());
+    assert!(
+        !record_subagent_handback_to(&path, &child.id, &handback("turn-1", "again")).unwrap(),
+        "a second report for the same turn is refused"
+    );
+    assert!(record_subagent_handback_to(&path, &child.id, &handback("turn-2", "next")).unwrap());
+    assert_eq!(
+        load_subagent_report_from(&path, &child.id)
+            .unwrap()
+            .handback,
+        Some(handback("turn-2", "next"))
+    );
+
+    let mut state = load_state_from(&path).unwrap();
+    state.subagents.remove(&child.id);
+    state.sessions.remove(&child.id);
+    save_state_to(&path, &state).unwrap();
+    assert_eq!(
+        load_subagent_report_from(&path, &child.id).unwrap(),
+        mj_core::subagent::SubagentReport::default(),
+        "the report leaves with its child"
+    );
+}
+
+/// The ordinal of the parent's newest prompt is recorded only for a sub-agent
+/// child, and a late write for an older prompt never moves it back.
+#[test]
+fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, child) = subagent_pair(&path);
+    record_subagent_prompt_to(&path, &child.id, 20).unwrap();
+    record_subagent_prompt_to(&path, &child.id, 45).unwrap();
+    record_subagent_prompt_to(&path, &child.id, 30).unwrap();
+    assert_eq!(
+        load_subagent_report_from(&path, &child.id)
+            .unwrap()
+            .awaited_ordinal,
+        Some(45)
+    );
+    record_subagent_prompt_to(&path, &parent.id, 7).unwrap();
+    assert_eq!(
+        load_subagent_report_from(&path, &parent.id).unwrap(),
+        mj_core::subagent::SubagentReport::default(),
+        "a session that is not a child records nothing"
     );
 }

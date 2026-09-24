@@ -104,6 +104,200 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
         .collect()
 }
 
+/// Everything recorded about one child's report. A child with nothing
+/// recorded yet reads as the empty report.
+pub fn load_subagent_report(child_session_id: &str) -> Result<mj_core::subagent::SubagentReport> {
+    load_subagent_report_from(&database_path(), child_session_id)
+}
+
+pub(super) fn load_subagent_report_from(
+    path: &Path,
+    child_session_id: &str,
+) -> Result<mj_core::subagent::SubagentReport> {
+    let connection = open_reader(path)?;
+    let row = connection
+        .query_row(
+            "SELECT handback_command_id, handback_message, handback_recorded_at_ms,
+                    reminder_command_id, reminder_for_command_id, reminder_sent_at_ms,
+                    reminder_failed_for_command_id, awaited_ordinal
+             FROM subagent_handbacks WHERE child_session_id = ?1",
+            [child_session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        handback_command,
+        handback_message,
+        handback_at,
+        reminder_command,
+        reminder_for,
+        reminder_at,
+        reminder_failed_for,
+        awaited_ordinal,
+    )) = row
+    else {
+        return Ok(mj_core::subagent::SubagentReport::default());
+    };
+    Ok(mj_core::subagent::SubagentReport {
+        handback: match (handback_command, handback_message, handback_at) {
+            (Some(command_id), Some(message), Some(recorded_at_ms)) => {
+                Some(mj_core::subagent::SubagentHandback {
+                    command_id,
+                    message,
+                    recorded_at_ms,
+                })
+            }
+            _ => None,
+        },
+        reminder: match (reminder_command, reminder_for, reminder_at) {
+            (Some(command_id), Some(for_command_id), Some(sent_at_ms)) => {
+                Some(mj_core::subagent::HandbackReminder {
+                    command_id,
+                    for_command_id,
+                    sent_at_ms,
+                })
+            }
+            _ => None,
+        },
+        reminder_failed_for,
+        awaited_ordinal: awaited_ordinal.and_then(|ordinal| u64::try_from(ordinal).ok()),
+    })
+}
+
+/// Record that the parent gave a child a prompt, accepted at `ordinal`. It is
+/// recorded only for a sub-agent child, and never moves backwards.
+pub fn record_subagent_prompt(child_session_id: &str, ordinal: u64) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    submit_database_write("record_subagent_prompt", move |_| {
+        record_subagent_prompt_to(&database_path(), &child_session_id, ordinal)
+    })
+}
+
+pub(super) fn record_subagent_prompt_to(
+    path: &Path,
+    child_session_id: &str,
+    ordinal: u64,
+) -> Result<()> {
+    let ordinal = i64::try_from(ordinal).context("prompt ordinal exceeds the store's range")?;
+    open(path)?.execute(
+        "INSERT INTO subagent_handbacks(child_session_id, awaited_ordinal)
+         SELECT ?1, ?2 WHERE EXISTS (
+             SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
+         )
+         ON CONFLICT(child_session_id) DO UPDATE SET
+             awaited_ordinal = max(coalesce(awaited_ordinal, 0), excluded.awaited_ordinal)",
+        params![child_session_id, ordinal],
+    )?;
+    Ok(())
+}
+
+/// Record a child's report for the turn it names, unless a report for that
+/// turn is already recorded. Returns whether this one was recorded: a child
+/// delivers one report per turn, and the check and the write are one
+/// transaction so two racing calls cannot both be accepted.
+pub fn record_subagent_handback(
+    child_session_id: &str,
+    handback: &mj_core::subagent::SubagentHandback,
+) -> Result<bool> {
+    let child_session_id = child_session_id.to_owned();
+    let handback = handback.clone();
+    submit_database_write("record_subagent_handback", move |_| {
+        record_subagent_handback_to(&database_path(), &child_session_id, &handback)
+    })
+}
+
+pub(super) fn record_subagent_handback_to(
+    path: &Path,
+    child_session_id: &str,
+    handback: &mj_core::subagent::SubagentHandback,
+) -> Result<bool> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let recorded_for: Option<String> = tx
+        .query_row(
+            "SELECT handback_command_id FROM subagent_handbacks WHERE child_session_id = ?1",
+            [child_session_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if recorded_for.as_deref() == Some(handback.command_id.as_str()) {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO subagent_handbacks(
+             child_session_id, handback_command_id, handback_message, handback_recorded_at_ms
+         ) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(child_session_id) DO UPDATE SET
+             handback_command_id = excluded.handback_command_id,
+             handback_message = excluded.handback_message,
+             handback_recorded_at_ms = excluded.handback_recorded_at_ms",
+        params![
+            child_session_id,
+            handback.command_id,
+            handback.message,
+            handback.recorded_at_ms
+        ],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// Record the reminder sent after a child's turn ended without a report.
+pub fn record_handback_reminder(
+    child_session_id: &str,
+    reminder: &mj_core::subagent::HandbackReminder,
+) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    let reminder = reminder.clone();
+    submit_database_write("record_handback_reminder", move |_| {
+        open(&database_path())?.execute(
+            "INSERT INTO subagent_handbacks(
+                 child_session_id, reminder_command_id, reminder_for_command_id, reminder_sent_at_ms
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(child_session_id) DO UPDATE SET
+                 reminder_command_id = excluded.reminder_command_id,
+                 reminder_for_command_id = excluded.reminder_for_command_id,
+                 reminder_sent_at_ms = excluded.reminder_sent_at_ms",
+            params![
+                child_session_id,
+                reminder.command_id,
+                reminder.for_command_id,
+                reminder.sent_at_ms
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Record that the reminder for a turn could not be sent, so the child's
+/// last message stands as its report.
+pub fn record_handback_reminder_failed(child_session_id: &str, for_command_id: &str) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    let for_command_id = for_command_id.to_owned();
+    submit_database_write("record_handback_reminder_failed", move |_| {
+        open(&database_path())?.execute(
+            "INSERT INTO subagent_handbacks(child_session_id, reminder_failed_for_command_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(child_session_id) DO UPDATE SET
+                 reminder_failed_for_command_id = excluded.reminder_failed_for_command_id",
+            params![child_session_id, for_command_id],
+        )?;
+        Ok(())
+    })
+}
+
 pub fn lookup_subagent_request(
     parent_session_id: &str,
     request_key: &str,

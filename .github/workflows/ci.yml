@@ -118,8 +118,6 @@ jobs:
         include:
         - os: ubuntu-latest
           target: x86_64-unknown-linux-gnu
-        - os: macos-latest
-          target: aarch64-apple-darwin
         - os: windows-latest
           target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
@@ -149,8 +147,9 @@ jobs:
       run: cargo clippy --all-targets -- -D warnings
 
     # The runtime suite exercises Unix target paths, directory fsync, and Git
-    # worktree byte preservation. Clippy above still compiles every test target
-    # on Windows, while Linux and macOS execute the suite.
+    # worktree byte preservation. Linux executes the suite here and
+    # .github/workflows/macos.yml runs it on macOS. Clippy above still compiles
+    # every test target on Windows.
     - name: Run tests
       if: runner.os != 'Windows'
       run: cargo test
@@ -159,22 +158,54 @@ jobs:
       if: runner.os == 'Windows'
       run: cargo test --no-run
 
-    # Keep all macOS validation on one runner per CI run.
-    - name: Build Mjolnir release on macOS
-      if: runner.os == 'macOS'
-      run: cargo build --release
+  # Ordinary check-ins run Linux and Windows; macOS runs here only for
+  # macOS-sensitive changes (the path list in .github/macos-ci-paths.txt plus
+  # any file with a macOS cfg gate), and nightly in macos-nightly.yml.
+  macos-changes:
+    name: Classify macOS-sensitive changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      macos: ${{ steps.classify.outputs.macos }}
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        # A pull request checks out its merge commit; HEAD^1 is then the
+        # base branch tip, so HEAD^1..HEAD is exactly what the merge changes.
+        fetch-depth: 2
+    - name: Test macOS CI scripts
+      run: |
+        bash scripts/test-macos-ci-paths.sh
+        bash scripts/test-macos-nightly-issue.sh
+    - name: Classify changed paths
+      id: classify
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        PUSH_BEFORE: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        if [[ "$EVENT_NAME" == pull_request ]]; then
+          base=HEAD^1
+        else
+          base="$PUSH_BEFORE"
+          # The classifier runs macOS when it cannot resolve the base, which
+          # covers new branches (all-zero before) and a failed fetch here.
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 origin "$base" || true
+          fi
+        fi
+        macos="$(bash scripts/macos-ci-paths.sh "$base" HEAD)"
+        printf 'macos=%s\n' "$macos" >>"$GITHUB_OUTPUT"
 
-    - name: Run desktop Clippy lints on macOS
-      if: runner.os == 'macOS'
-      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
-
-    - name: Build desktop application on macOS
-      if: runner.os == 'macOS'
-      run: cargo build --release --locked -p brokk-mj-desktop
-
-    - name: Run desktop tests on macOS
-      if: runner.os == 'macOS'
-      run: cargo test --locked -p brokk-mj-desktop
+  macos:
+    name: macOS
+    needs: macos-changes
+    # Runs unless classification positively said no. If the classifier job
+    # fails, CI is red and macOS still runs.
+    if: ${{ !cancelled() && needs.macos-changes.outputs.macos != 'false' }}
+    uses: ./.github/workflows/macos.yml
 
   portable-worker:
     name: Portable worker (x86_64-unknown-linux-musl)
