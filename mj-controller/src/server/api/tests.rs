@@ -1685,6 +1685,9 @@ async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].capabilities.interrupt_turn = true;
+            // The sample session is a live independent clone, which suspend
+            // refuses without acknowledgement; this one has nothing to publish.
+            snapshot.sessions[0].publication_state = None;
         });
 
     for (path, expected) in [
@@ -1715,6 +1718,50 @@ async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
         let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
+}
+
+#[tokio::test]
+async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_acknowledged() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].publication_state =
+                Some(mj_core::state::PublicationState::Unknown);
+        });
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(actions.try_recv().is_err());
+
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"acknowledge_unpublished_work":true}"#))
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: true,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
 #[tokio::test]

@@ -347,10 +347,10 @@ pub(super) async fn suspend(
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
-    let active_children = {
+    let (active_children, publication_state) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        session
+        let active_children = session
             .subagent_session_ids
             .iter()
             .filter(|id| {
@@ -359,7 +359,8 @@ pub(super) async fn suspend(
                     .iter()
                     .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
-            .count()
+            .count();
+        (active_children, session.publication_state)
     };
     if active_children > 0
         && !request
@@ -370,26 +371,16 @@ pub(super) async fn suspend(
             "session has {active_children} sub-agent(s); retry with acknowledge_active_subagents=true to suspend children first"
         )));
     }
-    if !request
-        .as_ref()
-        .is_some_and(|r| r.acknowledge_unpublished_work)
+    // The controller re-checks publication after its checkpoint; this is only
+    // an early refusal that avoids a needless checkpoint.
+    if publication_state.is_some()
+        && !request
+            .as_ref()
+            .is_some_and(|r| r.acknowledge_unpublished_work)
     {
-        let check_id = session_id.clone();
-        let needs_confirmation = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let controller = crate::controller::Controller::load()?;
-            Ok(controller
-                .state
-                .sessions
-                .get(&check_id)
-                .is_some_and(|session| session.publication_state().is_some()))
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("publication preflight failed: {error}"))??;
-        if needs_confirmation {
-            return Err(ApiFailure::conflict(
-                "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
-            ));
-        }
+        return Err(ApiFailure::conflict(
+            "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
+        ));
     }
     backend(&state)?.cancel_start(session_id.clone()).await?;
     send_action(
