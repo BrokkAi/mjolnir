@@ -43,6 +43,7 @@ pub mod targets;
 pub mod test_hooks;
 pub mod transcript;
 pub mod usage;
+pub mod worker_build;
 pub mod worker_launch;
 pub mod worker_protocol;
 pub mod workspace;

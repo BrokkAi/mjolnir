@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::hex::lower_hex;
+use mj_core::worker_build::WorkerBuild;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerBinaryAvailability {
@@ -71,33 +72,45 @@ pub(super) fn worker_sibling_names(controller: &Path) -> Vec<std::ffi::OsString>
 /// A local-bare session runs on the controller host, so it may use the native
 /// worker built or packaged beside `mj`. Managed targets never consider this
 /// name because a macOS or glibc binary is not portable into Linux targets.
-pub(super) fn select_native_worker(
-    controller: &Path,
-    is_file: impl Fn(&Path) -> bool,
-) -> Option<(PathBuf, &'static str)> {
-    let directory = controller.parent()?;
+pub(super) fn native_worker_candidates(controller: &Path) -> Vec<(PathBuf, &'static str)> {
+    let Some(directory) = controller.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
     if let (Some(profile), Some(target_dir)) = (directory.file_name(), directory.parent()) {
-        let development_worker = target_dir.join("worker").join(profile).join("mj-worker");
-        if is_file(&development_worker) {
-            return Some((development_worker, "isolated native development worker"));
-        }
+        candidates.push((
+            target_dir.join("worker").join(profile).join("mj-worker"),
+            "isolated native development worker",
+        ));
     }
-    let packaged_worker = directory.join("mj-worker");
-    is_file(&packaged_worker).then_some((packaged_worker, "native worker beside mj"))
+    candidates.push((directory.join("mj-worker"), "native worker beside mj"));
+    candidates
 }
 
-/// Choose a worker binary that ships beside the controller or in a development
-/// musl sibling directory. `is_file` probes the filesystem; tests pass a
-/// hand-written probe. The static musl sibling is probed before the worker in
-/// the controller's own directory, because in a development checkout that
-/// same-directory candidate resolves to the controller itself, whose glibc may
-/// be newer than the target's.
+/// The first sibling candidate that exists, ignoring build stamps.
+#[cfg(test)]
 pub(super) fn select_sibling_worker(
     controller: &Path,
     triple: &str,
     is_file: impl Fn(&Path) -> bool,
 ) -> Option<(PathBuf, &'static str)> {
-    let directory = controller.parent()?;
+    sibling_worker_candidates(controller, triple)
+        .into_iter()
+        .find(|(path, _)| is_file(path))
+}
+
+/// Worker binaries that ship beside the controller or in a development musl
+/// sibling directory, in lookup order. The static musl sibling comes before
+/// the worker in the controller's own directory, because in a development
+/// checkout that same-directory candidate resolves to the controller itself,
+/// whose glibc may be newer than the target's.
+pub(super) fn sibling_worker_candidates(
+    controller: &Path,
+    triple: &str,
+) -> Vec<(PathBuf, &'static str)> {
+    let Some(directory) = controller.parent() else {
+        return Vec::new();
+    };
     let names = worker_sibling_names(controller);
     let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
     // Packaged worker beside the controller, named for the target triple.
@@ -141,7 +154,7 @@ pub(super) fn select_sibling_worker(
     {
         candidates.push((directory.join(name), "beside the running executable"));
     }
-    candidates.into_iter().find(|(path, _)| is_file(path))
+    candidates
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,7 +254,13 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     let cache_root = data_dir().join("workers").join("pinned");
     let started = std::time::Instant::now();
     let snapshot = WorkerBinarySourceSnapshot::capture(&cache_root, |arch, requirement| {
-        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+        worker_binary_prerequisite_for_current(
+            arch,
+            requirement,
+            &current,
+            &|path| path.is_file(),
+            &worker_file_build,
+        )
     });
     tracing::info!(
         elapsed_ms = started.elapsed().as_millis(),
@@ -361,7 +380,13 @@ pub(super) fn worker_binary_for_arch(
         return resolve_worker_source_again(arch, requirement, pinned.err());
     }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+    worker_binary_prerequisite_for_current(
+        arch,
+        requirement,
+        &current,
+        &|path| path.is_file(),
+        &worker_file_build,
+    )
 }
 
 /// Whether a pinned worker source can still be used as it stands.
@@ -390,8 +415,13 @@ fn resolve_worker_source_again(
     pinned_error: Option<anyhow::Error>,
 ) -> Result<WorkerBinaryAvailability> {
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let resolved =
-        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file());
+    let resolved = worker_binary_prerequisite_for_current(
+        arch,
+        requirement,
+        &current,
+        &|path| path.is_file(),
+        &worker_file_build,
+    );
     match resolved {
         Ok(WorkerBinaryAvailability::Local { path, source }) => {
             let cache_root = data_dir().join("workers").join("pinned");
@@ -424,18 +454,79 @@ fn resolve_worker_source_again(
     }
 }
 
-/// The lookup itself, with the controller's own path and the file probe passed
-/// in so both can be exercised without the machine they describe.
+/// The build this controller was compiled from. Every worker it installs must
+/// carry a stamp that serves it (#1138).
+pub(in crate::controller) fn controller_worker_build() -> &'static WorkerBuild {
+    static BUILD: OnceLock<WorkerBuild> = OnceLock::new();
+    BUILD.get_or_init(|| {
+        WorkerBuild::parse_marker(mj_core::worker_build_marker!())
+            .expect("the controller's own build marker is well formed")
+    })
+}
+
+/// Read a candidate worker file's build stamp.
+pub(super) fn worker_file_build(path: &Path) -> Result<Option<WorkerBuild>> {
+    let build = mj_core::worker_build::read_worker_build(path)?;
+    if build.is_none() && mj_core::test_hooks::accept_unstamped_worker() {
+        return Ok(Some(controller_worker_build().clone()));
+    }
+    Ok(build)
+}
+
+/// Why a worker file that exists was not used.
+fn stale_worker_reason(
+    path: &Path,
+    build_of: &dyn Fn(&Path) -> Result<Option<WorkerBuild>>,
+) -> Option<String> {
+    let expected = controller_worker_build();
+    match build_of(path) {
+        Ok(Some(build)) if build.serves(expected) => None,
+        Ok(Some(build)) => Some(format!("it is build {build}")),
+        Ok(None) => Some("it carries no build stamp, so it predates stamped workers".to_owned()),
+        Err(error) => Some(format!("its build could not be read: {error:#}")),
+    }
+}
+
+/// Fail when a downloaded or otherwise fixed worker file does not serve this
+/// controller. Nothing that fails here may be uploaded to a target.
+pub(super) fn ensure_worker_serves_controller(path: &Path, source: &str) -> Result<()> {
+    match stale_worker_reason(path, &worker_file_build) {
+        None => Ok(()),
+        Some(reason) => bail!(
+            "the worker from {source} ({}) does not match this mj ({}): {reason}; \
+             install the worker built with this mj",
+            display_path(path),
+            controller_worker_build()
+        ),
+    }
+}
+
+/// The lookup itself, with the controller's own path and the file probes
+/// passed in so they can be exercised without the machine they describe.
+///
+/// A candidate that exists but was built for a different `mj` is skipped and
+/// logged, and the next candidate is tried; installing it is how a new daemon
+/// came to start a pre-2.7 worker that rejected its launch config (#1138).
 pub(super) fn worker_binary_prerequisite_for_current(
     arch: &str,
     requirement: WorkerBinaryRequirement,
     current: &Path,
     is_file: &dyn Fn(&Path) -> bool,
+    build_of: &dyn Fn(&Path) -> Result<Option<WorkerBuild>>,
 ) -> Result<WorkerBinaryAvailability> {
     let triple = format!("{arch}-unknown-linux-musl");
     if let Some(path) = mj_core::config::env_override_os("WORKER_BINARY").map(PathBuf::from) {
         if !is_file(&path) {
             bail!("MJ_WORKER_BINARY is not a file: {}", path.display());
+        }
+        // The override names one file outright; a mismatch there is an error
+        // to fix, never a reason to look elsewhere.
+        if let Some(reason) = stale_worker_reason(&path, build_of) {
+            bail!(
+                "MJ_WORKER_BINARY {} does not match this mj ({}): {reason}; point it at the worker built with this mj",
+                display_path(&path),
+                controller_worker_build()
+            );
         }
         return Ok(WorkerBinaryAvailability::Local {
             path,
@@ -454,27 +545,35 @@ pub(super) fn worker_binary_prerequisite_for_current(
         ));
         candidates.push((directory.join(&triple).join("hel"), "MJ_WORKER_DIR"));
     }
-    if let Some((path, source)) = candidates.into_iter().find(|(path, _)| is_file(path)) {
-        return Ok(WorkerBinaryAvailability::Local {
-            path,
-            source: source.into(),
-        });
+    if requirement == WorkerBinaryRequirement::LocalHost {
+        candidates.extend(native_worker_candidates(current));
     }
-    if requirement == WorkerBinaryRequirement::LocalHost
-        && let Some((path, source)) = select_native_worker(current, is_file)
-    {
-        return Ok(WorkerBinaryAvailability::Local {
-            path,
-            source: source.into(),
-        });
+    if !controller_replaced {
+        candidates.extend(sibling_worker_candidates(current, &triple));
     }
-    if !controller_replaced
-        && let Some((path, source)) = select_sibling_worker(current, &triple, is_file)
-    {
-        return Ok(WorkerBinaryAvailability::Local {
-            path,
-            source: source.into(),
-        });
+    let mut skipped = Vec::new();
+    for (path, source) in candidates {
+        if !is_file(&path) || skipped.iter().any(|(seen, _)| seen == &path) {
+            continue;
+        }
+        match stale_worker_reason(&path, build_of) {
+            None => {
+                return Ok(WorkerBinaryAvailability::Local {
+                    path,
+                    source: source.into(),
+                });
+            }
+            Some(reason) => {
+                tracing::warn!(
+                    path = %display_path(&path),
+                    source,
+                    expected = %controller_worker_build(),
+                    reason = %reason,
+                    "skipping a worker binary that was not built with this mj"
+                );
+                skipped.push((path, reason));
+            }
+        }
     }
     if let Some(template) = mj_core::config::env_override("WORKER_URL") {
         let expected = mj_core::config::env_override("WORKER_SHA256")
@@ -485,6 +584,20 @@ pub(super) fn worker_binary_prerequisite_for_current(
             sha256: expected,
             triple,
         });
+    }
+    if !skipped.is_empty() {
+        let found = skipped
+            .iter()
+            .map(|(path, reason)| format!("{} ({reason})", display_path(path)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "no Linux worker for {triple} matches this mj ({}); skipped {found}. \
+             Replace them with the workers built with this mj: reinstall mj from its release \
+             archive so mj-worker-{triple} beside it is updated, or in a checkout run \
+             `cargo build --target {triple} -p brokk-mj-worker --bin mj-worker`",
+            controller_worker_build()
+        );
     }
     // Telling someone to install a worker beside a binary that is no longer
     // there sends them looking in the wrong place.

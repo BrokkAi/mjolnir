@@ -76,6 +76,23 @@ pub fn reach_test_hook(name: &'static str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the controller may treat a worker file with no build stamp as its
+/// own build. Worker fixtures are checked-in shell scripts that cannot carry a
+/// stamp; the default build never accepts one.
+#[cfg(not(feature = "test-hooks"))]
+#[inline]
+pub fn accept_unstamped_worker() -> bool {
+    false
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn accept_unstamped_worker() -> bool {
+    std::env::var_os(ACCEPT_UNSTAMPED_WORKER).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Set to `1` in an isolated test that installs an unstamped worker fixture.
+pub const ACCEPT_UNSTAMPED_WORKER: &str = "MJ_TEST_ACCEPT_UNSTAMPED_WORKER";
+
 /// The checked-in executable used by fake commands and worker fixtures.
 #[cfg(all(unix, feature = "test-hooks"))]
 pub fn fake_command_dispatcher() -> std::path::PathBuf {

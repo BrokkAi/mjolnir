@@ -36,6 +36,12 @@ use mj_core::hex::lower_hex;
 use mj_core::targets::ProcessExecutor;
 
 use anyhow::Result;
+use mj_core::worker_build::WorkerBuild;
+
+/// A worker probe for which every file is a worker built with this `mj`.
+fn built_with_this_mj(_: &Path) -> Result<Option<WorkerBuild>> {
+    Ok(Some(controller_worker_build().clone()))
+}
 
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 use mj_core::config::ExecutionPolicy;
@@ -371,6 +377,7 @@ fn local_bare_may_use_a_native_worker_beside_the_controller() {
         WorkerBinaryRequirement::LocalHost,
         &controller,
         &|path| path == controller || path == worker,
+        &built_with_this_mj,
     )
     .unwrap();
     assert_eq!(
@@ -392,6 +399,7 @@ fn local_bare_prefers_the_isolated_native_development_worker() {
         WorkerBinaryRequirement::LocalHost,
         &controller,
         &|path| path == controller || path == worker || path == packaged,
+        &built_with_this_mj,
     )
     .unwrap();
     assert_eq!(
@@ -634,6 +642,7 @@ fn a_replaced_controller_is_reported_instead_of_a_missing_worker() {
             probed.borrow_mut().push(path.to_path_buf());
             false
         },
+        &built_with_this_mj,
     )
     .unwrap_err();
 
@@ -674,6 +683,7 @@ fn a_present_controller_still_looks_beside_itself() {
             probed.borrow_mut().push(path.to_path_buf());
             path == controller
         },
+        &built_with_this_mj,
     )
     .unwrap_err();
 
@@ -699,6 +709,7 @@ fn a_present_controller_still_looks_beside_itself() {
         WorkerBinaryRequirement::PortableLinux,
         &root,
         &|path| path == root,
+        &built_with_this_mj,
     )
     .unwrap_err();
     let detail = format!("{error:#}");
@@ -720,7 +731,7 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
     if std::env::var_os(WORKER_BINARY_OVERRIDE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let worker = directory.path().join("mj-worker");
-        std::fs::write(&worker, b"worker").unwrap();
+        std::fs::write(&worker, mj_core::worker_build_marker!()).unwrap();
         IsolatedTest::new(test_name(
             module_path!(),
             "a_replaced_controller_still_honors_the_worker_binary_override",
@@ -737,6 +748,7 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
         WorkerBinaryRequirement::PortableLinux,
         &stale,
         &|path| path.is_file(),
+        &worker_file_build,
     )
     .unwrap();
 
@@ -746,6 +758,118 @@ fn a_replaced_controller_still_honors_the_worker_binary_override() {
         }
         other => panic!("expected the override to resolve, got {other:?}"),
     }
+}
+
+/// A worker file built for another `mj`, as its stamp reports it.
+fn older_build() -> WorkerBuild {
+    WorkerBuild {
+        version: "2.6.0".into(),
+        git_sha: Some("0123456789abcdef".into()),
+    }
+}
+
+/// #1138: a stale packaged worker first in the lookup order must not be
+/// installed when a worker built with this `mj` exists further down.
+#[test]
+fn a_stale_worker_first_in_the_lookup_yields_to_a_matching_one() {
+    let controller = PathBuf::from("target/debug/mj");
+    let stale = PathBuf::from("target/debug/mj-worker-x86_64-unknown-linux-musl");
+    let unstamped = PathBuf::from("target/worker/x86_64-unknown-linux-musl/debug/mj-worker");
+    let current = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj-worker");
+    let present = [&controller, &stale, &unstamped, &current];
+    let selected = worker_binary_prerequisite_for_current(
+        "x86_64",
+        WorkerBinaryRequirement::PortableLinux,
+        &controller,
+        &|path| present.iter().any(|candidate| *candidate == path),
+        &|path| {
+            Ok(if path == current {
+                Some(controller_worker_build().clone())
+            } else if path == stale {
+                Some(older_build())
+            } else {
+                None
+            })
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        selected,
+        WorkerBinaryAvailability::Local {
+            path: current,
+            source: "development musl worker".into(),
+        }
+    );
+}
+
+/// With only stale workers installed, the lookup fails before anything is
+/// provisioned and names each file it refused and why.
+#[test]
+fn only_stale_workers_fail_the_lookup_and_name_the_files() {
+    let controller = PathBuf::from("/opt/brokk/mj");
+    let stale = PathBuf::from("/opt/brokk/mj-worker-x86_64-unknown-linux-musl");
+    let legacy = PathBuf::from("/opt/brokk/hel");
+    let error = worker_binary_prerequisite_for_current(
+        "x86_64",
+        WorkerBinaryRequirement::PortableLinux,
+        &controller,
+        &|path| path == controller || path == stale || path == legacy,
+        &|path| Ok((path == stale).then(older_build)),
+    )
+    .unwrap_err();
+
+    let detail = format!("{error:#}");
+    assert!(detail.contains("matches this mj"), "{detail}");
+    assert!(
+        detail.contains("/opt/brokk/mj-worker-x86_64-unknown-linux-musl (it is build 2.6.0+0123456789ab)"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("/opt/brokk/hel (it carries no build stamp"),
+        "{detail}"
+    );
+}
+
+const STALE_WORKER_OVERRIDE_CHILD: &str = "MJ_STALE_WORKER_OVERRIDE_CHILD";
+
+/// An explicit override that names a stale worker is an error to fix; the
+/// lookup never quietly uploads it or goes looking for another file.
+#[test]
+fn a_stale_worker_binary_override_is_refused() {
+    if std::env::var_os(STALE_WORKER_OVERRIDE_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("mj-worker");
+        std::fs::write(&worker, b"\x7fELF MJ-WORKER-BUILD:2.6.0+0123abcd:END").unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_stale_worker_binary_override_is_refused",
+        ))
+        .env(STALE_WORKER_OVERRIDE_CHILD, "1")
+        .env("MJ_WORKER_BINARY", &worker)
+        .run();
+        return;
+    }
+
+    let error = worker_binary_prerequisite_for_current(
+        FOREIGN_ARCH,
+        WorkerBinaryRequirement::PortableLinux,
+        &PathBuf::from("/opt/brokk/mj"),
+        &|path| path.is_file(),
+        &worker_file_build,
+    )
+    .unwrap_err();
+    let detail = format!("{error:#}");
+    assert!(detail.contains("MJ_WORKER_BINARY"), "{detail}");
+    assert!(detail.contains("it is build 2.6.0+0123abcd"), "{detail}");
+}
+
+#[test]
+fn the_controller_build_marker_names_this_version() {
+    assert_eq!(
+        controller_worker_build().version,
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 #[test]
@@ -3274,11 +3398,31 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
     assert_eq!(std::fs::read(&launch).unwrap(), b"old launch schema");
     assert!(!restarted.exists());
 
+    // A worker built for another mj is refused just the same (#1138): the old
+    // worker and its launch config stay paired and nothing restarts.
+    let source = std::env::var_os("MJ_WORKER_BINARY").unwrap();
+    std::fs::write(&source, b"stale worker MJ-WORKER-BUILD:2.6.0+0123abcd:END").unwrap();
+    let error = crate::session_manager::recover_worker_controlled(
+        plan.clone(),
+        false,
+        None,
+        &ProcessExecutor,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("does not match this mj"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&binary).unwrap(), b"old worker");
+    assert_eq!(std::fs::read(&launch).unwrap(), b"old launch schema");
+    assert!(!restarted.exists());
+
     // The same recovery plan retries after the matching worker is installed;
     // no controller restart or replanning is needed.
-    std::fs::write(std::env::var_os("MJ_WORKER_BINARY").unwrap(), b"new worker").unwrap();
+    let current = format!("new worker {}", mj_core::worker_build_marker!());
+    std::fs::write(&source, &current).unwrap();
     crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor).unwrap();
-    assert_eq!(std::fs::read(binary).unwrap(), b"new worker");
+    assert_eq!(std::fs::read(binary).unwrap(), current.as_bytes());
     assert_eq!(std::fs::read(launch).unwrap(), b"new launch schema");
     assert!(restarted.exists());
 }

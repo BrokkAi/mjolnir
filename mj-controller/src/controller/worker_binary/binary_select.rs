@@ -110,7 +110,13 @@ pub(in crate::controller) fn worker_binary_for(
             url,
             sha256,
             triple,
-        } => download_worker(&url, &sha256, &triple),
+        } => {
+            let path = download_worker(&url, &sha256, &triple)?;
+            // A URL cannot be checked before the download; the file can,
+            // and it must be before anything uploads it to a target.
+            ensure_worker_serves_controller(&path, &url)?;
+            Ok(path)
+        }
     }
 }
 

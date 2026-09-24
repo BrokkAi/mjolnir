@@ -112,3 +112,7 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The controller scans whole worker binaries for their build stamp.
+[profile.dev.package.memchr]
+opt-level = 3

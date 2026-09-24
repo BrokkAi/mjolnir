@@ -324,7 +324,14 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
     anyhow::bail!("target login environment requires a Unix worker")
 }
 
+/// The build stamp the controller reads from this file before installing it,
+/// so it never uploads a worker built from a different release (#1138).
+#[used]
+static WORKER_BUILD_MARKER: &str = mj_core::worker_build_marker!();
+
 fn main() -> Result<()> {
+    // Keep the stamp's bytes in the linked image whatever the linker prunes.
+    std::hint::black_box(WORKER_BUILD_MARKER);
     // The standalone worker uses the same ring provider as the daemon.
     let _ = rustls::crypto::ring::default_provider().install_default();
     install_stderr_logging()?;

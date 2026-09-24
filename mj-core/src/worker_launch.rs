@@ -316,8 +316,23 @@ impl WorkerLaunchConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
             .with_context(|| format!("read worker launch config {}", path.display()))?;
-        serde_json::from_slice(&body)
-            .with_context(|| format!("parse worker launch config {}", path.display()))
+        serde_json::from_slice(&body).map_err(|error| {
+            // A field this worker does not know means a newer daemon wrote the
+            // config for a newer worker; say so instead of only naming the
+            // field, which is what #1138 looked like from the outside.
+            let hint = error.to_string().contains("unknown field").then(|| {
+                format!(
+                    "; this worker ({}) is older than the daemon that wrote the config, \
+                     which must install the worker built with it",
+                    env!("CARGO_PKG_VERSION")
+                )
+            });
+            anyhow::Error::new(error).context(format!(
+                "parse worker launch config {}{}",
+                path.display(),
+                hint.unwrap_or_default()
+            ))
+        })
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
