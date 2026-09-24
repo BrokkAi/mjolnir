@@ -282,7 +282,7 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     assert_eq!(check.id, "build-cache.local");
     assert_eq!(check.status, CheckStatus::Warning);
     assert!(check.detail.contains("1.15.0"));
-    assert!(check.detail.contains("1.16.0"));
+    assert!(check.detail.contains(crate::controller::MBX_VERSION));
     assert!(check.detail.contains("run without the shared build cache"));
     assert!(check.detail.contains("docker, podman"));
     assert!(
@@ -300,7 +300,12 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
 
     let json = serde_json::to_value(check).unwrap();
     assert_eq!(json["status"], "warning");
-    assert!(json["remediation"].as_str().unwrap().contains("1.16.0"));
+    assert!(
+        json["remediation"]
+            .as_str()
+            .unwrap()
+            .contains(crate::controller::MBX_VERSION)
+    );
     let mut human = Vec::new();
     render_human(&checks, &mut human).unwrap();
     let human = String::from_utf8(human).unwrap();
@@ -318,7 +323,10 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     )]);
     for (response, expected_status, expected_text) in [
         (
-            Ok(output("mbx\nmbx 1.16.0")),
+            Ok(output(format!(
+                "mbx\nmbx {}",
+                crate::controller::MBX_VERSION
+            ))),
             CheckStatus::Ready,
             "compatible",
         ),

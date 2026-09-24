@@ -1125,6 +1125,11 @@ mod tests {
 
     /// The canned answers a host with no native mbx and a reflink-capable
     /// home directory gives.
+    /// A native mbx's `--version` answer at the release containers run.
+    fn current_native_mbx() -> String {
+        format!("mbx\nmbx {MBX_VERSION}")
+    }
+
     fn plain_host() -> Vec<(&'static str, i32, &'static str)> {
         vec![
             ("$m\" --version", 1, ""),
@@ -1173,7 +1178,7 @@ mod tests {
     fn a_native_mbx_supplies_the_cache_directory_and_its_own_limits() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
+            ("$m\" --version", 0, current_native_mbx().as_str()),
             (
                 "mbx cache dir --json",
                 0,
@@ -1241,7 +1246,7 @@ mod tests {
     fn a_relocated_target_root_is_reported_for_its_own_mount() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
+            ("$m\" --version", 0, current_native_mbx().as_str()),
             (
                 "mbx cache dir --json",
                 0,
@@ -1269,7 +1274,7 @@ mod tests {
     fn a_target_root_that_cannot_be_cloned_into_still_gets_the_cache() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
+            ("$m\" --version", 0, current_native_mbx().as_str()),
             (
                 "mbx cache dir --json",
                 0,
@@ -1317,9 +1322,10 @@ mod tests {
     #[test]
     fn a_cargo_installed_mbx_off_the_path_is_queried_where_it_was_found() {
         let _isolated = isolated();
-        let mut answers = plain_host();
+        let found = format!("/home/dev/.cargo/bin/mbx\nmbx {MBX_VERSION}");
+        let mut answers: Vec<(&'static str, i32, &str)> = plain_host();
         answers.retain(|(needle, _, _)| *needle != "$m\" --version");
-        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.16.0"));
+        answers.push(("$m\" --version", 0, found.as_str()));
         answers.push((
             "/home/dev/.cargo/bin/mbx cache dir --json",
             0,
@@ -1450,7 +1456,7 @@ mod tests {
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
 
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
+            ("$m\" --version", 0, current_native_mbx().as_str()),
             (
                 "mbx cache dir --json",
                 0,
@@ -1469,7 +1475,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some("1.16.0"));
+        assert_eq!(preview.native_mbx.as_deref(), Some(MBX_VERSION));
         assert_eq!(
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))
