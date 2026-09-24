@@ -132,6 +132,13 @@ Move inherits the source resource sizing and attached directories by default.
 uses its configured defaults; attached directories remain part of the fixed
 workspace selection.
 
+A session that works in a bare checkout on an SSH host cannot move to
+another machine. Its working tree is the checkout itself, so `--target` is
+refused with `this session's working tree lives on <host>; resume it there`.
+Such a session can change profile in place, or move to another bare target on
+the same host. To continue elsewhere, push its branch and start a new session
+from that branch. The same rule applies to `mj resume --target`.
+
 An interactive invocation prepares the destination and asks for confirmation.
 `--yes` confirms the interruption for unattended use, but it does not choose
 what to do with queued work. If commands are pending, unattended use must pass
