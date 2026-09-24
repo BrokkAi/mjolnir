@@ -1312,38 +1312,25 @@ async fn start_forwards_the_launch_base_to_the_controller() {
     );
 }
 
-/// A fresh instance has no workspace, and until #1080 the only way to make one
-/// was to open the terminal dashboard, so a scripted first session was refused
-/// with nothing the script could do about it. Starting one now adopts the
-/// store's `default` workspace instead.
+/// A fresh instance has no workspace. Every session lives in a workspace the
+/// dashboard and the viewer list, so a first session that names none is
+/// refused with the way to create one, and no hidden workspace is made or
+/// used (launch finding H-3).
 #[tokio::test]
-async fn a_first_session_on_an_instance_with_no_workspace_creates_the_default_one() {
+async fn a_first_session_on_an_instance_with_no_workspace_is_refused_with_the_way_to_make_one() {
     let backend = Arc::new(FakeBackend {
         workspaces: FakeWorkspaces::empty(),
         ..FakeBackend::default()
     });
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
-    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New { workspace_id, .. } = &request.action else {
-        panic!("expected a New action, got {:?}", request.action);
-    };
-    assert_eq!(workspace_id, "id-of-default");
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        backend.workspaces.0.lock().unwrap().len(),
-        1,
-        "the default workspace is created once and then reused"
+    let response = app.oneshot(start_request(start_body(""))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await.to_string();
+    assert!(body.contains("mj workspaces create"), "{body}");
+    assert!(
+        backend.workspaces.0.lock().unwrap().is_empty(),
+        "no workspace is created on the caller's behalf"
     );
 }
 

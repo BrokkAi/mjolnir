@@ -165,8 +165,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 ```text
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
-mj new [--profile <id>] [--target <id>] [--bundle <id>] [--project-directory <path>]
-       [--base <revision>] [--workspace-id <id>] [--title <text>]
+mj new --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
+       [--project-directory <path>] [--base <revision>] [--title <text>]
        [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
@@ -232,14 +232,21 @@ carries history changes as well as session work. Without `--json`, `mj diff`
 writes the patch to standard output and one `warning:` line to standard error
 saying so. An older worker leaves the field out, and no warning is printed.
 
-A session belongs to a workspace, and a fresh instance has none. `mj new` no
-longer needs one to exist: with no `--workspace-id` and no global `--workspace`,
-it uses the instance's only workspace, or the `default` workspace when the
-instance has none, so `mj -i <name> new ...` works on a brand-new instance
-without opening the terminal first. An instance with several workspaces needs
-`--workspace-id` or `--workspace`. Use `mj workspaces create` to name one
-deliberately; it selects the workspace when the name already exists, so a script
-can run it every time.
+Every session lives in a workspace that the dashboard and the web viewer list,
+so `mj new` needs `--workspace <name>` (or `--workspace-id <id>`). Without it,
+`mj new` fails, lists the instance's workspaces with their session counts, and
+says how to create one. A fresh instance has no workspace. Run `mj workspaces
+create <name>` first. It selects the workspace when the name already exists, so
+a script can run it every time:
+
+```sh
+mj workspaces create agents
+mj new --workspace agents --project-directory . "Fix the failing test"
+```
+
+The terminal dashboard still names its first workspace after the directory it
+was started in. A store from an earlier release that holds sessions made
+without a workspace lists them in a workspace named `default`.
 
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints

@@ -3005,19 +3005,42 @@ fn independent_session_writes_preserve_both_updates() {
     );
 }
 
+/// Launch finding H-3: no session may sit in a workspace nobody can see. A
+/// store whose `default` holds a session, suspended ones included, lists it
+/// as an ordinary workspace named `default`; an empty `default` is not
+/// listed, and its name cannot be taken for a workspace that would then be
+/// invisible.
 #[test]
-fn legacy_sessions_are_migrated_into_the_default_workspace_without_copying_state() {
+fn a_default_workspace_that_holds_sessions_is_listed_and_an_empty_one_is_not() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let visible = create_workspace_at(&database, "Visible").unwrap();
+    assert_eq!(
+        list_workspaces_from(&database)
+            .unwrap()
+            .iter()
+            .map(|workspace| workspace.id.as_str())
+            .collect::<Vec<_>>(),
+        [visible.id.as_str()]
+    );
+    let refused = create_or_get_workspace_at(&database, "Default").unwrap_err();
+    assert!(format!("{refused:#}").contains("reserved"), "{refused:#}");
 
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
     assert_eq!(
         workspace_for_session_at(&database, "session-1").unwrap(),
         Some(DEFAULT_WORKSPACE_ID.to_owned())
     );
-    assert!(
-        list_workspaces_from(&database).unwrap().is_empty(),
-        "an inactive migrated history must not make the hidden default workspace visible"
+    let listed = list_workspaces_from(&database).unwrap();
+    let default = listed
+        .iter()
+        .find(|workspace| workspace.id == DEFAULT_WORKSPACE_ID)
+        .expect("a default workspace holding a session is listed");
+    assert_eq!(default.name, "default");
+    assert_eq!(
+        create_or_get_workspace_at(&database, "default").unwrap().id,
+        DEFAULT_WORKSPACE_ID,
+        "once listed, the name selects it like any other"
     );
 }
 

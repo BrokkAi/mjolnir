@@ -93,7 +93,8 @@ Diagnosis:
 ## A delegation, end to end
 
 ```sh
-id=$(mj new --profile work --target local --json "Port the parser to the new API" | jq -r .session_id)
+mj workspaces create delegated
+id=$(mj new --workspace delegated --profile work --target local --json "Port the parser to the new API" | jq -r .session_id)
 mj wait --session "$id" --timeout 900
 mj diff --session "$id"
 mj suspend --session "$id"

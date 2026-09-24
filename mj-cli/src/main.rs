@@ -156,8 +156,8 @@ enum Command {
 /// it did nothing (F-16).
 #[derive(Debug, Clone, Default, Args)]
 pub(crate) struct WorkspaceName {
-    /// Workspace to work in, by name. Needed when the instance has more than
-    /// one.
+    /// Workspace to work in, by name. `mj new` and `mj acp` always need it;
+    /// other commands need it when the instance has more than one.
     #[arg(long = "workspace", id = "workspace_name", value_name = "NAME")]
     pub(crate) name: Option<String>,
 }
@@ -555,7 +555,10 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
-            let workspace = args.workspace.or(requested_workspace);
+            let Some(workspace) = args.workspace.or(requested_workspace) else {
+                return Err(workspace_required("mj acp", false).await);
+            };
+            let workspace = Some(workspace);
             acp::serve(args, workspace)
                 .await
                 .map(|()| DashboardExit::Normal)
@@ -1110,6 +1113,60 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
     }
 }
 
+/// The refusal for a command that creates a session without `--workspace`.
+///
+/// There is no hidden workspace to fall back on: every session lives in one
+/// the dashboard and the viewer list, so the command has to name it (launch
+/// finding H-3). The refusal lists what exists, from the daemon, and how to
+/// make one. A daemon that cannot be reached leaves the list out rather than
+/// hiding the reason. `start_daemon` is false for `mj acp`, which must never
+/// start a daemon before a client has asked it for a session.
+pub(crate) async fn workspace_required(command: &str, start_daemon: bool) -> anyhow::Error {
+    let connected = if start_daemon {
+        daemon::connect_or_start().await
+    } else {
+        daemon::connect_existing().await
+    };
+    let workspaces = match connected {
+        Ok(mut daemon) => daemon.list_workspaces().await.map_err(|error| {
+            tracing::warn!(%error, "could not list workspaces for the refusal");
+        }),
+        Err(error) => {
+            tracing::warn!(%error, "could not reach the daemon to list workspaces");
+            Err(())
+        }
+    };
+    let workspaces = workspaces.ok().map(|workspaces| {
+        workspaces
+            .into_iter()
+            .map(|listing| (listing.workspace.name, listing.workspace.session_count))
+            .collect::<Vec<_>>()
+    });
+    anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
+}
+
+fn workspace_required_message(command: &str, workspaces: Option<&[(String, u64)]>) -> String {
+    let mut message =
+        format!("{command} needs --workspace NAME: every session lives in a workspace");
+    match workspaces {
+        Some([]) => message.push_str("; this instance has none yet"),
+        Some(workspaces) => {
+            message.push_str(". Workspaces:");
+            for (name, sessions) in workspaces {
+                let noun = if *sessions == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                };
+                message.push_str(&format!("\n  {name}  ({sessions} {noun})"));
+            }
+        }
+        None => {}
+    }
+    message.push_str("\nCreate one with `mj workspaces create NAME`.");
+    message
+}
+
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
     let base = std::env::current_dir()
         .context("read current directory for workspace name")?
@@ -1121,9 +1178,12 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
         .chars()
         .take(64)
         .collect::<String>();
+    // The store keeps the name `default` for sessions made before a
+    // workspace was required, even while that workspace is not listed.
     let names = workspaces
         .iter()
         .map(|candidate| candidate.workspace.name.to_lowercase())
+        .chain([mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()])
         .collect::<std::collections::BTreeSet<_>>();
     if !names.contains(&base.to_lowercase()) {
         return Ok(base);
@@ -1759,6 +1819,28 @@ mod tests {
             &mut missing,
         );
         assert!(missing.is_empty(), "undescribed arguments: {missing:#?}");
+    }
+
+    /// H-3: `mj new` and `mj acp` without `--workspace` are refused with the
+    /// daemon's workspaces, their session counts, and how to make one.
+    #[test]
+    fn a_missing_workspace_is_refused_with_the_workspaces_and_how_to_make_one() {
+        let listed = [("Release".to_owned(), 1), ("fuzz".to_owned(), 3)];
+        let message = workspace_required_message("mj new", Some(&listed));
+        assert!(
+            message.starts_with("mj new needs --workspace NAME"),
+            "{message}"
+        );
+        assert!(message.contains("\n  Release  (1 session)"), "{message}");
+        assert!(message.contains("\n  fuzz  (3 sessions)"), "{message}");
+        assert!(message.ends_with("Create one with `mj workspaces create NAME`."));
+
+        let message = workspace_required_message("mj acp", Some(&[]));
+        assert!(message.contains("this instance has none yet"), "{message}");
+        assert!(message.contains("mj workspaces create NAME"), "{message}");
+
+        let message = workspace_required_message("mj acp", None);
+        assert!(message.contains("mj workspaces create NAME"), "{message}");
     }
 
     /// F-16: `--workspace` was global, so every command's help offered it.
