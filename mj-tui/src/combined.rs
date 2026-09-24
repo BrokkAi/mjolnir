@@ -947,6 +947,11 @@ fn render_combined_themed(
                         transition,
                         failed,
                         pane_focused: false,
+                        title_lead: crate::pane_controls::pane_chrome_width(
+                            dashboard,
+                            pane_id,
+                            transcript_area.width,
+                        ),
                     },
                 ),
                 (Some(chat), None) => {
@@ -1023,6 +1028,7 @@ fn render_combined_themed(
                 prompt_area,
                 dashboard,
                 focus_borders,
+                crate::pane_controls::pane_chrome_width(dashboard, pane_id, transcript_area.width),
             );
             false
         } else if let Some((session_id, transition, failed)) = selected_transition.clone() {
@@ -1036,6 +1042,11 @@ fn render_combined_themed(
                     transition,
                     failed,
                     pane_focused: focus_borders,
+                    title_lead: crate::pane_controls::pane_chrome_width(
+                        dashboard,
+                        pane_id,
+                        transcript_area.width,
+                    ),
                 },
             );
             false
@@ -1488,11 +1499,12 @@ fn render_launch_standby_surface(
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     pane_focused: bool,
+    title_lead: u16,
 ) {
     let panel = theme::panel(pane_focused)
-        .title(format!(
-            " Transition · {} ",
-            SessionTransitionKind::Starting.label()
+        .title(transition_title(
+            SessionTransitionKind::Starting,
+            title_lead,
         ))
         .title(
             Line::from(vec![
@@ -1548,6 +1560,21 @@ struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
     pane_focused: bool,
+    /// Columns the pane chrome draws its label into at the left of the
+    /// title row; the title starts after them.
+    title_lead: u16,
+}
+
+/// A transition panel title that starts after the pane chrome label, the
+/// same way the conversation title does, so the label does not cover the
+/// state word (launch findings B-2 and D-1: "Conversation g" for
+/// Suspending).
+fn transition_title(transition: SessionTransitionKind, lead: u16) -> String {
+    format!(
+        "{} Transition · {} ",
+        " ".repeat(usize::from(lead)),
+        transition.label()
+    )
 }
 
 fn render_transition_surface(
@@ -1562,6 +1589,7 @@ fn render_transition_surface(
         transition,
         failed,
         pane_focused,
+        title_lead,
     } = surface;
     if failed && transcript_area.height > 3 {
         dashboard.failure_drawn(session_id);
@@ -1612,8 +1640,7 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
-    let mut panel =
-        theme::panel(pane_focused).title(format!(" Transition · {} ", transition.label()));
+    let mut panel = theme::panel(pane_focused).title(transition_title(transition, title_lead));
     if !failed {
         panel = panel.title(
             Line::from(vec![
@@ -2021,6 +2048,33 @@ mod tests {
                 .any(|line| line.contains("ctrl+b shift+c to cancel suspending")),
             "cancel chord missing: {lines:?}"
         );
+    }
+
+    /// Launch findings B-2 / D-1 for Suspending: the transition panel's title
+    /// started under the pane chrome label, so the row read
+    /// "Conversation g". It starts after the label, as the chat title does.
+    #[test]
+    fn the_pane_chrome_does_not_cover_the_transition_title() {
+        for (kind, word) in [
+            (SessionOperationKind::Suspending, "Suspending"),
+            (SessionOperationKind::Launching, "Starting"),
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.begin_session_operation("session-1".into(), kind, None);
+            for width in [140_u16, 100] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+                terminal
+                    .draw(|frame| crate::render::render(frame, &mut dashboard))
+                    .unwrap();
+                let lines = buffer_lines(terminal.backend().buffer());
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line.contains(&format!("Transition · {word}"))),
+                    "{width}: {word} title covered: {lines:?}"
+                );
+            }
+        }
     }
 
     /// The standby composer keeps the empty chat composer's floor and grows
