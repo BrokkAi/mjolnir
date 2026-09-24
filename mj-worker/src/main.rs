@@ -325,6 +325,7 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
     // The standalone worker uses the same ring provider as the daemon.
     let _ = rustls::crypto::ring::default_provider().install_default();
     install_stderr_logging()?;

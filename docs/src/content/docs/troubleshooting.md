@@ -200,7 +200,8 @@ mj doctor --json --smoke
 Then follow the target-specific result:
 
 - **Podman:** it must be rootless and have a valid subordinate UID/GID mapping.
-  Run `podman info` as the same user that runs Mjolnir, then follow [Podman for
+  Run `podman unshare cat /proc/self/uid_map` as the same user that runs
+  Mjolnir, then follow [Podman for
   Mjolnir](/podman/).
 - **Docker:** the CLI must reach a Linux daemon, and writable attachments need
   working OverlayFS support on the daemon's filesystem host. Run `docker info`

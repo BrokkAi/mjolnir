@@ -86,10 +86,11 @@ pub(crate) enum WizardControl {
 }
 
 /// How long a stored readiness result stays usable across wizard opens
-/// before it is treated as missing and re-probed. Each non-local probe is an
-/// ssh round trip (about 2 seconds), so this keeps repeated wizard opens in
-/// the same dashboard session from re-probing every time while still
-/// catching a target that went unavailable a while ago.
+/// before it is treated as missing and re-probed. An SSH probe opens its own
+/// connection when no shared one is up (up to a second) and an AWS probe calls
+/// the AWS API, so this keeps repeated wizard opens in the same dashboard
+/// session from re-probing every time while still catching a target that went
+/// unavailable a while ago.
 pub(crate) const TARGET_READINESS_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// How long a failed readiness result is kept. Failures are usually

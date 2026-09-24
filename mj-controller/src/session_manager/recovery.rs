@@ -32,6 +32,7 @@ pub(super) fn refresh_worker_binary_if_stale(
     match refresh {
         None => Ok(()),
         Some(WorkerBinaryRefresh::Prepared(plan)) => {
+            mj_core::worker_build::verify_worker_build(&plan.source)?;
             let expected = mj_core::worker_launch::worker_executable_digest(&plan.source)?;
             if installed_digest_matches(executor, &plan.installed_digest, &expected) {
                 return Ok(());

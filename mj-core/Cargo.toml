@@ -9,6 +9,7 @@ repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 readme.workspace = true
 include = [
+    "build.rs",
     "src/**/*.rs",
     "tests/fixtures/fake-command.sh",
     # Turn-classifier questions shared with the hosted proxy.
@@ -43,6 +44,7 @@ chrono.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 libc.workspace = true
+memchr.workspace = true
 regex = "1"
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
@@ -54,6 +56,9 @@ toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

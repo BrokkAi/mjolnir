@@ -3545,6 +3545,28 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
 }
 
 #[test]
+fn availability_checks_start_on_the_first_wizard_step() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile));
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("availability check must start on the profile step");
+    };
+    assert_eq!(target_ids, ["podman"]);
+    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
+
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
+    assert_eq!(dashboard.take_prerequisite_check(), None);
+    assert_eq!(dashboard.target_readiness_rejection("podman"), None);
+}
+
+#[test]
 fn readiness_checks_are_independent_and_ignore_changed_configuration() {
     let mut config = config();
     config.targets.insert(

@@ -444,9 +444,10 @@ image = "ubuntu:24.04"
 
     // These tests exercise dashboard lifecycle, not worker execution. An explicit
     // failing worker keeps startup independent of installed workers and avoids
-    // copying and hashing large debug binaries for every parallel fixture.
+    // copying and hashing large debug binaries for every parallel fixture. It
+    // carries this build's stamp, because a mismatched override is an error.
     let worker = storage.path().join("fixture-worker");
-    mj_core::test_hooks::install_fake_command(
+    mj_core::test_hooks::install_fake_worker(
         storage.path(),
         "fixture-worker",
         "#!/bin/sh\necho 'PTY fixture cannot launch workers' >&2\nexit 1\n",

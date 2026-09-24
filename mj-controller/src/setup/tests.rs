@@ -447,7 +447,6 @@ fn config_contains_discovered_profiles_current_repository_and_selected_target() 
 fn runtime_probe_requires_podman_rootless_preflight_and_checks_apple_on_macos() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
-        ok(b"true\n"),
         ok(b"0 1000 1\n1 100000 65536\n"),
         ok(b"29.0.1 linux\n"),
         ok(b"container version 1\n"),
@@ -460,14 +459,10 @@ fn runtime_probe_requires_podman_rootless_preflight_and_checks_apple_on_macos() 
     assert_eq!(executor.commands.borrow()[0].args, ["--version"]);
     assert_eq!(
         executor.commands.borrow()[1].args,
-        ["info", "--format", "{{.Host.Security.Rootless}}"]
-    );
-    assert_eq!(
-        executor.commands.borrow()[2].args,
         ["unshare", "cat", "/proc/self/uid_map"]
     );
-    assert_eq!(executor.commands.borrow()[3].program, "docker");
-    assert_eq!(executor.commands.borrow()[4].program, "container");
+    assert_eq!(executor.commands.borrow()[2].program, "docker");
+    assert_eq!(executor.commands.borrow()[3].program, "container");
     assert!(runtimes.iter().all(|runtime| runtime.usable));
 }
 

@@ -527,11 +527,75 @@ fn failed_new_session_provisioning_retains_error_record() {
 const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
 
 #[test]
+fn stale_worker_fails_before_any_container_is_created() {
+    const CHILD: &str = "MJ_STALE_WORKER_PROVISION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("stale-worker");
+        std::fs::write(&worker, b"legacy worker without a build stamp").unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "stale_worker_fails_before_any_container_is_created",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "issue-1138-provision")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_BINARY", worker)
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let config = ssh_docker_registration_config();
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let session = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "docker",
+            "stale worker",
+            SessionLaunchOptions {
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                create_managed_worktree: None,
+                launch_base: None,
+                launch_branch: None,
+                mjolnir_subagents: None,
+                initial_prompt: None,
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+                project_directory: None,
+                session_title_override: None,
+            },
+        )
+        .unwrap();
+    let executor = RecordingExecutor::failing("no target command should run");
+    let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
+        &session,
+        &executor,
+        None,
+        ProvisioningFailureDisposition::Discard,
+    ))
+    .unwrap_err();
+    let detail = format!("{error:#}");
+    assert!(
+        detail.contains("stale-worker") && detail.contains("missing worker build stamp"),
+        "{detail}"
+    );
+    assert!(detail.contains(mj_core::worker_build::BUILD_ID), "{detail}");
+    assert!(executor.commands().is_empty(), "{:?}", executor.commands());
+    assert!(controller.state.sessions[&session].target.is_none());
+}
+
+#[test]
 fn failed_ssh_docker_preflight_retains_durable_error_record() {
     if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_ssh_docker_preflight_retains_durable_error_record";
         IsolatedTest::new(test_name(module_path!(), test))
+            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())
@@ -573,7 +637,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             .contains_key(&session_id)
     );
 
-    let executor = RecordingExecutor::failing("check Docker daemon");
+    let executor = RecordingExecutor::failing("verify SSH connectivity");
     let error = futures::executor::block_on(controller.provision_session_with_failure_disposition(
         &session_id,
         &executor,
@@ -583,14 +647,15 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
     .unwrap_err();
     let reported = format!("{error:#}");
     assert!(
-        reported.contains("remote Docker preflight failed"),
+        reported.contains("SSH connectivity test failed"),
         "{reported}"
     );
     assert!(
-        executor.commands().iter().any(|argv| {
-            let command = argv.join(" ");
-            command.contains("'docker' 'version'")
-        }),
+        executor
+            .commands()
+            .iter()
+            .any(|argv| argv.first().is_some_and(|program| program == "ssh")
+                && argv.last().is_some_and(|remote| remote == "'true'")),
         "the fake preflight did not run: {:?}",
         executor.commands()
     );
@@ -696,6 +761,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
         let directory = tempfile::tempdir().unwrap();
         let test = "failed_node_preflight_retains_error_before_provisioning";
         IsolatedTest::new(test_name(module_path!(), test))
+            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
             .env("MJ_CONFIG_DIR", directory.path())

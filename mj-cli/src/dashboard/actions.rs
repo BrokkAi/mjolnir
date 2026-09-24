@@ -453,7 +453,7 @@ pub(crate) async fn apply_dashboard_action(
                     move |cancelled| {
                         let executor = CancellableProcessExecutor::new(cancelled)
                             .with_deadline(std::time::Duration::from_secs(15));
-                        config_only_controller(config).test_target(&target_id, &executor)
+                        config_only_controller(config).check_target_readiness(&target_id, &executor)
                     },
                     move |result| DashboardIoUpdate::TargetReadiness {
                         generation,

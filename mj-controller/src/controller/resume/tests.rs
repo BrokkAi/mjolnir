@@ -190,7 +190,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
 
     let detail = format!("{error:#}");
     assert!(
-        detail.contains("preflight the worker binary before resuming"),
+        detail.contains("preflight the worker binary before provisioning"),
         "{detail}"
     );
     assert!(detail.contains("absent-worker"), "{detail}");
