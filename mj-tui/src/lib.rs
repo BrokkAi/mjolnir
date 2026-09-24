@@ -72,6 +72,7 @@ mod test_support;
 
 pub use crate::actions::CommandId;
 pub use crate::combined::{render_combined, render_combined_with_theme};
+pub use crate::dashboard_conversation::SPLIT_REFUSED_NOTICE;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;
 pub use crate::ingest::{
@@ -400,6 +401,9 @@ pub enum DashboardAction {
         generation: u64,
         target_ids: Vec<String>,
     },
+    /// Read the stored mount and project-directory history on a worker and
+    /// hand it back through `DashboardState::apply_mount_history`.
+    LoadMountHistory,
     LoadWebAccess,
     /// Stop the running daemon and start one from the build this surface is
     /// running, then report which build came up. The keep-alive never starts
@@ -490,6 +494,16 @@ pub enum DashboardAction {
         workspace_id: String,
     },
     ExitSubagentWorkspace,
+    /// Interrupt the running turn of this session's open conversation, as
+    /// Esc in its composer does.
+    InterruptTurn {
+        session_id: String,
+    },
+    /// Show a session's sub-agents in their own workspace. The controller
+    /// saves the composer draft first, as the prompt border's click does.
+    OpenSubagents {
+        parent_id: String,
+    },
     LoadNativeAgentHistory {
         owner: String,
         child: String,
@@ -774,6 +788,9 @@ pub struct DashboardState {
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
+    /// The New wizard opened and the stored mount and project history should
+    /// be read again, since sessions created after startup add to it.
+    pub(crate) mount_history_refresh_pending: bool,
     /// Selection anchor for the Sessions pane, by id rather than position: the
     /// pane shows different row sets at different explicit sizes, so a
     /// position could silently point at a different session after resizing.
@@ -878,6 +895,9 @@ pub struct DashboardState {
     pub(crate) mode: Mode,
     pub(crate) help_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
+    /// The Git repository `mj` was started in, found before the dashboard
+    /// opened. The new-session wizard offers it as the local project.
+    pub(crate) launch_project_directory: Option<std::path::PathBuf>,
     pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     /// What each session's checkout looked like when last read, for the
@@ -886,6 +906,9 @@ pub struct DashboardState {
     /// When each session's checkout was last asked about, so the host reads
     /// a visible session's status about once a minute and no more.
     pub(crate) git_probe_at: BTreeMap<String, Instant>,
+    /// The unreachable-worker notice last shown for each session, so the
+    /// notice can be withdrawn once the worker answers again.
+    pub(crate) unreachable_notices: BTreeMap<String, String>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -1002,10 +1025,12 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             go: None,
+            launch_project_directory: None,
             go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),
             git_status: BTreeMap::new(),
             git_probe_at: BTreeMap::new(),
+            unreachable_notices: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,
@@ -1015,6 +1040,7 @@ impl DashboardState {
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
+            mount_history_refresh_pending: false,
             selected_session_id: None,
             command_session_override: None,
             sessions_scroll: Cell::new(0),

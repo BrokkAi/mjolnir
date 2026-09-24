@@ -10,7 +10,7 @@ use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 1;
+pub const TOOL_SUMMARY_VERSION: u8 = 2;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -312,6 +312,10 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
         summarize_shell(&bounded)
             .or_else(|| first_meaningful_token(&bounded))
             .unwrap_or_else(|| "tool".to_owned())
+    } else if bounded.trim_end().ends_with('?') {
+        // A question tool (Claude's AskUserQuestion) is titled with the
+        // question; its first word alone ("Which") says nothing.
+        bounded.trim().to_owned()
     } else {
         first_meaningful_token(&bounded).unwrap_or_else(|| "tool".to_owned())
     };
@@ -1356,6 +1360,32 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus};
     use serde_json::json;
+
+    /// I1-18: Claude's question tool is titled with the question itself. Its
+    /// row showed only "Which"; it must show the whole question.
+    #[test]
+    fn a_question_tool_is_summarized_by_its_whole_question() {
+        let call = ToolCall::new("ask", "Which file name should I use for the new file?")
+            .raw_input(json!({"questions": [{"question": "Which file name should I use for the new file?", "header": "File name"}]}));
+        assert_eq!(
+            tool_call_presentation(&call).summary,
+            "Which file name should I use for the new file?"
+        );
+        let read = ToolCall::new("read", "Read src/lib.rs");
+        assert_eq!(tool_call_presentation(&read).summary, "Read");
+        let stale = ToolCallPresentation {
+            summary: "Which".into(),
+            source: call.title.clone(),
+            source_kind: ToolSummarySourceKind::Title,
+            tool_kind: ToolKind::Other,
+            summary_version: 1,
+        };
+        assert_eq!(
+            materialized_tool_call_presentation(Some(&stale), &call).summary,
+            "Which file name should I use for the new file?",
+            "stored rows written by the old rules are repaired"
+        );
+    }
 
     #[test]
     fn acp_new_file_diff_counts_each_inserted_line() {

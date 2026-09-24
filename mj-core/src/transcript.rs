@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
 pub const WORK_INTERRUPTED_ITEM_PREFIX: &str = "system:work-interrupted:";
+/// Marks where a turn the user cancelled stopped.
+pub const TURN_INTERRUPTED_TEXT: &str = "Interrupted";
+pub const TURN_INTERRUPTED_ITEM_PREFIX: &str = "system:turn-interrupted:";
 /// Marks the point where the harness resumed work with no prompt in flight.
 pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";

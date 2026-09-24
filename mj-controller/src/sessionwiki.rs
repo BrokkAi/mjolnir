@@ -940,12 +940,28 @@ pub fn query_rows(
     }
     .context("search the SessionWiki index")?;
     // SessionWiki's full-text search has no sub-agent filter of its own.
-    let mut rows: Vec<WikiRow> = hits
-        .into_iter()
-        .filter(|hit| include_subagents || is_main_session(&hit.row))
-        .take(limit)
-        .map(|hit| wiki_row(hit.row, Some(hit.snippet), live))
-        .collect();
+    let mut rows = Vec::with_capacity(hits.len().min(limit));
+    for hit in hits {
+        if rows.len() >= limit {
+            break;
+        }
+        if !include_subagents && !is_main_session(&hit.row) {
+            continue;
+        }
+        // A match only in tool text is not one the preview can show: it
+        // never anchors on tool output. It is also how a sub-agent's words
+        // reach its parent, as the Task prompt and result Claude Code records
+        // in the parent's transcript. Keep such a hit only when the
+        // conversation itself matches too. The agents' history search, which
+        // asks for sub-agents, keeps tool matches.
+        if !include_subagents
+            && !matches!(hit.role.as_str(), "user" | "assistant")
+            && !conversation_matches(&connection, &hit.row, query)?
+        {
+            continue;
+        }
+        rows.push(wiki_row(hit.row, Some(hit.snippet), live));
+    }
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
@@ -1043,6 +1059,18 @@ fn named_like(
                 || row.project.to_lowercase().contains(&needle)
         })
         .collect())
+}
+
+/// Whether a user or assistant message of an indexed session matches the
+/// query, by the same rule the preview's passages use.
+fn conversation_matches(
+    connection: &rusqlite::Connection,
+    row: &sessionwiki::index::SessionRow,
+    query: &str,
+) -> Result<bool> {
+    let session = sessionwiki::index::session_from_index(connection, row)
+        .context("read an indexed session")?;
+    Ok(!hit_transcript(&session, query, 0, 1).blocks.is_empty())
 }
 
 /// Whether an indexed session is one a person started rather than a
@@ -1627,6 +1655,13 @@ pub fn wiki_session(
             .unwrap_or_default(),
         false => tags::MjTags::default(),
     };
+    // Only an archived row is continued by restoring its transcript, and a
+    // restore needs a prompt to open the first turn.
+    let nothing_to_restore = status == WikiSessionStatus::Archived
+        && !has_prompt(
+            &sessionwiki::index::session_from_index(&connection, &row)
+                .context("read an indexed session")?,
+        );
     let harness = tags
         .harness
         .as_deref()
@@ -1647,7 +1682,17 @@ pub fn wiki_session(
         harness,
         title: row.title,
         project: row.project,
+        nothing_to_restore,
     }))
+}
+
+/// Whether an indexed transcript holds a prompt, which is what
+/// [`snapshot_of`] needs to open a turn.
+fn has_prompt(session: &sessionwiki::model::Session) -> bool {
+    session
+        .messages
+        .iter()
+        .any(|message| message.role == Role::User && !message.text.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -2338,6 +2383,12 @@ mod tests {
             error.to_string().contains("no prompt"),
             "a session with no prompt cannot be restored: {error}"
         );
+        // `mj sessions --session` offers a restore by the same rule.
+        assert!(!has_prompt(&indexed(vec![(
+            Role::Assistant,
+            "nobody asked"
+        )])));
+        assert!(has_prompt(&indexed(vec![(Role::User, "carry on")])));
     }
 
     fn record(
@@ -2791,6 +2842,87 @@ mod tests {
                 "query {query:?}"
             );
         }
+    }
+
+    /// I1-5: a phrase only a sub-agent wrote reaches its parent's index as
+    /// tool text (Claude Code records the Task prompt and the sub-agent's
+    /// answer as the parent's tool call and tool result). The resume search
+    /// matched the parent on it while the preview, which never anchors on
+    /// tool output, said "no hits". A match counts only where the preview can
+    /// show it.
+    #[test]
+    fn a_phrase_only_in_a_sub_agents_transcript_does_not_match_its_parent() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        let message = |session_id: &str, role: &str, text: &str| {
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id, role, text],
+                )
+                .expect("insert a message");
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                    rusqlite::params![connection.last_insert_rowid(), text],
+                )
+                .expect("index the message");
+        };
+        for (session_id, kind) in [("parent", "main"), ("child", "sub")] {
+            tags::testing::index_row(&connection, session_id, "claude");
+            connection
+                .execute(
+                    "UPDATE files SET kind = ?2 WHERE session_id = ?1",
+                    rusqlite::params![session_id, kind],
+                )
+                .expect("set the session kind");
+        }
+        message("parent", "user", "look into the relay journal");
+        message("parent", "tool", "Task {\"prompt\":\"read the journal\"}");
+        message("parent", "tool", "the journal uses a quokka checksum");
+        message(
+            "parent",
+            "assistant",
+            "The journal is fine; the parent zebra ends here.",
+        );
+        message("child", "user", "read the journal");
+        message("child", "assistant", "the journal uses a quokka checksum");
+
+        let ids = |query: &str, include_subagents: bool| {
+            let mut ids: Vec<String> = query_rows(query, 10, &BTreeSet::new(), include_subagents)
+                .expect("query the index")
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert!(
+            ids("quokka", false).is_empty(),
+            "{:?}",
+            ids("quokka", false)
+        );
+        // The agents' history search asks for sub-agents and keeps tool text.
+        assert_eq!(ids("quokka", true), ["child", "parent"]);
+        assert_eq!(ids("parent zebra", false), ["parent"]);
+    }
+
+    #[test]
+    fn short_query_scan_also_ignores_tool_only_matches() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        tags::testing::index_row(&connection, "parent", "claude");
+        connection
+            .execute(
+                "INSERT INTO messages(session_id, role, text) VALUES ('parent', 'tool', 'qx')",
+                [],
+            )
+            .expect("insert a message");
+        assert!(
+            query_rows("qx", 10, &BTreeSet::new(), false)
+                .expect("query the index")
+                .is_empty()
+        );
     }
 
     #[test]

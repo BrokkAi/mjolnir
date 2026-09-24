@@ -23,10 +23,8 @@ pub(crate) fn apply_worker_poll_update(
     match update.view.error {
         Some(ViewError::Unreachable(detail)) => {
             dashboard.mark_transcript_unavailable(&update.session_id);
-            dashboard.set_notice(format!(
-                "Session {}: relay unreachable: {detail}; collecting worker diagnostics…",
-                &update.session_id[..update.session_id.len().min(8)]
-            ));
+            tracing::warn!(session_id = %update.session_id, "relay unreachable: {detail}");
+            dashboard.report_session_unreachable(&update.session_id, true);
         }
         Some(ViewError::TargetMissing(detail)) => {
             dashboard.mark_transcript_unavailable(&update.session_id);
@@ -71,7 +69,7 @@ pub(crate) fn apply_worker_poll_update(
                 &update.session_id[..update.session_id.len().min(8)]
             ));
         }
-        None => {}
+        None => dashboard.report_session_reachable(&update.session_id),
     }
     Ok(update.view.snapshot.is_some())
 }

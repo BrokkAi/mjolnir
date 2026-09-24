@@ -80,17 +80,22 @@ impl std::error::Error for TargetConversionError {}
 /// the terminal and wedge provisioning. `BatchMode` fails fast instead of
 /// prompting, and `accept-new` trusts a first-seen host key (fresh EC2
 /// instances are always first-seen) while still rejecting changed keys.
-/// User-supplied arguments come last so they can override.
+///
+/// OpenSSH uses the first value it sees for an option, so the user's
+/// `extra_args` come first and override these defaults: a machine with
+/// `-o StrictHostKeyChecking=yes` gets strict checking. Settings in
+/// `ssh_config` cannot override them, because command-line options always
+/// win over the config file.
 pub fn ssh_args_with_identity(args: &[String], identity: Option<&Path>) -> Vec<String> {
-    let mut result = vec![
+    let mut result = args.to_vec();
+    result.extend([
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
         "StrictHostKeyChecking=accept-new".into(),
         "-o".into(),
         "ConnectTimeout=15".into(),
-    ];
-    result.extend(args.iter().cloned());
+    ]);
     if let Some(identity) = identity {
         result.push("-i".into());
         result.push(path_text(identity));
@@ -493,5 +498,51 @@ mod tests {
                 .any(|args| args == ["-i", "/keys/ec2"])
         );
         assert!(ssh.ssh_args.windows(2).any(|args| args == ["-p", "2222"]));
+    }
+
+    /// The value OpenSSH would use for `key`: the first `-o key=value` (or
+    /// `-okey=value`) on the command line wins, as `ssh -G` shows.
+    fn effective_ssh_option(args: &[String], key: &str) -> Option<String> {
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let option = if arg == "-o" {
+                args.next().cloned()
+            } else {
+                arg.strip_prefix("-o").map(str::to_owned)
+            };
+            let Some(option) = option else { continue };
+            let (name, value) = option.split_once(['=', ' ']).unwrap_or((&option, ""));
+            if name.trim().eq_ignore_ascii_case(key) {
+                return Some(value.trim().to_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn user_extra_args_can_require_strict_host_key_checking() {
+        let args = ssh_args_with_identity(&["-o".into(), "StrictHostKeyChecking=yes".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "StrictHostKeyChecking").as_deref(),
+            Some("yes")
+        );
+        let args = ssh_args_with_identity(&["-oUserKnownHostsFile=/k".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "UserKnownHostsFile").as_deref(),
+            Some("/k")
+        );
+    }
+
+    #[test]
+    fn mjolnir_ssh_defaults_apply_when_the_user_sets_nothing() {
+        let args = ssh_args_with_identity(&["-p".into(), "2222".into()], None);
+        assert_eq!(
+            effective_ssh_option(&args, "StrictHostKeyChecking").as_deref(),
+            Some("accept-new")
+        );
+        assert_eq!(
+            effective_ssh_option(&args, "BatchMode").as_deref(),
+            Some("yes")
+        );
     }
 }

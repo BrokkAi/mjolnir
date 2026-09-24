@@ -1508,3 +1508,59 @@ fn correlated_prompt_reply_waits_for_relay_submission_without_delaying_legacy_ad
     replies.accept(8, &prompt_action(), tx);
     assert_eq!(rx.try_recv().unwrap(), ActionOutcome::accepted());
 }
+
+/// Finding G-2: `mj new` puts a session in `default` without any dashboard
+/// having listed that workspace, and the daemon's published workspace list
+/// can predate the session. The browser draws its tabs from the snapshot's
+/// workspaces, so every workspace a session is in has to be there.
+#[test]
+fn every_workspace_holding_a_session_is_listed_even_if_the_workspace_list_omits_it() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut listed = phone_session("in-listed", 0);
+    listed.workspace_id = "workspace-1".into();
+    controller.state.sessions.insert(listed.id.clone(), listed);
+    let unlisted = phone_session("in-default", 0);
+    controller
+        .state
+        .sessions
+        .insert(unlisted.id.clone(), unlisted);
+    let workspaces = [mj_core::workspace::WorkspaceRecord {
+        id: "workspace-1".into(),
+        name: "Mjolnir".into(),
+        created_at: String::new(),
+        last_opened_at: String::new(),
+        session_count: 1,
+    }];
+    let snapshot = viewer_snapshot(
+        &controller,
+        &workspaces,
+        &std::collections::BTreeMap::new(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &std::collections::BTreeMap::new(),
+            queued_prompts: &std::collections::BTreeMap::new(),
+            active_user_shells: &std::collections::BTreeMap::new(),
+            pending_elicitations: &std::collections::BTreeMap::new(),
+            prompt_images: &std::collections::BTreeSet::new(),
+            operational: &std::collections::BTreeMap::new(),
+            materialized_activity: &std::collections::BTreeMap::new(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &std::collections::BTreeMap::new(),
+            move_recoveries: &std::collections::BTreeMap::new(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &std::collections::BTreeMap::new(),
+        },
+        1,
+    );
+    let listed: Vec<(&str, &str)> = snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| (workspace.id.as_str(), workspace.name.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("workspace-1", "Mjolnir"), ("default", "default")],
+        "the listed workspace keeps its place and name; the session's own follows"
+    );
+}

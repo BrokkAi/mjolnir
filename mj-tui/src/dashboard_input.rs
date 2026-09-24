@@ -425,6 +425,14 @@ impl DashboardState {
             // clears the notice bar: the combined surface is quit with the
             // detach key, and a stray Escape must never take the whole screen
             // away.
+            // Inside a session's sub-agents, Escape on their list goes back
+            // to the parent, the same as the X on the workspace strip.
+            (KeyCode::Esc, _)
+                if self.focus == Focus::Sessions && self.subagent_parent_id.is_some() =>
+            {
+                self.record_event_handled();
+                return DashboardAction::ExitSubagentWorkspace;
+            }
             (KeyCode::Esc, _) => {
                 self.notices.clear();
                 self.record_event_handled();
@@ -623,7 +631,9 @@ impl DashboardState {
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some(),
             };
-            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mode = Mode::Confirm(
+                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+            );
             return DashboardAction::None;
         }
         if let Some(operation) = self
@@ -652,7 +662,9 @@ impl DashboardState {
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some(),
             };
-            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mode = Mode::Confirm(
+                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+            );
             return DashboardAction::None;
         }
         let session_id = session.id.clone();

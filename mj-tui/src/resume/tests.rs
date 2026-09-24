@@ -79,6 +79,28 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
     }
 }
 
+/// C-25: a long title gives way to the "[unavailable]" marker, so the marker
+/// is always shown in full.
+#[test]
+fn a_long_unavailable_title_keeps_its_marker() {
+    for width in [120, 80, 60] {
+        let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+        let mut session = native(
+            "native-long",
+            &"A very long imported conversation title ".repeat(6),
+            NEWER_THAN_THE_CHECKPOINT,
+        );
+        session.unavailable_reason = Some("missing Git repo".into());
+        dashboard.show_resume_dialog(1, vec![codex_profile(vec![session])]);
+        switch_to_import(&mut dashboard);
+        let rendered = drawn(&mut dashboard, width, 34).join("\n");
+        assert!(
+            rendered.contains("[unavailable]"),
+            "width {width}:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
     use crossterm::event::{MouseButton, MouseEventKind};
@@ -855,6 +877,65 @@ fn slash_moves_focus_to_the_search_box_and_typing_narrows_by_name() {
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 }
 
+/// C-12: when a state filter empties the Live list, the message names the
+/// filter rather than saying nothing is running.
+#[test]
+fn an_empty_filtered_live_list_names_the_filter() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.show_resume_dialog(1, Vec::new());
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert!(rows(&dashboard).is_empty(), "no session is blocked");
+    let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rendered.contains("No blocked sessions"), "{rendered}");
+    assert!(!rendered.contains("No running sessions"), "{rendered}");
+}
+
+/// C-13: the archived briefing's UTC date is shown in local time, like every
+/// other time on screen.
+#[test]
+fn the_briefing_date_is_shown_in_local_time() {
+    let central = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+    assert_eq!(
+        localize_brief_date(
+            "- Tool: mjolnir | Project: /tmp/project | Date: 2026-09-23 18:46",
+            &central
+        ),
+        "- Tool: mjolnir | Project: /tmp/project | Date: 2026-09-23 13:46"
+    );
+    let with_source = "- Tool: codex | Project: p | Date: 2026-09-24 02:00\n";
+    assert_eq!(
+        localize_brief_date(with_source.trim_end(), &central),
+        "- Tool: codex | Project: p | Date: 2026-09-23 21:00"
+    );
+    for untouched in [
+        "- Tool: codex | Project: p | Date: -",
+        "Date: 2026-09-23 18:46",
+    ] {
+        assert_eq!(localize_brief_date(untouched, &central), untouched);
+    }
+}
+
+/// C-6: Enter in the search box does what Enter on the list does. On the Live
+/// tab that jumps to the matched session and closes the dialog.
+#[test]
+fn enter_in_the_search_box_opens_the_live_match() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "mast".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "Enter on the search match left the dialog open"
+    );
+}
+
 /// No production path opens the dialog anywhere but Live (see Milestone 5),
 /// so `search_focus_pending` served no purpose and was removed. An index
 /// answer arriving while the dialog is open must still leave the focus
@@ -1024,6 +1105,20 @@ fn archived_row_shows_indexed_target_and_profile() {
         "the indexed profile, not the tool"
     );
     assert_eq!(bare.origin, "localhost/project");
+
+    // C-14: a session that ran in a managed worktree is named by the project
+    // it worked on, not by the worktree's session-id directory.
+    let worktree = archived(WikiRow {
+        project: "/home/dev/project/.mj/worktrees/556ebcbaee181".into(),
+        ..tagged_wiki_row("worktree", "localhost", "codex-2")
+    });
+    assert_eq!(worktree.origin, "localhost/project");
+    let nested = archived(WikiRow {
+        project: "/home/dev/project/.mj/worktrees/556ebcbaee181/sub".into(),
+        target: None,
+        ..tagged_wiki_row("nested", "localhost", "codex-2")
+    });
+    assert_eq!(nested.origin, "local/sub");
 
     let container = archived(tagged_wiki_row("container", "podman", "codex-2"));
     assert_eq!(container.origin, "podman");
@@ -1386,6 +1481,36 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
         );
     }
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+}
+
+/// I1-16: LAST ACTIVE for a running session is its last activity, not the
+/// time its record was last written (often its creation).
+#[test]
+fn the_live_tab_shows_each_sessions_last_activity() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    let session_id = dashboard
+        .state
+        .sessions
+        .keys()
+        .next()
+        .cloned()
+        .expect("a live session");
+    let recorded = timestamp_ms(&dashboard.state.sessions[&session_id].updated_at)
+        .expect("the record has a time");
+    let active = recorded + 20 * 60 * 1000;
+    dashboard.session_details.insert(
+        session_id.clone(),
+        crate::ingest::SessionDetail {
+            last_activity_at_ms: Some(u64::try_from(active).unwrap()),
+            ..crate::ingest::SessionDetail::default()
+        },
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+    let row = rows(&dashboard)
+        .into_iter()
+        .find(|row| row.key == ResumeRowKey::Live(session_id.clone()))
+        .expect("the session is listed");
+    assert_eq!(row.last_activity_ms, active);
 }
 
 /// Enter on a running session in another workspace closes the dialog and takes
@@ -2192,19 +2317,17 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
     );
 }
 
-/// While the first build runs the box says so and cannot be typed into,
-/// the dialog keeps asking, and a ready answer opens it without the person
-/// reopening the dialog.
+/// An ongoing build leaves the query editable across tabs and returns the
+/// indexed matches while polling for more.
 #[test]
-fn the_search_box_is_disabled_until_the_first_build_finishes() {
+fn search_remains_available_while_the_index_builds() {
     let mut dashboard = DashboardState::new(
         config(),
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
-    // Search on the history tabs is the index's answer, so they are where a
-    // box that cannot answer yet says so.
+    replace_search(&mut dashboard, "archived");
     switch_to_hel(&mut dashboard);
     let request_id = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
@@ -2213,7 +2336,7 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     dashboard.apply_wiki_search(
         request_id,
         WikiSearchPage {
-            rows: Vec::new(),
+            rows: vec![wiki_row("gone", true)],
             status: WikiStatus {
                 state: WikiIndexState::Indexing,
                 topping_up: true,
@@ -2223,30 +2346,40 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert!(!dialog.search_enabled());
-    assert_eq!(dialog.search_placeholder(), Some("Indexing…"));
+    assert!(dialog.search_enabled());
+    assert_eq!(dialog.search_placeholder(), None);
 
-    // Tabs and row navigation keep working while it builds.
+    // Tabs preserve the query and the already indexed matches.
     dashboard.handle_key(key(KeyCode::Char('/')));
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert_ne!(
+    assert_eq!(
         dialog.focused(),
         ResumeFocus::Search,
-        "a disabled box does not take the focus"
+        "search remains editable during indexing"
     );
     switch_to_archive(&mut dashboard);
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
     assert_eq!(dialog.tab, ResumeTab::Archive);
+    assert_eq!(dialog.search.value(), "archived");
+    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+    let rendered = drawn(&mut dashboard, 120, 34);
+    let search_line = rendered
+        .iter()
+        .find(|line| line.contains("Search:"))
+        .unwrap();
+    assert!(search_line.contains("archived"), "{search_line}");
+    assert!(!search_line.contains("Indexing"), "{search_line}");
 
     // The build says it is still running, so the dialog asks again.
     let (next_id, query, delay) = dashboard
         .next_wiki_refresh()
         .expect("a building index is asked again");
-    assert_eq!(query, "");
+    assert_eq!(query, "archived");
+    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
     assert_eq!(delay, WIKI_INDEXING_POLL);
 
     dashboard.apply_wiki_search(next_id, ready_page(vec![wiki_row("gone", true)]));
@@ -2255,7 +2388,7 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
     };
     assert!(
         dialog.search_enabled(),
-        "the box opens as soon as the build finishes"
+        "search stays available after the build finishes"
     );
     assert_eq!(dialog.search_placeholder(), None);
     assert!(

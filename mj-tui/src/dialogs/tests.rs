@@ -1674,3 +1674,15 @@ fn repository_origin_completes_local_paths() {
     };
     assert_eq!(dialog.replacement, "/srv/bifrost/");
 }
+
+#[test]
+fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
+    let ages = super::render::notice_log_ages(&[44, 77, 3_700]);
+    let widths = ages
+        .iter()
+        .map(|age| age.chars().count())
+        .collect::<Vec<_>>();
+    assert!(widths.iter().all(|&width| width == widths[0]), "{ages:?}");
+    assert!(ages.iter().all(|age| age.ends_with("ago ")), "{ages:?}");
+    assert!(ages[0].trim_start().starts_with("44s"), "{ages:?}");
+}

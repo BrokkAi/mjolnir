@@ -675,6 +675,59 @@ pub fn fit_footer_items<T>(
     }
 }
 
+/// Fit footer hints whose chord group (the middle one) is read after a prefix.
+///
+/// `prefix` — `ctrl+b then ` — is prepended to the chord group's first hint.
+/// That hint is the first unprotected chord the fitter drops, and once it is
+/// gone the survivors would read `: palette · ? keys`, as if `:` alone opened
+/// the palette. So when the labeled hint did not survive, the label moves to
+/// the first chord that did, and the fit runs again so the label's width is
+/// paid for. A row too narrow for the label and the palette together keeps
+/// the unlabeled palette: a reachable key beats a complete sentence.
+///
+/// Both the dashboard footer and the composer footer go through this one
+/// function, so the two cannot disagree about when the prefix is named.
+pub fn fit_prefixed_footer_items<K: Clone>(
+    groups: [Vec<(K, String)>; 3],
+    width: u16,
+    prefix: &str,
+    protected: impl Fn(&K) -> bool,
+) -> [Vec<(K, String)>; 3] {
+    let mut groups = groups;
+    if let Some((_, text)) = groups[1].first_mut() {
+        *text = format!("{prefix}{text}");
+    }
+    let labeled = |groups: &[Vec<(K, String)>; 3]| {
+        groups[1]
+            .first()
+            .is_none_or(|(_, text)| text.starts_with(prefix))
+    };
+    let fitted = fit_footer_items(
+        groups,
+        width,
+        |(_, text)| text.as_str(),
+        |(key, _)| protected(key),
+    );
+    if labeled(&fitted) {
+        return fitted;
+    }
+    let mut relabeled = fitted.clone();
+    if let Some((_, text)) = relabeled[1].first_mut() {
+        *text = format!("{prefix}{text}");
+    }
+    let relabeled = fit_footer_items(
+        relabeled,
+        width,
+        |(_, text)| text.as_str(),
+        |(key, _)| protected(key),
+    );
+    if labeled(&relabeled) && !relabeled[1].is_empty() {
+        relabeled
+    } else {
+        fitted
+    }
+}
+
 /// Render the same complete segments used to register footer controls.
 pub fn footer_items_text<T>(groups: &[Vec<T>; 3], label: impl Fn(&T) -> &str) -> String {
     groups
@@ -775,7 +828,7 @@ mod tests {
             assert!(glyphs().working.is_ascii());
             assert_eq!(footer_separator(), " - ");
             // A hyphenated key survives the ASCII separator.
-            let line = hints("Shift-Enter newline - Tab pane | ctrl+b then: c create");
+            let line = hints("Shift-Enter newline - Tab pane | ctrl+b then c create");
             let text = line
                 .spans
                 .iter()
@@ -783,7 +836,7 @@ mod tests {
                 .collect::<String>();
             assert_eq!(
                 text,
-                "Shift-Enter newline - Tab pane | ctrl+b then: c create"
+                "Shift-Enter newline - Tab pane | ctrl+b then c create"
             );
             assert_eq!(line.spans[1].content, "Shift-Enter");
         });

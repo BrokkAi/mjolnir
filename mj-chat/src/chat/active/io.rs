@@ -229,6 +229,10 @@ impl ActiveChat {
                 let _ = acknowledged.send(());
                 return;
             }
+            ChatIoUpdate::ReviewerNotice(notice) => {
+                self.state.conversation_notice(notice);
+                return;
+            }
             ChatIoUpdate::ReviewerStarted(result) => {
                 if let Err(error) = result {
                     if let Some(view) = self.state.second_opinion_mut() {
@@ -268,7 +272,7 @@ impl ActiveChat {
                         let policy = if self.state.prompt_images_supported {
                             ""
                         } else {
-                            "; this agent has not advertised image support, so only clipboard text can be pasted"
+                            "; this agent accepts only clipboard text"
                         };
                         self.state
                             .set_notice(format!("Paste failed: {error}{policy}"));

@@ -64,6 +64,22 @@ pub(super) fn issue_session_cookie(
     Ok(response)
 }
 
+/// Whether this browser holds a valid viewer cookie. The page asks before it
+/// loads anything protected, so a signed-out load shows the login form
+/// without a failed request in the console. It answers 200 either way and
+/// neither issues nor renews a cookie.
+pub(super) async fn session_status(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let signed_in = authenticated_viewer(&state, &headers).is_ok();
+    let mut response = Json(serde_json::json!({ "signed_in": signed_in })).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 pub(super) async fn clear_session(
     State(state): State<ServerState>,
     headers: HeaderMap,

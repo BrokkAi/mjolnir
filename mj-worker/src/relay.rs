@@ -264,6 +264,9 @@ impl DurableRelay {
                 snapshot.acknowledged_digest = restored.event_frontier_digest.clone();
                 snapshot.recovery_floor_ordinal = restored.event_frontier;
                 snapshot.recovery_floor_digest = restored.event_frontier_digest;
+                // The accepted model and effort the worker pins on its first
+                // bridge start, exactly as it does after a restart.
+                snapshot.config.extend(restored.accepted_config);
                 for queued in restored.queued_prompts {
                     validate_identifier(&queued.command_id, "restored queued command ID")?;
                     if queued.content.is_empty() {
@@ -577,10 +580,7 @@ impl DurableRelay {
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
     fn clear_context_started_at_ms(&self) -> Option<i64> {
-        self.snapshot
-            .dispatches
-            .values()
-            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
+        self.clear_context_in_progress()
             .then_some(self.snapshot.activity_turn_started_at_ms)
             .flatten()
     }

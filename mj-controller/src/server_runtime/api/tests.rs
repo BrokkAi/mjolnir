@@ -1064,3 +1064,34 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
         ));
     }
 }
+
+#[test]
+fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
+    // F-13: with `RUST_LOG=debug` the worker's log shared standard error with
+    // its refusal, and the 409 began with a DEBUG line.
+    let refused = |stdout: &str, stderr: &str| match worker_output(
+        CommandOutput {
+            status: mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        },
+        "branch export",
+    ) {
+        Err(ExportError::Refused(message)) => message,
+        other => panic!("a refusal, not {other:?}"),
+    };
+    let log = "2026-09-23T19:52:35Z DEBUG mj_core::targets: target command finished\n";
+    assert_eq!(
+        refused(
+            "no push remote configured\n",
+            &format!("{log}no push remote configured\n")
+        ),
+        "no push remote configured"
+    );
+    // A worker from before the change says it only on standard error.
+    assert_eq!(
+        refused("", "no push remote configured\n"),
+        "no push remote configured"
+    );
+    assert_eq!(refused("", ""), "branch export was refused by the target");
+}

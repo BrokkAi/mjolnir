@@ -661,6 +661,7 @@ async fn transcript_scrollbar_gestures_bypass_text_selection() {
                     footer: None,
                     overlay: frame.area(),
                     title_controls: 0,
+                    title_lead: 0,
                     pane_focused: false,
                 },
                 true,
@@ -1739,4 +1740,131 @@ async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
             .all(mj_chat::chat::ActiveChat::session_feed_open)
     );
     assert!(notices.iter().all(|notices| notices.current().is_none()));
+}
+
+/// Launch findings B-2 and D-1: the pane chrome ("Browse | Conversation")
+/// was drawn over the start of the conversation's own title, so the title
+/// row read `Conversation e` for Idle. The title must start after the
+/// chrome, so the target and the state word stay whole.
+#[tokio::test]
+async fn the_pane_chrome_does_not_cover_the_conversation_title() {
+    let mut dashboard = populated_dashboard();
+    let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+    let chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity {
+            target: "podman-target".into(),
+            profile: "fake".into(),
+            title: "S4".into(),
+            ..SessionHeaderIdentity::default()
+        },
+        String::new(),
+        Notices::default(),
+    );
+    let mut chats = focused_chats(&mut dashboard, chat);
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let title = rows
+        .iter()
+        .find(|row| row.contains("| Conversation"))
+        .unwrap_or_else(|| panic!("no pane title row:\n{}", rows.join("\n")));
+    assert!(title.contains("| Conversation  podman-target  "), "{title}");
+    assert!(title.contains("  fake  S4"), "{title}");
+}
+
+/// Launch finding D-11: in a narrow pane the title row read
+/// `Browse |t ◇r`: the chrome label was cut without an ellipsis, a letter of
+/// the conversation title showed between the label and the pin chip, and
+/// another leaked through the chip's unpainted third cell. At every width
+/// the row must show whole words or an ellipsis, never stray letters.
+#[tokio::test]
+async fn a_narrow_pane_title_ends_in_an_ellipsis_not_stray_letters() {
+    for width in (40..=140).step_by(3) {
+        let mut dashboard = populated_dashboard();
+        let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+        let chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity {
+                target: "podman-target".into(),
+                profile: "fake".into(),
+                title: "S4".into(),
+                ..SessionHeaderIdentity::default()
+            },
+            String::new(),
+            Notices::default(),
+        );
+        let mut chats = focused_chats(&mut dashboard, chat);
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let Some(row) = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .find(|cells| cells.concat().contains(" Browse "))
+        else {
+            continue;
+        };
+        let text = row.concat();
+        for pair in row.windows(2) {
+            let (left, right) = (pair[0].as_str(), pair[1].as_str());
+            let letter = right.chars().next().is_some_and(char::is_alphanumeric) || right == "…";
+            assert!(
+                !(["|", "◇", "◆", "⋯", "×"].contains(&left) && letter),
+                "width {width}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_quick_reconnect_replaces_the_daemon_unavailable_notice() {
+    let mut dashboard =
+        DashboardState::new(Default::default(), State::default(), Default::default());
+    dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+
+    dashboard.set_failure_notice("Could not save the layout.");
+    dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+
+    // Another fresh failure is not the reconnect's to clear.
+    dashboard.set_failure_notice("Could not save the layout.");
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not save the layout.")
+    );
 }

@@ -6202,6 +6202,84 @@ async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Claude).await;
 }
 
+/// I1-13: a resumed Claude session reports its model as a raw id that its own
+/// catalogue does not list. Replaying that id after `/clear` must not fail the
+/// clear or stop the runtime; the new conversation keeps the bridge's model.
+#[tokio::test]
+async fn clear_skips_a_reported_model_the_bridge_does_not_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("clear.py");
+    std::fs::write(&script, r#"
+import json, os, sys
+root = sys.argv[1]
+count_path = os.path.join(root, 'generation')
+generation = int(open(count_path).read()) + 1 if os.path.exists(count_path) else 1
+with open(count_path, 'w') as f: f.write(str(generation))
+current = 'claude-fable-5-1[1m]' if generation == 1 else 'default'
+options = [{'id':'model','name':'Model','category':'model','type':'select','currentValue':current,'options':[{'value':'default','name':'Default'},{'value':'opus[1m]','name':'Opus'}]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    ident = request.get('id')
+    with open(os.path.join(root, 'requests.jsonl'), 'a') as f:
+        f.write(json.dumps(request) + '\n')
+    if ident is None: continue
+    if method == 'initialize':
+        result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}}
+    elif method in ('session/new', 'session/load', 'session/resume'):
+        result = {'sessionId': 'original' if generation == 1 or method != 'session/new' else 'replacement',
+                  'configOptions':options,
+                  'modes': {'currentModeId':'auto','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'},{'id':'auto','name':'Auto'}]}}
+    elif method == 'session/set_config_option':
+        value = request['params']['value']
+        if value not in ('default', 'opus[1m]'):
+            print(json.dumps({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'unknown model'}}), flush=True)
+            continue
+        options[0]['currentValue'] = value
+        result = {'configOptions':options}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#).unwrap();
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.command = "python3".into();
+    spec.args = vec![
+        script.to_string_lossy().into_owned(),
+        temp.path().to_string_lossy().into_owned(),
+    ];
+    spec.cwd = temp.path().to_path_buf();
+    spec.harness = HarnessKind::Claude;
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    request_tx
+        .send(CommandRequest::ClearContext {
+            request_id: "clear-request".into(),
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    drop(request_tx);
+    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    tokio::time::timeout(Duration::from_secs(20), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drain.await.unwrap();
+}
+
 #[tokio::test]
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
@@ -6422,4 +6500,89 @@ async fn live_adapter_compacts_and_replaces_context() {
     drop(tx);
     while events.recv().await.is_some() {}
     runtime.await.unwrap().unwrap();
+}
+
+#[test]
+fn a_permission_form_shows_the_command_it_approves() {
+    // I2-5: Kimi's reviewer asked "requests permission: Bash" with no command.
+    assert_eq!(
+        permission_title_with_command("Bash", Some(&serde_json::json!({"command": "ls -la"}))),
+        "Bash\n$ ls -la"
+    );
+    assert_eq!(
+        permission_title_with_command(
+            "Shell",
+            Some(&serde_json::json!({"command": ["git", "status"]}))
+        ),
+        "Shell\n$ git status"
+    );
+    // A title that already names the command is not repeated.
+    assert_eq!(
+        permission_title_with_command(
+            "Run ls -la",
+            Some(&serde_json::json!({"command": "ls -la"}))
+        ),
+        "Run ls -la"
+    );
+    assert_eq!(
+        permission_title_with_command("Edit a.py", None),
+        "Edit a.py"
+    );
+}
+
+#[test]
+fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
+    // I2-15: after Escape, Kimi left its permission request pending and the
+    // form stayed open on an idle session.
+    let pending = PendingElicitations::default();
+    let (permission, mut permission_rx) = oneshot::channel();
+    let (question, mut question_rx) = oneshot::channel();
+    {
+        let mut map = pending.lock().unwrap();
+        map.insert(format!("{TOOL_PERMISSION_ID_PREFIX}1"), permission);
+        map.insert("elicitation-1".to_owned(), question);
+    }
+    withdraw_tool_permissions(&pending);
+    assert!(
+        matches!(
+            permission_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ),
+        "the permission's task answers the agent with cancelled"
+    );
+    assert!(matches!(
+        question_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(pending.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
+    // Launch finding I2-7: a missing Codex thread came back with a hint about
+    // login-shell output that had nothing to do with it.
+    let agent = protocol_failure(
+        agent_client_protocol::Error::internal_error()
+            .data(serde_json::json!("thread not found: t1")),
+        false,
+    )
+    .to_string();
+    assert!(agent.contains("thread not found"), "{agent}");
+    assert!(!agent.contains("login-shell"), "{agent}");
+    // Output the transport could not parse, or a connection that broke, is
+    // what the hint is for.
+    let garbage = protocol_failure(
+        agent_client_protocol::Error::parse_error().data(serde_json::json!("x")),
+        false,
+    )
+    .to_string();
+    assert!(
+        garbage.contains("login-shell startup must be silent"),
+        "{garbage}"
+    );
+    let closed = protocol_failure(agent_client_protocol::Error::internal_error(), true).to_string();
+    assert!(
+        closed.contains("login-shell startup must be silent"),
+        "{closed}"
+    );
 }

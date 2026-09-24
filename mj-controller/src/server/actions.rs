@@ -235,7 +235,7 @@ impl ActionOutcome {
             Self::Accepted { .. } => None,
             Self::Busy => Some(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
-                "the controller is at its concurrent action limit; retry shortly",
+                "the controller is at its concurrent action limit (a session that is still starting holds an action until it is ready); retry shortly",
             )),
             Self::SessionBusy => Some(ApiError::new(
                 StatusCode::CONFLICT,

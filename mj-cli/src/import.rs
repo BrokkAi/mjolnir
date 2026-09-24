@@ -66,6 +66,10 @@ pub(crate) struct NativeImportArgs {
     /// Import the most recently modified session.
     #[arg(long)]
     latest: bool,
+    /// Profile whose home holds the session. Needed only when several
+    /// enabled profiles run this harness.
+    #[arg(long)]
+    profile: Option<String>,
     /// Existing configured bundle to associate with the imported session.
     #[arg(long)]
     bundle: Option<String>,
@@ -78,6 +82,21 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
+    #[command(flatten)]
+    pub(crate) workspace: crate::WorkspaceName,
+}
+
+impl ImportArgs {
+    /// The workspace named with the command.
+    pub(crate) fn workspace(&self) -> &crate::WorkspaceName {
+        match &self.command {
+            ImportCommand::Claude(args)
+            | ImportCommand::Codex(args)
+            | ImportCommand::Kimi(args)
+            | ImportCommand::Grok(args)
+            | ImportCommand::Muse(args) => &args.workspace,
+        }
+    }
 }
 
 impl ImportCommand {
@@ -95,7 +114,72 @@ impl ImportCommand {
 
 pub(crate) fn import(args: ImportArgs, workspace_id: &str) -> Result<()> {
     let (harness, args) = args.command.split();
-    import_native(harness, args, workspace_id).map(|_| ())
+    let source = import_source(&Config::load()?, harness, args.profile.as_deref())?;
+    import_native(harness, args, &source, workspace_id).map(|_| ())
+}
+
+/// Where one import reads its session from.
+#[derive(Debug, PartialEq, Eq)]
+struct ImportSource {
+    /// The configured profile whose home this is, when one is.
+    profile_id: Option<String>,
+    home: PathBuf,
+}
+
+/// Where `mj import <harness>` reads sessions: the home of the named profile,
+/// else of the one enabled profile that runs this harness, else the harness's
+/// own stock home when no profile runs it.
+///
+/// It used to read the stock home whatever was configured, so on a machine
+/// where a profile keeps its sessions elsewhere, `--latest` picked a session
+/// that belonged to some other `mj` instance or to the user's own harness
+/// (F-18).
+fn import_source(
+    config: &Config,
+    harness: HarnessKind,
+    requested: Option<&str>,
+) -> Result<ImportSource> {
+    if let Some(profile_id) = requested {
+        let profile = config
+            .profiles
+            .get(profile_id)
+            .with_context(|| format!("unknown profile {profile_id:?}"))?;
+        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        ensure!(
+            profile.kind == harness,
+            "profile {profile_id:?} runs {}, not {}",
+            profile.kind.display_name(),
+            harness.display_name()
+        );
+        return Ok(ImportSource {
+            profile_id: Some(profile_id.to_owned()),
+            home: profile.home.clone(),
+        });
+    }
+    let candidates: Vec<(&String, &mj_core::config::HarnessProfile)> = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.enabled && profile.kind == harness)
+        .collect();
+    match candidates.as_slice() {
+        [] => Ok(ImportSource {
+            profile_id: None,
+            home: harness_config_home(harness)?,
+        }),
+        [(profile_id, profile)] => Ok(ImportSource {
+            profile_id: Some((*profile_id).clone()),
+            home: profile.home.clone(),
+        }),
+        several => bail!(
+            "several profiles run {}; name the one whose home holds the session with --profile: {}",
+            harness.display_name(),
+            several
+                .iter()
+                .map(|(profile_id, _)| profile_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// Adopt one named native session, answering with the Mjolnir session id the
@@ -110,16 +194,23 @@ pub(crate) fn import_named_native_session(
     native_session_id: String,
     workspace_id: &str,
 ) -> Result<Option<String>> {
+    let source = ImportSource {
+        profile_id: None,
+        home: harness_config_home(harness)?,
+    };
     import_native(
         harness,
         NativeImportArgs {
             session: Some(native_session_id),
             latest: false,
+            profile: None,
             bundle: None,
             title: None,
             allow_dirty_local: false,
             allow_omitted_non_git: false,
+            workspace: crate::WorkspaceName::default(),
         },
+        &source,
         workspace_id,
     )
 }
@@ -146,19 +237,26 @@ fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
 fn import_native(
     harness: HarnessKind,
     args: NativeImportArgs,
+    source: &ImportSource,
     workspace_id: &str,
 ) -> Result<Option<String>> {
-    let home = harness_config_home(harness)?;
+    let home = source.home.clone();
     let selection = match args.session {
         Some(session) => ClaudeSessionSelection::NativeSessionId(session),
         None => ClaudeSessionSelection::Latest,
     };
     let located = locate_native_session(harness, &home, &selection)?;
+    // Printed before anything is read or written, so a `--latest` that picked
+    // the wrong session is seen before it is imported.
     println!(
-        "Selected {} session {} at {}",
+        "Selected {} session {} at {}{}",
         import_label(harness),
         located.native_session_id,
-        located.source_path.display()
+        located.source_path.display(),
+        match &source.profile_id {
+            Some(profile_id) => format!(" (profile {profile_id})"),
+            None => " (no profile runs this harness; read its default home)".to_owned(),
+        }
     );
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
@@ -186,7 +284,7 @@ fn import_native(
             source_path: &located.source_path,
             transcript: &transcript,
             bundle_id: &bundle_id,
-            profile_id: None,
+            profile_id: source.profile_id.as_deref(),
             title: args.title.as_deref(),
             archive_directory: &sessions_dir(),
         },
@@ -382,7 +480,7 @@ pub(crate) fn discover_import_profile(
             if option.unavailable_reason.is_none() {
                 option.unavailable_reason = reason.clone();
             }
-            profile.sessions.push(option);
+            push_unique_session(&mut profile.sessions, option);
         }
         if last_publish.is_none_or(|last| last.elapsed() >= SCAN_PUBLISH_INTERVAL) {
             last_publish = Some(Instant::now());
@@ -395,6 +493,20 @@ pub(crate) fn discover_import_profile(
     // The last state always reaches the dialog, whatever the throttle skipped.
     publish(&profile);
     profile
+}
+
+/// Adds one scanned session unless the profile already lists it. A harness
+/// can keep one native session under more than one working-directory entry
+/// (Grok Build did, I2-16); scans run newest first, so the first listing is
+/// the one kept.
+fn push_unique_session(sessions: &mut Vec<ImportSessionOption>, option: ImportSessionOption) {
+    if sessions
+        .iter()
+        .any(|listed| listed.native_session_id == option.native_session_id)
+    {
+        return;
+    }
+    sessions.push(option);
 }
 
 fn import_session_option(
@@ -721,6 +833,25 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn a_native_session_is_listed_once() {
+        let option = |id: &str, title: &str| ImportSessionOption {
+            native_session_id: id.into(),
+            title: title.into(),
+            project_directory: String::new(),
+            details: String::new(),
+            unavailable_reason: None,
+            last_activity_ms: 0,
+            natively_archived: false,
+        };
+        let mut sessions = Vec::new();
+        push_unique_session(&mut sessions, option("c8180e55", "newest"));
+        push_unique_session(&mut sessions, option("7459ec1d", "other"));
+        push_unique_session(&mut sessions, option("c8180e55", "older copy"));
+        let titles: Vec<_> = sessions.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["newest", "other"]);
+    }
+
+    #[test]
     fn discovery_checks_current_git_availability_even_with_cached_session_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("profile");
@@ -786,6 +917,52 @@ mod tests {
 
     /// All harnesses share one implementation, so each subcommand must
     /// still name its own harness and take the same selection arguments.
+    #[test]
+    fn an_import_reads_the_configured_profiles_home_not_the_stock_one() {
+        let profile = |kind: HarnessKind, home: &str| mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: PathBuf::from(home),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let mut config = Config::default();
+        config
+            .profiles
+            .insert("fake".into(), profile(HarnessKind::Codex, "/lab/profile"));
+        config
+            .profiles
+            .insert("claude".into(), profile(HarnessKind::Claude, "/lab/claude"));
+
+        assert_eq!(
+            import_source(&config, HarnessKind::Codex, None).unwrap(),
+            ImportSource {
+                profile_id: Some("fake".into()),
+                home: PathBuf::from("/lab/profile"),
+            }
+        );
+
+        config
+            .profiles
+            .insert("work".into(), profile(HarnessKind::Codex, "/lab/work"));
+        let error = import_source(&config, HarnessKind::Codex, None).unwrap_err();
+        assert!(
+            error.to_string().contains("--profile") && error.to_string().contains("work"),
+            "two candidate homes are not guessed between: {error}"
+        );
+        assert_eq!(
+            import_source(&config, HarnessKind::Codex, Some("work"))
+                .unwrap()
+                .home,
+            PathBuf::from("/lab/work")
+        );
+        assert!(
+            import_source(&config, HarnessKind::Codex, Some("claude")).is_err(),
+            "a profile for another harness holds none of its sessions"
+        );
+    }
+
     #[test]
     fn every_import_subcommand_names_its_harness_and_takes_the_same_arguments() {
         for (subcommand, expected) in [

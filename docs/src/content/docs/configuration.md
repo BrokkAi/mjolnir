@@ -11,7 +11,7 @@ Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
 palette (**prefix+:**) also provides **Manage agent profiles**, **Manage
 machines**, and **Manage runtimes**. No setup command or file editing is
-required. **Detect machine** on the **Agent Profiles** page can import existing
+required. **Detect profiles** on the **Agent Profiles** page can import existing
 agent accounts for review.
 
 Standard local targets are supplied automatically: localhost, Podman, Docker,
@@ -30,7 +30,7 @@ If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
 and press Enter for repair details, its retained transcript, or Settings.
 The web session menu also provides repair guidance. Restore the named entry in
-Settings and retry. Detect machine can rediscover installations, but cannot
+Settings and retry. **Detect profiles** can rediscover installations, but cannot
 reconstruct an arbitrary deleted bundle or custom target. Other
 sessions remain accessible, and configuration diagnostics do not change the
 affected session's stored lifecycle state.
@@ -57,14 +57,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 12
+version = 13
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `12`. |
+| `version` | integer | yes | none | Configuration schema version; use `13`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -87,7 +87,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 12 configuration. Older
+A missing or empty file is treated as an empty version 13 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -190,6 +190,9 @@ The default bindings:
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
 | `toggle_dictation` | `prefix+m` | Start or stop dictation |
 | `changed_files` | `prefix+d` | List the selected session's changed files |
+| `open_subagents` | `prefix+shift+a` | Show the selected session's sub-agents |
+| `session_actions` | `prefix+.` | Open the selected session's actions menu (also `.` on the Sessions pane) |
+| `interrupt_turn` | `prefix+i` | Interrupt the selected session's running turn (Esc in the composer does the same) |
 | `split_vertical` | `prefix+v` | Open the selected session in a pane beside this one |
 | `split_horizontal` | `prefix+-` | Open the selected session in a pane below this one |
 | `close_pane` | `prefix+x` | Close the conversation pane you are in |
@@ -199,7 +202,14 @@ The default bindings:
 | `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
 | `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
 | `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
-| `suspend_session` | unbound | Stop the selected session |
+| `resize_mode` | `prefix+r` | Enter resize mode: arrow keys or `h`/`j`/`k`/`l` move the pane border until Esc |
+| `swap_pane_left` | `prefix+shift+h` | Swap the pane you are in with the pane on the left |
+| `swap_pane_down` | `prefix+shift+j` | Swap the pane you are in with the pane below |
+| `swap_pane_up` | `prefix+shift+k` | Swap the pane you are in with the pane above |
+| `swap_pane_right` | `prefix+shift+l` | Swap the pane you are in with the pane on the right |
+| `rename_workspace` | `prefix+shift+w` | Rename the current workspace in the workspace dialog |
+| `close_workspace` | `prefix+shift+d` | Close the current workspace from the workspace dialog |
+| `suspend_session` | `prefix+shift+x` | Suspend the selected session (asks first) |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |
 | `destroy_session` | unbound | Delete the selected session |
@@ -291,10 +301,20 @@ tailscale_detect = true
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | Starts the viewer with the daemon. |
-| `bind` | string | no | `"127.0.0.1:3765"` | Must parse as a numeric socket address, including a port. |
+| `bind` | string | no | `"127.0.0.1:3765"`; a named instance uses a port in 38000–38999 | Must parse as a numeric socket address, including a port. |
 | `tailscale_detect` | boolean | no | `true` | Allows automatic trusted `ts.net` certificate discovery and renewal. |
 | `tls_cert` | path string | no | unset | Certificate-chain path. Must be paired with `tls_key`. |
 | `tls_key` | path string | no | unset | Private-key path. Must be paired with `tls_cert`. |
+
+A named instance (`MJ_INSTANCE=<name>` or `mj --instance <name>`) that does not
+set `bind` listens on `127.0.0.1` at a port from 38000 to 38999 computed from
+its name. The port stays the same across daemon restarts, so a bookmarked
+login link keeps working, and it does not collide with the default instance's
+port 3765. If the port is taken anyway, for example by another named instance
+whose name maps to the same port, the viewer reports the conflict and gives the
+exact `bind` line to add under `[phone]`. The `mj` commands that use the HTTP API,
+such as `mj sessions` and `mj prompt`, need the viewer's listener and fail until
+the conflict is resolved.
 
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
 When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
@@ -720,8 +740,8 @@ with kinds named `local-bare`, `local-podman`, `local-docker`,
 `apple-container`, `ssh-bare`, `ssh-podman`, `ssh-docker`, and `aws-ec2`.
 Mjolnir still reads such a file when its `version` is 11 or lower: it derives
 the machines, moves each container's `build_cache` onto the machine that owns
-it, and writes the new shape on the next save. A file that already says
-`version = 12` must use the new kinds; an old one is refused with the spelling
+it, and writes the new shape on the next save. A file that says
+`version = 12` or later must use the new kinds; an old one is refused with the spelling
 to write instead.
 
 ## Complete compact example
@@ -731,7 +751,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 12
+version = 13
 
 [phone]
 enabled = true

@@ -25,6 +25,10 @@ pub(crate) struct PaneMenu {
     form: RefCell<Dialog<usize>>,
     destinations: bool,
     pressed_destination: Option<usize>,
+    /// Where the menu was last drawn. The empty-pane chooser lies inside a
+    /// destination pane, so a click on the menu must not count as a click
+    /// on the pane beneath it.
+    popup: std::cell::Cell<Rect>,
 }
 
 impl DashboardState {
@@ -54,6 +58,7 @@ impl DashboardState {
             form: RefCell::new(form),
             destinations,
             pressed_destination: None,
+            popup: std::cell::Cell::new(Rect::default()),
         });
     }
 
@@ -78,6 +83,13 @@ impl DashboardState {
             ));
         }
         self.show_pane_menu("Pin session", entries, false);
+    }
+
+    /// Whether the pane chrome puts "Pin selected here" on the pane's first
+    /// inside row: an empty pane other than Browse. Anything drawn in the
+    /// pane keeps clear of that row.
+    pub(crate) fn pane_shows_pin_hint(&self, pane: PaneId) -> bool {
+        self.pane_session(pane).is_none() && pane != self.browse_pane()
     }
 
     fn empty_pin_panes(&self) -> impl Iterator<Item = PaneId> + '_ {
@@ -139,6 +151,7 @@ impl DashboardState {
         let mut direct = None;
         if menu.destinations
             && let Event::Mouse(mouse) = &event
+            && !rect_contains(menu.popup.get(), mouse.column, mouse.row)
         {
             let hit = menu
                 .entries
@@ -233,6 +246,54 @@ impl DashboardState {
     }
 }
 
+const PANE_CHROME_SUFFIX: &str = "| Conversation ";
+
+/// The pane's own name in its title row: Browse, its pin badge, or Empty.
+fn pane_chrome_label(dashboard: &DashboardState, pane: PaneId) -> String {
+    let badge = dashboard
+        .pane_session(pane)
+        .and_then(|id| dashboard.pin_id(id));
+    if pane == dashboard.browse_pane() {
+        "Browse".to_owned()
+    } else if let Some(badge) = badge {
+        format!("{} {}", theme::glyphs().pinned, theme::pin_label(badge))
+    } else {
+        "Empty".to_owned()
+    }
+}
+
+/// How many columns at the left of a pane's title row `render_pane_chrome`
+/// draws over, so the conversation drawn beneath can start its own title
+/// after them instead of losing its first words.
+pub(crate) fn pane_chrome_width(dashboard: &DashboardState, pane: PaneId, width: u16) -> u16 {
+    if width < 12 {
+        return 0;
+    }
+    let label = pane_chrome_label(dashboard, pane);
+    let drawn = Line::from(format!(" {label} {PANE_CHROME_SUFFIX}")).width();
+    u16::try_from(drawn).unwrap_or(u16::MAX).min(width - 12)
+}
+
+/// How many columns from the right of a pane's title row the pane chips
+/// start at: the pin chip, then the menu chip, then room for the close chip.
+const PANE_CHROME_CHIPS_RESERVE: u16 = 10;
+
+/// The columns a pane's own title must leave clear at the right: the host's
+/// `reserve` for its close and zoom chips, widened to clear the pin and menu
+/// chips `render_pane_chrome` draws whenever the pane is wide enough for
+/// them. A title that ran under a chip showed through its unpainted cells.
+pub(crate) fn pane_title_reserve(dashboard: &DashboardState, width: u16, reserve: u16) -> u16 {
+    if width < 12 {
+        return reserve;
+    }
+    let zoom = if dashboard.conversation_zoomed() {
+        3
+    } else {
+        0
+    };
+    reserve.max(PANE_CHROME_CHIPS_RESERVE + zoom)
+}
+
 pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) {
     for &(pane, transcript, _) in &dashboard.conversation_pane_areas {
         if transcript.width < 12 || transcript.height == 0 {
@@ -240,13 +301,7 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
         }
         let session = dashboard.pane_session(pane);
         let badge = session.and_then(|id| dashboard.pin_id(id));
-        let label = if pane == dashboard.browse_pane() {
-            "Browse".to_owned()
-        } else if let Some(badge) = badge {
-            format!("{} {}", theme::glyphs().pinned, theme::pin_label(badge))
-        } else {
-            "Empty".to_owned()
-        };
+        let label = pane_chrome_label(dashboard, pane);
         let style = badge.map_or_else(theme::muted, |id| Style::default().fg(theme::pin_color(id)));
         let badge_style = if dashboard.focus() == Focus::Sessions
             && session.is_some()
@@ -257,10 +312,14 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
         } else {
             style
         };
-        let header = Line::from(vec![
-            ratatui::text::Span::styled(format!(" {label} "), badge_style),
-            ratatui::text::Span::styled("| Conversation ", theme::muted()),
-        ]);
+        // A label cut short ends in an ellipsis rather than a stray letter.
+        let header = mj_chat::chat::truncate_line_to_width(
+            Line::from(vec![
+                ratatui::text::Span::styled(format!(" {label} "), badge_style),
+                ratatui::text::Span::styled(PANE_CHROME_SUFFIX, theme::muted()),
+            ]),
+            usize::from(transcript.width.saturating_sub(12)),
+        );
         frame.render_widget(
             Paragraph::new(header),
             Rect::new(
@@ -295,9 +354,10 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
                 1,
             );
             form.register(control, ControlKind::Button, area, true);
-            frame.render_widget(Paragraph::new(format!(" {glyph}")).style(style), area);
+            // Paint all three cells, so nothing underneath shows through.
+            frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), area);
         }
-        if session.is_none() && pane != dashboard.browse_pane() && transcript.height > 2 {
+        if dashboard.pane_shows_pin_hint(pane) && transcript.height > 2 {
             let area = Rect::new(
                 transcript.x + 1,
                 transcript.y + 1,
@@ -324,12 +384,32 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
         return;
     };
     let popup = if menu.destinations {
-        Rect::new(
-            area.x,
-            area.y,
-            area.width.min(44),
-            area.height.min(menu.entries.len() as u16 + 2),
-        )
+        // Open inside the first destination pane, under its "[1] Pin here"
+        // marker, so the chooser sits beside the panes it names; without a
+        // drawn pane, centre it like any other menu.
+        let width = area.width.min(44);
+        let height = area.height.min(menu.entries.len() as u16 + 2);
+        let anchor = menu.entries.iter().find_map(|(_, op)| match op {
+            PaneOperation::PinHere(_, pane) => dashboard
+                .conversation_pane_areas
+                .iter()
+                .find(|(id, _, _)| id == pane)
+                .map(|(_, transcript, _)| *transcript),
+            _ => None,
+        });
+        match anchor {
+            Some(transcript) => {
+                let x = (transcript.x + 1).min(area.right().saturating_sub(width));
+                let y = (transcript.y + 3).min(area.bottom().saturating_sub(height));
+                Rect::new(x.max(area.x), y.max(area.y), width, height)
+            }
+            None => Rect::new(
+                area.x + (area.width - width) / 2,
+                area.y + (area.height - height) / 2,
+                width,
+                height,
+            ),
+        }
     } else {
         let width = area.width.min(44);
         let height = area.height.min(menu.entries.len() as u16 + 2);
@@ -361,6 +441,7 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             }
         }
     }
+    menu.popup.set(popup);
     let mut form = menu.form.borrow_mut();
     let selected = form.selected(0).unwrap_or(0);
     form.begin_frame();
@@ -485,6 +566,64 @@ mod tests {
             }
         );
         assert!(d.pane_menu.is_none());
+    }
+
+    /// Launch campaign finding D-10: the empty-pane chooser opens in the
+    /// empty pane, under its "[1] Pin here" marker, not at the screen's
+    /// top-left corner over the Workspaces pane.
+    #[test]
+    fn the_empty_pane_chooser_opens_inside_the_empty_pane() {
+        let mut d = dashboard_with_session(running_session());
+        d.conversation_area = Some(Rect::new(0, 0, 120, 40));
+        let empty = d.browse_pane();
+        d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        d.set_pane_session(empty, None);
+        d.conversation_pane_areas =
+            vec![(empty, Rect::new(46, 0, 74, 30), Rect::new(46, 30, 74, 10))];
+        d.begin_pin_menu("session-1".into());
+        d.handle_key(key(KeyCode::Char('3')));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = (0..40)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let marker = rows
+            .iter()
+            .position(|row| row.contains("[1] Pin here"))
+            .expect("marker");
+        let title = rows
+            .iter()
+            .position(|row| row.contains("Choose empty pane"))
+            .expect("chooser");
+        assert!(title > marker, "{rows:#?}");
+        let column = (0..120u16)
+            .find(|&x| buffer[(x, u16::try_from(title).unwrap())].symbol() != " ")
+            .map(usize::from)
+            .expect("chooser border");
+        assert!(column >= 46, "{rows:#?}");
+        // A click on the chooser's own entry picks it through the menu even
+        // though the chooser lies inside the pane.
+        let entry = (
+            u16::try_from(column).unwrap() + 3,
+            u16::try_from(title).unwrap() + 1,
+        );
+        let action = d.handle_pane_menu_event(Event::Mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Left),
+            entry,
+        )));
+        assert!(
+            d.pane_menu
+                .as_ref()
+                .is_none_or(|menu| menu.pressed_destination.is_none()),
+            "{action:?}"
+        );
     }
 
     #[test]

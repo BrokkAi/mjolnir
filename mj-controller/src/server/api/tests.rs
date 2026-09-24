@@ -59,6 +59,57 @@ async fn bundle_export_distinguishes_deferral_from_failure() {
     }
 }
 
+#[test]
+fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
+    // F-12: a dashboard-created session listed its hex id as its title.
+    let (config, mut state) = sample_config_state();
+    let record = state.sessions.get_mut("session-1").unwrap();
+    record.session_title_override = None;
+    record.acp_session_title = None;
+    record.title = "proj via fake".into();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(snapshot.sessions[0].title, "proj via fake");
+
+    state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .acp_session_title = Some("Fix the parser".into());
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(snapshot.sessions[0].title, "Fix the parser");
+}
+
+#[tokio::test]
+async fn a_finished_wait_does_not_report_the_session_still_running() {
+    // F-12: `prompt --wait --json` answered with `chat_phase: running` because
+    // the published view had not caught up with the live actor yet.
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = ApiSession::from(&snapshot.sessions[0]);
+    session.chat_phase = crate::server::ViewerChatPhase::Running;
+    let observation = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        ..WaitObservation::default()
+    };
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
+
+    let response = finish_wait(
+        &backend,
+        "session-1",
+        session,
+        observation,
+        WaitDecision::simple(WaitOutcome::Finished, None),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response.session.chat_phase,
+        crate::server::ViewerChatPhase::Idle
+    );
+}
+
 #[tokio::test]
 async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness() {
     let root = tempfile::tempdir().unwrap();
@@ -79,7 +130,10 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
     };
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let session = &snapshot.sessions[0];
+    // The runtime snapshot publishes this for an attached, idle session.
+    let mut session = snapshot.sessions[0].clone();
+    session.capabilities.prompt = true;
+    let session = &session;
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
     for known in [None, Some(false), Some(true)] {
         live.snapshot
@@ -1112,6 +1166,73 @@ async fn a_prompt_is_validated_before_it_reaches_the_backend() {
     );
 }
 
+/// A session that has been provisioned and whose worker has not attached
+/// yet, which is what every session is for the seconds after it is created.
+fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
+    let session = &mut snapshot.sessions[0];
+    session.state = "disconnected".into();
+    session.lifecycle = ViewerLifecycleCategory::Live;
+    session.has_error = false;
+    session.capabilities.prompt = false;
+}
+
+#[tokio::test]
+async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches() {
+    // F-4: a new session refused prompts with 409 for the twenty seconds its
+    // worker took to attach, so every caller needed its own retry loop.
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
+    let request = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"first words"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The handshake marks the record running a moment before the worker's
+    // first report makes the session promptable.
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].state = "running".into());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !request.is_finished() && backend.prompts.lock().unwrap().is_empty(),
+        "nothing is submitted or refused before the worker attaches"
+    );
+
+    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+    let response = request.await.unwrap().unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(response).await["turn_id"], 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wait() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"first words"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("still starting"),
+        "the refusal says why: {body}"
+    );
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
@@ -1930,6 +2051,32 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
         assert!(!state.is_idle(), "{state:?}");
         assert!(state.has_work_in_flight(), "{state:?}");
     }
+}
+
+/// `mj wait` with no turn must not say "finished" while the session is still
+/// provisioning, or is live but not yet able to take a prompt (a resume that
+/// has not reattached): the next prompt would be refused.
+#[test]
+fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
+    let request = WaitRequest {
+        return_on_input: false,
+        turn_id: None,
+        timeout_secs: None,
+    };
+    let mut starting = idle(None);
+    starting.lifecycle = Some(ViewerLifecycleCategory::Starting);
+    starting.cannot_take_prompt = true;
+    assert_eq!(resolve_wait(&starting, &request), None);
+
+    let mut reattaching = idle(Some(completed(3, "end_turn")));
+    reattaching.cannot_take_prompt = true;
+    assert_eq!(resolve_wait(&reattaching, &request), None);
+
+    let ready = idle(None);
+    assert_eq!(
+        resolve_wait(&ready, &request).map(|decision| decision.outcome),
+        Some(WaitOutcome::Finished)
+    );
 }
 
 #[test]
@@ -2883,9 +3030,22 @@ async fn resuming_a_running_session_is_refused_with_the_reason() {
     let body = json_body(response).await;
     let error = body["error"].as_str().unwrap().to_owned();
     assert!(
-        error.contains("close it before resuming it"),
+        error.contains("already running") && !error.contains("close"),
         "unexpected refusal: {error}"
     );
+}
+
+/// `close` is gone (2e3077d9). A resume refused because the session is
+/// suspending says what to wait for, in the words the CLI uses now.
+#[test]
+fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.lifecycle = ViewerLifecycleCategory::Suspending;
+    let refusal = resume_refusal(&session);
+    assert!(refusal.contains("wait until it is suspended"), "{refusal}");
+    assert!(!refusal.contains("close"), "{refusal}");
 }
 
 #[tokio::test]

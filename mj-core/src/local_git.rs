@@ -375,9 +375,18 @@ pub fn apply_repository_remote_repairs(
     Ok(())
 }
 
+/// What the caller of a new session or resume is told when the project's
+/// repository has no remote the target can clone from. It names no path or
+/// host, so it may travel to any client.
+const NO_NETWORK_REMOTE: &str = "the project's Git repository has no remote; SSH and container targets clone the project from a network remote. Add one, for example `git remote add origin https://github.com/owner/repository.git`";
+
+/// The same, for a remote whose URL is a local path or another transport a
+/// target cannot reach.
+const LOCAL_REMOTE_URL: &str = "the project's Git remote is not a network URL (it is a local path or an unsupported transport); SSH and container targets need an https://, ssh://, git://, or user@host:path remote";
+
 fn default_fetch_remote(remotes: &[String]) -> Result<String> {
     match remotes {
-        [] => bail!("repository has no configured Git remotes"),
+        [] => Err(crate::refusal::Refusal::unusable(NO_NETWORK_REMOTE).into()),
         [remote] => Ok(remote.clone()),
         _ if remotes.iter().any(|remote| remote == "origin") => Ok("origin".to_owned()),
         _ => bail!(
@@ -460,12 +469,14 @@ fn resolve_local_repository_with_remote(
 
     let fetch_url = remote_url(path, &fetch_remote, false, executor)?;
     let push_urls = remote_urls(path, &push_remote, true, executor)?;
-    validate_network_url(&fetch_url).with_context(|| {
-        format!(
-            "fetch URL {} for Git remote {fetch_remote:?}",
-            display_url(&fetch_url)
-        )
-    })?;
+    validate_network_url(&fetch_url)
+        .with_context(|| {
+            format!(
+                "fetch URL {} for Git remote {fetch_remote:?}",
+                display_url(&fetch_url)
+            )
+        })
+        .context(crate::refusal::Refusal::unusable(LOCAL_REMOTE_URL))?;
     for push_url in &push_urls {
         validate_network_url(push_url).with_context(|| {
             format!(
@@ -1015,13 +1026,18 @@ mod tests {
             format!("{error:#}").contains("local repository path"),
             "{error:#}"
         );
+        let refusal = crate::refusal::Refusal::of(&error).expect("a reason the caller may see");
+        assert!(refusal.message().contains("not a network URL"));
+        assert!(!refusal.message().contains("another-repository"));
     }
 
     #[test]
     fn resolver_reports_missing_and_ambiguous_remote_selection() {
         let no_remote = initialized_repository();
         let error = resolve_local_repository(no_remote.path(), &ProcessExecutor).unwrap_err();
-        assert!(error.to_string().contains("no configured Git remotes"));
+        let refusal = crate::refusal::Refusal::of(&error)
+            .expect("a missing remote is a reason the caller may see, not a log reference");
+        assert!(refusal.message().contains("has no remote"), "{error:#}");
 
         let ambiguous = initialized_repository();
         git(

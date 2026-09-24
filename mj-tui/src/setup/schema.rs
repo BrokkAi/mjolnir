@@ -69,7 +69,7 @@ fn machine_defaults(kind: &str) -> Value {
         "ssh" => {
             object.extend(
                 json!({"host":"","user":null,"identity_file":null,"extra_args":[],
-                       "workspace_prefix":".local/share/hel/workspaces",
+                       "workspace_prefix":mj_core::config::DEFAULT_WORKSPACE_PREFIX,
                        "build_cache":build_cache_defaults()})
                 .as_object()
                 .unwrap()
@@ -106,12 +106,20 @@ fn target_defaults(kind: &str) -> Value {
 }
 
 /// Insert omitted optional fields, preserving all stored values.
+///
+/// The fields a section always has come first, in the order listed above,
+/// so a page's rows keep their places whichever fields the file stores.
+/// Anything else, such as the entries of a collection, follows in its
+/// stored order.
 pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
     let missing = defaults(path, value);
     if let Some(object) = value.as_object_mut() {
+        let mut stored = std::mem::take(object);
         for (key, default) in missing.as_object().unwrap() {
-            object.entry(key.clone()).or_insert_with(|| default.clone());
+            let value = stored.shift_remove(key).unwrap_or_else(|| default.clone());
+            object.insert(key.clone(), value);
         }
+        object.append(&mut stored);
         for (key, child) in object {
             path.push(key.clone());
             expand(child, path);
@@ -123,6 +131,58 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
             expand(child, path);
             path.pop();
         }
+    }
+}
+
+/// A setting the file stores as a whole number. The form edits every value
+/// as text, so this is the one place that text becomes a number again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WholeNumber {
+    pub(super) min: u64,
+    pub(super) max: u64,
+    /// What to say when the text is not a whole number in range.
+    pub(super) message: &'static str,
+    /// Whether clearing the field removes it, so the setting's own default
+    /// applies. Otherwise a cleared field is an optional value set to none.
+    pub(super) defaulted: bool,
+}
+
+pub(super) fn whole_number(path: &[String]) -> Option<WholeNumber> {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let (min, max, message, defaulted) = match parts.as_slice() {
+        ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
+        ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
+        ["sessionwiki", "archive_after_days"] => (
+            1,
+            u64::from(u32::MAX),
+            "Enter a whole number of days, at least 1. Clear the field to keep every session.",
+            false,
+        ),
+        ["profiles", _, "context_window_bytes"] => (
+            0,
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            "Enter a whole number of bytes.",
+            false,
+        ),
+        _ => return None,
+    };
+    Some(WholeNumber {
+        min,
+        max,
+        message,
+        defaulted,
+    })
+}
+
+/// Converts the text typed into a whole-number field. Blank means unset.
+pub(super) fn parse_whole_number(number: WholeNumber, text: &str) -> Result<Value, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    match text.parse::<u64>() {
+        Ok(value) if (number.min..=number.max).contains(&value) => Ok(Value::from(value)),
+        _ => Err(number.message.to_owned()),
     }
 }
 
@@ -154,7 +214,7 @@ pub(super) fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
-        "continuation" => "Automatically continue unfinished requests and quota-blocked sessions",
+        "continuation" => "Continuation",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
@@ -221,6 +281,15 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     match parts.as_slice() {
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // A cleared number takes the setting's own default.
+        ["notify", "delay_seconds"] => format!(
+            "{} (default)",
+            mj_core::config::NotifyConfig::default().delay_seconds
+        ),
+        ["subagents", "max_concurrent"] => format!(
+            "{} (default)",
+            mj_core::config::SubagentConfig::default().max_concurrent
+        ),
         // Unset symbols follow the terminal: ASCII on the Linux console or
         // without a UTF-8 locale, Unicode otherwise.
         ["advanced", "symbols"] => "Follows the terminal".to_owned(),
@@ -280,7 +349,10 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
     Some(match key {
         "interface" => format!(
             "{} · sidebar {}",
-            choice_label(&["theme".to_owned()], &draft["theme"], draft),
+            theme_report(
+                &choice_label(&["theme".to_owned()], &draft["theme"], draft),
+                mj_chat::theme::no_color_requested()
+            ),
             choice_label(
                 &["sessions_side".to_owned()],
                 &draft["sessions_side"],
@@ -323,10 +395,16 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] != Value::Bool(true) {
                 "Off".to_owned()
             } else {
-                let tier = choice_label(&["tier".to_owned()], &section["tier"], draft);
+                // An unset depth is the default one, and an unset profile is
+                // Auto, which picks a reviewer when each review starts.
+                let tier = match &section["tier"] {
+                    Value::Null => Value::String("quick".to_owned()),
+                    tier => tier.clone(),
+                };
+                let tier = choice_label(&["tier".to_owned()], &tier, draft);
                 match section["profile"].as_str() {
                     Some(profile) => format!("{tier} · {profile}"),
-                    None => format!("{tier} · no reviewer"),
+                    None => format!("{tier} · Auto · picks by quota"),
                 }
             }
         }
@@ -341,10 +419,12 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
             } else {
-                match section["max_concurrent"].as_u64() {
-                    Some(limit) => format!("On · up to {limit}"),
-                    None => "On".to_owned(),
-                }
+                // A cleared limit is the default one, which still applies.
+                let limit = section["max_concurrent"].as_u64().unwrap_or(
+                    u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
+                        .unwrap_or(u64::MAX),
+                );
+                format!("On · up to {limit}")
             }
         }
         "sessionwiki" => match section["archive_after_days"].as_u64() {
@@ -373,6 +453,19 @@ fn named_entries(value: &Value) -> String {
         return names.join(", ");
     }
     format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
+}
+
+/// The theme as Setup reports it. `NO_COLOR` is an override, not a theme:
+/// [`theme::effective_theme`] draws in monochrome whatever is configured, and
+/// the configured choice is kept and comes back once `NO_COLOR` is unset. So
+/// the report says what is on screen and why, and names the configured theme
+/// that is waiting.
+pub(super) fn theme_report(configured_label: &str, no_color: bool) -> String {
+    if no_color {
+        format!("Monochrome (NO_COLOR; configured: {configured_label})")
+    } else {
+        configured_label.to_owned()
+    }
 }
 
 pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
@@ -510,16 +603,16 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
         }
         "profiles" => {
-            "Add an agent profile for each installed agent you want to run, or use Detect profiles to find the agents installed on this machine."
+            "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."
         }
         "home" => {
-            "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
+            "The agent's account directory, such as ~/.codex. Sign in with the agent's own login command."
         }
         "machines" => {
-            "Add an SSH host or an EC2 launch template. This machine is always listed as local. Build cache settings live here because every runtime on a machine shares them."
+            "Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes share them."
         }
         "targets" => {
-            "Add a runtime and choose the machine it runs on, or use Detect runtimes to find this machine's usable container engines."
+            "Add a runtime and choose its machine, or use Detect runtimes to find container engines here."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {
@@ -530,7 +623,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "How to be told when a session you are not looking at asks a question, fails, or finishes."
         }
         "mode" if path.first().is_some_and(|key| key == "notify") => {
-            "Terminal rings the bell and works over SSH. System also posts a desktop notification through osascript or notify-send."
+            "Terminal rings the bell and works over SSH. System also posts a desktop notification."
         }
         "bell" => "Ring the terminal bell with each notification.",
         "delay_seconds" => {
@@ -545,7 +638,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Group sessions by project, or list the ones that need you first without project headings."
         }
         "symbols" => {
-            "Draw status marks, borders, and separators with Unicode or plain ASCII. Unset, the terminal decides: ASCII on the Linux console or without a UTF-8 locale."
+            "Draw marks and borders in Unicode or ASCII. Unset: ASCII on the Linux console or without UTF-8."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
@@ -554,41 +647,41 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => {
-            "Shared by turn review and plan second opinion. Auto prefers another provider with quota; a named profile allows main model and effort overrides."
+            "Used by turn review and plan second opinions. Auto picks another provider with quota."
         }
         "continuation" => {
-            "Automatically continue unfinished requests up to three times between user messages, and resume quota-blocked sessions one minute after the exhausted quota windows reset. Quota retries do not count toward the three continuations."
+            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "sessionwiki" => {
-            "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."
+            "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
         }
         "archive_after_days" => {
-            "Suspended sessions older than this many days lose their checkpoint and attachments once SessionWiki has indexed them; a fully merged branch goes too. Blank keeps all."
+            "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
         "subagents" => {
-            "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."
+            "Mjolnir-owned child agents: their limit and extra profiles. A parent's own profile is always eligible."
         }
         "eligible_profiles" => {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share one mbx build cache between the Rust container sessions on each machine. Leave a machine's settings blank to use its own defaults."
+            "Share one mbx build cache among Rust container sessions on each machine. Blank settings use its defaults."
         }
         "directory" => {
-            "Cache directory on the machine itself. Blank uses that machine's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
+            "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."
         }
         "max_size" => {
-            "Largest the whole cache may grow, as a whole number of GB: build outputs, target directories, and incremental state together. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
+            "Largest size of the whole cache, in whole GB. Blank uses the host's mbx limits, or min(100 GB, 1/4 free)."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "pull_policy" => {
-            "When Mjolnir downloads this image. The first choice is derived from the image: it never delays a launch, pulling only a missing image, while the daemon refreshes a remote :latest image in the background."
+            "When Mjolnir downloads this image. The first choice follows the image and never delays a launch."
         }
         "context_window_bytes" => {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
         }
         "guardian_review_model" => {
-            "For a Codex profile with a custom model provider: newest-flash reviews with the newest flash model, session reviews with the session's own model, or name a model from the provider's catalog. Leave blank for newest-flash."
+            "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
         }
         // The first page has no parent setting to describe, so it says what
         // the whole screen does instead.

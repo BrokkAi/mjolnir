@@ -921,7 +921,12 @@ fn render_combined_themed(
                         EmptyConversation::Failed,
                         dashboard.config.spinner,
                         Some(dashboard.session_failure_text(&session_id)),
-                        title_controls(close_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip),
+                        ),
+                        false,
                         false,
                     );
                     render_empty_prompt_advice(
@@ -953,7 +958,20 @@ fn render_combined_themed(
                             prompt: prompt_area,
                             footer: None,
                             overlay: pane_rect,
-                            title_controls: title_controls(close_chip),
+                            title_controls: crate::pane_controls::pane_title_reserve(
+                                dashboard,
+                                transcript_area.width,
+                                crate::pane_controls::pane_title_reserve(
+                                    dashboard,
+                                    transcript_area.width,
+                                    title_controls(close_chip),
+                                ),
+                            ),
+                            title_lead: crate::pane_controls::pane_chrome_width(
+                                dashboard,
+                                pane_id,
+                                transcript_area.width,
+                            ),
                             pane_focused: false,
                         },
                         false,
@@ -972,8 +990,13 @@ fn render_combined_themed(
                         reason,
                         dashboard.config.spinner,
                         None,
-                        title_controls(close_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip),
+                        ),
                         false,
+                        dashboard.pane_shows_pin_hint(pane_id),
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
                 }
@@ -1029,6 +1052,7 @@ fn render_combined_themed(
                         dashboard,
                         crate::actions::FooterGroup::Chord,
                     );
+                    let chord_prefix = crate::render::chord_prefix(dashboard);
                     let commands = chords.clone();
                     let chords = chords
                         .iter()
@@ -1050,12 +1074,21 @@ fn render_combined_themed(
                             footer: prompt_focused.then_some(ChatFooter {
                                 area: footer_area,
                                 chords: &chords,
+                                chord_prefix: &chord_prefix,
                                 functions: &[],
                                 banner: banner.as_ref(),
                             }),
                             overlay: pane_rect,
-                            title_controls: title_controls(close_chip)
-                                + zoom_title_controls(zoom_chip),
+                            title_controls: crate::pane_controls::pane_title_reserve(
+                                dashboard,
+                                transcript_area.width,
+                                title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                            ),
+                            title_lead: crate::pane_controls::pane_chrome_width(
+                                dashboard,
+                                pane_id,
+                                transcript_area.width,
+                            ),
                             pane_focused: focus_borders,
                         },
                         prompt_focused,
@@ -1110,8 +1143,13 @@ fn render_combined_themed(
                         failed
                             .as_deref()
                             .map(|session_id| dashboard.session_failure_text(session_id)),
-                        title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                        crate::pane_controls::pane_title_reserve(
+                            dashboard,
+                            transcript_area.width,
+                            title_controls(close_chip) + zoom_title_controls(zoom_chip),
+                        ),
                         focus_borders,
+                        dashboard.pane_shows_pin_hint(pane_id),
                     );
                     if opening {
                         // The real composer parks in the prompt band while the
@@ -1238,6 +1276,7 @@ enum EmptyConversation {
 /// that has live sessions just needs one opened, and an attach that is still
 /// running needs nothing but a moment. Telling the second user there is no
 /// live session would be a plain lie — the pane above is listing them.
+#[allow(clippy::too_many_arguments)]
 fn render_empty_transcript(
     frame: &mut Frame,
     transcript_area: Rect,
@@ -1246,6 +1285,7 @@ fn render_empty_transcript(
     failure: Option<String>,
     title_controls: u16,
     pane_focused: bool,
+    pin_hint: bool,
 ) {
     if matches!(reason, EmptyConversation::Failed) {
         let panel = theme::panel(pane_focused)
@@ -1293,12 +1333,17 @@ fn render_empty_transcript(
         );
     }
     frame.render_widget(panel, transcript_area);
-    if transcript_area.height >= 7 {
+    // The pane chrome puts "Pin selected here" on the first inside row of
+    // an empty pane; the splash starts below it, and is left out when the
+    // pane is too short for both.
+    let first_row = if pin_hint { 2 } else { 1 };
+    let top = (transcript_area.height.saturating_sub(5) / 2).max(first_row);
+    if transcript_area.height >= 7 && top + 3 < transcript_area.height {
         let hero = Rect::new(
             transcript_area.x.saturating_add(1),
-            transcript_area.y + (transcript_area.height.saturating_sub(5) / 2).max(1),
+            transcript_area.y + top,
             transcript_area.width.saturating_sub(2),
-            4,
+            (transcript_area.height - 1 - top).min(4),
         );
         let invitation = match reason {
             EmptyConversation::NoLiveSession => {
@@ -1366,15 +1411,15 @@ fn render_empty_prompt_advice(
         ),
         EmptyConversation::Opening => (
             " Opening session ",
-            [
-                format!("Opening session{}", theme::glyphs().ellipsis),
+            [format!("Opening session{}", theme::glyphs().ellipsis), {
+                let separator = theme::glyphs().footer_separator;
                 match dashboard.first_key_label(crate::CommandId::QuitDetach) {
-                    Some(detach) => {
-                        format!("Esc cancels · select another session to switch · {detach} quits")
-                    }
-                    None => "Esc cancels · select another session to switch".to_owned(),
-                },
-            ],
+                    Some(detach) => format!(
+                        "Esc cancels{separator}select another session to switch{separator}{detach} quits"
+                    ),
+                    None => format!("Esc cancels{separator}select another session to switch"),
+                }
+            }],
         ),
         EmptyConversation::Failed => (
             " Session failed ",
@@ -1678,6 +1723,67 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// Launch campaign finding A-13: in an empty pane the "Pin selected
+    /// here" hint on the first inside row was drawn over the splash at 79
+    /// and 60 columns. The splash keeps clear of that row, and is dropped
+    /// when the pane is too short for both.
+    #[test]
+    fn the_splash_keeps_clear_of_the_pin_hint_row() {
+        for height in 3..=16 {
+            let mut terminal = Terminal::new(TestBackend::new(34, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_empty_transcript(
+                        frame,
+                        frame.area(),
+                        EmptyConversation::NoConversationOpen,
+                        spinner::SpinnerStyle::default(),
+                        None,
+                        0,
+                        false,
+                        true,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            assert!(
+                !lines[1].contains("M J O") && !lines[1].contains("Your next"),
+                "height {height}: {lines:#?}"
+            );
+            if height >= 8 {
+                assert!(
+                    lines.iter().any(|line| line.contains("M J O L N I R")),
+                    "height {height}: {lines:#?}"
+                );
+            }
+        }
+    }
+
+    /// Launch campaign finding A-15: the "Opening session" advice kept a
+    /// hard-coded "·" in ASCII symbol mode.
+    #[test]
+    fn the_opening_advice_uses_the_symbol_set_in_force() {
+        let dashboard = dashboard_with_session(running_session());
+        let lines = theme::with_symbols(theme::SymbolSet::Ascii, || {
+            let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_empty_prompt_advice(
+                        frame,
+                        frame.area(),
+                        false,
+                        EmptyConversation::Opening,
+                        &dashboard,
+                    );
+                })
+                .unwrap();
+            buffer_lines(terminal.backend().buffer())
+        });
+        let text = lines.join("\n");
+        assert!(text.contains("Esc cancels"), "{text}");
+        assert!(text.is_ascii(), "{text}");
+    }
 
     #[test]
     fn minimized_sessions_use_two_content_lines_per_visible_item() {

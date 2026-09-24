@@ -111,6 +111,9 @@ pub(crate) struct WorkspaceManager {
     pub(crate) selected_draft: usize,
     pub(crate) view: WorkspaceManagerView,
     pending_command: Option<(String, bool)>,
+    /// The Rename or Close view was opened by its shortcut from the
+    /// dashboard, not from the list, so leaving it returns to the dashboard.
+    opened_by_shortcut: bool,
     closing_workspaces: std::collections::BTreeSet<String>,
     pub(crate) name: TextInput,
     pub(crate) form: RefCell<Dialog<WorkspaceControl>>,
@@ -165,6 +168,7 @@ impl WorkspaceManager {
             selected_draft: 0,
             view: WorkspaceManagerView::List,
             pending_command: None,
+            opened_by_shortcut: false,
             closing_workspaces: Default::default(),
             name: TextInput::default(),
             form: manager_form(),
@@ -207,9 +211,11 @@ impl WorkspaceManager {
     }
 
     fn open_selected_command(&mut self, close: bool) {
-        let Some(entry) = self.selected_entry() else {
+        if self.selected_entry().is_none() {
             return;
-        };
+        }
+        self.opened_by_shortcut = false;
+        let entry = self.selected_entry().expect("selection was just checked");
         self.name = TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64);
         let entry = self.selected_entry().expect("selection is unchanged");
         self.view = if close {
@@ -276,7 +282,18 @@ impl WorkspaceManager {
         !self.loading && self.busy.is_none()
     }
 
+    /// Whether leaving the current view should close the manager: the view
+    /// was opened by its shortcut, so the list is not where the user was.
+    fn leaves_to_dashboard(&self) -> bool {
+        self.opened_by_shortcut
+            && matches!(
+                self.view,
+                WorkspaceManagerView::Rename { .. } | WorkspaceManagerView::Close { .. }
+            )
+    }
+
     fn reset_to_list(&mut self) {
+        self.opened_by_shortcut = false;
         self.view = WorkspaceManagerView::List;
         self.selected_draft = 0;
         self.error = None;
@@ -702,6 +719,7 @@ impl DashboardState {
                     {
                         manager.select(index);
                         manager.open_selected_command(close);
+                        manager.opened_by_shortcut = true;
                     } else {
                         manager.error = Some("The workspace no longer exists.".into());
                     }
@@ -734,7 +752,9 @@ impl DashboardState {
                     .busy
                     .is_some_and(|mutation| mutation != WorkspaceMutation::Load);
                 if !locked {
-                    if matches!(manager.view, WorkspaceManagerView::List) {
+                    if matches!(manager.view, WorkspaceManagerView::List)
+                        || manager.leaves_to_dashboard()
+                    {
                         self.cancel_modal();
                     } else {
                         manager.reset_to_list();
@@ -832,7 +852,9 @@ impl DashboardState {
                     }
                 }
                 WorkspaceControl::Back => {
-                    if matches!(manager.view, WorkspaceManagerView::List) {
+                    if matches!(manager.view, WorkspaceManagerView::List)
+                        || manager.leaves_to_dashboard()
+                    {
                         self.cancel_modal();
                     } else {
                         manager.reset_to_list();
@@ -863,10 +885,13 @@ impl DashboardState {
                     return self.workspace_manager_mutation(WorkspaceMutation::Recover);
                 }
                 WorkspaceControl::Cancel => {
-                    if matches!(
-                        manager.view,
-                        WorkspaceManagerView::Delete { .. } | WorkspaceManagerView::Close { .. }
-                    ) {
+                    if !manager.leaves_to_dashboard()
+                        && matches!(
+                            manager.view,
+                            WorkspaceManagerView::Delete { .. }
+                                | WorkspaceManagerView::Close { .. }
+                        )
+                    {
                         manager.reset_to_list();
                     } else {
                         self.cancel_modal();

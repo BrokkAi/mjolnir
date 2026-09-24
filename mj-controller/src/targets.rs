@@ -13,8 +13,12 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::ImagePullPolicy;
 
 pub use mj_core::targets::*;
-pub const PODMAN_DOCUMENTATION_PATH: &str = "docs/PODMAN.md";
-pub const DOCKER_DOCUMENTATION_PATH: &str = "docs/DOCKER.md";
+/// Published copies of `docs/PODMAN.md` and `docs/DOCKER.md`
+/// (`docs/scripts/sync-podman.mjs` copies them into the site at
+/// `docs/astro.config.mjs`'s `site`). Messages link these because an
+/// installed user has no repository checkout.
+pub const PODMAN_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/podman/";
+pub const DOCKER_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/docker/";
 
 // `mj doctor` prints a self-contained setup page that quotes these two pages in
 // full. They are embedded here, beside the paths that name them, because this
@@ -26,7 +30,7 @@ pub const PODMAN_DOCUMENTATION: &str = include_str!("../docs/PODMAN.md");
 /// The Docker postconditions page, verbatim.
 pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
-/// `--userns=keep-id:uid=,gid=`, which maps a session container's image user
+/// `--userns=keep-id:uid=<uid>,gid=<gid>`, which maps a session container's image user
 /// onto the host user, landed in Podman 4.3.0.
 const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 3);
 

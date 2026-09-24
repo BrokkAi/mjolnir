@@ -3609,6 +3609,44 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     .unwrap();
 }
 
+/// Finding G-3: the login page used to learn it was signed out from a
+/// `GET /api/snapshot` 401, which every browser logs as a console error. The
+/// page asks this route instead, which answers 200 either way.
+#[tokio::test]
+async fn session_status_answers_signed_out_without_an_error_status() {
+    let (app, _, _, _, _) = app();
+    let status = |cookie: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::get("/auth/session");
+            if let Some(cookie) = cookie {
+                request = request.header(COOKIE, cookie);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    assert_eq!(
+        status(None).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    assert_eq!(
+        status(Some("mj_viewer=forged".into())).await,
+        serde_json::json!({ "signed_in": false })
+    );
+    let cookie = login_cookie(&app).await;
+    assert_eq!(
+        status(Some(cookie)).await,
+        serde_json::json!({ "signed_in": true })
+    );
+}
+
 #[tokio::test]
 async fn snapshot_endpoint_returns_only_public_projection() {
     let (app, _, _, _, _) = app();

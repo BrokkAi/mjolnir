@@ -97,6 +97,17 @@ impl RuntimeState {
                     session_title_override: request.session_title_override,
                 },
             )?;
+            // Every surface creates sessions through here, so the dashboard,
+            // the phone, `mj new`, and `mj acp` all leave a default pair
+            // behind for the next caller that names none. A preference that
+            // cannot be written does not undo a session that was created.
+            if let Err(error) = mj_core::go::GoPreferences::remember_first_pair(
+                &mj_core::go::GoPreferences::path(),
+                &request.profile_id,
+                &request.target_template_id,
+            ) {
+                tracing::warn!(%error, "could not save the default profile and target");
+            }
             let session = controller
                 .state
                 .sessions

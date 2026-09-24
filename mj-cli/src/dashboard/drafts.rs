@@ -150,6 +150,18 @@ impl DashboardContext {
             self.dashboard.set_pane_session(pane, Some(session_id));
             return;
         }
+        // A suspended session has no worker to attach to; an attach would
+        // wait out its timeout on every start. A pinned pane lets go of it;
+        // Browse keeps following the selection as before.
+        if pane != self.dashboard.browse_pane()
+            && self.dashboard.pane_session_is_suspended(session_id)
+        {
+            self.cancel_chat_open_in(pane);
+            self.dashboard.release_suspended_pane(pane, session_id);
+            self.retire_chats_outside_the_layout();
+            self.save_active_workspace_layout();
+            return;
+        }
         if self
             .chats
             .get(session_id)
@@ -260,7 +272,8 @@ impl DashboardContext {
             .map(|key| format!("; {key} quits"))
             .unwrap_or_default();
         self.dashboard.set_notice(format!(
-            "Opening session… Esc cancels; select another session to switch{detach}."
+            "Opening session{} Esc cancels; select another session to switch{detach}.",
+            mj_chat::theme::glyphs().ellipsis
         ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();

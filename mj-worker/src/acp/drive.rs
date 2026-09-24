@@ -120,6 +120,10 @@ where
     let session_environment = spec.environment.clone();
     let restart = Arc::new(Mutex::new(None));
     let restart_slot = restart.clone();
+    // Set when the session itself failed (an agent error answer, for example),
+    // as opposed to the connection: only the latter may be stray bridge output.
+    let session_failed = Arc::new(AtomicBool::new(false));
+    let session_failed_flag = session_failed.clone();
     let native_agents = Arc::new(Mutex::new(native_agents::NativeAgentRouter::default()));
     let permission_native_agents = native_agents.clone();
     let elicitation_native_agents = native_agents.clone();
@@ -497,7 +501,7 @@ where
                         .await
                         .map_err(|_| relay_event_channel_error())?;
                 }
-                let id = format!("tool-permission-{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                 let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
                     "const": option.option_id.to_string(), "title": option.name,
                 })).collect();
@@ -512,7 +516,10 @@ where
                     .map(str::trim)
                     .filter(|title| !title.is_empty())
                 {
-                    Some(title) => title.to_owned(),
+                    Some(title) => permission_title_with_command(
+                        title,
+                        request.tool_call.fields.raw_input.as_ref(),
+                    ),
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
                 };
@@ -969,21 +976,78 @@ where
                         native_session_id;
                     Ok(())
                 }
-                Err(error) => Err(agent_client_protocol::Error::internal_error()
-                    .data(serde_json::Value::String(format!("{error:#}")))),
+                Err(error) => {
+                    session_failed_flag.store(true, Ordering::Release);
+                    Err(agent_client_protocol::Error::internal_error()
+                        .data(serde_json::Value::String(format!("{error:#}"))))
+                }
             }
         })
         .await
-        .map_err(|error| {
-            anyhow!(
-                "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
-                 and login-shell startup must be silent"
-            )
-        })?;
+        .map_err(|error| protocol_failure(error, !session_failed.load(Ordering::Acquire)))?;
     Ok(restart
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// A permission form's text: the tool call's title, and the command it would
+/// run when the title does not already show it. Kimi titles a shell request
+/// just "Bash", which left the person approving a command they could not
+/// see (I2-5).
+pub(super) fn permission_title_with_command(
+    title: &str,
+    raw_input: Option<&serde_json::Value>,
+) -> String {
+    let command = raw_input.and_then(|input| {
+        let value = input.get("command").or_else(|| input.get("cmd"))?;
+        match value {
+            serde_json::Value::String(command) => Some(command.trim().to_owned()),
+            serde_json::Value::Array(parts) => {
+                let parts: Vec<&str> = parts.iter().filter_map(serde_json::Value::as_str).collect();
+                (!parts.is_empty()).then(|| parts.join(" "))
+            }
+            _ => None,
+        }
+    });
+    match command {
+        Some(command) if !command.is_empty() && !title.contains(&command) => {
+            format!("{title}\n$ {command}")
+        }
+        _ => title.to_owned(),
+    }
+}
+
+/// Drops the answer channel of every pending tool permission request. Each
+/// request's task then answers the agent with `cancelled` and reports the
+/// elicitation resolved, which closes its form.
+pub(super) fn withdraw_tool_permissions(pending: &PendingElicitations) {
+    pending
+        .lock()
+        .expect("pending elicitation lock poisoned")
+        .retain(|id, _| !id.starts_with(TOOL_PERMISSION_ID_PREFIX));
+}
+
+/// The id prefix of a permission request shown as a form.
+pub(super) const TOOL_PERMISSION_ID_PREFIX: &str = "tool-permission-";
+
+/// Describe a failed ACP connection. The hint about stray bridge output only
+/// helps when the connection itself broke or could not parse what the bridge
+/// wrote; an error the agent answered (such as a missing thread, I2-7) says
+/// nothing about bridge stdout, and the hint would send the person the wrong
+/// way.
+pub(super) fn protocol_failure(
+    error: agent_client_protocol::Error,
+    connection_failed: bool,
+) -> anyhow::Error {
+    if connection_failed || error.code == agent_client_protocol::Error::parse_error().code {
+        anyhow!(
+            "ACP protocol failed: {error}; bridge stdout must contain only JSON-RPC frames \
+             and login-shell startup must be silent"
+        )
+    } else {
+        anyhow!("ACP protocol failed: {error}")
+    }
 }
 
 /// muse-acp 0.5.0 asks, before each Muse question that offers choices, whether
@@ -1318,9 +1382,16 @@ pub(super) async fn apply_cancel(
     cancel_id: String,
     events: &mpsc::Sender<RuntimeEvent>,
     terminals: &TerminalRegistry,
+    pending: &PendingElicitations,
 ) -> Result<()> {
     terminals.kill_live();
-    match connection.send_notification(CancelNotification::new(session_id.clone())) {
+    let sent = connection.send_notification(CancelNotification::new(session_id.clone()));
+    // ACP: once the client cancels a turn it answers every pending
+    // `session/request_permission` of that turn with `cancelled`. Some agents
+    // (Kimi, I2-15) never withdraw the request themselves, which left the
+    // form open on an idle session.
+    withdraw_tool_permissions(pending);
+    match sent {
         Ok(()) => {
             emit_runtime_event(
                 events,

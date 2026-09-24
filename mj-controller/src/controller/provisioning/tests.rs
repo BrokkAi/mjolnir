@@ -1307,7 +1307,7 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         let lock = lock.clone();
         let started = started.clone();
         std::thread::spawn(move || {
-            let guard = lock.lock().unwrap();
+            let guard = crate::image_pull_gate::hold_image_pull(&lock, || false, || {}).unwrap();
             started.wait();
             std::thread::sleep(std::time::Duration::from_millis(300));
             drop(guard);

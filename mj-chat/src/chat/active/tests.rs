@@ -1543,7 +1543,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1563,7 +1563,7 @@ fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
+        "│ ctrl+b then b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1595,8 +1595,61 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             // The chords give way before the composer's own keys, so what a
             // narrow row keeps is the key that works right here plus the two
             // hints that lead to everything else.
-            assert_eq!(text.trim_end(), "Tab pane │ : palette · ? keys");
+            // The label outranks Tab pane: without it `:` reads as a plain
+            // key, and a plain `:` types a colon (A-12).
+            assert_eq!(text.trim_end(), "ctrl+b then : palette · ? keys");
         }
+    }
+}
+
+/// A-12: the composer's footer dropped the prefix label with the first chord,
+/// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
+/// as the reader could tell. The label must ride on the first chord left.
+#[test]
+fn the_composer_footer_names_the_prefix_at_every_width() {
+    let chat = ChatState::new(&snapshot(), &[]);
+    let chords = [
+        "c create",
+        "g sessions",
+        "a read",
+        "b panes",
+        "q detach",
+        "u web",
+        ": palette",
+        "? keys",
+    ];
+    for width in [140_u16, 100, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let footer = crate::chat::ChatFooter {
+                    area,
+                    chords: &chords,
+                    chord_prefix: "ctrl+b then ",
+                    functions: &[],
+                    banner: None,
+                };
+                render_chat_footer(frame, footer, &chat, true);
+            })
+            .expect("draw footer");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let chord_group = text
+            .split('│')
+            .nth(1)
+            .unwrap_or_else(|| panic!("{width}: no chord group in {text:?}"));
+        assert!(
+            chord_group.trim_start().starts_with("ctrl+b then "),
+            "{width}: {text:?}"
+        );
+        assert!(text.contains(": palette · ? keys"), "{width}: {text:?}");
+        assert!(!text.contains("then:"), "{width}: {text:?}");
     }
 }
 
@@ -1694,7 +1747,7 @@ fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
         .collect::<String>();
 
     assert_eq!(rendered.matches("gpt-5.6-sol · high").count(), 1);
-    assert!(rendered.contains("Esc cancels"));
+    assert!(rendered.contains("Esc interrupts"));
     assert!(!rendered.contains("Running"));
     // No outer frame wraps the whole session: the transcript's own titled
     // border is the first thing on the frame, not a session title bar.
@@ -1726,9 +1779,9 @@ fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
     chat.set_prompt_in_flight(true);
     assert_eq!(
         prompt_bottom_queue_control(&chat).unwrap().to_string(),
-        " Esc cancels"
+        " Esc interrupts"
     );
-    assert!(!prompt_title(&chat).contains("Esc cancels"));
+    assert!(!prompt_title(&chat).contains("Esc interrupts"));
 }
 
 #[tokio::test]
@@ -1767,14 +1820,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                     key: "model".into(),
                     value: "next-model".into(),
                 }),
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
             (
                 Some(true),
                 None,
-                "Esc cancels",
+                "Esc interrupts",
                 "Interrupting turn…",
                 "Cancellation requested",
             ),
@@ -1792,7 +1845,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             );
             let mut materialized = MaterializedSession::empty("steering-session");
             let targeted = protocol.is_some_and(|version| version >= 17);
-            let hint = if targeted { hint } else { "Esc cancels" };
+            let hint = if targeted { hint } else { "Esc interrupts" };
             let sending = if targeted {
                 sending
             } else {
@@ -2247,6 +2300,7 @@ async fn the_task_dialog_and_setup_form_are_centred_within_their_overlay_rect() 
         footer: None,
         overlay: pane,
         title_controls: 0,
+        title_lead: 0,
         pane_focused: true,
     };
     let outside_is_untouched = |terminal: &Terminal<TestBackend>, what: &str| {
@@ -2342,6 +2396,7 @@ fn the_task_dialog_claims_only_the_pointer_over_itself() {
                     footer: None,
                     overlay: pane,
                     title_controls: 0,
+                    title_lead: 0,
                     pane_focused: true,
                 },
                 false,
@@ -2387,6 +2442,7 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         footer: None,
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 
@@ -2488,10 +2544,14 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
             prompt_title.chars().count() - 3,
             "spinner occupies the upper-right title: {prompt_title}"
         );
-        assert!(
-            running[prompt_bottom].contains("Esc cancels"),
-            "{running:?}"
-        );
+        // A 16-column composer has 14 cells of border, one short of the
+        // whole hint; the border clips it there.
+        let hint = if width > 16 {
+            "Esc interrupts"
+        } else {
+            "Esc interrupt"
+        };
+        assert!(running[prompt_bottom].contains(hint), "{running:?}");
         assert_eq!(running[0], idle[0], "the transcript keeps its full height");
         assert_eq!(running[input.y as usize], idle[input.y as usize]);
         assert_eq!(
@@ -2524,6 +2584,7 @@ fn draw_in_draws_a_cursor_only_when_the_prompt_has_focus() {
         footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
         overlay: Rect::new(0, 0, 80, 24),
         title_controls: 0,
+        title_lead: 0,
         pane_focused: false,
     };
 
@@ -3033,4 +3094,33 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
             .contains("invalid image encoding")
     );
     assert_eq!(chat.state.submit_input(), ChatAction::None);
+}
+
+/// Launch campaign finding A-15: switching Setup's symbols to ASCII left an
+/// open transcript drawn with `❯` until a restart, because its row cache
+/// was kept across the change. The next draw uses the new symbols.
+#[test]
+fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
+    use crate::theme::{SymbolSet, with_symbols};
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::User, "hello there"));
+    let unicode = with_symbols(SymbolSet::Unicode, || drawn_transcript(&mut chat, 60, 12));
+    assert!(unicode.iter().any(|row| row.contains('❯')), "{unicode:#?}");
+    let ascii = with_symbols(SymbolSet::Ascii, || drawn_transcript(&mut chat, 60, 12));
+    assert!(ascii.iter().all(|row| !row.contains('❯')), "{ascii:#?}");
+}
+
+#[tokio::test]
+async fn empty_paste_without_image_support_reports_it_without_reading_the_clipboard() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(false);
+    chat.state.input = "draft".into();
+    chat.handle_event_result(crossterm::event::Event::Paste(String::new()));
+    assert!(!chat.paste_in_flight, "the clipboard must not be read");
+    assert_eq!(
+        chat.state.notice().as_deref(),
+        Some(super::super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE)
+    );
+    assert_eq!(chat.state.input, "draft");
 }

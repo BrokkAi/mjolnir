@@ -4551,6 +4551,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             event_frontier: 0,
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             queued_prompts: Vec::new(),
+            accepted_config: Default::default(),
         })
         .unwrap(),
     )
@@ -4574,6 +4575,36 @@ async fn restored_relay_seed_records_a_restart_marker() {
         .filter(|event| matches!(event.observation, RelayObservation::SessionRestarted))
         .count();
     assert_eq!(markers, 1);
+}
+
+/// I1-6: the restored relay starts with the model and effort the archived
+/// session accepted, so the first bridge start pins them.
+#[test]
+fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_owned();
+    std::fs::write(
+        mj_core::relay::restored_relay_seed_path(&root),
+        serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+            event_frontier: 0,
+            event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            queued_prompts: Vec::new(),
+            accepted_config: [
+                ("model".to_owned(), "opus[1m]".to_owned()),
+                ("effort".to_owned(), "high".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let state = relay.operational_state();
+    let accepted =
+        crate::acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options);
+    assert_eq!(accepted.model.as_deref(), Some("opus[1m]"));
+    assert_eq!(accepted.effort.as_deref(), Some("high"));
 }
 
 /// Codex rebuilds a resumed thread from the launch request, so the bridge has

@@ -526,6 +526,7 @@ impl RuntimeState {
                 viewer_code,
                 qr_login_url,
                 fallback_reason,
+                ..
             } => WebViewerStatus::Ready {
                 viewer_url: viewer_url.clone(),
                 viewer_code: viewer_code.clone(),

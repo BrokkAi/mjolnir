@@ -1052,3 +1052,155 @@ for line in sys.stdin:
         "the replacement bridge must start on the accepted model"
     );
 }
+
+/// A harness shaped like claude-agent-acp 0.81.0: it advertises short model
+/// values with display names, and resolves a full model id sent to
+/// `session/set_config_option` to the advertised value that runs it, the way
+/// the bridge's `resolveModelPreference` does. Anything else is refused with
+/// the bridge's own error text.
+fn claude_alias_harness(root: &std::path::Path) -> PathBuf {
+    let script = root.join("claude_alias.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+model = 'default'
+choices = [('default','Default (recommended)'),('opus[1m]','Opus 5.5 (1M context)'),('sonnet','Sonnet 5')]
+resolved = {'claude-opus-5-5':'opus[1m]','claude-opus-5-5[1m]':'opus[1m]','claude-sonnet-5':'sonnet'}
+def options():
+    return [{'id':'model','name':'Model','category':'model','type':'select',
+       'currentValue':model,'options':[{'value':v,'name':n} for v,n in choices]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params = request.get('params', {})
+    error = None
+    if method == 'initialize': result = {'protocolVersion':1}
+    elif method in ('session/new','session/load','session/resume'):
+        result = {'sessionId':'native','configOptions':options(),
+                  'modes':{'currentModeId':'default','availableModes':[
+                      {'id':'default','name':'Default'},{'id':'auto','name':'Auto'}]}}
+    elif method == 'session/set_config_option':
+        value = params['value']
+        value = resolved.get(value, value)
+        if value in [v for v,_ in choices]:
+            model = value
+            result = {'configOptions':options()}
+        else:
+            result = None
+            error = {'code':-32603,'message':'Invalid value for config option model: ' + params['value']}
+    else: result = {}
+    reply = {'jsonrpc':'2.0','id':ident}
+    reply['error' if error else 'result'] = error or result
+    print(json.dumps(reply), flush=True)
+"#,
+    )
+    .unwrap();
+    script
+}
+
+async fn set_model_outcome(
+    commands: &mpsc::Sender<CommandRequest>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    value: &str,
+) -> Result<(String, Vec<SessionConfigOption>), String> {
+    commands
+        .send(CommandRequest::SetConfig {
+            request_id: format!("model-{value}"),
+            key: "model".into(),
+            value: value.into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        match next(events).await {
+            RuntimeEvent::ConfigApplied {
+                value,
+                config_options,
+                ..
+            } => return Ok((value, config_options)),
+            RuntimeEvent::CommandRejected { message, .. } => return Err(message),
+            RuntimeEvent::Stopped => panic!("the session must survive a selector change"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_on_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let mut spec = launch(
+        root.path(),
+        claude_alias_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    spec.harness = HarnessKind::Claude;
+    let accepted = spec.accepted_config.clone();
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    // I1-3: the id commit 44957c9f says can be selected.
+    let (value, options) = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
+        .await
+        .expect("the bridge resolves a full model id");
+    assert_eq!(value, "opus[1m]", "the applied value is the advertised one");
+    assert_eq!(reported(&options, "model"), "opus[1m]");
+    assert_eq!(
+        accepted.lock().unwrap().model.as_deref(),
+        Some("opus[1m]"),
+        "restarts replay the advertised value, not the alias"
+    );
+
+    // The display name the picker shows selects its value.
+    let (value, _) = set_model_outcome(&commands, &mut events, "sonnet 5")
+        .await
+        .expect("a display name selects its value");
+    assert_eq!(value, "sonnet");
+
+    let refusal = set_model_outcome(&commands, &mut events, "gpt-9")
+        .await
+        .expect_err("an unknown model is refused");
+    assert!(
+        refusal.contains("\"default\"")
+            && refusal.contains("\"opus[1m]\"")
+            && refusal.contains("\"sonnet\""),
+        "the refusal lists the accepted values: {refusal}"
+    );
+
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_unlisted_value_is_refused_with_the_accepted_values() {
+    let root = tempfile::tempdir().unwrap();
+    let spec = launch(
+        root.path(),
+        stale_answer_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+    let refusal = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
+        .await
+        .expect_err("harnesses without id resolution only take listed values");
+    assert!(
+        refusal.contains("\"default\"") && refusal.contains("\"chosen\""),
+        "{refusal}"
+    );
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

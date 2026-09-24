@@ -53,7 +53,7 @@ an existing Git project directory instead.
 
 For a TOML error, fix the exact path and type named by `mj doctor`. Mjolnir's
 schema rejects unknown fields rather than silently ignoring a misspelling. See
-the [Configuration reference](/configuration/) for every version 2 field.
+the [Configuration reference](/configuration/) for every field.
 
 An older Mjolnir refuses to load a configuration last written by a newer build.
 Update Mjolnir, or use the newer build; do not lower the `version` value by
@@ -279,10 +279,10 @@ visible response. Once all work ends, the recovery and upgrade coordinators
 observe the idle state automatically. Read
 [Durability and recovery](/durability/) for the exact guarantees.
 
-## Stop failed or a session needs recovery
+## Suspension failed or a session needs recovery
 
-A normal Stop will not destroy a target unless its recovery archive passes the
-checksum and frontier gates. A stop failure is therefore normally
+A normal suspension will not destroy a target unless its recovery archive
+passes the checksum and frontier gates. A suspension failure is therefore normally
 non-destructive: read the exact checkpoint or target error, repair the storage
 or connection problem, and try a manual checkpoint:
 
@@ -290,11 +290,12 @@ or connection problem, and try a manual checkpoint:
 mj checkpoint --session <session-id>
 ```
 
-Then retry Stop from the session command palette. If a fresh checkpoint remains
-impossible but an older verified archive exists, the failure dialog can force
-stop. That removes the live target without a new archive and can lose every
-change after the older checkpoint, but leaves the session resumable. Force
-destroy is different: it removes the target, archive, and record permanently.
+Then choose **Retry suspension** in the failure dialog, or run **Suspend
+session…** again from the command palette. If a fresh checkpoint remains
+impossible but an older verified archive exists, the failure dialog also offers
+**Discard changes since checkpoint…**. That removes the live target without a new archive and can lose every
+change after the older checkpoint, but leaves the session resumable. **Destroy session…** is different: it removes the target, archive, and record
+permanently.
 
 If a managed target is still running but has disappeared from controller
 state, scan without changing it:

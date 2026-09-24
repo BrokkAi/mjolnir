@@ -857,6 +857,88 @@ fn remote_operation_cancel_action_carries_the_operation_kind() {
     );
 }
 
+/// Launch campaign finding A-7: the cancel chord with nothing in flight
+/// says so instead of doing nothing silently.
+#[test]
+fn cancel_with_nothing_in_flight_shows_a_notice() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    assert_eq!(
+        chord(&mut dashboard, CommandId::CancelOperation),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("Nothing to cancel"));
+}
+
+/// Launch campaign finding A-10: a pinned pane restored for a suspended
+/// session kept trying to attach and failed after 15 seconds with a notice
+/// that named no session. The pane is emptied instead, with a notice that
+/// names the session; a failure to open names it too.
+#[test]
+fn a_pinned_pane_releases_a_suspended_session_and_names_it() {
+    let mut session = stopped_session();
+    session.session_title_override = Some("Pinned B".into());
+    let mut dashboard = dashboard_with_session(session);
+    let pane = dashboard.browse_pane();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+        .unwrap();
+    dashboard.set_pane_session(pane, Some("session-1"));
+    assert!(dashboard.pane_session_is_suspended("session-1"));
+    dashboard.release_suspended_pane(pane, "session-1");
+    assert_eq!(dashboard.pane_session(pane), None);
+    let notice = dashboard.notice().unwrap();
+    assert!(notice.contains("Session Pinned B is suspended"), "{notice}");
+
+    dashboard.report_open_failure(
+        "session-1",
+        "Session opening did not respond within 15 seconds",
+    );
+    let notice = dashboard.notice().unwrap();
+    assert!(
+        notice.starts_with("Could not open Session Pinned B: "),
+        "{notice}"
+    );
+
+    // A session being resumed is on its way back and is not released.
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+    assert!(!dashboard.pane_session_is_suspended("session-1"));
+}
+
+/// Launch campaign finding B-10: the title is a record field, not worker
+/// state, so a session that is still starting can be renamed from the
+/// Sessions pane and from its type-ahead composer.
+#[test]
+fn a_starting_session_can_be_renamed() {
+    for from_prompt in [false, true] {
+        let mut session = stopped_session();
+        session.state = SessionState::Provisioning;
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Launching,
+            None,
+        );
+        if from_prompt {
+            // The launch leaves the conversation pane empty until the attach
+            // finishes, with the keyboard in the composer.
+            dashboard.pane_sessions.clear();
+            dashboard.focus_prompt();
+        } else {
+            dashboard.focus_sessions();
+        }
+        chord(&mut dashboard, CommandId::RenameSession);
+        let Mode::Rename(editor) = &dashboard.mode else {
+            panic!(
+                "from_prompt={from_prompt}: {:?} notice={:?}",
+                dashboard.mode,
+                dashboard.notice()
+            );
+        };
+        assert_eq!(editor.session_id, "session-1");
+    }
+}
+
 /// A launching session parks its conversation behind a composer the user
 /// can type into; the draft survives to be taken by the chat that opens.
 #[test]
@@ -2536,6 +2618,37 @@ fn dashboard_with_two_sessions() -> DashboardState {
     dashboard
 }
 
+/// Launch finding B-4: a launch that finishes after the user selected
+/// another row must not take the selection back, or the next session
+/// command (such as close) acts on a session the user did not choose.
+#[test]
+fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
+    let mut dashboard = dashboard_with_two_sessions();
+    // The launch selected its session when it started.
+    dashboard.select_active_session("session-1");
+    // While it launches, the user picks the other session.
+    dashboard.select_active_session("session-2");
+    dashboard.focus_sessions();
+
+    dashboard.finish_new_session("session-1");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.focus(), Focus::Sessions);
+}
+
+/// When the selection is still on the launching session, finishing the
+/// launch opens it for its first prompt, as before.
+#[test]
+fn a_finished_launch_opens_the_session_the_user_left_selected() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.select_active_session("session-1");
+
+    dashboard.finish_new_session("session-1");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.focus(), Focus::Prompt);
+}
+
 #[test]
 fn setting_the_current_session_writes_only_the_focused_pane() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2686,9 +2799,8 @@ fn opening_a_session_shown_elsewhere_is_answered_by_the_pane_that_has_it() {
     assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
-/// A split that would leave either half too small to use is refused and
-/// changes nothing. The controller turns the refusal into the notice "Not
-/// enough room to split".
+/// A split that would leave either half too small to use is refused, leaves
+/// the layout unchanged, and says why on the notice bar.
 #[test]
 fn a_split_with_no_room_is_refused_and_changes_nothing() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2702,6 +2814,32 @@ fn a_split_with_no_room_is_refused_and_changes_nothing() {
     assert!(refused.is_none());
     assert_eq!(dashboard.focused_pane(), before);
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(crate::SPLIT_REFUSED_NOTICE)
+    );
+}
+
+/// Launch finding D-2: the refusal notice describes a failed split, so a
+/// later split that succeeds must take it off the bar.
+#[test]
+fn a_successful_split_clears_the_earlier_no_room_notice() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    drawn(&mut dashboard, 80, 30);
+    assert!(
+        dashboard
+            .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+            .is_none()
+    );
+    assert!(dashboard.notice().is_some());
+
+    drawn(&mut dashboard, 200, 60);
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+        .expect("a wide frame has room for two panes");
+
+    assert_eq!(dashboard.notice(), None);
 }
 
 /// Moving the focus between panes is a layout change the controller has to
@@ -4290,24 +4428,52 @@ fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     });
     let mut dashboard = dashboard_with_session(session);
     let start = std::time::Instant::now();
-    assert_eq!(dashboard.git_probe_candidates(start), ["session-1"]);
-    assert!(dashboard.git_probe_candidates(start).is_empty());
+    assert_eq!(dashboard.git_probe_candidates(start, 2), ["session-1"]);
+    assert!(dashboard.git_probe_candidates(start, 2).is_empty());
     assert!(
         dashboard
-            .git_probe_candidates(start + std::time::Duration::from_secs(30))
+            .git_probe_candidates(start + std::time::Duration::from_secs(30), 2)
             .is_empty()
     );
     assert_eq!(
-        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61)),
+        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61), 2),
         ["session-1"]
     );
     // A stopped session's target is gone, so there is nothing to read.
     dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
     assert!(
         dashboard
-            .git_probe_candidates(start + std::time::Duration::from_secs(200))
+            .git_probe_candidates(start + std::time::Duration::from_secs(200), 2)
             .is_empty()
     );
+}
+
+/// Launch finding D-3: after a restart every session is due at once. The
+/// host reads only a few per pass, so a session it did not read must stay
+/// due; marking all of them as read left all but the first few without a
+/// branch marker for good.
+#[test]
+fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
+    let target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    };
+    let mut first = running_session();
+    first.target = Some(target.clone());
+    let mut dashboard = dashboard_with_session(first);
+    for id in ["session-2", "session-3", "session-4"] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.target = Some(target.clone());
+        dashboard.state.sessions.insert(id.into(), session);
+    }
+    let start = std::time::Instant::now();
+
+    let mut probed = dashboard.git_probe_candidates(start, 2);
+    assert_eq!(probed.len(), 2, "one pass reads at most the limit");
+    probed.extend(dashboard.git_probe_candidates(start + std::time::Duration::from_secs(1), 2));
+    probed.sort();
+
+    assert_eq!(probed, ["session-1", "session-2", "session-3", "session-4"]);
 }
 
 #[test]
@@ -4813,6 +4979,46 @@ fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+/// Launch finding B-3: the row menu is titled with the session's name, so
+/// the Suspend confirmation and the Rename dialog must name it the same way
+/// instead of by its id.
+#[test]
+fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: ACP pretty name"), "{suspend}");
+    assert!(!suspend.contains("Session: session-1"), "{suspend}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::RenameSession);
+    let rename = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rename.contains("Session: ACP pretty name"), "{rename}");
+    assert!(!rename.contains("Session: session-1"), "{rename}");
+}
+
+/// Without a title the dialogs fall back to the id, which is the only name
+/// the session has.
+#[test]
+fn suspend_confirmation_falls_back_to_the_id_for_an_untitled_session() {
+    let mut session = running_session();
+    session.acp_session_title = None;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: session-1"), "{suspend}");
 }
 
 #[test]

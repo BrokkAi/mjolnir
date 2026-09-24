@@ -2098,7 +2098,40 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
 
     assert!(rendered.contains("(lossy: text-only transcript)"));
     assert!(rendered.contains("Resume · 1/3"));
+    // I1-6: the session's own profile is selected, and a same-harness resume
+    // continues the native conversation, so it carries no loss warning.
+    assert!(rendered.contains("Same agent: the conversation continues natively."));
+    assert!(!rendered.contains("Lossy: text only"));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("resume wizard is open");
+    };
+    let initial = wizard.profile;
+    let session_harness = dashboard.state.sessions[&wizard.session_id].harness_kind;
+    let lossy = dashboard
+        .resume_wizard_profiles(wizard)
+        .iter()
+        .position(|(_, harness)| *harness != session_harness)
+        .expect("the fixture offers a cross-harness profile");
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    wizard.profile = lossy;
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw cross-harness selection");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
     assert!(rendered.contains("Lossy: text only; tool calls + reasoning dropped."));
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    wizard.profile = initial;
 
     ready_key(&mut dashboard, key(KeyCode::Enter));
     terminal
@@ -3886,6 +3919,26 @@ fn row_of(lines: &[String], label: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"))
 }
 
+/// `cd ~/demo && mj`: the local project step starts with the repository `mj`
+/// was started in, ahead of any remembered directory (J-10).
+#[test]
+fn the_local_project_starts_as_the_repository_mj_was_started_in() {
+    let mut config = config();
+    config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+    let mut state = State::default();
+    state.remember_project_directory("local", std::path::Path::new("/work/remembered"));
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    dashboard.set_launch_project_directory(Some("/home/me/demo".into()));
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the local project step")
+    };
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert_eq!(wizard.project_directory, "/home/me/demo");
+}
+
 /// The step pre-fills a remembered directory, so it has to draw it with the
 /// caret at its end. A value the field holds but does not show takes every
 /// character typed after it and turns the path into two paths.
@@ -4047,4 +4100,128 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
         "no popup border is drawn through the buttons: {:?}",
         lines[buttons]
     );
+}
+
+/// The review's Compute row states the allocation itself; the " · " that
+/// joins it to a target name in the target list does not belong there.
+/// Launch campaign finding C-7.
+#[test]
+fn the_review_compute_row_does_not_start_with_a_separator() {
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    let _ = dashboard.take_prerequisite_check();
+    let context = dashboard.path_input_context();
+    dashboard.apply_resolved_project_directory(
+        &context,
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: false,
+                default_create: false,
+            },
+        )),
+    );
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let compute = &lines[row_of(&lines, "Compute:")];
+    assert!(
+        compute.contains("Compute: fixed/default resources"),
+        "{compute:?}"
+    );
+
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+    });
+    let lines = drawn(&mut dashboard, 120, 40);
+    let compute = &lines[row_of(&lines, "Compute:")];
+    assert!(compute.contains("Compute: 2 CPU / "), "{compute:?}");
+}
+
+/// Another surface or this run's own sessions can remember a project directory
+/// after the dashboard loaded its state. Opening the New wizard asks for the
+/// stored history again, and the project step offers what comes back.
+/// Launch campaign finding C-1.
+#[test]
+fn opening_the_new_wizard_refreshes_recent_projects() {
+    let mut config = config();
+    config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    assert_eq!(
+        dashboard.take_mount_history_refresh(),
+        Some(DashboardAction::LoadMountHistory)
+    );
+    assert_eq!(
+        dashboard.take_mount_history_refresh(),
+        None,
+        "one open asks once"
+    );
+    let mut stored = State::default();
+    stored.remember_project_directory("local", std::path::Path::new("/work/used-this-run"));
+    dashboard.apply_mount_history(stored.mount_history);
+
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the New wizard")
+    };
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert_eq!(
+        wizard.project_history,
+        vec![PathBuf::from("/work/used-this-run")]
+    );
+}
+
+/// Tab moves keyboard focus onto the recent directories, so each one has to
+/// look different while it holds focus, including the one that is already the
+/// selected directory. Launch campaign finding C-2.
+#[test]
+fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
+    fn style_of(dashboard: &mut DashboardState, label: &str) -> ratatui::style::Style {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let (column, row) = point(&buffer_lines(&buffer), label);
+        buffer[(column, row)].style()
+    }
+    let labels = ["/work/newer", "/work/older"];
+    let mut dashboard = dashboard_at_local_project_step(&labels);
+    let unfocused = labels.map(|label| style_of(&mut dashboard, label));
+
+    let mut checked = 0;
+    for _ in 0..6 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+        let Mode::New(wizard) = &dashboard.mode else {
+            panic!("expected the local project step")
+        };
+        let Some(WizardControl::RecentProject(index)) = wizard.form.borrow().focused() else {
+            continue;
+        };
+        let label = wizard.project_history[index].display().to_string();
+        let position = labels.iter().position(|known| *known == label).unwrap();
+        assert_ne!(
+            style_of(&mut dashboard, &label),
+            unfocused[position],
+            "{label} looks the same with and without focus"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2, "Tab reaches both recent directories");
 }

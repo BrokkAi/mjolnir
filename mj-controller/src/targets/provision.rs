@@ -295,7 +295,22 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
 
 /// Run the disposable setup smoke test and always attempt container cleanup
 /// after a successful create step.
+///
+/// The test runs the target's image, which the engine pulls if it is
+/// missing. It holds the image download lock while it runs, so it waits for
+/// a daemon that is downloading the same image instead of pulling it a
+/// second time at once (J-13).
 pub fn run_setup_smoke_test(
+    template: &TargetTemplate,
+    smoke_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    crate::image_pull_gate::with_image_ready(template, executor, || {
+        run_setup_smoke_test_unlocked(template, smoke_id, executor)
+    })
+}
+
+fn run_setup_smoke_test_unlocked(
     template: &TargetTemplate,
     smoke_id: &str,
     executor: &impl CommandExecutor,

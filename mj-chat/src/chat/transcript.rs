@@ -110,6 +110,9 @@ impl TranscriptScrollbarState {
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     theme: theme::UiTheme,
+    /// Whether the rows were drawn with the ASCII symbol set; a change of
+    /// set redraws them, like a change of palette.
+    ascii: bool,
     width: u16,
     mode: TranscriptRenderMode,
     entries: Vec<Option<CachedEntry>>,
@@ -381,8 +384,13 @@ fn prepare_render_cache(
 ) {
     let mode_changed = cache.mode != mode;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
-    if cache.width != width || mode_changed || cache.theme != theme::current() {
+    if cache.width != width
+        || mode_changed
+        || cache.theme != theme::current()
+        || cache.ascii != theme::ascii()
+    {
         cache.theme = theme::current();
+        cache.ascii = theme::ascii();
         cache.width = width;
         cache.mode = mode;
         cache.entries.clear();
@@ -467,6 +475,7 @@ impl Default for TranscriptRenderCache {
     fn default() -> Self {
         Self {
             theme: theme::current(),
+            ascii: theme::ascii(),
             width: 0,
             mode: TranscriptRenderMode::Rich,
             entries: Vec::new(),
@@ -743,6 +752,23 @@ impl ChatState {
                 top,
             };
         }
+        // The opening reveal parks the view on the latest reply, but the
+        // reader did not scroll there. Once something newer arrives, follow
+        // the tail again. Any scroll by the reader moves the anchor off the
+        // revealed row and ends this.
+        if let Some((revealed, last)) = self.revealed_anchor {
+            let still_revealed = matches!(
+                self.anchor,
+                TranscriptAnchor::Row { entry, row: 0 }
+                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
+            );
+            if !still_revealed {
+                self.revealed_anchor = None;
+            } else if self.entries.last().map(|entry| entry.start_seq) != Some(last) {
+                self.anchor = TranscriptAnchor::Bottom;
+                self.revealed_anchor = None;
+            }
+        }
         if self.reveal_latest_agent_on_draw
             && self.unconverted_prefix == 0
             && self.anchor == TranscriptAnchor::Bottom
@@ -758,6 +784,10 @@ impl ChatState {
             });
             if let Some(entry) = latest_agent.filter(|_| agent_is_above_tail) {
                 self.anchor = TranscriptAnchor::Row { entry, row: 0 };
+                self.revealed_anchor = self
+                    .entries
+                    .last()
+                    .map(|last| (self.entries[entry].start_seq, last.start_seq));
             } else {
                 return tail;
             }
