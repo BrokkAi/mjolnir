@@ -8,18 +8,18 @@ This runbook defines the missions and evidence for a single campaign operator. T
 
 Build the current commit and install the pinned browser once:
 
-    cargo build -p hel-cli
+    cargo build -p brokk-mjolnir
     npm ci --prefix tests/e2e/web
     npx --prefix tests/e2e/web playwright install chromium
 
 Choose a seed, prepare the disposable fake-ACP/local-bare lab, and source the printed environment file in the shell that will start tmux:
 
-    python3 tests/e2e/prepare-luna-lab.py --seed 1 --hel ./target/x86_64-unknown-linux-musl/debug/hel
+    python3 tests/e2e/prepare-luna-lab.py --seed 1 --hel ./target/debug/mj
     source target/reliability-artifacts/luna-manual-seed-1-*/luna-env.sh
 
 The manual-lab preparer gives fake ACP new/load and prompt calls a 15-second
 delay by default so M3 has a reproducible cancellation window. Record
-`HEL_LUNA_FAKE_ACP_DELAY_MS` in the evidence. Override `--fake-delay-ms` only
+`MJ_LUNA_FAKE_ACP_DELAY_MS` in the evidence. Override `--fake-delay-ms` only
 for a named timing variant; a zero-delay lab cannot prove M3 cancellation.
 During the prompt delay the fake continues reading stdin: `session/cancel`
 must appear in `fake-acp.log`, suppress the agent reply, and complete the
@@ -28,14 +28,14 @@ cancel after emitting its reply cannot test prompt cancellation.
 
 Record the build and terminal geometry before doing anything else:
 
-    git rev-parse HEAD | tee "$HEL_LUNA_ARTIFACTS/commit.txt"
-    printf 'outer=%sx%s\n' "$(tput cols)" "$(tput lines)" | tee "$HEL_LUNA_ARTIFACTS/dimensions.txt"
+    git rev-parse HEAD | tee "$MJ_LUNA_ARTIFACTS/commit.txt"
+    printf 'outer=%sx%s\n' "$(tput cols)" "$(tput lines)" | tee "$MJ_LUNA_ARTIFACTS/dimensions.txt"
     tmux -L hel-luna-1 -f /dev/null new-session -d -s hel -x 140 -y 40
     tmux -L hel-luna-1 split-window -h -t hel:0
     tmux -L hel-luna-1 split-window -v -t hel:0.1
-    tmux -L hel-luna-1 send-keys -t hel:0.0 "source '$HEL_LUNA_ARTIFACTS/luna-env.sh'; '$HEL_LUNA_BINARY'" Enter
-    tmux -L hel-luna-1 send-keys -t hel:0.1 "source '$HEL_LUNA_ARTIFACTS/luna-env.sh'; '$HEL_LUNA_BINARY'" Enter
-    tmux -L hel-luna-1 send-keys -t hel:0.2 "source '$HEL_LUNA_ARTIFACTS/luna-env.sh'; watch -n 1 '$HEL_LUNA_BINARY daemon status'" Enter
+    tmux -L hel-luna-1 send-keys -t hel:0.0 "source '$MJ_LUNA_ARTIFACTS/luna-env.sh'; '$MJ_LUNA_BINARY'" Enter
+    tmux -L hel-luna-1 send-keys -t hel:0.1 "source '$MJ_LUNA_ARTIFACTS/luna-env.sh'; '$MJ_LUNA_BINARY'" Enter
+    tmux -L hel-luna-1 send-keys -t hel:0.2 "source '$MJ_LUNA_ARTIFACTS/luna-env.sh'; watch -n 1 '$MJ_LUNA_BINARY daemon status'" Enter
     tmux -L hel-luna-1 attach -t hel
 
 Use the first TUI to accept the proposed workspace name. Attach the second TUI to that workspace. Open the Web dialog with `Ctrl+B`, scan its QR code or enter the six-digit code in a mobile-sized browser, and confirm all three surfaces show the same empty workspace. Record the browser name/version and viewport in `dimensions.txt`.
@@ -78,7 +78,7 @@ Capture bounded console and network summaries for the whole mission. Expected of
 
 ### M6 — daemon death
 
-Record the daemon PID from `hel daemon status`, send it `SIGTERM`, and keep typing in both TUIs while it restarts. Repeat with `SIGKILL` only after confirming the PID's `/proc/<pid>/environ` contains the campaign's exact `HEL_CONFIG_DIR` and `HEL_DATA_DIR`. The browser and both TUIs must reconnect, revisions must not move backward, and one client stopping a session must update the other two.
+Record the daemon PID from `"$MJ_LUNA_BINARY" daemon status`, send it `SIGTERM`, and keep typing in both TUIs while it restarts. Repeat with `SIGKILL` only after confirming the PID's `/proc/<pid>/environ` contains the campaign's exact `MJ_CONFIG_DIR` and `MJ_DATA_DIR`. The browser and both TUIs must reconnect, revisions must not move backward, and one client stopping a session must update the other two.
 
 ### M7 — worker and bridge death
 
@@ -92,11 +92,11 @@ Interrupt checkpoint/close by killing the daemon, restart with either TUI, and r
 
 After each mission, capture both panes with escapes intact and refresh the bounded process/log evidence:
 
-    tmux -L hel-luna-1 capture-pane -p -e -S -2000 -t hel:0.0 > "$HEL_LUNA_ARTIFACTS/tui-1.capture"
-    tmux -L hel-luna-1 capture-pane -p -e -S -2000 -t hel:0.1 > "$HEL_LUNA_ARTIFACTS/tui-2.capture"
-    ps -eo pid=,ppid=,pgid=,sid=,stat=,etimes=,args= > "$HEL_LUNA_ARTIFACTS/process-tree.txt"
-    tail -n 2000 "$HEL_DATA_DIR/daemon.log" > "$HEL_LUNA_ARTIFACTS/daemon.log"
-    find "$HEL_DATA_DIR/logs" -type f -name '*.log' -print -exec tail -n 500 {} \; > "$HEL_LUNA_ARTIFACTS/controller.log"
+    tmux -L hel-luna-1 capture-pane -p -e -S -2000 -t hel:0.0 > "$MJ_LUNA_ARTIFACTS/tui-1.capture"
+    tmux -L hel-luna-1 capture-pane -p -e -S -2000 -t hel:0.1 > "$MJ_LUNA_ARTIFACTS/tui-2.capture"
+    ps -eo pid=,ppid=,pgid=,sid=,stat=,etimes=,args= > "$MJ_LUNA_ARTIFACTS/process-tree.txt"
+    tail -n 2000 "$MJ_DATA_DIR/daemon.log" > "$MJ_LUNA_ARTIFACTS/daemon.log"
+    find "$MJ_DATA_DIR/logs" -type f -name '*.log' -print -exec tail -n 500 {} \; > "$MJ_LUNA_ARTIFACTS/controller.log"
 
 Save any browser screenshot and Playwright trace as `browser-failure.png` and `browser-trace.zip`. Copy or update the lab's `trace.json`; do not put viewer codes, QR URLs, cookie values, profile environments, or other authentication material in notes, traces, screenshots, or terminal captures.
 
@@ -113,34 +113,13 @@ Do not fix a finding during the campaign. First preserve a minimal reproduction 
 
 ## Finish and clean up
 
-Quit both TUIs normally when possible, then stop the daemon. Check integrity before removing anything:
+A Luna lab has no watchdog: it outlives the preparer by design, so nothing stops its daemon or workers until you finish it. Finish every lab you prepare, including one you abandon partway. A lab left running holds a daemon and a worker per session indefinitely.
 
-    "$HEL_LUNA_BINARY" daemon stop
-    sqlite3 "$HEL_DATA_DIR/hel.sqlite3" 'PRAGMA integrity_check; PRAGMA foreign_key_check;' | tee "$HEL_LUNA_ARTIFACTS/integrity.txt"
-    luna_config_dir=$HEL_CONFIG_DIR
-    luna_data_dir=$HEL_DATA_DIR
-    luna_artifacts=$HEL_LUNA_ARTIFACTS
-    unset HEL_CONFIG_DIR HEL_DATA_DIR
-    : > "$luna_artifacts/leaks.txt"
-    for environ in /proc/[0-9]*/environ; do
-        has_config=false
-        has_data=false
-        if ! {
-            while IFS= read -r -d '' entry; do
-                test "$entry" = "HEL_CONFIG_DIR=$luna_config_dir" && has_config=true
-                test "$entry" = "HEL_DATA_DIR=$luna_data_dir" && has_data=true
-            done
-            :
-        } 2>/dev/null < "$environ"; then
-            continue
-        fi
-        test "$has_config" = true || continue
-        test "$has_data" = true || continue
-        owned_pid=${environ#/proc/}
-        printf '%s\n' "${owned_pid%/environ}" >> "$luna_artifacts/leaks.txt"
-    done
+Quit both TUIs normally when possible, then close the tmux server and finish the lab with the command `prepare-luna-lab.py` printed:
+
     tmux -L hel-luna-1 kill-server
+    python3 tests/e2e/finish-luna-lab.py "$MJ_LUNA_ARTIFACTS"
 
-The audit deliberately unsets the lab exports before spawning observer commands so the observers do not match themselves. `leaks.txt` contains numeric PIDs, never `PID/environ` paths. Resolve each PID's process group, verify every member against the exact saved config and data directories, terminate the group, and run the same audit again. Never delete the runtime after killing only individual processes: a surviving group member can recreate it.
+The finisher stops the daemon, then stops every process the lab owns and scans again until none remain. It uses the same ownership rule as the automated labs, so it also stops workers that re-exec with a cleared environment. It writes `integrity.txt` and `leaks.txt` to the artifact directory. It removes the runtime only when `integrity_check` is `ok`, `foreign_key_check` reports nothing, and no owned process survives; otherwise it exits non-zero, names the problem, and keeps the runtime for diagnosis.
 
-`integrity_check` must print `ok`, `foreign_key_check` must print nothing, and the final leak audit must contain no campaign-owned process after the observer commands exit. Only then remove the exact directory printed as `HEL_LUNA_RUNTIME_ROOT`; retain the artifact directory and record whether every mission passed, failed, or was blocked. A no-defect campaign still keeps `notes.md`, captures, bounded logs, process tree, trace, browser evidence when used, and integrity result.
+Retain the artifact directory and record whether every mission passed, failed, or was blocked. A no-defect campaign still keeps `notes.md`, captures, bounded logs, process tree, trace, browser evidence when used, and integrity result.

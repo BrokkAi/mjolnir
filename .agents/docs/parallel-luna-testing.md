@@ -14,7 +14,7 @@ The browser is semantic-first. Playwright MCP exposes the page's accessibility s
 
 Work from the repository root. Build once and install the repository-pinned browser once:
 
-    cargo build -p hel-cli
+    cargo build -p brokk-mjolnir
     npm ci --prefix tests/e2e/web
     npx --prefix tests/e2e/web playwright install chromium
 
@@ -28,9 +28,9 @@ server will find it:
 
 Choose three different integer seeds. Prepare the two isolated labs and the shared lab, recording the exact `artifacts=`, `runtime=`, and `source` lines printed by every command:
 
-    python3 tests/e2e/prepare-luna-lab.py --seed 1101 --hel ./target/x86_64-unknown-linux-musl/debug/hel
-    python3 tests/e2e/prepare-luna-lab.py --seed 1102 --hel ./target/x86_64-unknown-linux-musl/debug/hel
-    python3 tests/e2e/prepare-luna-lab.py --seed 1103 --hel ./target/x86_64-unknown-linux-musl/debug/hel
+    python3 tests/e2e/prepare-luna-lab.py --seed 1101 --hel ./target/debug/mj
+    python3 tests/e2e/prepare-luna-lab.py --seed 1102 --hel ./target/debug/mj
+    python3 tests/e2e/prepare-luna-lab.py --seed 1103 --hel ./target/debug/mj
 
 Do not recover paths with a broad glob after several campaigns exist. Copy each printed path into a role-specific variable in the coordinating shell:
 
@@ -77,7 +77,7 @@ Do not add the optional `vision` capability. Screenshots remain available for ex
 
 `tui-ux` runs mission M4 from the reliability runbook and also explores every pane, dialog, hotkey, narrow size, long transcript, scroll boundary, detach/reattach path, and clipboard failure. It owns its daemon and any nested tmux server it creates. It must distinguish terminal corruption from text merely present in scrollback.
 
-`fault-recovery` runs missions M3 and M6 through M8. Before sending any signal it verifies the exact process environment contains its lab's `HEL_CONFIG_DIR`, `HEL_DATA_DIR`, and `HEL_CHAOS_ISOLATED=1`. It never selects a victim using only a process name or grep match. Use exact `/proc/<pid>/environ` matching for the leak audit and tolerate unreadable unrelated `/proc` entries; do not use a broad self-matching `ps | rg` pipeline.
+`fault-recovery` runs missions M3 and M6 through M8. Before sending any signal it verifies the exact process environment contains its lab's `MJ_CONFIG_DIR`, `MJ_DATA_DIR`, and `MJ_CHAOS_ISOLATED=1`. It never selects a victim using only a process name or grep match. Use exact `/proc/<pid>/environ` matching for the leak audit and tolerate unreadable unrelated `/proc` entries; do not use a broad self-matching `ps | rg` pipeline.
 
 `shared-tui` runs missions M1 and M2. In the normal campaign path it starts TUI 1, creates the workspace, and only then starts TUI 2; this prevents setup mechanics from consuming the lifecycle mission. A separate, explicit concurrency probe may start both selectors against an empty database and accept the same workspace name in both. It creates a phase-unique readiness marker such as `$HEL_PARALLEL_RUN/attempt-2-shared-ready` only after both dashboards show the same workspace and the Web dialog can be opened. It owns lifecycle and cleanup for the shared lab. Before each coordinated race it writes a future Unix timestamp to a phase-unique file such as `$HEL_PARALLEL_RUN/attempt-2-phase-N-go`; both shared workers act when that timestamp arrives and record their observed start time. This makes timing comparable without either agent writing the other's files.
 
@@ -91,7 +91,7 @@ then Enter on the default Create button. The fake profile's quota row can say
 that Codex is unavailable while the configured fake ACP executable remains
 fully launchable; quota health is not harness health.
 
-Launch or relaunch the TUI by running plain `$HEL_LUNA_BINARY` in the prepared
+Launch or relaunch the TUI by running plain `$MJ_LUNA_BINARY` in the prepared
 environment and selecting the existing workspace when necessary. Hel has no
 `dashboard <workspace>` subcommand; treating that invented command's parser
 error as a product failure invalidates the phase.
@@ -147,7 +147,7 @@ If the campaign exposes an ambiguous command, unsafe ownership rule, missing pre
 
 ## Finish and acceptance
 
-Wait for all four `result.md` files before cleanup. Each isolated worker stops its daemon, verifies SQLite integrity and foreign keys, checks for processes retaining its exact `HEL_CONFIG_DIR`, terminates its nested tmux server, and only then removes its exact runtime root. `shared-web` closes its browser and writes the current attempt's exact browser-closed marker; `shared-tui` accepts only that campaign-root marker before performing the shared lab's integrity, leak, and cleanup checks. A worker-local or earlier-attempt marker is never sufficient.
+Wait for all four `result.md` files before cleanup. Each isolated worker terminates its nested tmux server and then runs `python3 tests/e2e/finish-luna-lab.py "$MJ_LUNA_ARTIFACTS"` for its lab, as the runbook's "Finish and clean up" section describes; the finisher stops the daemon and every owned process, checks SQLite integrity and foreign keys, and removes the runtime root only when both are clean. `shared-web` closes its browser and writes the current attempt's exact browser-closed marker; `shared-tui` accepts only that campaign-root marker before finishing the shared lab the same way. A lab whose finisher exits non-zero is a cleanup failure to record, not a lab to delete by hand. A worker-local or earlier-attempt marker is never sufficient.
 
 The coordinator writes `summary.md` with every mission result, finding classification, repair commit when applicable, original-seed rerun result, SQLite result, leak audit, and cleanup outcome. A campaign passes only when all confirmed defects are repaired and rerun, every lab reports `integrity_check` as `ok` with no foreign-key output, no owned processes remain, and no unresolved finding involves data loss, duplicate transcript events, lifecycle failure, authentication leakage, terminal corruption, UI hang, or cross-client divergence.
 
