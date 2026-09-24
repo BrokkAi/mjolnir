@@ -749,6 +749,64 @@ impl SshRefusal {
             }
         }
     }
+
+    /// Log one retry of a command this refusal turned away.
+    ///
+    /// A refused session on a live shared connection is routine while many
+    /// sessions start at once, and the retry nearly always gets in (launch
+    /// finding R3-5 counted 98 in one dashboard log, all answered), so it is
+    /// logged at debug level. A connection closed before authentication can
+    /// mean a master died, so it stays a warning. A command still refused
+    /// after its last attempt is logged by [`Self::log_exhausted`].
+    pub fn log_retry(
+        self,
+        destination: &str,
+        purpose: &str,
+        attempt: usize,
+        delay: Duration,
+        stderr: &str,
+    ) {
+        let delay_ms = delay.as_millis() as u64;
+        match self {
+            Self::SessionLimit => tracing::debug!(
+                destination,
+                purpose,
+                attempt,
+                attempts = SSH_RETRY_ATTEMPTS,
+                delay_ms,
+                stderr,
+                "{}",
+                self.retry_message()
+            ),
+            Self::BeforeAuthentication => tracing::warn!(
+                destination,
+                purpose,
+                attempt,
+                attempts = SSH_RETRY_ATTEMPTS,
+                delay_ms,
+                stderr,
+                "{}",
+                self.retry_message()
+            ),
+        }
+    }
+
+    /// Log a command the server still refused on its last attempt.
+    pub fn log_exhausted(self, destination: &str, purpose: &str, stderr: &str) {
+        tracing::warn!(
+            destination,
+            purpose,
+            attempts = SSH_RETRY_ATTEMPTS,
+            stderr,
+            "{}",
+            match self {
+                Self::BeforeAuthentication =>
+                    "the SSH server closed the connection before authentication on every attempt",
+                Self::SessionLimit =>
+                    "the SSH server refused another session on a shared connection (MaxSessions) on every attempt",
+            }
+        );
+    }
 }
 
 /// Classify a finished `ssh` process that the server turned away. A refused

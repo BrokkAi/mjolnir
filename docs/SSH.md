@@ -66,9 +66,13 @@ on the master it joins, so probes for new sessions cannot push a master past
 the two spare sessions.
 
 If the server refuses a session anyway, the command never started, so Mjolnir
-retries it. The daemon log names this case "refused another session on a
-shared connection (MaxSessions)", which is different from a connection
-closed before authentication (`MaxStartups`).
+retries it, up to three attempts with a growing delay. The dashboard's own
+Git reads for the conversation header and the capacity probe retry the same
+way. A refused session that gets in on a retry is logged only at debug level;
+one still refused on its last attempt is logged as a warning that names
+"refused another session on a shared connection (MaxSessions)". A
+connection closed before authentication (`MaxStartups`) is always a
+warning.
 
 If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
 `-S`, Mjolnir adds no sharing options at all for that target and leaves

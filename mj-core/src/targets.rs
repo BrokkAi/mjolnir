@@ -608,20 +608,13 @@ fn with_ssh_admission(
         let Some(refusal) = refusal else {
             return Ok(output);
         };
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if attempt == SSH_RETRY_ATTEMPTS {
+            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
             return Ok(output);
         }
         let delay = ssh_retry_delay(attempt);
-        tracing::warn!(
-            destination,
-            purpose = command.purpose.as_str(),
-            attempt,
-            attempts = SSH_RETRY_ATTEMPTS,
-            delay_ms = delay.as_millis() as u64,
-            stderr = String::from_utf8_lossy(&output.stderr).trim(),
-            "{}",
-            refusal.retry_message()
-        );
+        refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
         if !sleep_unless_cancelled(delay, is_cancelled) {
             bail!("operation cancelled while {}", command.purpose);
         }

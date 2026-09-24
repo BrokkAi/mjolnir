@@ -625,6 +625,56 @@ async fn capacity_results_are_revalidated_after_output_backpressure() {
     fixture.assert_no_start().await;
 }
 
+/// Launch finding R3-5: while SSH-bare sessions were starting, the capacity
+/// probe was refused a session on a shared connection ("Session open refused
+/// by peer", MaxSessions) and failed without a retry, where the relay and
+/// every executor-run ssh command retry. The command never ran, so it is
+/// retried; a probe that fails for its own reasons is not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capacity_probe_refused_a_shared_session_is_retried() {
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().unwrap();
+    let probe = |name: &str, refusal: &str, exit: u8| {
+        let counter = directory.path().join(name);
+        let script = format!(
+            r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -eq 0 ]; then
+  echo '{refusal}' >&2
+  exit {exit}
+fi
+echo sampled
+"#,
+            counter = counter.display()
+        );
+        let command = CommandSpec::new("sh", ["-c".to_owned(), script])
+            .ssh_destination("ubuntu@203.0.113.9")
+            .purpose("sample deployment host capacity");
+        (command, counter)
+    };
+    let attempts = |counter: &PathBuf| std::fs::read_to_string(counter).unwrap().trim().to_owned();
+
+    let (command, counter) = probe(
+        "refused",
+        "mux_client_request_session: session request failed: Session open refused by peer",
+        255,
+    );
+    let output = execute_resource_command(&command)
+        .await
+        .expect("a refused session is retried, not reported as a failed probe");
+    assert_eq!(output.stdout, b"sampled\n");
+    assert_eq!(attempts(&counter), "2");
+
+    let (command, counter) = probe("broken", "sh: free: not found", 1);
+    execute_resource_command(&command)
+        .await
+        .expect_err("a probe that fails by itself is reported");
+    assert_eq!(attempts(&counter), "1");
+    mj_core::targets::set_ssh_retry_backoff_for_test(None);
+}
+
 #[tokio::test(start_paused = true)]
 async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
