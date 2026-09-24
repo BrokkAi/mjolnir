@@ -1095,14 +1095,16 @@ fn render_combined_themed(
                         transcript_selected,
                     );
                     if prompt_focused {
-                        for (index, command_area) in chat.footer_command_areas() {
-                            if let Some((id, text)) = commands.get(index) {
+                        // Draw the text the chat fitted into each area, not
+                        // the host's hint: the first chord carries the prefix.
+                        for (index, command_area, text) in chat.footer_command_areas() {
+                            if let Some((id, _)) = commands.get(index) {
                                 crate::surface_controls::render_footer_command(
                                     frame,
                                     command_area,
                                     dashboard,
                                     *id,
-                                    text,
+                                    &text,
                                 );
                             }
                         }
@@ -1723,6 +1725,62 @@ mod tests {
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// Launch finding A-12 / R1-2: the composer footer drew the host's
+    /// unlabeled first chord over the "ctrl+b then " label, so the row read
+    /// "g sessionsn g sessions". The label and the chord after it must read
+    /// as one intact hint at every width the campaign captured.
+    #[tokio::test]
+    async fn composer_footer_keeps_the_chord_label_and_first_chord_apart() {
+        let session = running_session();
+        let session_id = session.id.clone();
+        for width in [140_u16, 100, 80] {
+            let mut dashboard = dashboard_with_session(session.clone());
+            dashboard.focus = Focus::Prompt;
+            let fixture = mj_client::session::replacement_session_test_fixture(&session_id, 1);
+            let chat = ActiveChat::open(
+                fixture.stopped,
+                "hel",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity::default(),
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            );
+            let mut chats = BTreeMap::from([(session_id.clone(), chat)]);
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_combined_for_test(
+                        frame,
+                        &mut dashboard,
+                        &mut chats,
+                        &BTreeMap::new(),
+                        false,
+                    );
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let footer = lines.last().unwrap();
+            let chord_group = footer
+                .split(theme::footer_group_separator())
+                .nth(1)
+                .unwrap_or_else(|| panic!("{width}: no chord group in {footer:?}"));
+            let label = chord_group
+                .trim_start()
+                .strip_prefix("ctrl+b then ")
+                .unwrap_or_else(|| panic!("{width}: label overdrawn in {footer:?}"));
+            let first = label.split(theme::footer_separator()).next().unwrap();
+            let chords =
+                crate::render::footer_commands(&dashboard, crate::actions::FooterGroup::Chord);
+            assert!(
+                chords
+                    .iter()
+                    .any(|(_, text)| text.as_str() == first.trim_end()),
+                "{width}: {first:?} is not a whole chord in {footer:?}"
+            );
+        }
+    }
 
     /// Launch campaign finding A-13: in an empty pane the "Pin selected
     /// here" hint on the first inside row was drawn over the splash at 79

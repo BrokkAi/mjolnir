@@ -700,7 +700,7 @@ pub struct ChatState {
     /// selection engine can hit-test the screen the user is looking at.
     pub(super) frame_surfaces: FrameSurfaces,
     /// Visible host shortcuts, indexed through chords followed by function keys.
-    footer_command_areas: RefCell<Vec<(usize, Rect)>>,
+    footer_command_areas: RefCell<Vec<(usize, Rect, String)>>,
     /// The row space transcript selections are measured in, re-pinned by every
     /// frame the engine is not holding a transcript selection through.
     transcript_selection: Option<TranscriptSelectionSpace>,
