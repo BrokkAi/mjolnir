@@ -44,7 +44,7 @@ chrono.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 libc.workspace = true
-memchr = "2"
+memchr.workspace = true
 regex = "1"
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

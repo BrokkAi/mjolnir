@@ -462,12 +462,15 @@ pub(super) fn worker_binary_prerequisite_for_current(
         if !is_file(&path) {
             bail!("MJ_WORKER_BINARY is not a file: {}", path.display());
         }
-        if matches_build(&path) {
-            return Ok(WorkerBinaryAvailability::Local {
-                path,
-                source: "MJ_WORKER_BINARY".into(),
-            });
-        }
+        // An explicit override names the one worker to use. Installing a
+        // different one instead would hide the mismatch.
+        verify_worker_build(&path).context(
+            "MJ_WORKER_BINARY does not match the running mj; rebuild it from the same commit or unset MJ_WORKER_BINARY",
+        )?;
+        return Ok(WorkerBinaryAvailability::Local {
+            path,
+            source: "MJ_WORKER_BINARY".into(),
+        });
     }
     // A rebuilt or renamed checkout leaves a running controller pointing at a
     // path that no longer holds a binary. Every lookup derived from that path
