@@ -1504,3 +1504,40 @@ fn awaiting_input_is_a_handoff_instead_of_an_error() {
         PromptCompletion::Error
     );
 }
+
+/// Launch finding R2-8: the dashboard titled a session with the full project
+/// path and its trailing slash ("/tmp/lab/project/ via fake"), while `mj new`
+/// titled it "project via fake". Both now use this.
+#[test]
+fn a_new_session_is_titled_by_its_directory_name_and_profile() {
+    assert_eq!(
+        default_session_title(Some(Path::new("/tmp/lab/project/")), "fixture", "fake"),
+        "project via fake"
+    );
+    assert_eq!(
+        default_session_title(None, "fixture", "fake"),
+        "fixture via fake"
+    );
+}
+
+/// R2-8: until the harness names a dashboard session, its row showed the hex
+/// id. It shows the title the session was created with, as the API has since
+/// F-12; a rename or a harness title still wins.
+#[test]
+fn a_session_nobody_named_is_listed_by_the_title_it_was_created_with() {
+    let mut session = sample_session();
+    session.title = "project via fake".into();
+    session.acp_session_title = None;
+    session.session_title_override = None;
+    assert_eq!(session.listed_title(), "project via fake");
+
+    session.acp_session_title = Some("Harness name".into());
+    assert_eq!(session.listed_title(), "Harness name");
+
+    session.session_title_override = Some("My name".into());
+    assert_eq!(session.listed_title(), "My name");
+
+    // A name that happens to equal the id is still a name.
+    session.session_title_override = Some(session.id.clone());
+    assert_eq!(session.listed_title(), session.id);
+}

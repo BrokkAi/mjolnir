@@ -1301,12 +1301,10 @@ pub(crate) fn spawn_dashboard_create_session(
             if cancelled.load(Ordering::Acquire) {
                 bail!("operation cancelled");
             }
-            let title = format!(
-                "{} via {profile_id}",
-                project_directory
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| bundle_id.clone())
+            let title = mj_core::state::default_session_title(
+                project_directory.as_deref(),
+                &bundle_id,
+                &profile_id,
             );
             let registered = mj_core::runtime::block_on(async {
                 daemon::connect_or_start()

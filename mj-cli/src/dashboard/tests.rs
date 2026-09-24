@@ -564,7 +564,9 @@ fn short_bordered_minimized_list_can_be_selected_and_copied() {
 
     let copied = draw_with_selection(&mut terminal, &mut dashboard, &selection)
         .expect("tiny minimized list selection extracts text");
-    assert!(copied.contains("session"), "copied list text: {copied:?}");
+    // The fixture's sessions have no harness title or rename, so their rows
+    // show the titles they were created with (launch finding R2-8).
+    assert!(copied.contains("First"), "copied list text: {copied:?}");
 }
 
 /// A press is held back until the button comes up, then replayed to the
@@ -575,7 +577,7 @@ fn click_gestures_reach_the_view_as_presses_and_still_double_click() {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     let mut selection = SelectionState::new();
     draw_with_selection(&mut terminal, &mut dashboard, &selection);
-    let row = row_containing(&terminal, "session-2");
+    let row = row_containing(&terminal, "Second");
     let column = dashboard
         .frame_surfaces()
         .surface(SurfaceId::DashboardPane(0))
