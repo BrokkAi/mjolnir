@@ -4,6 +4,10 @@ use super::*;
 /// reported back.
 pub(super) const ARCHIVE_RESTORE_IN_FLIGHT: &str = "Restore already started.";
 
+/// The answer to a second Resume press while the first press's check is
+/// still running.
+const RESUME_IN_FLIGHT: &str = "Resume already started.";
+
 impl DashboardState {
     pub(in crate::wizards) fn advance_resume_wizard(
         &mut self,
@@ -176,6 +180,16 @@ impl DashboardState {
             self.cancel_modal();
             return action;
         }
+        // The wizard stays open while the attached directories and the
+        // checkpoint's repositories are checked, so Resume can be pressed
+        // again before the check reports back. A second check would race
+        // the first to open the same dialog or start the same launch.
+        if self.resume_preflight_in_flight() {
+            self.notices.set(RESUME_IN_FLIGHT);
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
+        }
+        self.resume_preflight_generation = Some(self.session_preflight_generation());
         let launch = DashboardAction::ResumeSession {
             workspace_id: wizard.workspace_id.clone(),
             session_id: wizard.session_id.clone(),
@@ -221,6 +235,25 @@ impl DashboardState {
     pub fn finish_archive_restore(&mut self, launch: &DashboardAction) {
         if let DashboardAction::RestoreArchivedSession { wiki_id, .. } = launch {
             self.archive_restores_in_flight.remove(wiki_id);
+        }
+    }
+
+    /// Whether a live resume's check has been sent and has not reported
+    /// back.
+    pub(crate) fn resume_preflight_in_flight(&self) -> bool {
+        self.resume_preflight_generation == Some(self.session_preflight_generation())
+    }
+
+    /// Ends a live resume's check that has failed, so Resume can start
+    /// another, and moves the generation on so that any other result sent
+    /// under the same generation is dropped. The other results end the
+    /// check the same way: Ready closes the wizard, and the conversion and
+    /// origin dialogs move the generation on when they open. Does nothing
+    /// when no resume check is in flight, so a new-session check that shares
+    /// the failure path is left alone.
+    pub fn end_resume_preflight(&mut self) {
+        if self.resume_preflight_in_flight() {
+            self.invalidate_session_preflight();
         }
     }
 
@@ -324,6 +357,7 @@ impl DashboardState {
             }
             _ => {}
         }
+        self.end_resume_preflight();
     }
 
     pub fn finish_session_mount_preflight(&mut self) {

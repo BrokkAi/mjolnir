@@ -2996,6 +2996,262 @@ fn a_failed_restore_reports_the_failure_and_retries_it_once() {
     assert!(restores(&again, "wiki-1"), "{again:?}");
 }
 
+fn cache_mount() -> AdditionalMount {
+    AdditionalMount {
+        source: "/opt/cache".into(),
+        destination: "/mnt/cache".into(),
+        access: MountAccess::Cow,
+    }
+}
+
+/// Walks the resume wizard for the stopped session to its review and presses
+/// Resume.
+fn press_resume(dashboard: &mut DashboardState) -> DashboardAction {
+    open_resume_wizard(dashboard);
+    ready_key(dashboard, key(KeyCode::Enter));
+    ready_key(dashboard, key(KeyCode::Enter));
+    assert_eq!(resume_wizard(dashboard).step, WizardStep::Review);
+    ready_key(dashboard, key(KeyCode::Enter))
+}
+
+/// The resume launch inside the check that Resume sends.
+fn resume_launch(check: &DashboardAction) -> DashboardAction {
+    match check {
+        DashboardAction::ValidateSessionMounts { launch, .. } => resume_launch(launch),
+        DashboardAction::PreflightResumeRepositories { launch } => {
+            assert!(
+                matches!(launch.as_ref(), DashboardAction::ResumeSession { .. }),
+                "{launch:?}"
+            );
+            launch.as_ref().clone()
+        }
+        other => panic!("expected the resume check, got {other:?}"),
+    }
+}
+
+fn resume_receipt() -> mj_core::state::ResumeRepositorySourceReceipt {
+    mj_core::state::ResumeRepositorySourceReceipt {
+        session_id: "session-1".into(),
+        bundle_id: "hel".into(),
+        checkpoint_sha256: "a".repeat(64),
+        repositories: Vec::new(),
+    }
+}
+
+/// What the dashboard loop does with a result of the resume check
+/// (`SessionMountValidation` and `ResumeRepositoryPreflight` in
+/// mj-cli/src/dashboard/io.rs): it applies the result while the generation
+/// the check was sent under is current, and drops it otherwise. Answers
+/// whether the result was applied.
+fn deliver_resume_check_result(
+    dashboard: &mut DashboardState,
+    generation: u64,
+    apply: impl FnOnce(&mut DashboardState),
+) -> bool {
+    if generation != dashboard.session_preflight_generation() {
+        return false;
+    }
+    apply(dashboard);
+    true
+}
+
+/// Resume on the review stays open while the check runs. A second press
+/// used to send a second check beside the first, with or without attached
+/// directories to check first.
+#[test]
+fn pressing_resume_twice_sends_one_check() {
+    for mounts in [Vec::new(), vec![cache_mount()]] {
+        let with_mounts = !mounts.is_empty();
+        let mut session = stopped_session();
+        session.additional_mounts = mounts;
+        let mut dashboard = dashboard_with_session(session);
+
+        let first = press_resume(&mut dashboard);
+        if with_mounts {
+            assert!(
+                matches!(first, DashboardAction::ValidateSessionMounts { .. }),
+                "{first:?}"
+            );
+        } else {
+            assert!(
+                matches!(first, DashboardAction::PreflightResumeRepositories { .. }),
+                "{first:?}"
+            );
+        }
+
+        assert_eq!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::None,
+            "with mounts: {with_mounts}"
+        );
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("Resume already started.")
+        );
+        assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    }
+}
+
+/// Once the check has reported back, another result sent under the same
+/// generation is dropped. A late Ready used to close whatever the first
+/// result had opened and start the launch anyway.
+#[test]
+fn a_late_second_ready_is_dropped() {
+    #[derive(Debug, Clone, Copy)]
+    enum First {
+        Ready,
+        RawConversion,
+        MovedOrigin,
+        AttachmentFailure,
+    }
+    for first in [
+        First::Ready,
+        First::RawConversion,
+        First::MovedOrigin,
+        First::AttachmentFailure,
+    ] {
+        let mut session = stopped_session();
+        if matches!(first, First::AttachmentFailure) {
+            session.additional_mounts = vec![cache_mount()];
+        }
+        let mut dashboard = dashboard_with_session(session);
+        let launch = resume_launch(&press_resume(&mut dashboard));
+        // The dashboard loop sends the check under the generation current
+        // when it receives the action.
+        let generation = dashboard.session_preflight_generation();
+
+        let applied =
+            deliver_resume_check_result(&mut dashboard, generation, |dashboard| match first {
+                First::Ready => dashboard.finish_resume_repository_preflight(),
+                First::RawConversion => dashboard.show_raw_conversion_confirmation(
+                    launch.clone(),
+                    resume_receipt(),
+                    raw_conversion_preview(),
+                ),
+                First::MovedOrigin => dashboard.show_repository_origin_dialog(
+                    "session-1".into(),
+                    "hel".into(),
+                    "b".repeat(40),
+                    "https://github.com/example/old.git".into(),
+                    "https://github.com/example/new.git".into(),
+                    launch.clone(),
+                ),
+                First::AttachmentFailure => dashboard.apply_session_mount_preflight_failure(
+                    "/opt/cache",
+                    "source path /opt/cache does not exist or is not a directory".into(),
+                ),
+            });
+        assert!(applied, "{first:?}");
+        let after_first = dashboard.mode.clone();
+
+        let late = deliver_resume_check_result(&mut dashboard, generation, |dashboard| {
+            dashboard.finish_resume_repository_preflight()
+        });
+        assert!(!late, "{first:?}: the late Ready was applied");
+        assert_eq!(dashboard.mode, after_first, "{first:?}");
+    }
+}
+
+/// A second raw-conversion result for the same check is dropped instead of
+/// opening a second confirmation over the first. Cancel on the one
+/// confirmation returns to the wizard, where Resume starts a new check.
+#[test]
+fn a_late_second_raw_conversion_result_does_not_stack_a_dialog() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let launch = resume_launch(&press_resume(&mut dashboard));
+    let generation = dashboard.session_preflight_generation();
+    let show = |dashboard: &mut DashboardState| {
+        dashboard.show_raw_conversion_confirmation(
+            launch.clone(),
+            resume_receipt(),
+            raw_conversion_preview(),
+        )
+    };
+
+    assert!(deliver_resume_check_result(
+        &mut dashboard,
+        generation,
+        show
+    ));
+    assert!(!deliver_resume_check_result(
+        &mut dashboard,
+        generation,
+        show
+    ));
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!(
+            "expected the conversion confirmation, got {:?}",
+            dashboard.mode
+        );
+    };
+    let crate::dialogs::Confirmation::ConvertRawCheckout { previous, .. } = &dialog.confirmation
+    else {
+        panic!("expected the conversion confirmation, got {dialog:?}");
+    };
+    assert!(
+        matches!(previous.as_ref(), Mode::Resume(_)),
+        "the confirmation sits over another dialog: {previous:?}"
+    );
+
+    // Cancel is focused first.
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    let again = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(again, DashboardAction::PreflightResumeRepositories { .. }),
+        "{again:?}"
+    );
+}
+
+/// A failed check ends the hold, so Resume on the same review sends a new
+/// check. Closing the wizard ends it too: its check's result is dropped and
+/// a reopened wizard's Resume is not refused.
+#[test]
+fn resume_starts_a_new_check_once_the_first_fails_or_the_wizard_closes() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    press_resume(&mut dashboard);
+    let generation = dashboard.session_preflight_generation();
+    // What the dashboard loop does when the repository check fails.
+    assert!(deliver_resume_check_result(
+        &mut dashboard,
+        generation,
+        |dashboard| {
+            dashboard.set_notice("Could not check checkpoint repositories: offline");
+            dashboard.end_resume_preflight();
+        }
+    ));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    let retry = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(retry, DashboardAction::PreflightResumeRepositories { .. }),
+        "{retry:?}"
+    );
+
+    let generation = dashboard.session_preflight_generation();
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "{:?}",
+        dashboard.mode
+    );
+    assert!(!deliver_resume_check_result(
+        &mut dashboard,
+        generation,
+        |dashboard| dashboard.finish_resume_repository_preflight()
+    ));
+    let reopened = press_resume(&mut dashboard);
+    assert!(
+        matches!(
+            reopened,
+            DashboardAction::PreflightResumeRepositories { .. }
+        ),
+        "{reopened:?}"
+    );
+}
+
 #[test]
 fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     let mut dashboard = dashboard_with_session(stopped_session());

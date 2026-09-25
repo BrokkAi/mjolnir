@@ -925,6 +925,10 @@ impl DashboardState {
         configured_origin: String,
         launch: DashboardAction,
     ) {
+        // This dialog is a result of the resume check. Moving the generation
+        // on ends the check, so any other result sent under it is dropped
+        // instead of replacing this dialog or launching behind it.
+        self.invalidate_session_preflight();
         self.mode = Mode::RepositoryOrigin(RepositoryOriginDialog {
             session_id,
             repository_id,
@@ -1133,6 +1137,10 @@ impl DashboardState {
         receipt: mj_core::state::ResumeRepositorySourceReceipt,
         preview: mj_core::state::RawConversionPreview,
     ) {
+        // This confirmation is a result of the resume check. Moving the
+        // generation on ends the check, so any other result sent under it is
+        // dropped instead of opening a second confirmation over this one.
+        self.invalidate_session_preflight();
         let previous = Box::new(self.mode.clone());
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConvertRawCheckout {
             launch: Box::new(launch),

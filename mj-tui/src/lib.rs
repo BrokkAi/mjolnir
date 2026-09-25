@@ -942,6 +942,12 @@ pub struct DashboardState {
     /// the restore, so this, not the wizard, is what keeps a second press or
     /// a reopened wizard from restoring the same transcript twice.
     pub(crate) archive_restores_in_flight: BTreeSet<String>,
+    /// The `session_preflight_generation` a live resume's check was sent
+    /// under. The check is in flight while that generation is current: every
+    /// result of the check, and closing the wizard, moves the generation on.
+    /// A restore's hold is the set above instead, because the restore wizard
+    /// closes, and moves the generation on, as soon as it sends the restore.
+    pub(crate) resume_preflight_generation: Option<u64>,
     pub(crate) notices: Notices,
     /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
@@ -1116,6 +1122,7 @@ impl DashboardState {
             session_preflight_generation: 0,
             next_move_preparation_request_id: 0,
             archive_restores_in_flight: BTreeSet::new(),
+            resume_preflight_generation: None,
             notices: Notices::default(),
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),

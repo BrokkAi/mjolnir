@@ -1321,6 +1321,7 @@ impl DashboardContext {
                                 self.dashboard.set_notice(format!(
                                     "Could not check checkpoint repositories: {error:#}"
                                 ));
+                                self.dashboard.end_resume_preflight();
                             }
                         }
                         launch => {
@@ -1341,6 +1342,7 @@ impl DashboardContext {
                         self.dashboard
                             .apply_remote_session_preflight(generation, Err(error.clone()));
                         self.dashboard.set_notice(error);
+                        self.dashboard.end_resume_preflight();
                     }
                 }
             }
@@ -1408,6 +1410,7 @@ impl DashboardContext {
                             self.dashboard.set_notice(format!(
                                 "Could not check checkpoint repositories: {error}"
                             ));
+                            self.dashboard.end_resume_preflight();
                         }
                     }
                 }
