@@ -44,48 +44,199 @@ fn evidence_ordinal(view: &ManagedSessionView) -> Option<u64> {
         .map(|item| item.latest_content_event_ordinal.unwrap_or(item.position))
 }
 
+/// Workers from this protocol on record turns the harness ends on its own and
+/// admit continuation by [`mj_core::activity::driver_present`] instead of raw
+/// background counts, and without a plan-mode exclusion.
+const ENDED_TURN_PROTOCOL: u32 = 23;
+
+fn current_rules(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
+    s.operational
+        .relay_protocol_version
+        .is_some_and(|v| v >= ENDED_TURN_PROTOCOL)
+}
+
+/// The turn a check is about: the last prompted turn, or one the harness
+/// started and ended on its own.
+pub(super) struct EndedTurn<'a> {
+    /// The id `continuation.completed_command_id` carries for this turn.
+    pub key: &'a str,
+    pub start_position: Option<u64>,
+    pub completed_ordinal: u64,
+    pub completed_at_ms: i64,
+    /// How a prompted turn ended; a self-started turn has no outcome.
+    pub outcome: Option<&'a TurnOutcomeKind>,
+    pub diagnostic: Option<&'a mj_core::diagnostic::TurnDiagnostic>,
+}
+
+impl EndedTurn<'_> {
+    fn self_started(&self) -> bool {
+        self.outcome.is_none()
+    }
+    fn finished(&self) -> bool {
+        self.outcome.is_none_or(|outcome| {
+            matches!(outcome, TurnOutcomeKind::Completed { stop_reason }
+                if classify_prompt_completion(stop_reason) == PromptCompletion::Finished)
+        })
+    }
+    fn quota_candidate(&self) -> bool {
+        self.outcome.is_none_or(|outcome| {
+            matches!(outcome, TurnOutcomeKind::Completed { stop_reason }
+                if !mj_core::relay::is_capacity_stop_reason(stop_reason)
+                && !matches!(classify_prompt_completion(stop_reason), PromptCompletion::Cancelled))
+        })
+    }
+}
+
+pub(super) fn ended_turn(s: &mj_core::state::ManagedSessionSnapshot) -> Option<EndedTurn<'_>> {
+    let c = &s.operational.continuation;
+    if current_rules(s)
+        && let Some(turn) = &c.harness_turn
+        && c.completed_command_id.as_deref() == Some(turn.id.as_str())
+    {
+        return Some(EndedTurn {
+            key: &turn.id,
+            start_position: Some(turn.start_position),
+            completed_ordinal: turn.settled_ordinal,
+            completed_at_ms: turn.settled_at_ms,
+            outcome: None,
+            diagnostic: None,
+        });
+    }
+    s.materialized
+        .last_turn_outcome
+        .as_ref()
+        .map(|t| EndedTurn {
+            key: &t.command_id,
+            start_position: t.turn_start_position,
+            completed_ordinal: t.completed_ordinal,
+            completed_at_ms: t.completed_at_ms,
+            outcome: Some(&t.outcome),
+            diagnostic: t.diagnostic.as_ref(),
+        })
+}
+
+/// What older workers still require before automatic work, and so what their
+/// sessions are still held to.
+fn legacy_quiet(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
+    mj_core::activity::is_quiet(&s.operational.facts())
+        && s.operational.background_commands.is_empty()
+        && !s.operational.goal.active()
+}
+
+/// Everything ordinary continuation needs except that nothing else is about
+/// to move the session on.
+fn continuation_allowed(view: &ManagedSessionView) -> bool {
+    let Some(s) = &view.snapshot else {
+        return false;
+    };
+    view.connected
+        && s.operational
+            .relay_protocol_version
+            .is_some_and(|v| v >= 18)
+        && !s.operational.goal.budget_limited()
+        && s.operational
+            .continuation
+            .quota_recovery
+            .as_ref()
+            .is_none_or(|r| r.submitted)
+        && s.operational.continuation.eligible()
+        && s.materialized.pending_elicitations.is_empty()
+        && ended_turn(s).is_some_and(|t| t.finished())
+}
+
+/// A background command, agent or goal will move the session on, so an
+/// ordinary nudge waits until it stops.
+fn driven(view: &ManagedSessionView) -> bool {
+    view.snapshot.as_ref().is_some_and(|s| {
+        current_rules(s) && mj_core::activity::driver_present(&s.operational.facts())
+    })
+}
+
+/// What [`driven`] saw, for the decision log.
+fn driver_name(view: &ManagedSessionView) -> &'static str {
+    let Some(s) = &view.snapshot else {
+        return "unknown";
+    };
+    match mj_core::activity::classify(&s.operational.facts()) {
+        ActivityState::Background { .. } => "background",
+        ActivityState::Goal => "goal",
+        ActivityState::Retry => "retry",
+        _ => "turn",
+    }
+}
+
 fn eligible(view: &ManagedSessionView) -> bool {
     let Some(s) = &view.snapshot else {
         return false;
     };
-    view.connected && s.operational.relay_protocol_version.is_some_and(|v| v >= 18)
-        && s.operational.continuation.quota_recovery.as_ref().is_none_or(|r| r.submitted)
-        && s.operational.continuation.eligible()
-        && mj_core::activity::is_quiet(&s.operational.facts())
-        && s.operational.background_commands.is_empty()
-        && !s.operational.goal.active()
-        && s.materialized.pending_elicitations.is_empty()
-        && s.materialized.last_turn_outcome.as_ref().is_some_and(|t| matches!(&t.outcome,
-            TurnOutcomeKind::Completed { stop_reason } if classify_prompt_completion(stop_reason) == PromptCompletion::Finished))
+    continuation_allowed(view)
+        && if current_rules(s) {
+            let facts = s.operational.facts();
+            mj_core::activity::can_submit(&facts) && !mj_core::activity::driver_present(&facts)
+        } else {
+            legacy_quiet(s)
+        }
 }
 
-fn quota_eligible(view: &ManagedSessionView) -> bool {
+/// Everything a quota recovery needs except the chance to submit a prompt.
+fn quota_allowed(view: &ManagedSessionView) -> bool {
     let Some(s) = &view.snapshot else {
         return false;
     };
     let c = &s.operational.continuation;
-    view.connected && s.operational.relay_protocol_version.is_some_and(|v| v >= 20)
-        && !c.quota_suppressed && c.user_command_id.is_some() && c.completed_command_id.is_some()
-        && mj_core::activity::is_quiet(&s.operational.facts())
-        && s.operational.background_commands.is_empty() && !s.operational.goal.active()
+    view.connected
+        && s.operational
+            .relay_protocol_version
+            .is_some_and(|v| v >= 20)
+        && !c.quota_suppressed
+        && c.user_command_id.is_some()
+        && !s.operational.goal.budget_limited()
         && s.materialized.pending_elicitations.is_empty()
-        && s.materialized.last_turn_outcome.as_ref().is_some_and(|t| {
-            c.completed_command_id.as_ref() == Some(&t.command_id)
-                && matches!(&t.outcome, TurnOutcomeKind::Completed { stop_reason }
-                    if !mj_core::relay::is_capacity_stop_reason(stop_reason)
-                    && !matches!(classify_prompt_completion(stop_reason), PromptCompletion::Cancelled))
+        && ended_turn(s).is_some_and(|t| {
+            c.completed_command_id.as_deref() == Some(t.key) && t.quota_candidate()
+        })
+}
+
+/// A quota recovery may be recorded: a turn, background work or a goal does
+/// not stop that, since none of them gets past the limit.
+fn quota_schedulable(view: &ManagedSessionView) -> bool {
+    quota_allowed(view)
+        && view
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| current_rules(s) || legacy_quiet(s))
+}
+
+/// A due quota recovery may be submitted now.
+fn quota_resumable(view: &ManagedSessionView) -> bool {
+    quota_allowed(view)
+        && view.snapshot.as_ref().is_some_and(|s| {
+            if current_rules(s) {
+                mj_core::activity::can_submit(&s.operational.facts())
+            } else {
+                legacy_quiet(s)
+            }
         })
 }
 
 fn check_eligible(view: &ManagedSessionView) -> bool {
-    eligible(view)
-        || (quota_eligible(view)
-            && view.snapshot.as_ref().is_some_and(|s| {
-                let c = &s.operational.continuation;
-                c.quota_recovery.as_ref().is_none_or(|r| {
-                    c.completed_command_id.as_ref() != Some(&r.completed_command_id)
-                })
-            }))
+    let Some(s) = &view.snapshot else {
+        return false;
+    };
+    // Current workers are checked whatever else is running; the answer is
+    // acted on only when it can be.
+    let ordinary = if current_rules(s) {
+        continuation_allowed(view)
+    } else {
+        eligible(view)
+    };
+    ordinary
+        || (quota_schedulable(view) && {
+            let c = &s.operational.continuation;
+            c.quota_recovery
+                .as_ref()
+                .is_none_or(|r| c.completed_command_id.as_ref() != Some(&r.completed_command_id))
+        })
 }
 
 fn allowed(state: &RuntimeState, session: &str) -> bool {
@@ -221,6 +372,9 @@ fn spawn_in(
     let (tx, rx) = coalesced_update_channel();
     let task = tokio::spawn(async move {
         let mut seen = BTreeMap::<String, Option<String>>::new();
+        // Ended turns whose continuation waits for a background command,
+        // agent or goal to stop moving the session on.
+        let mut deferred = BTreeMap::<String, String>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
@@ -237,13 +391,20 @@ fn spawn_in(
                     let id = update.session_id;
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
-                    let completed = view.snapshot.as_ref().and_then(|s| {
-                        s.materialized
-                            .last_turn_outcome
-                            .as_ref()
-                            .map(|t| t.command_id.clone())
-                    });
+                    let completed = view
+                        .snapshot
+                        .as_ref()
+                        .and_then(ended_turn)
+                        .map(|t| t.key.to_owned());
+                    let self_started = view
+                        .snapshot
+                        .as_ref()
+                        .and_then(ended_turn)
+                        .is_some_and(|t| t.self_started());
                     let previous = seen.insert(id.clone(), completed.clone());
+                    if deferred.get(&id).is_some_and(|key| Some(key) != completed.as_ref()) {
+                        deferred.remove(&id);
+                    }
                     if let Some(p) = pending.get_mut(&id) {
                         let unchanged = check_eligible(&view)
                             && (environment.allowed)(&id)
@@ -270,7 +431,11 @@ fn spawn_in(
                         // Its atomic frontier guard still lets new input win.
                     }
                     let new_completion = previous.is_some_and(|old| old != completed) && completed.is_some();
-                    if new_completion && check_eligible(&view) && (environment.allowed)(&id) {
+                    // Whatever held a deferred continuation has stopped: ask
+                    // again, since the conversation may have moved on.
+                    let released = !new_completion && deferred.contains_key(&id) && eligible(&view);
+                    if (new_completion || released) && check_eligible(&view) && (environment.allowed)(&id) {
+                        deferred.remove(&id);
                         let Ok(upgrade_work) = crate::upgrade::activity("automatic continuation") else {
                             publish(&tx, &environment, id, view, false);
                             continue;
@@ -282,6 +447,12 @@ fn spawn_in(
                         let diagnostic = environment.log.as_ref().map(|log| log.start(&id, "continuation",
                             "Is the turn blocked by subscription quota, or does authorized unfinished work remain?",
                             "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
+                        if let Some(diagnostic) = &diagnostic {
+                            diagnostic.update(None, serde_json::json!({
+                                "turn": if self_started { "self-started" } else { "prompted" },
+                                "trigger": if released { "driver-stopped" } else { "turn-ended" },
+                            }));
+                        }
                         let request_diagnostic = diagnostic.clone();
                         let classify = classifier.clone();
                         let task_work = upgrade_work.clone();
@@ -291,7 +462,7 @@ fn spawn_in(
                                 let evidence_work = _task_work.clone();
                                 let evidence = tokio::task::spawn_blocking(move || {
                                     let _evidence_work = evidence_work;
-                                    let quota_message = quota::message(&snapshot.materialized);
+                                    let quota_message = quota::message(&snapshot);
                                     let materialized = snapshot.materialized;
                                     let ordinary = if snapshot.window.omitted_items > 0 {
                                         crate::database::load_continuation_evidence(
@@ -356,7 +527,7 @@ fn spawn_in(
                             let result = match result {
                                 Outcome::QuotaPrepared(result) => {
                                     match result {
-                                        Ok(recovery) if (environment.allowed)(&id) && quota_eligible(&p.view) => {
+                                        Ok(recovery) if (environment.allowed)(&id) && quota_schedulable(&p.view) => {
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
                                             let task_work = p._upgrade_work.clone();
                                             let abort = jobs.spawn(async move {
@@ -404,7 +575,7 @@ fn spawn_in(
                                 }
                             }
                             if result.as_ref().is_ok_and(|v| v.is_quota_limit())
-                                && quota_eligible(&p.view) && (environment.allowed)(&id) {
+                                && quota_schedulable(&p.view) && (environment.allowed)(&id) {
                                 let env = environment.clone();
                                 let session = id.clone();
                                 let view = p.view.clone();
@@ -455,11 +626,8 @@ fn spawn_in(
                                         );
                                         let command_id = format!(
                                             "auto-continue-{}-{}",
-                                            snapshot
-                                                .materialized
-                                                .last_turn_outcome
-                                                .as_ref()
-                                                .unwrap()
+                                            ended_turn(snapshot)
+                                                .context("missing ended turn")?
                                                 .completed_ordinal,
                                             c.attempts + 1
                                         );
@@ -499,6 +667,17 @@ fn spawn_in(
                                     (submit_id, epoch, Outcome::Submitted(outcome))
                                 });
                                 pending.insert(id, Pending { abort, submitting: true, ..p });
+                            } else if result.as_ref().is_ok_and(|v| v.should_continue())
+                                && continuation_allowed(&p.view)
+                                && driven(&p.view)
+                                && (environment.allowed)(&id)
+                            {
+                                if let Some(diagnostic) = &p.diagnostic {
+                                    diagnostic.update(None, serde_json::json!({"deferred_by": driver_name(&p.view)}));
+                                    diagnostic.finish("deferred", "Something else is still moving the session on. Mj will check again once it stops.");
+                                }
+                                deferred.insert(id.clone(), p.completed.clone());
+                                publish(&tx, &environment, id, p.view, false);
                             } else {
                                 if let Some(diagnostic) = &p.diagnostic {
                                     let (status, action) = match &result {
@@ -546,7 +725,7 @@ fn spawn_in(
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
                         let clear = !(environment.allowed)(id) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
-                        if !clear && (!quota_eligible(view) || recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis())) { continue; }
+                        if !clear && (!quota_resumable(view) || recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis())) { continue; }
                         if !view.connected { continue; }
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
@@ -564,6 +743,7 @@ fn spawn_in(
                     }
                     let live = (environment.live)();
                     seen.retain(|id, _| live.contains(id));
+                    deferred.retain(|id, _| live.contains(id));
                     latest.retain(|id, _| live.contains(id));
                     retry_after.retain(|id, _| live.contains(id));
                 }

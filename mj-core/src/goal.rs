@@ -128,6 +128,28 @@ impl GoalState {
             .as_ref()
             .is_some_and(|e| e.status == "running")
     }
+    /// Why a `limited` goal stopped, as the adapter reports it: `usage` for
+    /// the account usage limit, `budget` for the goal's own token budget.
+    pub fn limit_reason(&self) -> Option<&str> {
+        self.snapshot
+            .as_ref()
+            .filter(|goal| goal.status == "limited")
+            .and_then(|goal| goal.details.get("limitReason"))
+            .and_then(Value::as_str)
+    }
+    /// The goal spent its own budget, so only the user may continue it.
+    pub fn budget_limited(&self) -> bool {
+        self.limit_reason() == Some("budget")
+    }
+    /// The account usage limit stopped the goal, and the adapter can restart
+    /// it with an identity check once the limit resets.
+    pub fn resumable_after_quota(&self) -> bool {
+        self.limit_reason() == Some("usage")
+            && self.supports(GoalControlAction::Resume)
+            && self.snapshot.as_ref().is_some_and(|goal| {
+                goal.created_at.is_some() && goal.control_method.as_deref() == Some("_session/goal")
+            })
+    }
     pub fn synchronized(&self) -> bool {
         self.known
             && self.execution.is_some()

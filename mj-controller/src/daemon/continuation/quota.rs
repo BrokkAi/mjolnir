@@ -80,16 +80,17 @@ pub(super) fn deadline(
     (reset_at_ms, retry_at_ms, notice)
 }
 
-pub(super) fn message(materialized: &mj_core::state::MaterializedSession) -> Option<String> {
+pub(super) fn message(snapshot: &mj_core::state::ManagedSessionSnapshot) -> Option<String> {
     use mj_core::transcript::{TranscriptBody, materialized_chunks_text};
-    let turn = materialized.last_turn_outcome.as_ref()?;
-    let reply = materialized
+    let turn = ended_turn(snapshot)?;
+    let reply = snapshot
+        .materialized
         .transcript
         .iter()
         .rev()
         .filter(|item| item.position < turn.completed_ordinal)
         .take_while(|item| {
-            turn.turn_start_position
+            turn.start_position
                 .is_none_or(|start| item.position >= start)
         })
         .find_map(|item| match &item.body {
@@ -100,7 +101,7 @@ pub(super) fn message(materialized: &mj_core::state::MaterializedSession) -> Opt
             _ => None,
         })
         .unwrap_or_default();
-    let text = match &turn.diagnostic {
+    let text = match turn.diagnostic {
         Some(diagnostic) => format!("{reply}\nProvider error: {}", diagnostic.message),
         None => reply,
     };
@@ -117,11 +118,7 @@ pub(super) async fn prepare(
     view: &ManagedSessionView,
 ) -> Result<QuotaRecovery> {
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
-    let turn = snapshot
-        .materialized
-        .last_turn_outcome
-        .as_ref()
-        .context("missing quota completion")?;
+    let turn = ended_turn(snapshot).context("missing quota completion")?;
     let (profile_id, profile) = {
         let controller = state
             .controller
@@ -196,7 +193,7 @@ pub(super) async fn prepare(
         .and_then(|text| crate::quota::normalize_reset_at(text, now))
         .map(|t| t.timestamp())
         .or_else(|| {
-            message(&snapshot.materialized)
+            message(snapshot)
                 .and_then(|text| crate::quota::message_reset(&text, turn.completed_at_ms))
         });
     let c = &snapshot.operational.continuation;
@@ -219,7 +216,7 @@ pub(super) async fn prepare(
     );
     Ok(QuotaRecovery {
         user_command_id: c.user_command_id.clone().context("missing user request")?,
-        completed_command_id: turn.command_id.clone(),
+        completed_command_id: turn.key.to_owned(),
         profile_id,
         reset_at_ms,
         retry_at_ms,
@@ -250,7 +247,7 @@ pub(super) async fn schedule(
         let current = handle.view();
         ensure!(
             (env.allowed)(id)
-                && quota_eligible(&current)
+                && quota_schedulable(&current)
                 && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
                 && evidence_ordinal(&current) == evidence_ordinal(&view),
             "quota evidence changed during refresh"
@@ -259,11 +256,8 @@ pub(super) async fn schedule(
             "quota-schedule-{}",
             view.snapshot
                 .as_ref()
-                .unwrap()
-                .materialized
-                .last_turn_outcome
-                .as_ref()
-                .unwrap()
+                .and_then(ended_turn)
+                .context("missing quota completion")?
                 .completed_ordinal
         );
         handle
@@ -309,10 +303,7 @@ pub(super) async fn resume(
         let ordinal = current
             .snapshot
             .as_ref()
-            .unwrap()
-            .materialized
-            .last_turn_outcome
-            .as_ref()
+            .and_then(ended_turn)
             .context("missing blocked turn")?
             .completed_ordinal;
         let (command_id, command) = if clear {
@@ -326,17 +317,33 @@ pub(super) async fn resume(
         } else {
             ensure!(
                 (env.allowed)(id)
-                    && quota_eligible(&current)
+                    && quota_resumable(&current)
                     && (env.profile)(id).as_deref() == Some(&recovery.profile_id),
                 "quota recovery no longer allowed"
             );
-            (
-                format!("quota-retry-{ordinal}"),
-                RelayCommand::ResumeAfterQuota {
-                    expected: cursor(&current)?,
-                    completed_command_id: recovery.completed_command_id.clone(),
-                },
-            )
+            let s = current.snapshot.as_ref().unwrap();
+            // Older workers would take the command for a user's plain resume.
+            if current_rules(s) && s.operational.goal.resumable_after_quota() {
+                // Restarting the goal restarts its own loop; a continuation
+                // prompt would get one turn and leave the goal stopped.
+                (
+                    format!(
+                        "{}{ordinal}",
+                        mj_core::continuation::QUOTA_GOAL_RESUME_PREFIX
+                    ),
+                    RelayCommand::GoalControl {
+                        action: mj_core::goal::GoalControlAction::Resume,
+                    },
+                )
+            } else {
+                (
+                    format!("quota-retry-{ordinal}"),
+                    RelayCommand::ResumeAfterQuota {
+                        expected: cursor(&current)?,
+                        completed_command_id: recovery.completed_command_id.clone(),
+                    },
+                )
+            }
         };
         handle.submit(command_id, command).await?;
         handle.sync_now().await?;

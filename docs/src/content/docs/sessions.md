@@ -526,6 +526,12 @@ Continuation also needs Jev: with `[jev] enabled = false` it does not run, whate
 
 The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
 
-Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, active goals, failed turns, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+Mjolnir checks every turn that ends, including a turn the agent starts on its own, for example when a background task it was waiting for finishes.
+
+Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, failed turns, sessions waiting on a question, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+
+When a background command, a sub-agent, or an active goal will still move the session on, a continuation waits. Mjolnir checks again when that work stops, or when Jev judges that the background work is idle, such as a command that only sleeps.
+
+When a turn ends at a subscription limit, Mjolnir schedules a continuation for one minute after the limit resets. This also applies to turns the agent started on its own, and to sessions with background work still running. If the usage limit stopped a Codex goal, Mjolnir resumes the goal instead. A goal that has used up its own token budget is never continued automatically; resume it yourself.
 
 The check uses user messages since the last context reset and recent assistant replies, including earlier exchanges that establish what “go ahead” refers to. It excludes tool history and generated prompts. Evidence has size limits; required user history is never clipped to fit. TypeSafe processes this text, through the public Jev proxy when no local TypeSafe key is configured. The proxy does not log or store message bodies.
