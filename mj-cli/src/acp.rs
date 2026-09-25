@@ -142,6 +142,10 @@ struct Adapter {
     /// Sessions the consumer asked to cancel, kept until the turn that is
     /// answering them has read the request.
     cancelling: Mutex<HashSet<String>>,
+    /// The first refused `session/new`. An adapter that ends without having
+    /// created a session reports it, so a misconfigured `mj acp` does not
+    /// exit 0 in silence (launch finding R5-9).
+    refused: Mutex<Option<String>>,
 }
 
 /// Serve the Agent Client Protocol on standard input and output.
@@ -181,7 +185,10 @@ async fn serve_on(
                     .await
                 {
                     Ok(session_id) => responder.respond(NewSessionResponse::new(session_id)),
-                    Err(error) => responder.respond_with_internal_error(format!("{error:#}")),
+                    Err(error) => {
+                        adapter.note_refusal(&error);
+                        responder.respond_with_error(refusal(&error))
+                    }
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -197,7 +204,7 @@ async fn serve_on(
                         let prompt = match prompt_text(&request.prompt) {
                             Ok(prompt) => prompt,
                             Err(error) => {
-                                return responder.respond_with_internal_error(format!("{error:#}"));
+                                return responder.respond_with_error(refusal(&error));
                             }
                         };
                         let mut notify = |session_id: &str, message: &str| -> Result<()> {
@@ -212,9 +219,7 @@ async fn serve_on(
                         };
                         match adapter.turn(&session_id, &prompt, &mut notify).await {
                             Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
-                            Err(error) => {
-                                responder.respond_with_internal_error(format!("{error:#}"))
-                            }
+                            Err(error) => responder.respond_with_error(refusal(&error)),
                         }
                     })
                 }
@@ -253,10 +258,23 @@ async fn serve_on(
     let retired = adapter.apply_exit_policy().await;
     let served = served.context("serving the Agent Client Protocol on standard input and output");
     match (served, retired) {
-        (Ok(()), retired) => retired,
+        (Ok(()), Ok(())) => match adapter.unanswered_refusal() {
+            Some(refused) => Err(anyhow::anyhow!(refused)),
+            None => Ok(()),
+        },
+        (Ok(()), Err(retired)) => Err(retired),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(retired)) => Err(error.context(format!("{retired:#}"))),
     }
+}
+
+/// The JSON-RPC error for a refused request. Its `message` carries the
+/// refusal itself: clients show `message`, and "Internal error" with the
+/// reason only in `data` told them nothing (launch finding R5-9).
+fn refusal(error: &anyhow::Error) -> agent_client_protocol::Error {
+    let mut refusal = agent_client_protocol::Error::internal_error();
+    refusal.message = format!("{error:#}");
+    refusal
 }
 
 /// Resolve when the process is asked to stop, naming the signal.
@@ -307,7 +325,25 @@ impl Adapter {
             sessions: Mutex::new(HashSet::new()),
             active: Mutex::new(HashSet::new()),
             cancelling: Mutex::new(HashSet::new()),
+            refused: Mutex::new(None),
         }
+    }
+
+    /// Remember the first refused `session/new`.
+    fn note_refusal(&self, error: &anyhow::Error) {
+        self.refused
+            .lock()
+            .expect("adapter refusal")
+            .get_or_insert_with(|| format!("{error:#}"));
+    }
+
+    /// The refusal to exit with: set when a `session/new` was refused and no
+    /// session was ever created.
+    fn unanswered_refusal(&self) -> Option<String> {
+        if !self.owned_sessions().is_empty() {
+            return None;
+        }
+        self.refused.lock().expect("adapter refusal").clone()
     }
 
     async fn client(&self) -> Result<Arc<ApiClient>> {
@@ -1557,11 +1593,48 @@ mod tests {
         );
         let refused = consumer.response(2).await;
 
+        // Launch finding R5-9: the refusal came as "Internal error" with the
+        // text only in `data`, which clients do not show.
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            refused["error"]["data"].to_string().contains("nowhere"),
+            message.contains("unknown workspace \"nowhere\""),
             "{refused}"
         );
+        assert!(message.contains("mj workspaces create NAME"), "{refused}");
         assert!(daemon.start.lock().unwrap().is_empty());
+    }
+
+    /// Launch finding R5-9: an adapter whose sessions were all refused exited
+    /// 0 with nothing on standard error. It now ends with the refusal, which
+    /// `mj acp` prints and turns into exit status 1.
+    #[tokio::test]
+    async fn an_adapter_that_created_nothing_ends_with_the_refusal() {
+        let (client, _daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let mut consumer = Consumer::connect(Arc::new(Adapter::new(
+            AcpArgs::default(),
+            Some("nowhere".to_owned()),
+            Some(client),
+        )));
+        consumer.request(
+            2,
+            "session/new",
+            json!({"cwd": "/work/project", "mcpServers": []}),
+        );
+        consumer.response(2).await;
+
+        let Consumer {
+            to_adapter, served, ..
+        } = consumer;
+        drop(to_adapter);
+        let error = tokio::time::timeout(Duration::from_secs(10), served)
+            .await
+            .expect("the adapter leaves when its input closes")
+            .unwrap()
+            .expect_err("an adapter that created nothing reports the refusal");
+        assert!(
+            format!("{error:#}").contains("unknown workspace \"nowhere\""),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

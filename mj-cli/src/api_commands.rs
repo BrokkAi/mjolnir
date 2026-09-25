@@ -589,7 +589,12 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     // so the command names one (launch finding H-3).
     let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
         (Some(workspace_id), _) => Some(workspace_id.clone()),
-        (None, Some(name)) => Some(crate::resolve_store_workspace(Some(name)).await?),
+        (None, Some(name)) => {
+            // An unknown name is refused without starting a stopped daemon,
+            // as a missing one is (launch findings R2-14 and R5-9).
+            crate::refuse_unknown_workspace(name, true).await?;
+            Some(crate::resolve_store_workspace(Some(name)).await?)
+        }
         (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
