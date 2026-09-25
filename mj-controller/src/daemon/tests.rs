@@ -1875,34 +1875,6 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
 }
 
 #[test]
-fn force_destruction_enumerates_only_the_workspaces_active_sessions_oldest_first() {
-    let mut oldest = runtime_test_session("oldest", "workspace-a", SessionState::Provisioning);
-    oldest.created_at = "2026-09-01T00:00:00Z".into();
-    let newest = runtime_test_session("newest", "workspace-a", SessionState::Error);
-    let elsewhere = runtime_test_session("elsewhere", "workspace-b", SessionState::Running);
-    let history = runtime_test_session("history", "workspace-a", SessionState::Stopped);
-    let controller = Controller {
-        config: Config::default(),
-        state: mj_core::state::State {
-            sessions: [oldest, newest, elsewhere, history]
-                .into_iter()
-                .map(|session| (session.id.clone(), session))
-                .collect(),
-            ..mj_core::state::State::default()
-        },
-    };
-
-    assert_eq!(
-        active_sessions_for_force_destruction(&controller, "workspace-a"),
-        vec!["oldest".to_owned(), "newest".to_owned()]
-    );
-    assert_eq!(
-        active_sessions_for_force_destruction(&controller, "workspace-b"),
-        vec!["elsewhere".to_owned()]
-    );
-}
-
-#[test]
 fn force_destroy_serializes_as_its_own_lifecycle_kind() {
     assert_eq!(
         serde_json::to_string(&RuntimeLifecycleKind::ForceDestroy).unwrap(),
@@ -3031,6 +3003,14 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     )
     .unwrap();
     let state = test_runtime_state_loading_the_store();
+    state.refresh_workspaces().await.unwrap();
+    assert!(
+        state
+            .workspaces()
+            .borrow()
+            .iter()
+            .any(|w| w.id == workspace.id)
+    );
     let admission = state
         .workspace_resume_gate(&workspace.id)
         .read_owned()
@@ -3056,7 +3036,20 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     drop(admission);
     // An unrelated workspace's resume must not prevent this close.
     let _other_resume = state.workspace_resume_gate("other").read_owned().await;
-    state.close_workspace(workspace.id.clone()).await.unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    assert!(matches!(
+        handle_action(
+            DaemonAction::DeleteWorkspace {
+                workspace_id: workspace.id.clone(),
+            },
+            &metadata,
+            &state,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
     let stored = crate::database::load_state().unwrap();
     assert_eq!(stored.sessions[&history.id].state, SessionState::Stopped);
     assert!(stored.sessions[&history.id].draft_input.is_empty());
@@ -3068,6 +3061,96 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     assert!(
         crate::database::list_workspaces()
             .unwrap()
+            .iter()
+            .all(|w| w.id != workspace.id)
+    );
+    assert!(
+        state
+            .workspaces()
+            .borrow()
+            .iter()
+            .all(|w| w.id != workspace.id)
+    );
+    assert!(
+        !state
+            .runtime_snapshot("", 0, true)
+            .await
+            .unwrap()
+            .workspace_names
+            .contains_key(&workspace.id)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_deleted_tab() {
+    const TEST: &str =
+        "workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_deleted_tab";
+    const CHILD: &str = "MJ_TEST_WORKSPACE_FEED_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    let DaemonReply::Workspace(workspace) = handle_action(
+        DaemonAction::CreateWorkspace {
+            name: "Before".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap() else {
+        panic!("create did not return the workspace");
+    };
+    assert_eq!(state.workspaces().borrow()[0].id, workspace.id);
+
+    handle_action(
+        DaemonAction::RenameWorkspace {
+            workspace_id: workspace.id.clone(),
+            name: "After".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.workspaces().borrow()[0].name, "After");
+    assert_eq!(
+        state
+            .runtime_snapshot("", 0, true)
+            .await
+            .unwrap()
+            .workspace_names[&workspace.id],
+        "After"
+    );
+
+    // A refresh queued before deletion must read after the writer commits,
+    // rather than publish a workspace list captured before deletion.
+    let refresh_guard = state.workspace_refresh.lock().await;
+    let delayed = tokio::spawn({
+        let state = state.clone();
+        async move { state.refresh_workspaces().await }
+    });
+    tokio::task::yield_now().await;
+    crate::database::close_workspace(&workspace.id).unwrap();
+    drop(refresh_guard);
+    delayed.await.unwrap().unwrap();
+    assert!(
+        state
+            .workspaces()
+            .borrow()
             .iter()
             .all(|w| w.id != workspace.id)
     );

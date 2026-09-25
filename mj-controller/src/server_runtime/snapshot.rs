@@ -456,24 +456,6 @@ pub(super) fn viewer_snapshot(
             name: workspace.name.clone(),
         })
         .collect();
-    // The published list comes from the workspace table, which omits an
-    // empty `default` and can predate a session created since (`mj new`
-    // makes one without any dashboard opening its workspace). The browser
-    // draws its tabs from this list, so a session whose workspace is missing
-    // would have no tab at all. List each such workspace by its id.
-    for session in &snapshot.sessions {
-        if !session.workspace_id.is_empty()
-            && !snapshot
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.id == session.workspace_id)
-        {
-            snapshot.workspaces.push(crate::server::ViewerWorkspace {
-                id: session.workspace_id.clone(),
-                name: session.workspace_id.clone(),
-            });
-        }
-    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

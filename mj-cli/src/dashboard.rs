@@ -497,7 +497,15 @@ pub(crate) async fn run_dashboard_for_workspace(
     })
     .await
     .context("initialize startup configuration task failed")??;
-    let Some(mut context) = DashboardContext::open(workspace_id, client_id, daemon_presence)?
+    let workspaces = crate::daemon::connect_or_start()
+        .await?
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .map(|listing| listing.workspace)
+        .collect();
+    let Some(mut context) =
+        DashboardContext::open(workspace_id, client_id, daemon_presence, workspaces)?
     else {
         return Ok(DashboardExit::Normal);
     };
@@ -1403,10 +1411,10 @@ impl DashboardContext {
         workspace_id: &str,
         client_id: &str,
         daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+        workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     ) -> Result<Option<Self>> {
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let workspaces = mj_controller::database::list_workspaces()?;
         let workspace_names = workspaces
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.name.clone()))

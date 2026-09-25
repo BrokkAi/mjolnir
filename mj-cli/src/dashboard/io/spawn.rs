@@ -342,44 +342,6 @@ pub(crate) fn spawn_workspace_close(
     })
 }
 
-pub(crate) fn spawn_workspace_delete(
-    generation: u64,
-    workspace_id: String,
-    force: bool,
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) -> JoinHandle<()> {
-    let deleted_workspace_id = workspace_id.clone();
-    spawn_workspace_management_operation(
-        generation,
-        if force {
-            "force deleting workspace"
-        } else {
-            "deleting workspace"
-        },
-        updates,
-        Some(tracker),
-        async move {
-            let mut daemon = daemon::connect_or_start().await?;
-            if force {
-                daemon.force_delete_workspace(workspace_id).await?;
-            } else {
-                daemon.delete_workspace(workspace_id).await?;
-            }
-            let revision = daemon
-                .runtime_snapshot(String::new(), 0, true)
-                .await?
-                .revision;
-            Ok(WorkspaceManagementResult {
-                revision,
-                entries: load_workspace_management_entries(&mut daemon).await?,
-                select_workspace: None,
-                deleted_workspace_id: Some(deleted_workspace_id),
-            })
-        },
-    )
-}
-
 pub(crate) fn spawn_workspace_draft_recovery(
     generation: u64,
     draft_id: String,

@@ -361,7 +361,7 @@ fn manager_actions_activate_on_mouse_release() {
 }
 
 #[test]
-fn destructive_delete_requires_exact_name_and_uses_force_action() {
+fn delete_with_active_sessions_uses_the_cancellable_suspension_workflow() {
     let mut dashboard = dashboard_with_session(running_session());
     let DashboardAction::LoadWorkspaceManagement { generation } =
         dashboard.begin_workspace_manager()
@@ -384,25 +384,20 @@ fn destructive_delete_requires_exact_name_and_uses_force_action() {
     dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(
         &dashboard.mode,
-        Mode::WorkspaceManager(manager) if matches!(&manager.view, WorkspaceManagerView::Delete { .. })
+        Mode::WorkspaceManager(manager) if matches!(&manager.view, WorkspaceManagerView::Close { .. })
     ));
+    let rendered = draw_manager(&dashboard).join("\n");
+    assert!(rendered.contains("Suspend 2 sessions"), "{rendered}");
+    assert!(rendered.contains("Discard 1 saved draft and"), "{rendered}");
+    assert!(!rendered.contains("Force delete"), "{rendered}");
     if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
-        manager.form.get_mut().focus(WorkspaceControl::ForceDelete);
+        manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
     }
     assert_eq!(
         dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        DashboardAction::None
-    );
-    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
-        manager.name = TextInput::from_value("Project alpha").with_max_chars(64);
-        manager.form.get_mut().focus(WorkspaceControl::ForceDelete);
-    }
-    assert_eq!(
-        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        DashboardAction::DeleteWorkspace {
+        DashboardAction::CloseWorkspace {
             generation,
             workspace_id: "a".into(),
-            force: true,
         }
     );
 }
@@ -419,13 +414,14 @@ fn the_list_view_dismisses_from_its_title_bar_rather_than_a_close_button() {
         .finish_workspace_management(generation, Ok(vec![entry("workspace-a", "Project alpha")]));
     let lines = draw_manager(&dashboard);
     let list = lines.join("\n");
-    // Closing a workspace is an explicit action, distinct from dismissing
+    // Deleting a workspace is an explicit action, distinct from dismissing
     // the manager through its title-bar ×.
-    assert!(list.contains("Close…"), "{list}");
+    assert!(list.contains("Delete…"), "{list}");
+    assert!(!list.contains("Force delete"), "{list}");
     assert!(list.contains('×'), "{list}");
     // The actions stack in a column at the dialog's right edge, one per
     // row, in the order they apply.
-    let labels = ["New workspace", "Rename", "Close…", "Delete", "Open"];
+    let labels = ["New workspace", "Rename", "Delete…", "Open"];
     let width = labels
         .iter()
         .map(|label| label.chars().count())
@@ -723,7 +719,7 @@ fn a_workspace_close_can_run_in_background_and_reopen_for_cancellation() {
         matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy == Some(WorkspaceMutation::Close))
     );
     let lines = draw_manager(&dashboard).join("\n");
-    assert!(lines.contains("Cancel closing"), "{lines}");
+    assert!(lines.contains("Cancel deletion"), "{lines}");
     assert!(lines.contains("Continue working"));
     assert_eq!(dashboard.workspace_close_finished("a"), Some(reopened));
     dashboard.finish_workspace_management(reopened, Err("stop failed".into()));

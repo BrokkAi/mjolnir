@@ -1,11 +1,7 @@
 use super::*;
 
 pub(super) async fn refresh_runtime_workspaces(state: &RuntimeState) -> Result<()> {
-    let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
-        .await
-        .context("daemon workspace refresh task panicked")??;
-    state.publish_workspaces(workspaces);
-    Ok(())
+    state.refresh_workspaces().await
 }
 
 pub(super) fn spawn_phone_server(

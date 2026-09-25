@@ -495,7 +495,7 @@ impl DashboardContext {
             DashboardIoUpdate::WorkspaceCloseCancelled { result } => {
                 self.dashboard.set_notice(match result {
                     Ok(()) => {
-                        "Workspace close cancellation requested; completed stops cannot be undone."
+                        "Workspace deletion cancellation requested; completed suspensions cannot be undone."
                             .into()
                     }
                     Err(error) => format!("Could not cancel workspace close: {error}"),
