@@ -110,6 +110,7 @@ for line in sys.stdin:
                     native_session_id: "missing-thread".into(),
                     resumed: false,
                     native_continuity_lost: false,
+                    replaced_unused_native_session_id: None,
                 })
                 .unwrap();
             let accepted = relay.handle(RelayRequestEnvelope {
@@ -251,11 +252,27 @@ for line in sys.stdin:
         RelayOrigin::RestoredSeed => (4, restored_frontier.as_str()),
     };
     let events = relay.events_after(after, digest).unwrap();
-    assert!(events.iter().any(|event| matches!(
-        &event.observation,
-        RelayObservation::SessionOpened { native_session_id, .. }
-            if native_session_id == "replacement"
-    )));
+    // The opening names the session it replaced and why it could: the
+    // controller accepts a new identity on resume only on this evidence (R7-5).
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.observation,
+            RelayObservation::SessionOpened {
+                native_session_id,
+                resumed: false,
+                replaced_unused_native_session_id: Some(replaced),
+                ..
+            } if native_session_id == "replacement" && replaced == "missing-thread"
+        )),
+        "{events:#?}"
+    );
+    assert_eq!(
+        relay
+            .operational_state()
+            .replaced_unused_native_session_id
+            .as_deref(),
+        Some("missing-thread")
+    );
     assert!(events.iter().any(|event| matches!(
         &event.observation,
         RelayObservation::Warning { message } if message.contains("new empty session")

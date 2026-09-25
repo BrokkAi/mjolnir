@@ -602,6 +602,7 @@ fn a_locally_created_empty_native_session_has_no_history() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -625,6 +626,7 @@ fn a_dispatched_prompt_gives_the_native_session_history() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit_relay(
@@ -647,6 +649,7 @@ fn a_released_recovery_floor_gives_the_native_session_history() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -681,6 +684,7 @@ fn a_native_session_opened_after_a_restore_floor_has_no_history() {
             native_session_id: "fresh".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -710,6 +714,7 @@ fn a_resumed_native_session_has_history_after_reopening() {
             native_session_id: "imported".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(relay.native_session_may_have_history());
@@ -727,6 +732,7 @@ fn a_used_native_session_stays_used_across_persist_and_replay() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay.mark_native_session_used().unwrap();
@@ -760,6 +766,7 @@ fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
             native_session_id: "fresh".into(),
             resumed: false,
             native_continuity_lost: true,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(relay.operational_state().native_continuity_lost);
@@ -774,6 +781,7 @@ fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
             native_session_id: "later".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.operational_state().native_continuity_lost);
@@ -792,6 +800,7 @@ fn journals_without_lost_native_continuity_default_to_intact() {
             native_session_id: "native".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         }
     );
 
@@ -936,6 +945,7 @@ fn restored_native_identity_waits_for_current_acp_configuration() {
             native_session_id: "native-session".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.operational_state().native_session_is_ready());
@@ -2312,6 +2322,7 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
             native_session_id: "native".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay
@@ -4755,6 +4766,7 @@ fn clearable_relay(root: &Path) -> DurableRelay {
             native_session_id: "original".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay.mark_native_session_used().unwrap();

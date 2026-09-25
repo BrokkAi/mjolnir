@@ -551,6 +551,10 @@ pub struct RelayOperationalState {
     /// open records a new native id.
     #[serde(default)]
     pub native_continuity_lost: bool,
+    /// The native session the current one replaced because it was never used
+    /// (`RelayObservation::SessionOpened::replaced_unused_native_session_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_unused_native_session_id: Option<String>,
     /// Whether the current worker process has finished opening its ACP
     /// session. Older workers omit this field and are treated as ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -850,6 +854,13 @@ pub enum RelayObservation {
         /// field for existing events would invalidate every journal on disk.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         native_continuity_lost: bool,
+        /// The native session this one replaced because the harness had no
+        /// record of it and this session never used it, so nothing was lost.
+        /// A resume that expected the replaced session accepts the new one on
+        /// this evidence alone. Absent on every other open, which keeps the
+        /// digests of existing records valid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_unused_native_session_id: Option<String>,
     },
     SessionConfigured {
         config_options: Vec<SessionConfigOption>,
@@ -1115,6 +1126,11 @@ pub struct RelaySnapshot {
     /// after the fallback still sees that continuity was lost.
     #[serde(default)]
     pub native_continuity_lost: bool,
+    /// The native session `native_session_id` replaced because it was never
+    /// used. Cleared by the next open or clear. Written only while set, so an
+    /// older worker still reads every other snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_unused_native_session_id: Option<String>,
     /// The native thread behind `native_session_id` has been used: a prompt
     /// was transmitted to it, Claude Code reported a model cycle's result, it
     /// was resumed rather than created here, or its identity arrived from
@@ -1196,6 +1212,7 @@ impl RelaySnapshot {
             recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             native_session_id: None,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
             native_session_used: false,
             native_session_opened_ordinal: None,
             restored_native_session_unused: false,
@@ -1257,6 +1274,7 @@ impl RelaySnapshot {
             recovery_floor_digest: self.recovery_floor_digest.clone(),
             native_session_id: self.native_session_id.clone(),
             native_continuity_lost: self.native_continuity_lost,
+            replaced_unused_native_session_id: self.replaced_unused_native_session_id.clone(),
             // Readiness belongs to the current worker process, so durable
             // snapshots must never carry it across a restart.
             checkpoint_only: false,
@@ -1365,10 +1383,35 @@ mod native_continuity_encoding_tests {
             native_session_id: "fresh".into(),
             resumed: false,
             native_continuity_lost: true,
+            replaced_unused_native_session_id: None,
         };
         let encoded = serde_json::to_string(&observation).unwrap();
         assert!(encoded.contains("\"native_continuity_lost\":true"));
         let decoded: RelayObservation = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, observation);
+    }
+
+    /// The replaced session is written only when there is one, so every
+    /// record written before the field existed keeps its digest.
+    #[test]
+    fn a_replaced_unused_session_is_written_only_when_there_is_one() {
+        let replacing = RelayObservation::SessionOpened {
+            native_session_id: "fresh".into(),
+            resumed: false,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: Some("never-prompted".into()),
+        };
+        let encoded = serde_json::to_string(&replacing).unwrap();
+        assert!(encoded.contains("\"replaced_unused_native_session_id\":\"never-prompted\""));
+        assert_eq!(
+            serde_json::from_str::<RelayObservation>(&encoded).unwrap(),
+            replacing
+        );
+        let event: RelayEvent = serde_json::from_str(RECORDED_BEFORE_THE_FLAG).unwrap();
+        assert!(
+            !serde_json::to_string(&event.observation)
+                .unwrap()
+                .contains("replaced_unused_native_session_id")
+        );
     }
 }

@@ -4803,6 +4803,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
                 native_session_id: "replacement".into(),
                 resumed: false,
                 native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
             })
             .unwrap();
         assert_eq!(
@@ -5080,6 +5081,7 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
             native_session_id: "native-relay".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     let mut config = launch_config("/var/lib/hel/profiles/session");
@@ -5103,6 +5105,7 @@ fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit(
@@ -5149,6 +5152,7 @@ fn an_imported_native_identity_is_recorded_as_used_at_startup() {
             native_session_id: "imported".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     unix::record_imported_native_identity(&config, &mut local).unwrap();
@@ -5164,6 +5168,7 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     // What the ACP layer reports when the agent sends content or a prompt is
@@ -5786,6 +5791,7 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
             native_session_id: "saved-native-session".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit(&mut durable, "interrupted-turn", prompt("working"));
@@ -6148,6 +6154,7 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
             native_session_id: "saved-native-session".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     drop(durable);

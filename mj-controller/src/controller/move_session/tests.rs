@@ -1584,6 +1584,7 @@ fn seed_source_relay(worker_root: &Path) -> PathBuf {
     seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
         native_session_id: "native-session".into(),
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         resumed: true,
     })
     .unwrap();

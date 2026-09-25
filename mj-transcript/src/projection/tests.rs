@@ -53,6 +53,7 @@ fn resume_open_updates_operational_state_without_adding_transcript_noise() {
             native_session_id: "native".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         },
     );
     let mutation = project_relay_event(&session, &resumed).unwrap().mutation;
@@ -65,6 +66,7 @@ fn resume_open_updates_operational_state_without_adding_transcript_noise() {
             native_session_id: "native".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         },
     );
     assert_eq!(

@@ -6198,6 +6198,7 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
             native_session_id: "missing-thread".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     drop(relay);

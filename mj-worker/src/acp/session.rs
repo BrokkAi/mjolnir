@@ -155,6 +155,9 @@ pub(super) async fn serve_session(
     // Kept on the wire for older workers; no harness can lose native
     // continuity this way any more.
     let native_continuity_lost = false;
+    // Set when the recorded native session is replaced because it was never
+    // used; `session_opened` carries it so a resume can accept the new one.
+    let mut replaced_unused_native_session_id = None;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // Native children require replay to recover identity and transcripts.
@@ -251,6 +254,7 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                 }
+                replaced_unused_native_session_id = Some(existing.clone());
                 None
             }
         };
@@ -480,6 +484,7 @@ pub(super) async fn serve_session(
                 resumed,
                 execution_mode: enforcement.map(|enforcement| enforcement.label().to_owned()),
                 native_continuity_lost,
+                replaced_unused_native_session_id,
             },
         )
         .await?;

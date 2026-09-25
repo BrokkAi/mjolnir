@@ -699,7 +699,14 @@ impl Controller {
         let (mut relay, native_session_id) = readiness
             .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
         if native_continuity {
-            if native_session_id != archive_manifest.session.native_session_id {
+            if !restored_native_session_accepted(
+                &archive_manifest.session.native_session_id,
+                &native_session_id,
+                relay
+                    .operational()
+                    .replaced_unused_native_session_id
+                    .as_deref(),
+            ) {
                 bail!(
                     "ACP loaded native session {native_session_id}, expected {}",
                     archive_manifest.session.native_session_id
@@ -1662,45 +1669,13 @@ impl Controller {
                         "could not remove the conversion checkpoint after resume failed: {remove_error}"
                     );
                 }
-                // Put back whatever this resume could have written to the
-                // durable projection. Both branches restore archived content,
-                // so they are correct whether or not the write had happened
-                // when the resume failed.
-                if rebuild_projection {
-                    match materialized_session_from_canonical(session_id, &canonical_session) {
-                        Ok(previous_projection) => {
-                            if let Err(restore_error) =
-                                crate::database::save_materialized_session(&previous_projection)
-                            {
-                                tracing::error!(
-                                    session_id,
-                                    error = format!("{restore_error:#}"),
-                                    "could not restore the durable projection after resume failed"
-                                );
-                            }
-                        }
-                        Err(restore_error) => {
-                            tracing::error!(
-                                session_id,
-                                error = format!("{restore_error:#}"),
-                                "could not rebuild the durable projection after resume failed"
-                            );
-                        }
-                    }
-                } else if discard_queued_prompts
-                    && let Err(restore_error) = crate::database::replace_materialized_queued_prompts(
-                        session_id,
-                        &mj_transcript::projection::materialized_queued_prompts_from_canonical(
-                            &canonical_session.queued_prompts,
-                        ),
-                    )
-                {
-                    tracing::error!(
-                        session_id,
-                        error = format!("{restore_error:#}"),
-                        "could not restore queued prompts after resume failed"
-                    );
-                }
+                // Put back whatever this resume wrote to the durable
+                // projection, including the failed worker's own lines.
+                restore_projection_after_failed_resume(
+                    session_id,
+                    &canonical_session,
+                    discard_queued_prompts,
+                );
                 Err(self.rollback_failed_resume(
                     session_id,
                     &previous,
@@ -1929,6 +1904,89 @@ fn conversion_checkpoint(
         created_at: now(),
         event_frontier,
     })
+}
+
+/// Whether the native session a restored worker opened may stand in for the
+/// archived one.
+///
+/// The archived session is the one the conversation lives in, so a different
+/// one is refused: resuming in it would silently drop that history. The one
+/// exception is a worker that says it replaced exactly the archived session
+/// because the harness had no record of it and this session never used it.
+/// Claude Code and Codex write nothing for a native session until its first
+/// prompt, so a session suspended before one (or right after `/clear`) can
+/// only ever come back this way (R7-5).
+fn restored_native_session_accepted(
+    archived: &str,
+    opened: &str,
+    replaced_unused: Option<&str>,
+) -> bool {
+    opened == archived || replaced_unused == Some(archived)
+}
+
+/// Put the durable projection back to the archived one after a failed resume
+/// or in-place swap.
+///
+/// The attempt can have changed it two ways: a rebuild from the archive, and
+/// the events of the worker it started, which the controller projects while it
+/// waits for the harness. Either leaves the stored frontier somewhere other
+/// than the archive's, so the frontier decides, and the failed attempt leaves
+/// no lines in the transcript for the next one to add to. A projection still
+/// at the archived frontier only needs its queue back when the attempt
+/// discarded it.
+fn restore_projection_after_failed_resume(
+    session_id: &str,
+    canonical_session: &mj_checkpoint::archive::CanonicalSessionSnapshot,
+    discard_queued_prompts: bool,
+) {
+    let stored_frontier = crate::database::materialized_event_frontier(session_id)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not read the stored projection frontier after a failed resume; rebuilding it from the archive"
+            );
+            None
+        });
+    if projection_rebuild_required(
+        stored_frontier
+            .as_ref()
+            .map(|(ordinal, digest)| (*ordinal, digest.as_str())),
+        canonical_session.event_frontier,
+        &canonical_session.event_frontier_digest,
+    ) {
+        match materialized_session_from_canonical(session_id, canonical_session) {
+            Ok(previous_projection) => {
+                if let Err(restore_error) =
+                    crate::database::save_materialized_session(&previous_projection)
+                {
+                    tracing::error!(
+                        session_id,
+                        error = format!("{restore_error:#}"),
+                        "could not restore the durable projection after a failed resume"
+                    );
+                }
+            }
+            Err(restore_error) => tracing::error!(
+                session_id,
+                error = format!("{restore_error:#}"),
+                "could not rebuild the durable projection after a failed resume"
+            ),
+        }
+    } else if discard_queued_prompts
+        && let Err(restore_error) = crate::database::replace_materialized_queued_prompts(
+            session_id,
+            &mj_transcript::projection::materialized_queued_prompts_from_canonical(
+                &canonical_session.queued_prompts,
+            ),
+        )
+    {
+        tracing::error!(
+            session_id,
+            error = format!("{restore_error:#}"),
+            "could not restore queued prompts after a failed resume"
+        );
+    }
 }
 
 /// Whether a resume has to rebuild the durable projection from its archive.

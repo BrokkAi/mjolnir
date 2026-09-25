@@ -1653,3 +1653,340 @@ fn only_the_same_harness_keeps_native_continuity_on_resume() {
         HarnessKind::Codex
     ));
 }
+
+#[cfg(unix)]
+const FRESH_NATIVE_RESUME_CHILD: &str = "MJ_TEST_FRESH_NATIVE_RESUME_CHILD";
+
+/// How the stand-in worker of [`fresh_native_resume`] opens its session.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FreshNativeOpening {
+    /// A new native session that names the archived one it replaced because
+    /// this session never used it: what a restored worker does when the
+    /// harness has no record of a session that was never prompted.
+    ReplacesUnused,
+    /// A new native session with no reason given for the change.
+    Unexplained,
+}
+
+/// Run [`fresh_native_resume`] for Claude and for Codex, each alone in a child
+/// of this test binary: the durable store it writes is process-global.
+#[cfg(unix)]
+fn fresh_native_resume_for_each_harness(test: &str, opening: FreshNativeOpening) {
+    if let Some(harness) = std::env::var_os(FRESH_NATIVE_RESUME_CHILD) {
+        let harness = match harness.to_str() {
+            Some("claude") => mj_core::config::HarnessKind::Claude,
+            Some("codex") => mj_core::config::HarnessKind::Codex,
+            other => panic!("unexpected harness {other:?}"),
+        };
+        fresh_native_resume(harness, opening);
+        return;
+    }
+    for harness in ["claude", "codex"] {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            test,
+        ))
+        .env(FRESH_NATIVE_RESUME_CHILD, harness)
+        .env(
+            "MJ_WORKER_BINARY",
+            mj_core::test_hooks::fake_worker_dispatcher(),
+        )
+        .isolated_store(directory.path())
+        .run();
+    }
+}
+
+/// The tail of a resume onto a local bare target, where `mj resume` hands
+/// over once the target exists, with a stand-in worker in the worker root.
+///
+/// The stand-in serves a real durable relay over the worker's proxy command
+/// and journals what a restored worker does when the harness cannot reload the
+/// archived native session: a restart, the warning, and a `session_opened`
+/// with a new identity.
+#[cfg(unix)]
+fn fresh_native_resume(harness: mj_core::config::HarnessKind, opening: FreshNativeOpening) {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_ANSWER, LATCH_RELAY_ANSWER_PROMPTS, LATCH_RELAY_FRESH_NATIVE,
+        LATCH_RELAY_REPLACED_UNUSED, LATCH_RELAY_ROOT, LATCH_RELAY_SESSION,
+    };
+    use crate::controller::test_support::write_checkpoint_gate_archive_for_harness;
+    use crate::session_manager::StandaloneSession;
+    use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let session_id = LATCH_RELAY_SESSION;
+    let profile_id = match harness {
+        mj_core::config::HarnessKind::Claude => "claude",
+        _ => "codex",
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // A local bare worker root has to end in the session id.
+    let worker_root = directory.path().join(session_id);
+    let checkout = directory.path().join("checkout");
+    let archives = directory.path().join("archives");
+    let home = directory.path().join("profile");
+    for path in [&worker_root, &checkout, &archives, &home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(home.join("settings.json"), b"{}").unwrap();
+    std::fs::write(home.join("auth.json"), b"{}").unwrap();
+
+    // Never prompted: the archived transcript is empty, and the archive names
+    // the native session the harness was given at launch.
+    let checkpoint =
+        write_checkpoint_gate_archive_for_harness(&archives, session_id, 2, harness, profile_id);
+    let verified = verify_resume_checkpoint(session_id, &checkpoint).unwrap();
+    assert_eq!(
+        verified.manifest.session.native_session_id,
+        "native-session"
+    );
+    let archived_projection =
+        materialized_session_from_canonical(session_id, &verified.canonical_session).unwrap();
+
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    let replaced = match opening {
+        FreshNativeOpening::ReplacesUnused => format!(
+            "{LATCH_RELAY_REPLACED_UNUSED}=native-session\n    export {LATCH_RELAY_REPLACED_UNUSED}\n    "
+        ),
+        FreshNativeOpening::Unexplained => String::new(),
+    };
+    let script = format!(
+        r#"case "${{2:-}}" in
+proxy)
+    {replaced}{LATCH_RELAY_ROOT}={root}
+    {LATCH_RELAY_FRESH_NATIVE}=fresh-native
+    {LATCH_RELAY_ANSWER_PROMPTS}=1
+    export {LATCH_RELAY_ROOT} {LATCH_RELAY_FRESH_NATIVE} {LATCH_RELAY_ANSWER_PROMPTS}
+    {binary} --exact controller::checkpoint::tests::latch_relay_child_serves_stdio --nocapture | grep --line-buffered '^{{'
+    ;;
+restore-checkpoint)
+    cat >{seed} <<'SEED'
+{{"event_frontier":2,"event_frontier_digest":"{digest}","queued_prompts":[],"native_session_unused":true}}
+SEED
+    ;;
+esac
+exit 0
+"#,
+        root = quote(&worker_root),
+        binary = quote(&std::env::current_exe().unwrap()),
+        seed = quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
+        digest = verified.canonical_session.event_frontier_digest,
+    );
+    // Only the behaviour goes in: the resume installs `MJ_WORKER_BINARY`, the
+    // checked-in dispatcher, as `hel`, and that reads `hel.script` beside it.
+    // A `hel` link planted here would make that install write through it into
+    // the checked-in dispatcher.
+    std::fs::write(worker_root.join("hel.script"), &script).unwrap();
+
+    let (config, ()) = Config::update(|config| {
+        config.profiles.insert(
+            profile_id.into(),
+            HarnessProfile {
+                enabled: true,
+                kind: harness,
+                home: home.clone(),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        config
+            .targets
+            .insert("local-bare".into(), TargetTemplate::LocalBare);
+        Ok(())
+    })
+    .unwrap();
+    // The record as `resume_session_controlled` leaves it once the target
+    // is provisioned: still provisioning, expecting the archived identity.
+    let mut session = checkpoint_test_session(session_id);
+    session.harness_kind = harness;
+    session.last_profile = profile_id.into();
+    session.target_template_id = "local-bare".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    session.project_directory = Some(checkout.clone());
+    session.state = SessionState::Provisioning;
+    session.native_session_id = Some("native-session".into());
+    session.checkpoint = Some(checkpoint.clone());
+    crate::database::save_session(&session).unwrap();
+    crate::database::save_materialized_session(&archived_projection).unwrap();
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+    let profile = controller.config.profiles[profile_id].clone();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let restored = runtime.block_on(controller.restore_into_target(
+        session_id,
+        RestoreIntoTarget {
+            profile: &profile,
+            archive: &verified,
+            restored_archive: &verified.archive_path,
+            resumed_project_directory: Some(checkout.clone()),
+            resumed_container_workspace: None,
+            restore_repositories: false,
+            primary_repository_root_from_conversion: false,
+            native_continuity: true,
+            discard_queued_prompts: false,
+            replay_queue: true,
+            utility_handoff: None,
+            projection_build: None,
+            resume_notices: Vec::new(),
+            install_attached_resources: true,
+            worker_root_reset: WorkerRootReset::FreshTarget,
+            retire_after_ready: None,
+        },
+        &ProcessExecutor,
+    ));
+    let mentions = |projection: &MaterializedSession, text: &str| {
+        projection
+            .transcript
+            .iter()
+            .filter(|item| serde_json::to_string(item).unwrap().contains(text))
+            .count()
+    };
+
+    match opening {
+        FreshNativeOpening::ReplacesUnused => {
+            restored.unwrap_or_else(|error| panic!("{harness:?} resume failed: {error:#}"));
+            // The new identity is the session's now, in memory and on disk, so
+            // the next suspend archives it and the next resume expects it.
+            let record = &controller.state.sessions[session_id];
+            assert_eq!(record.state, SessionState::Running);
+            assert_eq!(record.native_session_id.as_deref(), Some("fresh-native"));
+            let durable = crate::database::load_state().unwrap();
+            assert_eq!(
+                durable.sessions[session_id].native_session_id.as_deref(),
+                Some("fresh-native")
+            );
+
+            // The resumed session takes a prompt and answers it.
+            let answered = runtime.block_on(async {
+                let spec = controller.reconnect_command(session_id).unwrap();
+                let mut relay = StandaloneSession::connect_command(&spec, session_id)
+                    .await
+                    .unwrap();
+                relay
+                    .submit(
+                        "prompt-after-resume".into(),
+                        RelayCommand::Prompt {
+                            prompt: vec![ContentBlock::Text(TextContent::new("hello again"))],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    let snapshot = relay.sync().await.unwrap();
+                    if mentions(&snapshot.materialized, LATCH_RELAY_ANSWER) > 0 {
+                        return snapshot.materialized;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the resumed session never answered: {:#?}",
+                        snapshot.materialized.transcript
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            });
+            // One line says the conversation started fresh.
+            let durable = crate::database::load_materialized_session(session_id)
+                .unwrap()
+                .unwrap();
+            for projection in [&answered, &durable] {
+                assert_eq!(
+                    mentions(projection, "continuing in a new empty session"),
+                    1,
+                    "{:#?}",
+                    projection.transcript
+                );
+                assert_eq!(mentions(projection, "[session restarted]"), 1);
+            }
+        }
+        FreshNativeOpening::Unexplained => {
+            let error = restored.expect_err("a substituted native session must be refused");
+            assert!(
+                format!("{error:#}").contains("expected native-session"),
+                "{error:#}"
+            );
+            assert_eq!(
+                controller.state.sessions[session_id]
+                    .native_session_id
+                    .as_deref(),
+                Some("native-session")
+            );
+            // The failed attempt's lines reached the durable projection while
+            // the controller waited for the worker. The rollback puts the
+            // archived projection back, so a failed attempt leaves no lines.
+            let synced = crate::database::load_materialized_session(session_id)
+                .unwrap()
+                .unwrap();
+            assert!(
+                mentions(&synced, "continuing in a new empty session") > 0,
+                "{:#?}",
+                synced.transcript
+            );
+            restore_projection_after_failed_resume(session_id, &verified.canonical_session, false);
+            assert_eq!(
+                crate::database::load_materialized_session(session_id).unwrap(),
+                Some(archived_projection)
+            );
+        }
+    }
+}
+
+/// R7-5: a session suspended before its native session was ever prompted.
+/// Claude Code and Codex write nothing for a native session until its first
+/// prompt, so the restored worker cannot reload the archived one and opens a
+/// fresh one. The resume accepts it, records the new identity, and the session
+/// answers prompts.
+#[cfg(unix)]
+#[test]
+fn a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened() {
+    fresh_native_resume_for_each_harness(
+        "a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened",
+        FreshNativeOpening::ReplacesUnused,
+    );
+}
+
+/// The identity check still protects history: a worker that opens a different
+/// native session without saying it replaced an unused one is refused, and the
+/// failed attempt leaves nothing behind in the transcript.
+#[cfg(unix)]
+#[test]
+fn a_resume_that_opens_another_native_session_without_cause_is_refused() {
+    fresh_native_resume_for_each_harness(
+        "a_resume_that_opens_another_native_session_without_cause_is_refused",
+        FreshNativeOpening::Unexplained,
+    );
+}
+
+/// A worker may stand a new native session in for the archived one only when
+/// it names that exact session as the unused one it replaced.
+#[test]
+fn only_the_archived_unused_session_may_be_replaced_on_resume() {
+    assert!(restored_native_session_accepted(
+        "archived", "archived", None
+    ));
+    assert!(restored_native_session_accepted(
+        "archived",
+        "fresh",
+        Some("archived")
+    ));
+    assert!(!restored_native_session_accepted("archived", "fresh", None));
+    assert!(!restored_native_session_accepted(
+        "archived",
+        "fresh",
+        Some("another")
+    ));
+}

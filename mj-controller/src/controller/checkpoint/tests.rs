@@ -297,6 +297,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
             native_session_id: Some("native-session".into()),
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
             agent_capabilities: None,
             agent_info: None,
             steering_supported: None,
@@ -1034,6 +1035,19 @@ const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
 #[cfg(unix)]
 const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
 pub(crate) const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
+/// Open a new native session with this id instead of reloading one, as a
+/// restored worker does when the harness has no record of the session it was
+/// asked to reload.
+pub(crate) const LATCH_RELAY_FRESH_NATIVE: &str = "MJ_TEST_LATCH_FRESH_NATIVE";
+/// With [`LATCH_RELAY_FRESH_NATIVE`]: the native session the new one replaced
+/// because this session never used it. Unset, the relay gives no reason.
+pub(crate) const LATCH_RELAY_REPLACED_UNUSED: &str = "MJ_TEST_LATCH_REPLACED_UNUSED";
+/// Answer every dispatched prompt with one agent message, like a harness.
+#[cfg(unix)]
+pub(crate) const LATCH_RELAY_ANSWER_PROMPTS: &str = "MJ_TEST_LATCH_ANSWER_PROMPTS";
+/// The text of the answer [`LATCH_RELAY_ANSWER_PROMPTS`] gives.
+#[cfg(unix)]
+pub(crate) const LATCH_RELAY_ANSWER: &str = "answered by the stand-in harness";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
 pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
 /// Whether the scripted relay understands the early checkpoint release.
@@ -1084,13 +1098,39 @@ fn latch_relay_child_serves_stdio() {
     .expect("open the test relay journal");
     relay.set_turn_verdict_harness(HarnessKind::Codex);
     if relay.operational_state().native_session_id.is_none() {
-        relay
-            .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-                native_session_id: "native-session".into(),
-                native_continuity_lost: false,
-                resumed: true,
-            })
-            .unwrap();
+        if let Ok(fresh) = std::env::var(LATCH_RELAY_FRESH_NATIVE) {
+            let replaced = std::env::var(LATCH_RELAY_REPLACED_UNUSED).ok();
+            // What a worker restored from a checkpoint journals when the
+            // harness cannot reload the archived native session and this
+            // session never used it.
+            relay
+                .record_observation(mj_core::relay::RelayObservation::SessionRestarted)
+                .unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::Warning {
+                    message: "Claude Code has no native session native-session and this \
+                              session never used it; continuing in a new empty session"
+                        .into(),
+                })
+                .unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                    native_session_id: fresh,
+                    native_continuity_lost: false,
+                    resumed: false,
+                    replaced_unused_native_session_id: replaced,
+                })
+                .unwrap();
+        } else {
+            relay
+                .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                    native_session_id: "native-session".into(),
+                    native_continuity_lost: false,
+                    resumed: true,
+                    replaced_unused_native_session_id: None,
+                })
+                .unwrap();
+        }
     }
     if !relay.operational_state().goal.synchronized() && !checkpoint_only {
         relay.record_session_update(serde_json::from_value(serde_json::json!({
@@ -1107,6 +1147,8 @@ fn latch_relay_child_serves_stdio() {
     let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
     #[cfg(unix)]
     let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
+    #[cfg(unix)]
+    let answer_prompts = std::env::var_os(LATCH_RELAY_ANSWER_PROMPTS).is_some();
     #[cfg(unix)]
     if running && relay.operational_state().active_prompt.is_none() {
         let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
@@ -1175,6 +1217,28 @@ fn latch_relay_child_serves_stdio() {
                     relay
                         .record_checkpoint_ready(&claimed.command_id)
                         .expect("report the checkpoint barrier ready");
+                }
+                #[cfg(unix)]
+                RelayCommand::Prompt { .. } if answer_prompts => {
+                    relay
+                        .record_session_update(
+                            serde_json::from_value(serde_json::json!({
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": LATCH_RELAY_ANSWER}
+                            }))
+                            .unwrap(),
+                        )
+                        .expect("answer the prompt");
+                    relay
+                        .record_command_completed(
+                            &claimed.command_id,
+                            RelayCommandOutcome::Prompt {
+                                diagnostic: None,
+                                stop_reason: "end_turn".into(),
+                                usage: None,
+                            },
+                        )
+                        .expect("complete the answered prompt");
                 }
                 #[cfg(unix)]
                 RelayCommand::CancelTurn => {
@@ -2032,6 +2096,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
             native_session_id: "native-session".into(),
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
             resumed: true,
         })
         .unwrap();
@@ -2599,6 +2664,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
         native_session_id: "native-session".into(),
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         resumed: true,
     })
     .unwrap();

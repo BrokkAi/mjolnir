@@ -15,7 +15,8 @@ use mj_transcript::projection::materialized_session_from_canonical;
 
 use super::{
     Controller, RestoreIntoTarget, WorkerRootReset, backend_locator, native_continuity_preserved,
-    now, projection_rebuild_required, utility_handoff_while_cancellable, verify_resume_checkpoint,
+    now, projection_rebuild_required, restore_projection_after_failed_resume,
+    utility_handoff_while_cancellable, verify_resume_checkpoint,
 };
 use crate::controller::removable_profile_root;
 use crate::targets::CommandExecutor;
@@ -221,42 +222,13 @@ impl Controller {
         match result {
             Ok(materialized) => Ok(materialized),
             Err(error) => {
-                // Put back whatever this swap could have written to the durable
-                // projection. Both branches restore archived content, so they
-                // are correct whether or not the write had happened.
-                if rebuild_projection {
-                    match materialized_session_from_canonical(session_id, &canonical_session) {
-                        Ok(previous_projection) => {
-                            if let Err(restore_error) =
-                                crate::database::save_materialized_session(&previous_projection)
-                            {
-                                tracing::error!(
-                                    session_id,
-                                    error = format!("{restore_error:#}"),
-                                    "could not restore the durable projection after an in-place move failed"
-                                );
-                            }
-                        }
-                        Err(restore_error) => tracing::error!(
-                            session_id,
-                            error = format!("{restore_error:#}"),
-                            "could not rebuild the durable projection after an in-place move failed"
-                        ),
-                    }
-                } else if let Err(restore_error) =
-                    crate::database::replace_materialized_queued_prompts(
-                        session_id,
-                        &mj_transcript::projection::materialized_queued_prompts_from_canonical(
-                            &canonical_session.queued_prompts,
-                        ),
-                    )
-                {
-                    tracing::error!(
-                        session_id,
-                        error = format!("{restore_error:#}"),
-                        "could not restore queued prompts after an in-place move failed"
-                    );
-                }
+                // Put back whatever this swap wrote to the durable projection,
+                // including the failed worker's own lines.
+                restore_projection_after_failed_resume(
+                    session_id,
+                    &canonical_session,
+                    discard_queued_prompts,
+                );
                 // Never retry in place: the rollback tears the target down and
                 // leaves the session `Stopped` with its verified checkpoint,
                 // which is what the fresh path resumes from. The managed

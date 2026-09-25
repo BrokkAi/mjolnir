@@ -150,6 +150,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
         native_session_id: Some(session_id.to_owned()),
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: None,
         agent_capabilities: None,

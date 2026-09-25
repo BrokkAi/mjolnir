@@ -288,6 +288,11 @@ impl StandaloneSession {
         Ok(())
     }
 
+    /// The relay state as of the last sync, without copying the projection.
+    pub fn operational(&self) -> &RelayOperationalState {
+        &self.operational
+    }
+
     pub fn snapshot(&self) -> ManagedSessionSnapshot {
         ManagedSessionSnapshot {
             window: self.window.clone(),

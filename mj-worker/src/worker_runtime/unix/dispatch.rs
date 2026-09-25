@@ -471,6 +471,7 @@ pub(crate) fn record_runtime_event(
             native_session_id,
             resumed,
             native_continuity_lost,
+            replaced_unused_native_session_id,
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
@@ -478,6 +479,7 @@ pub(crate) fn record_runtime_event(
                 native_session_id,
                 resumed,
                 native_continuity_lost,
+                replaced_unused_native_session_id,
             })?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {

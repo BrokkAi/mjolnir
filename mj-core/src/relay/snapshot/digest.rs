@@ -151,6 +151,7 @@ pub fn validate_relay_event_self(event: &RelayEvent) -> Result<()> {
         native_session_id,
         resumed,
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
     } = &event.observation
     {
         let legacy = LegacyFlaggedObservation::SessionOpened {

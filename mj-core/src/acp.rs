@@ -559,6 +559,10 @@ pub enum RuntimeEvent {
         /// checkpoint could restore. Older workers omit it.
         #[serde(default)]
         native_continuity_lost: bool,
+        /// The recorded native session this one replaced because the harness
+        /// had no record of it and this session never used it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_unused_native_session_id: Option<String>,
     },
     SessionConfigured {
         config_options: Vec<SessionConfigOption>,
