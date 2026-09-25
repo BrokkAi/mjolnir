@@ -373,6 +373,16 @@ impl HarnessKind {
         }
     }
 
+    /// Every harness by product name, in [`Self::ALL`] order, as a list that
+    /// ends with "or": "Codex, Claude Code, Kimi Code, Grok Build, or Muse
+    /// Code". Messages that say no agent was found use it, so each one names
+    /// every agent Mjolnir looks for.
+    pub fn every_display_name_or() -> String {
+        let names = Self::ALL.map(Self::display_name);
+        let (last, rest) = names.split_last().expect("ALL is not empty");
+        format!("{}, or {last}", rest.join(", "))
+    }
+
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex and Claude
     /// select their guardian mode explicitly.

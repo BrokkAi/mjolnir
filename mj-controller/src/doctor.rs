@@ -311,7 +311,10 @@ fn harness_discovery_check_from(
             DoctorCheck::fixable(
                 "harness.discovery",
                 "Harness home discovery",
-                "No Codex, Claude Code, Kimi Code, or Grok Build home was found in the default or environment-overridden locations.",
+                format!(
+                    "No {} home was found in the default or environment-overridden locations.",
+                    HarnessKind::every_display_name_or()
+                ),
                 format!(
                     "Install and sign in to a supported harness, then open Mjolnir, press {settings_key} for Settings, and choose Agent Profiles."
                 ),

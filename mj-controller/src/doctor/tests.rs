@@ -1595,6 +1595,19 @@ fn missing_harness_homes_are_fixable_without_a_configured_profile() {
     );
 }
 
+/// The README and the quickstart list five agents. The check that says none
+/// was found named four and left out Muse Code, which discovery does look
+/// for (launch finding R13-12).
+#[test]
+fn missing_harness_homes_name_every_supported_agent() {
+    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
+
+    assert_eq!(
+        check.detail,
+        "No Codex, Claude Code, Kimi Code, Grok Build, or Muse Code home was found in the default or environment-overridden locations."
+    );
+}
+
 #[test]
 fn apple_container_is_unsupported_on_intel_macs() {
     let executor = FakeExecutor::new([]);

@@ -1006,7 +1006,8 @@ fn write_discovered_homes(output: &mut impl Write, homes: &[DiscoveredHome]) -> 
     if homes.is_empty() {
         writeln!(
             output,
-            "  No existing Codex, Claude Code, Kimi Code, or Grok Build homes found."
+            "  No existing {} homes found.",
+            HarnessKind::every_display_name_or()
         )?;
     }
     for home in homes {

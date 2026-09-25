@@ -1433,6 +1433,19 @@ fn dialog_configures_raw_localhost_without_a_container_runtime() {
     assert!(output.contains("raw localhost will still be configured"));
 }
 
+/// Setup looks for all five agents' homes, so the line that says it found
+/// none names all five (launch finding R13-12).
+#[test]
+fn no_discovered_home_names_every_supported_agent() {
+    let mut output = Vec::new();
+    write_discovered_homes(&mut output, &[]).unwrap();
+
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "Harness homes:\n  No existing Codex, Claude Code, Kimi Code, Grok Build, or Muse Code homes found.\n"
+    );
+}
+
 #[test]
 fn discovered_homes_warn_for_harnesses_without_guardian_approvals() {
     let warning = |kind: HarnessKind| {
