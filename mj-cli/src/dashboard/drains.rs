@@ -504,7 +504,10 @@ impl DashboardContext {
                 .profiles
                 .get(&result.profile_id)
                 .map(|profile| profile.kind);
-            if let Some(notice) = self.credential_sync_notices.notice(&result, harness) {
+            if let Some(notice) =
+                self.credential_sync_notices
+                    .notice(&result, harness, &self.controller.state)
+            {
                 self.dashboard.set_notice(notice);
             }
         }

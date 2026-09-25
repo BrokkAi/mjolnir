@@ -209,9 +209,7 @@ pub(super) fn record_refresh_result(
 pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::OsStr>) -> bool {
     match host {
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
-            let Some(path) = path else { return false };
-            let engine = host.engine();
-            std::env::split_paths(path).any(|directory| directory.join(engine).is_file())
+            crate::targets::program_on_path(host.engine(), path)
         }
         ImageHost::SshPodman(_) | ImageHost::SshDocker(_) => true,
     }

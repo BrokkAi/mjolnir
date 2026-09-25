@@ -458,9 +458,25 @@ fn adopt_requested_value(
     }
 }
 
+/// The mode a harness puts a session in instead of `desired` when the model
+/// the session runs cannot use `desired`, and which it announces itself.
+///
+/// claude-agent-acp 0.81.0 (`dist/session-mode.js`, `AUTO_MODE_FALLBACK`)
+/// answers a request for Auto on a model without Auto mode with Accept edits
+/// and its "Auto mode unavailable" notice. It does the same when a model
+/// change or a reloaded session's model rules Auto out, which Mjolnir already
+/// accepted; this lets a mode request that meets the same rule succeed too.
+fn announced_mode_substitute(harness: HarnessKind, desired: &str) -> Option<&'static str> {
+    match (harness, desired) {
+        (HarnessKind::Claude, "auto") => Some("acceptEdits"),
+        _ => None,
+    }
+}
+
 pub(super) async fn enforce_execution_mode(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
+    harness: HarnessKind,
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
     legacy_modes: &mut Option<agent_client_protocol::schema::v1::SessionModeState>,
@@ -483,13 +499,16 @@ pub(super) async fn enforce_execution_mode(
         // A harness can answer the request and still report another mode, so
         // the session is only safe to use once it confirms the effective one.
         let effective = surface::config_current_value(config_options, &option_id);
-        ensure!(
-            effective.as_deref() == Some(desired),
-            "the harness acknowledged execution mode {desired} but reports {}",
-            effective.map_or_else(|| "no mode".to_owned(), |mode| format!("{mode:?}"))
-        );
+        let substitute = announced_mode_substitute(harness, desired);
+        let applied = match effective.as_deref() {
+            Some(mode) if mode == desired || Some(mode) == substitute => mode.to_owned(),
+            _ => bail!(
+                "the harness acknowledged execution mode {desired} but reports {}",
+                effective.map_or_else(|| "no mode".to_owned(), |mode| format!("{mode:?}"))
+            ),
+        };
         if let Some(modes) = legacy_modes.as_mut() {
-            modes.current_mode_id = desired.to_owned().into();
+            modes.current_mode_id = applied.into();
         }
         return Ok(());
     }
@@ -517,4 +536,63 @@ pub(super) async fn enforce_execution_mode(
         return Ok(());
     }
     bail!("ACP bridge does not expose required execution mode {desired}")
+}
+
+/// The harness's own words when it answered a mode request with an error,
+/// or `None` when the failure was not an answer from the harness: a mode it
+/// does not list, or an acknowledged request that left another mode.
+pub(super) fn mode_refusal(error: &anyhow::Error) -> Option<String> {
+    let refusal = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<agent_client_protocol::Error>())?;
+    let data = refusal.data.as_ref();
+    let text = data
+        .and_then(|data| data.get("details").or_else(|| data.get("message")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(refusal.message.as_str());
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(if text.is_empty() {
+        refusal.message.clone()
+    } else {
+        text
+    })
+}
+
+/// The one line a session gets when its harness refused the policy's mode
+/// for a new session, naming the mode the session is left in.
+pub(super) fn refused_mode_warning(
+    harness: HarnessKind,
+    desired: &str,
+    refusal: &str,
+    modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
+    config_options: &[SessionConfigOption],
+) -> String {
+    let harness_name = harness.display_name();
+    let current = config_options
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
+        .or_else(|| modes.map(|modes| modes.current_mode_id.to_string()));
+    let kept = match current {
+        Some(id) => {
+            let name = modes
+                .and_then(|modes| {
+                    modes
+                        .available_modes
+                        .iter()
+                        .find(|mode| mode.id.to_string() == id)
+                })
+                .map(|mode| mode.name.clone())
+                .filter(|name| name != &id);
+            match name {
+                Some(name) => format!("its own mode, {name} ({id})"),
+                None => format!("its own mode, {id}"),
+            }
+        }
+        None => "its own mode".to_owned(),
+    };
+    format!(
+        "{harness_name} refused execution mode {desired} for this session ({refusal}), so the \
+         session continues in {kept}."
+    )
 }

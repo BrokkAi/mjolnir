@@ -59,8 +59,8 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigValueId, SessionId, SessionModeState, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextResourceContents,
-    ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -81,11 +81,40 @@ use mj_core::elicitation::{
 use mj_core::relay::{AcpActivityClock, ClaimedSteeringPrompt};
 use mj_core::worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
 
+/// Heads the context a failed bridge's stderr tail is attached as.
+const BRIDGE_STDERR_CONTEXT: &str = "ACP bridge stderr:";
+
+/// What a worker's exit record says it stopped on: the error chain on one
+/// line, then the bridge's stderr tail when there is one.
+///
+/// The tail is the outermost context of a bridge failure, so the plain chain
+/// began with "ACP bridge stderr:" and dozens of bridge log lines, and the
+/// cause came last. A resume that failed this way stored the whole dump as
+/// the session's error (R8-2). With the cause first, the record's first line
+/// says why the worker stopped.
+pub fn worker_exit_reason(error: &anyhow::Error) -> String {
+    let (tails, causes): (Vec<String>, Vec<String>) = error
+        .chain()
+        .map(ToString::to_string)
+        .partition(|text| text.starts_with(BRIDGE_STDERR_CONTEXT));
+    let cause = causes
+        .iter()
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(": ");
+    tails
+        .into_iter()
+        .fold(cause, |reason, tail| format!("{reason}\n{tail}"))
+}
+
 /// The first block of a prompt the relay attached controller-only context to
 /// (project memory, shell results, a hand-off): an embedded resource named
 /// [`mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI`]. [`prompt_for_harness`]
 /// decides the form the harness's bridge receives.
+#[cfg(any(unix, test))]
 pub(crate) fn hidden_context_block(text: String) -> ContentBlock {
+    use agent_client_protocol::schema::v1::TextResourceContents;
+
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
             text,
@@ -576,8 +605,8 @@ async fn run_bridge(
         }
     };
     if !restarting && let Some(stderr_tail) = actionable_stderr_tail(&stderr_tail) {
-        result =
-            result.map_err(|error| error.context(format!("ACP bridge stderr:\n{stderr_tail}")));
+        result = result
+            .map_err(|error| error.context(format!("{BRIDGE_STDERR_CONTEXT}\n{stderr_tail}")));
     }
     match result {
         Ok(None) => Ok(None),

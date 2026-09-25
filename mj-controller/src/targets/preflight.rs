@@ -131,6 +131,26 @@ pub fn engine_not_installed(engine: &str) -> String {
     format!("{engine} is not installed on this host")
 }
 
+/// The command a local container target's engine runs as. `None` for any
+/// other target, whose readiness is not a local engine's.
+pub fn local_engine_command(template: &mj_core::config::TargetTemplate) -> Option<&'static str> {
+    use mj_core::config::TargetTemplate as Template;
+    match template {
+        Template::LocalPodman { .. } => Some("podman"),
+        Template::LocalDocker { .. } => Some("docker"),
+        Template::AppleContainer { .. } => Some("container"),
+        _ => None,
+    }
+}
+
+/// Whether `program` is a file in one of the directories of `path`, a PATH
+/// value. A missing PATH finds nothing.
+pub fn program_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    path.is_some_and(|path| {
+        std::env::split_paths(path).any(|directory| directory.join(program).is_file())
+    })
+}
+
 /// Why local Docker cannot run sessions: one sentence per case, where the
 /// raw error chain said "run docker for check Docker daemon: No such file or
 /// directory (os error 2)" (launch finding R5-3).

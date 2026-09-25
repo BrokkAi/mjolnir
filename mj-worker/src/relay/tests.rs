@@ -2582,11 +2582,12 @@ fn text_that_answers_a_model_change_opens_no_harness_turn() {
         "the answer to a configuration request is not a turn"
     );
     assert_eq!(state.execution, RelayExecutionState::Idle);
+    // As a notice row of its own since R8-5.
     assert!(
         observations(&relay).iter().any(|observation| matches!(
             observation,
-            RelayObservation::SessionUpdate { update }
-                if agent_chunk_text(update) == Some(CLAUDE_AUTO_MODE_FALLBACK_TEXT)
+            RelayObservation::Notice { message }
+                if *message == CLAUDE_AUTO_MODE_FALLBACK_TEXT.replace("**", "")
         )),
         "the notice still reaches the conversation"
     );
@@ -5082,4 +5083,168 @@ fn clear_is_refused_while_a_turn_is_running() {
         .submit_command("clear-request", RelayCommand::ClearContext)
         .unwrap();
     assert!(refused.is_err());
+}
+
+/// The transcript a relay's events project to.
+fn projected_transcript(relay: &DurableRelay) -> Vec<mj_core::state::TranscriptItem> {
+    let mut session = mj_core::state::MaterializedSession::empty(SESSION);
+    for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(
+            &mut session,
+            &event,
+            projected.mutation,
+        )
+        .unwrap();
+    }
+    session
+        .transcript
+        .into_iter()
+        .map(|item| (*item).clone())
+        .collect()
+}
+
+/// R8-4: resuming a prompted Claude session on haiku opened a phantom turn.
+/// The adapter sends its "Auto mode unavailable" notice while the resumed
+/// session is set up (journal: `harness_turn_started` at 77, the notice
+/// chunk at 78, both before `session_opened` at 79), so the transcript said
+/// "Agent continued on its own" and the row stayed Working until Esc. Output
+/// before the session is open and configured is a notice row, never a turn.
+#[test]
+fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    // The recorded order: a restarted session, a new bridge, the notice,
+    // then the opened and configured session.
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::AgentInitialized {
+            protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
+            capabilities: Box::default(),
+            agent_info: None,
+        })
+        .unwrap();
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none(), "setup output is not a turn");
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    let recorded = observations(&relay);
+    assert!(
+        !recorded
+            .iter()
+            .any(|observation| matches!(observation, RelayObservation::HarnessTurnStarted { .. })),
+        "{recorded:#?}"
+    );
+    let notice = "Auto mode unavailable: the selected model does not support Auto mode; using \
+                  Accept edits instead.";
+    assert!(
+        recorded.iter().any(|observation| matches!(
+            observation,
+            RelayObservation::Notice { message } if message == notice
+        )),
+        "{recorded:#?}"
+    );
+    let transcript = projected_transcript(&relay);
+    assert!(
+        transcript.iter().any(|item| matches!(
+            &item.body,
+            mj_core::state::TranscriptBody::System { text } if text == notice
+        )),
+        "{transcript:#?}"
+    );
+    assert!(
+        !transcript.iter().any(|item| item.is_turn_start()
+            || matches!(item.body, mj_core::state::TranscriptBody::Agent { .. })),
+        "{transcript:#?}"
+    );
+
+    // Once the session is configured, text with nothing in flight is Claude
+    // Code working on its own again.
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+}
+
+/// R8-5: a live `/model haiku` on a session that already had a reply added
+/// the adapter's notice to that reply: item `agent:msg_011Cf…` went from
+/// "one two" to "one two**Auto mode unavailable:** …" (cli/038 vs 046). The
+/// notice carries no message id, and the projection joins an id-less chunk
+/// that arrives while idle to the last agent message. Text that answers a
+/// configuration request is a notice row of its own.
+#[test]
+fn text_that_answers_a_model_change_is_its_own_notice_and_leaves_the_reply_alone() {
+    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    submit_relay(&mut relay, "prompt-reply", prompt("Reply with one two."));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("one two")))
+                .message_id(Some("msg_011Cf".into())),
+        ))
+        .unwrap();
+    finish_prompt(&mut relay, "prompt-reply");
+
+    submit_relay(&mut relay, "model-haiku", set_config("model", "haiku"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "haiku".into(),
+        })
+        .unwrap();
+    relay
+        .record_command_completed("model-haiku", RelayCommandOutcome::Configured)
+        .unwrap();
+
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    let transcript = projected_transcript(&relay);
+    let reply = transcript
+        .iter()
+        .find(|item| item.stable_id == "agent:msg_011Cf")
+        .expect("the reply is in the transcript");
+    let mj_core::state::TranscriptBody::Agent { chunks, .. } = &reply.body else {
+        panic!("the reply is an agent message: {reply:#?}");
+    };
+    let text = chunks
+        .iter()
+        .filter_map(|chunk| chunk.pointer("/content/text")?.as_str())
+        .collect::<String>();
+    assert_eq!(text, "one two");
+    assert!(
+        transcript.iter().any(|item| matches!(
+            &item.body,
+            mj_core::state::TranscriptBody::System { text }
+                if text == "Auto mode unavailable: the selected model does not support Auto \
+                            mode; using Accept edits instead."
+        )),
+        "{transcript:#?}"
+    );
 }

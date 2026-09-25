@@ -1799,6 +1799,20 @@ impl Default for State {
 }
 
 impl State {
+    /// How a notice names a session: the title the session list shows
+    /// (`listed_title`, which includes the title it was created with), or its
+    /// short id when it has no title or its record is gone (launch findings
+    /// B-3, R5-5 and R8-3).
+    #[must_use]
+    pub fn session_notice_name(&self, session_id: &str) -> String {
+        match self.sessions.get(session_id) {
+            Some(session) if session.listed_title() != session.id => {
+                session.listed_title().to_owned()
+            }
+            _ => short_id(session_id).to_owned(),
+        }
+    }
+
     /// The session whose project identity names a row.
     ///
     /// A sub-agent child runs inside its parent's workspace and owns no

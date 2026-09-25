@@ -7255,3 +7255,38 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         "the client answered launcher output with an error: {received:?}"
     );
 }
+
+/// R8-2: the exit record's first line names why the worker stopped. The
+/// bridge's stderr tail used to come first, so a resume that failed on a
+/// refused mode showed "ACP bridge stderr:" and the bridge's log lines.
+#[test]
+fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
+    let error = anyhow::anyhow!(
+        "Internal error: {{\n  \"details\": \"Cannot set permission mode to auto: auto mode \
+         unavailable for this model\"\n}}"
+    )
+    .context("select required ACP execution mode auto")
+    .context(format!(
+        "{BRIDGE_STDERR_CONTEXT}\n[session/create] phase=models durationMs=1\n\
+         [session/create] phase=register durationMs=1"
+    ));
+
+    let reason = worker_exit_reason(&error);
+    let mut lines = reason.lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "select required ACP execution mode auto: Internal error: { \"details\": \"Cannot \
+             set permission mode to auto: auto mode unavailable for this model\" }"
+        )
+    );
+    assert_eq!(lines.next(), Some(BRIDGE_STDERR_CONTEXT));
+    assert!(reason.ends_with("[session/create] phase=register durationMs=1"));
+
+    // A failure with no stderr is the chain on one line.
+    let error = anyhow::anyhow!("durable relay open failed").context("start worker");
+    assert_eq!(
+        worker_exit_reason(&error),
+        "start worker: durable relay open failed"
+    );
+}

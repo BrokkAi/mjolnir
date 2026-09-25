@@ -57,6 +57,8 @@ where
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
     // every old turn on every restart. New sessions have no old history.
+    // `session::accept_live_session_updates` turns them on however the
+    // session opens, including a resume that falls back to `session/new`.
     let session_updates_enabled = Arc::new(AtomicBool::new(spec.resume_session.is_none()));
     let notification_session_updates_enabled = session_updates_enabled.clone();
     // Codex can finish dispatching old tool updates after `session/load` has

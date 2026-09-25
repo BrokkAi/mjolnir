@@ -1751,7 +1751,13 @@ impl Controller {
                 "resume rollback cleanup reported failures"
             );
         }
-        let original = format!("{error:#}");
+        // The session's error is one line; a worker's diagnostic dump goes to
+        // the log (R8-2).
+        let original = super::worker_binary::failure_line(&error);
+        let detail = format!("{error:#}");
+        if detail != original {
+            tracing::warn!(session_id, error = %detail, "resume failed");
+        }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         let failure = apply_failed_resume_rollback(
             record,

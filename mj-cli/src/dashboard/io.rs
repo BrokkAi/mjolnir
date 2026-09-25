@@ -170,6 +170,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         target_id: String,
         result: std::result::Result<(), String>,
+        /// The configuration checked, when the check found its local
+        /// engine's command not installed.
+        absent_engine: Option<mj_core::config::TargetTemplate>,
     },
     MountHistory(
         std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
@@ -940,7 +943,20 @@ impl DashboardContext {
                 generation,
                 target_id,
                 result,
+                absent_engine,
             } => {
+                if let (Some(template), Err(message)) = (&absent_engine, &result)
+                    && self
+                        .absent_engines
+                        .record(&target_id, template, message.clone())
+                {
+                    tracing::info!(
+                        target_id,
+                        reason = %message,
+                        "the target's container engine is not installed; the dashboard checks it \
+                         again only when its configuration changes or the engine is installed"
+                    );
+                }
                 self.dashboard
                     .apply_target_readiness(generation, target_id, result);
             }
@@ -1623,15 +1639,9 @@ impl DashboardContext {
     }
 }
 
-/// How a notice names a session: the title the session list shows
-/// (`listed_title`, which includes the title it was created with), or its
-/// short id when it has no title or its record is gone (launch findings B-3
-/// and R5-5).
+/// How a notice names a session; see [`State::session_notice_name`].
 pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
-    match state.sessions.get(session_id) {
-        Some(session) if session.listed_title() != session.id => session.listed_title().to_owned(),
-        _ => short_id(session_id).to_owned(),
-    }
+    state.session_notice_name(session_id)
 }
 
 /// How a lifecycle's completion notice names its session. The daemon's

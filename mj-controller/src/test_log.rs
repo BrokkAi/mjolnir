@@ -23,6 +23,7 @@ impl CapturedLog {
     }
 
     /// Events at exactly `level`.
+    #[cfg(unix)]
     pub(crate) fn at(&self, level: tracing::Level) -> Vec<String> {
         self.events()
             .into_iter()

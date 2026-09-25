@@ -41,7 +41,6 @@ use crate::targets::{
 use crate::worker_client::CredentialSyncCoordinator;
 
 use crate::daemon;
-use mj_core::state::short_id;
 use mj_core::subagent::SubagentRecord;
 
 #[cfg(test)]

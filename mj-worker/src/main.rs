@@ -367,7 +367,7 @@ fn main() -> Result<()> {
             let refusal = mj_core::refusal::Refusal::of(error);
             write_worker_exit_record_with_refusal(
                 root,
-                &format!("{error:#}"),
+                &mj_worker::acp::worker_exit_reason(error),
                 refusal.as_ref().map(mj_core::refusal::Refusal::message),
             );
         }

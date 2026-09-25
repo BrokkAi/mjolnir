@@ -256,13 +256,55 @@ pub(in crate::controller) fn probe_worker(
 
 /// The sentence a refusing worker wrote in its exit record, when it wrote one.
 fn exit_refusal(text: &str) -> Option<String> {
+    exit_record_field(text, "refusal")
+}
+
+fn exit_record_field(text: &str, field: &str) -> Option<String> {
     let (_, rest) = text.split_once(WORKER_EXIT_RECORD_MARKER)?;
     let body = rest.split("\n--- ").next().unwrap_or(rest);
     let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
     record
-        .get("refusal")
+        .get(field)
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+/// A failure on one line, for a session's error field: each cause's first
+/// line, with a worker's diagnostic dump replaced by the first line of the
+/// reason the worker recorded for its exit. The caller logs the full chain.
+///
+/// [`worker_probe_diagnosis`] attaches the dump as the outermost context, so
+/// the whole chain began "worker diagnostics:" and ran to a hundred lines of
+/// startup steps, log tail and bridge stderr (R8-2).
+pub(in crate::controller) fn failure_line(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .filter_map(|cause| {
+            let text = cause.to_string();
+            let dump = text
+                .split_once("worker diagnostics:")
+                .map(|(before, _)| before.trim_end());
+            match dump {
+                Some(before) => {
+                    let reason = exit_record_field(&text, "reason").and_then(|reason| {
+                        reason
+                            .lines()
+                            .next()
+                            .map(|line| format!("the worker exited: {}", line.trim()))
+                    });
+                    let before = before.lines().next().unwrap_or_default().trim();
+                    match (before.is_empty(), reason) {
+                        (true, reason) => reason,
+                        (false, Some(reason)) => Some(format!("{before}: {reason}")),
+                        (false, None) => Some(before.to_owned()),
+                    }
+                }
+                None => Some(text.lines().next().unwrap_or_default().trim().to_owned()),
+            }
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// The text under the process marker, which is `alive (...)` or `absent`.
@@ -380,5 +422,48 @@ mod probe_tests {
 
         assert_eq!(startup_step(&text), None);
         assert!(process_section(&text).is_some_and(|section| section.starts_with("absent")));
+    }
+
+    /// R8-2 (cli/048): a resume whose worker exited stored the whole probe
+    /// as the session's error, 96 lines beginning "worker diagnostics:". The
+    /// error keeps one line: the reason the worker recorded, then the rest of
+    /// the chain.
+    #[test]
+    fn a_failure_carrying_worker_diagnostics_is_one_line_naming_the_workers_reason() {
+        let reason = "select required ACP execution mode auto: Cannot set permission mode \
+                      to auto: auto mode unavailable for this model\n\
+                      ACP bridge stderr:\n[session/create] phase=register durationMs=1";
+        let dump = format!(
+            "worker diagnostics:\n{WORKER_STARTUP_RECORD_MARKER}\n\
+             {{\n  \"step\": \"acp-initialized\"\n}}\n{WORKER_EXIT_RECORD_MARKER}\n{}\n\
+             --- worker.log (tail) ---\nERROR mj_worker: Mjolnir worker exited\n\
+             {WORKER_PROCESS_MARKER}\nabsent",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "reason": reason, "refusal": null, "version": "2.20.0"
+            }))
+            .unwrap()
+        );
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            .context("write relay history_requests request")
+            .context(dump);
+
+        assert_eq!(
+            failure_line(&error),
+            "the worker exited: select required ACP execution mode auto: Cannot set \
+             permission mode to auto: auto mode unavailable for this model: write relay \
+             history_requests request: broken pipe"
+        );
+
+        // A worker that left no exit record is still named, by what the
+        // readiness wait saw, and the dump stays out.
+        let error = anyhow::anyhow!("connect refused").context(format!(
+            "the worker process is gone; it reached the startup step \"serving\" and left no \
+             exit record\nworker diagnostics:\n{WORKER_PROCESS_MARKER}\nabsent"
+        ));
+        assert_eq!(
+            failure_line(&error),
+            "the worker process is gone; it reached the startup step \"serving\" and left no \
+             exit record: connect refused"
+        );
     }
 }

@@ -135,12 +135,14 @@ impl CredentialSyncNotices {
         &mut self,
         result: &mj_core::credentials::CredentialSyncResult,
         harness: Option<mj_core::config::HarnessKind>,
+        state: &State,
     ) -> Option<String> {
         let advice = setup_token_advice(&result.profile_id, harness);
         // Event-triggered syncs always speak: the upstream per-session
         // cooldown, not this dedup, is what keeps them rare.
         if let Some(trigger) = &result.trigger {
             let session_id = &trigger.session_id;
+            let session = state.session_notice_name(session_id);
             let sync_failure = result.failure.as_deref().or_else(|| {
                 result.failures().find_map(|(failed_session, detail)| {
                     (failed_session == session_id).then_some(detail)
@@ -150,14 +152,11 @@ impl CredentialSyncNotices {
                 return Some(match trigger.reason {
                     CredentialSyncReason::AuthenticationFailure => format!(
                         "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`{advice}.",
-                        result.profile_id,
-                        short_id(session_id),
-                        result.profile_id
+                        result.profile_id, session, result.profile_id
                     ),
                     CredentialSyncReason::EmptyPromptResponse => format!(
                         "Session {} returned no response; credential reconciliation for profile {} failed: {detail}. The failure is recorded in the transcript.",
-                        short_id(session_id),
-                        result.profile_id
+                        session, result.profile_id
                     ),
                 });
             }
@@ -166,25 +165,19 @@ impl CredentialSyncNotices {
             return Some(match (trigger.reason, result.pushed_to(session_id)) {
                 (CredentialSyncReason::AuthenticationFailure, true) => format!(
                     "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
-                    result.profile_id,
-                    short_id(session_id),
-                    result.profile_id
+                    result.profile_id, session, result.profile_id
                 ),
                 (CredentialSyncReason::AuthenticationFailure, false) => format!(
                     "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
-                    result.profile_id,
-                    short_id(session_id),
-                    result.profile_id
+                    result.profile_id, session, result.profile_id
                 ),
                 (CredentialSyncReason::EmptyPromptResponse, true) => format!(
                     "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
-                    short_id(session_id),
-                    result.profile_id
+                    session, result.profile_id
                 ),
                 (CredentialSyncReason::EmptyPromptResponse, false) => format!(
                     "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
-                    short_id(session_id),
-                    result.profile_id
+                    session, result.profile_id
                 ),
             });
         }
@@ -205,7 +198,7 @@ impl CredentialSyncNotices {
                 format!(
                     "Credential sync for profile {} (session {}) failed: {detail}",
                     result.profile_id,
-                    short_id(session_id)
+                    state.session_notice_name(session_id)
                 ),
             );
         }
