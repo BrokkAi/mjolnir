@@ -24,11 +24,13 @@ Two words come up on every screen:
 - A **target** is where the session runs: this machine directly (`localhost`),
   a local container, an SSH host, or an EC2 instance.
 
-When no workspace exists, Mjolnir creates one using the current directory's
-name, then leaves the dashboard ready for an explicit session. On Linux and
-macOS, when there is no configuration yet, `mj` adds a `codex` profile that uses
-`~/.codex` and a `localhost` target. It does not check that Codex is installed,
-and it does not start a session.
+When no workspace exists, Mjolnir creates one named after the current
+directory. It does not start a session. On Linux and macOS, when there is no
+configuration yet and Codex is on this machine (`~/.codex` exists or the
+`codex` command is installed), `mj` also adds a `codex` profile that uses
+`~/.codex`, and a `localhost` target. When no agent profile is set up, the
+dashboard opens on a **Get started** panel instead of the session list; see
+[If no coding agent is installed](#if-no-coding-agent-is-installed).
 
 Press **Create**, `N`, or `prefix+c` to open the full creation wizard. Choose the
 profile, target, project, resources, and attached directories before launch.
@@ -36,16 +38,28 @@ Launch progress and failures appear on the dashboard. When the new session is
 ready, type a prompt and press `Enter`. Use **prefix+s Settings** to discover agent
 accounts, add SSH or EC2 connections, and change runtime options.
 
-`mj setup` is optional. It does the same discovery from the shell: it looks
-for signed-in agents and local container runtimes, writes what it finds to
-`config.toml`, runs `mj doctor`, and ends by telling you to run `mj`. You can
-skip it and use Settings instead.
+`mj setup` is optional. Run it before `mj` if you prefer to set up from the
+shell. It looks for signed-in agents and local container runtimes, and lists
+what it will add to `config.toml`. Then it asks
+`Write this configuration? [y/N]`. Type `y` and press `Enter` to write the
+file. Pressing `Enter` alone answers no and writes nothing. After writing,
+setup runs `mj doctor` and ends by saying what to do next. You can skip setup
+and use Settings instead.
+
+`mj go` is a shortcut for later. Run it in a project directory: the first time
+it asks which profile and target to use, and after that it returns to that
+folder's last conversation. It uses the same workspace that `mj` created for
+the folder.
 
 ### If no coding agent is installed
 
-Mjolnir runs an agent you already use; it does not include one. `mj setup`
-then prints `No existing Codex, Claude Code, Kimi Code, or Grok Build homes
-found.`, and the dashboard says `Mjolnir needs a little fuel.` To fix this:
+Mjolnir runs an agent you already use; it does not include one. Without one,
+`mj setup` prints `No existing Codex, Claude Code, Kimi Code, Grok Build, or
+Muse Code homes found.` and ends by telling you to install an agent. The
+dashboard shows the **Get started** panel, which says `No coding agent was
+found on this machine.` This panel appears whenever no agent profile is set
+up: after `mj setup` found no agent, or on the first `mj` when Codex is not
+installed. To fix this:
 
 1. Install one supported agent and sign in with it once, using that agent's
    own instructions. For example, Claude Code: `npm install -g
@@ -53,7 +67,7 @@ found.`, and the dashboard says `Mjolnir needs a little fuel.` To fix this:
    @openai/codex`, then run `codex login`. Signing in creates the agent's home
    directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`, or
    `~/.config/muse`).
-2. Open Settings (`prefix+s`), choose **Agent Profiles**, and press **Detect
+2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
    profiles**, or run `mj setup` again.
 
 Codex and Claude Code sessions on this machine also need Node.js 22 or newer
@@ -213,9 +227,14 @@ Each way of stopping leaves a different amount running:
 | Action | What stops | What keeps running |
 | --- | --- | --- |
 | `prefix+q` (detach) | This dashboard only | The daemon, every session, and active turns |
-| **Suspend session…** (`prefix+shift+x`) or `mj suspend --session <id>` | That session's agent and target; a recovery copy is saved for **Resume** | The daemon and other sessions |
+| **Suspend session…** (`prefix+shift+x`) or `mj suspend --session <id> --acknowledge-unpublished-work` | That session's agent and target; a recovery copy is saved for **Resume** | The daemon and other sessions |
 | `mj daemon stop` | The daemon | Session workers and their targets, including EC2 instances; the next `mj` reconnects to them |
-| **Destroy session…** or `mj destroy --session <id>` | That session, its target, its clone, and its recovery copy, permanently | The daemon and other sessions |
+| **Destroy session…** or `mj destroy --session <id>` | That session's target, its clone, and its recovery copy. The conversation is archived: `mj sessions --session <id>` lists it as `archived`, and `mj resume --wiki <id>` starts a new session from it | The daemon and other sessions |
+
+`mj suspend` needs `--acknowledge-unpublished-work` for a session that works
+in its own clone, because while the session runs Mjolnir cannot check whether
+its commits have reached a remote; the recovery copy keeps unpushed work
+either way. The dashboard's Suspend dialog says the same and needs no flag.
 
 To stop everything, suspend or destroy each session first, then run
 `mj daemon stop`. `mj sessions` lists what is still live.
@@ -237,6 +256,20 @@ To uninstall after that:
    linked worktrees under `.mj/worktrees` on `mj/<id>` branches; remove those
    with `git worktree remove` first, and delete the `mj/<id>` branches you no
    longer want.
+6. Remove the session index, which holds searchable copies of your agent
+   conversations: `~/.local/share/sessionwiki` on Linux, or
+   `~/Library/Application Support/sessionwiki` on macOS. It also indexes
+   sessions you ran outside Mjolnir. Keep it if you use SessionWiki on its own.
+7. Remove the installer's checksum cache: `~/.cache/mjolnir-installer`.
+8. If you let the installer change your shell profile (for example
+   `~/.bashrc`), delete the two lines it added: `# Added by mjolnir installer`
+   and the `export PATH=...` line after it.
+9. Mjolnir 2.21.0 and earlier left `projects/hel-<key>-<session>` folders in
+   the agent's home for sessions on `localhost`, for example in
+   `~/.codex/projects` or `~/.claude/projects`. Later releases remove those of
+   ended sessions when the daemon starts. Delete any that are left. In
+   `~/.claude/projects` such a folder also holds that session's Claude Code
+   transcript.
 
 On macOS the configuration and data directories are both
 `~/Library/Application Support/mjolnir`.
