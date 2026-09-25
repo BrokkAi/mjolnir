@@ -80,6 +80,9 @@ pub(crate) enum DialogControl {
 pub struct ImportSessionOption {
     pub native_session_id: String,
     pub title: String,
+    /// The working directory the harness recorded, as `cwd` shows it on
+    /// this machine. `project_directory` is its display form.
+    pub cwd: std::path::PathBuf,
     pub project_directory: String,
     pub details: String,
     pub unavailable_reason: Option<String>,

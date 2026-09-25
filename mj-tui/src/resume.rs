@@ -630,6 +630,7 @@ pub(crate) fn merged_resume_rows(
     wiki: &[WikiRow],
 ) -> Vec<ResumeRow> {
     let mut adopted = BTreeSet::new();
+    let mut own_checkouts = Vec::new();
     let mut rows = Vec::new();
     for session in state.sessions.values() {
         // Every record adopts its native session, live ones included: the
@@ -637,6 +638,14 @@ pub(crate) fn merged_resume_rows(
         // a second import.
         if let Some(native_session_id) = &session.native_session_id {
             adopted.insert((session.harness_kind, native_session_id.clone()));
+        }
+        // The record names one native thread, but a `/clear` starts another
+        // and the store records it only at the next checkpoint. Every thread
+        // that ran in the session's own checkout is the session's (R10-3).
+        if let Some(checkout) = &session.managed_worktree
+            && checkout.target == mj_core::state::ManagedWorktreeTarget::Local
+        {
+            own_checkouts.push(checkout.worktree_root.as_path());
         }
         // A sub-agent is resumed through its parent, never on its own.
         if session.state.is_active() || state.is_subagent_session(&session.id) {
@@ -683,7 +692,11 @@ pub(crate) fn merged_resume_rows(
     for profile in profiles {
         for native in &profile.sessions {
             let key = (profile.harness_kind, native.native_session_id.clone());
-            if adopted.contains(&key) {
+            if adopted.contains(&key)
+                || own_checkouts
+                    .iter()
+                    .any(|checkout| native.cwd.starts_with(checkout))
+            {
                 continue;
             }
             rows.push(ResumeRow {

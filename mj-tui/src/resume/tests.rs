@@ -61,6 +61,7 @@ fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionO
     crate::ImportSessionOption {
         native_session_id: id.into(),
         title: title.into(),
+        cwd: "/home/dev/Projects/hel".into(),
         project_directory: "~/Projects/hel".into(),
         details: "master · 1.0KB · ~/Projects/hel".into(),
         unavailable_reason: None,
@@ -518,6 +519,63 @@ fn a_live_session_hides_its_native_counterpart_from_the_dialog() {
         &[],
     );
     assert_eq!(titles(&merged), ["Idle native session"]);
+}
+
+/// R10-3: a `/clear` leaves the session's earlier native thread in the
+/// harness home. The store names one thread per session: until the next
+/// checkpoint the one from before `/clear`, after it the new one. So the
+/// Import tab offered session C's pre-`/clear` thread, whose history C
+/// still holds, and importing it would have duplicated that history. A
+/// thread that ran in a session's own checkout is that session's.
+#[test]
+fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
+    let clone = std::path::PathBuf::from(
+        "/home/dev/reverify-10/project/.mj/clones/0858ecafaa06ecd148aa8bcf70bba899",
+    );
+    let pre_clear = "01a0d8c9-2bc1-7041-9a64-4b8216558cdc";
+    let post_clear = "01a0d8c9-cc35-7e81-943e-0c480730ac99";
+    // Before and after the checkpoint that records the new thread.
+    for (stored, state) in [
+        (pre_clear, SessionState::Running),
+        (post_clear, SessionState::Stopped),
+    ] {
+        let mut session = stopped_session();
+        session.id = "0858ecafaa06ecd148aa8bcf70bba899".into();
+        session.state = state;
+        session.native_session_id = Some(stored.into());
+        session.project_directory = Some(clone.clone());
+        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: "/home/dev/reverify-10/project".into(),
+            source_repository: "/home/dev/reverify-10/project".into(),
+            worktree_root: clone.clone(),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        });
+        let mut before = native(pre_clear, "Remember PINEAPPLE and reply OK", 10);
+        before.cwd = clone.clone();
+        let mut after = native(post_clear, "What word did I ask you to remember?", 20);
+        after.cwd = clone.clone();
+        let mut own = native("user-thread", "The user's own thread", 5);
+        own.cwd = "/home/dev/reverify-10/project".into();
+        let merged = merged_resume_rows(
+            &config(),
+            &state_with(vec![session]),
+            &[codex_profile(vec![before, after, own])],
+            &[],
+        );
+        let importable = merged
+            .iter()
+            .filter(|row| matches!(row.key, ResumeRowKey::Native(..)))
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            importable,
+            ["The user's own thread"],
+            "with {stored} stored"
+        );
+    }
 }
 
 /// A record whose target was renamed or removed from config still reports
