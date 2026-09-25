@@ -83,10 +83,16 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     }
 }
 
-/// A fake Codex bridge that opens a session, reports the title Codex gave
-/// the thread, then says one more thing so the test knows the title has been
-/// handled.
-async fn titling_codex_bridge(stream: tokio::io::DuplexStream) {
+/// A fake Codex bridge that titles a thread the way codex-acp 1.13.2 does:
+/// from the text blocks of the prompt, joined with spaces
+/// (`params.prompt.filter((b) => b.type === "text")` in its prompt handler,
+/// which feeds both the fallback title and the title model). Any other block
+/// is left out. It reports each prompt it receives, then the title, then one
+/// agent message so the test knows the title has been handled.
+async fn titling_codex_bridge(
+    stream: tokio::io::DuplexStream,
+    prompts: mpsc::UnboundedSender<serde_json::Value>,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -101,36 +107,59 @@ async fn titling_codex_bridge(stream: tokio::io::DuplexStream) {
             .get("id")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let mut messages = match method {
+        let messages = match method {
             "initialize" => vec![serde_json::json!({
                 "jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}
             })],
             "session/new" => vec![serde_json::json!({
-                "jsonrpc": "2.0", "id": id, "result": {"sessionId": "titled"}
+                "jsonrpc": "2.0", "id": id, "result": {
+                    "sessionId": "titled",
+                    "modes": {
+                        "currentModeId": "agent",
+                        "availableModes": [{"id": "agent", "name": "Agent"}],
+                    },
+                }
             })],
+            "session/prompt" => {
+                let prompt = request["params"]["prompt"].clone();
+                let title = prompt
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = prompts.send(prompt);
+                let mut messages = [
+                    serde_json::json!({
+                        "sessionUpdate": "session_info_update",
+                        "title": title.trim(),
+                    }),
+                    serde_json::json!({
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "pong"},
+                    }),
+                ]
+                .into_iter()
+                .map(|update| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {"sessionId": "titled", "update": update},
+                    })
+                })
+                .collect::<Vec<_>>();
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}
+                }));
+                messages
+            }
             _ if !id.is_null() => vec![serde_json::json!({
                 "jsonrpc": "2.0", "id": id, "result": {}
             })],
             _ => continue,
         };
-        if method == "session/new" {
-            for update in [
-                serde_json::json!({
-                    "sessionUpdate": "session_info_update",
-                    "title": "Project memory instructions",
-                }),
-                serde_json::json!({
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": "after the title"},
-                }),
-            ] {
-                messages.push(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {"sessionId": "titled", "update": update},
-                }));
-            }
-        }
         for message in messages {
             if write
                 .write_all(format!("{message}\n").as_bytes())
@@ -143,27 +172,27 @@ async fn titling_codex_bridge(stream: tokio::io::DuplexStream) {
     }
 }
 
-/// Launch finding I2-1: a new Codex session was titled "Project memory
-/// instructions" while its first prompt was "Reply with the single word
-/// pong.". Codex titles a thread from every text block of the first prompt,
-/// and Mjolnir's project memory block comes first. A Codex session given the
-/// memory keeps the title Mjolnir took from the user's prompt.
-#[tokio::test]
-async fn a_codex_title_drawn_from_project_memory_does_not_reach_the_relay() {
-    let temp = tempfile::tempdir().unwrap();
+/// Drive a new Codex session through one prompt against
+/// [`titling_codex_bridge`]. Returns the prompt the bridge received and the
+/// titles the worker relayed.
+async fn codex_session_titles(
+    project_memory: Option<&Path>,
+    prompt: Vec<ContentBlock>,
+) -> (serde_json::Value, Vec<String>) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(titling_codex_bridge(bridge_stream));
+    let (prompts_tx, mut prompts_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(titling_codex_bridge(bridge_stream, prompts_tx));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let (_request_tx, mut request_rx) = mpsc::channel(1);
+    let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let mut spec = reload_fallback_spec(HarnessKind::Codex);
     spec.resume_session = None;
-    spec.project_memory = Some(ProjectMemoryLaunchConfig {
+    spec.project_memory = project_memory.map(|root| ProjectMemoryLaunchConfig {
         history_socket: None,
         project_key: "abc".into(),
-        root: temp.path().join("memory"),
-        baseline_root: temp.path().join("baseline"),
+        root: root.join("memory"),
+        baseline_root: root.join("baseline"),
         repository_roots: BTreeMap::new(),
         mcp_delivery: ProjectMemoryMcpDelivery::Acp,
     });
@@ -178,65 +207,131 @@ async fn a_codex_title_drawn_from_project_memory_does_not_reach_the_relay() {
         )
         .await
     });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "first".into(),
+            prompt,
+        })
+        .await
+        .unwrap();
 
-    let mut updates = Vec::new();
+    let mut titles = Vec::new();
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        let Some(event) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("the runtime keeps reporting")
-            .expect("the event channel stays open");
-        if let RuntimeEvent::SessionUpdate { update } = event {
-            let done = update["sessionUpdate"] == "agent_message_chunk";
-            updates.push(update);
-            if done {
-                break;
-            }
+        else {
+            panic!("the runtime stopped: {:?}", driver.await);
+        };
+        let RuntimeEvent::SessionUpdate { update } = event else {
+            continue;
+        };
+        if update["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+        if update["sessionUpdate"] == "session_info_update"
+            && let Some(title) = update["title"].as_str()
+        {
+            titles.push(title.to_owned());
         }
     }
-
-    assert!(
-        updates
-            .iter()
-            .all(|update| update["sessionUpdate"] != "session_info_update"
-                || update.get("title").is_none()),
-        "{updates:?}"
-    );
+    let received = prompts_rx
+        .recv()
+        .await
+        .expect("the bridge received the prompt");
     driver.abort();
     bridge.abort();
+    (received, titles)
 }
 
-/// Other harnesses title from the prompt itself: Grok named the same prompt
-/// "Ping-pong single-word reply test". Their titles, and whatever else a
-/// Codex title update carries, still reach the relay.
+/// Launch finding I2-1: a new Codex session prompted "Reply with the single
+/// word pong." was titled "Project memory instructions". codex-acp titles a
+/// thread from the text blocks of its first prompt, and Mjolnir sent the
+/// project memory as the first of them. The memory now travels as an embedded
+/// resource: the model still reads all of it, and the title comes from the
+/// user's words.
+#[tokio::test]
+async fn a_codex_session_given_project_memory_is_titled_from_the_users_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let memory = mj_core::project_memory::startup_prompt_context(
+        &mj_core::project_memory::ProjectMemoryStore::new(temp.path().join("memory")),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let request = "Reply with the single word pong.";
+
+    let (received, titles) = codex_session_titles(
+        Some(temp.path()),
+        vec![
+            hidden_context_block(memory.clone()),
+            ContentBlock::Text(TextContent::new(request)),
+        ],
+    )
+    .await;
+
+    assert_eq!(titles, [request]);
+    assert_eq!(
+        received,
+        serde_json::json!([
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI,
+                    "text": memory,
+                },
+            },
+            {"type": "text", "text": request},
+        ])
+    );
+}
+
+/// A Codex session without project memory sends the user's blocks alone, as
+/// it always did, and Codex's title stands.
+#[tokio::test]
+async fn a_codex_session_without_project_memory_is_titled_as_before() {
+    let request = "Reply with the single word pong.";
+
+    let (received, titles) =
+        codex_session_titles(None, vec![ContentBlock::Text(TextContent::new(request))]).await;
+
+    assert_eq!(titles, [request]);
+    assert_eq!(
+        received,
+        serde_json::json!([{"type": "text", "text": request}])
+    );
+}
+
+/// Only Codex receives the hidden context as a resource. Every other harness
+/// gets the same text block as before; its bridge may not accept embedded
+/// resources at all.
 #[test]
-fn only_a_codex_session_given_project_memory_keeps_mjolnirs_title() {
-    assert!(keeps_mjolnir_title(HarnessKind::Codex, true));
-    assert!(!keeps_mjolnir_title(HarnessKind::Codex, false));
+fn only_codex_receives_hidden_context_as_a_resource() {
+    let context = "<mj-project-memory>notes</mj-project-memory>";
+    let user = ContentBlock::Text(TextContent::new("ship it"));
+    let prompt = vec![hidden_context_block(context.into()), user.clone()];
+
+    let codex = prompt_for_harness(HarnessKind::Codex, prompt.clone());
+    assert!(matches!(&codex[0], ContentBlock::Resource(_)), "{codex:?}");
+    assert_eq!(codex[1], user);
     for harness in [
         HarnessKind::Claude,
         HarnessKind::Grok,
         HarnessKind::Kimi,
         HarnessKind::Muse,
     ] {
-        assert!(!keeps_mjolnir_title(harness, true), "{harness:?}");
+        assert_eq!(
+            prompt_for_harness(harness, prompt.clone()),
+            vec![ContentBlock::Text(TextContent::new(context)), user.clone()],
+            "{harness:?}"
+        );
     }
-
-    let meta = serde_json::Map::from_iter([("goal".to_owned(), serde_json::json!(null))]);
-    let with_meta = SessionUpdate::SessionInfoUpdate(
-        agent_client_protocol::schema::v1::SessionInfoUpdate::new()
-            .title("Project memory instructions")
-            .meta(meta.clone()),
-    );
-    assert_eq!(
-        without_harness_title(with_meta),
-        Some(SessionUpdate::SessionInfoUpdate(
-            agent_client_protocol::schema::v1::SessionInfoUpdate::new().meta(meta)
-        ))
-    );
-    let other = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
-        "tool", "read",
-    ));
-    assert_eq!(without_harness_title(other.clone()), Some(other));
+    for harness in HarnessKind::ALL {
+        assert_eq!(
+            prompt_for_harness(harness, vec![user.clone()]),
+            vec![user.clone()],
+            "{harness:?}"
+        );
+    }
 }
 
 #[test]

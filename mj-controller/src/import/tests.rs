@@ -815,6 +815,51 @@ fn codex_jsonl_projects_user_and_agent_messages() {
     ));
 }
 
+/// Mjolnir sends Codex its hidden context as an embedded resource, which
+/// codex-acp turns into a text item wrapped in `<context ref=…>`. That item
+/// is Mjolnir's, not a prompt the user typed.
+#[test]
+fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
+    let uri = mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI;
+    let context = format!(
+        "{uri}\n<context ref=\"{uri}\">\n<mj-project-memory>\nprivate\n</mj-project-memory>\n</context>"
+    );
+    let record = serde_json::json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "item": {
+                "type": "UserMessage",
+                "id": "user-1",
+                "content": [
+                    {"type": "text", "text": context, "text_elements": []},
+                    {"type": "text", "text": "first prompt", "text_elements": []},
+                ],
+            },
+        },
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rollout.jsonl");
+    fs::write(
+        &path,
+        format!(
+            "{}\n{record}\n",
+            r#"{"type":"session_meta","payload":{"session_id":"019feb6c-5ffc-7c12-ad99-bdeaeb6be79d","cwd":"/work/app","history_mode":"paginated"}}"#
+        ),
+    )
+    .unwrap();
+
+    let transcript = read_codex_transcript(&path).unwrap();
+    assert!(
+        matches!(
+            &transcript.events[0].event,
+            WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
+        ),
+        "{:?}",
+        transcript.events[0].event
+    );
+}
+
 #[test]
 fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     let directory = tempfile::tempdir().unwrap();

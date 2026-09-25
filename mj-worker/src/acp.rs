@@ -51,14 +51,15 @@ use agent_client_protocol::schema::v1::TextContent;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
-    ElicitationFormCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, McpServer, McpServerStdio, NewSessionRequest,
-    PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigValueId, SessionId,
-    SessionModeState, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource, Implementation,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, McpServer,
+    McpServerStdio, NewSessionRequest, PermissionOptionKind, PromptRequest, PromptResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigValueId, SessionId, SessionModeState, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextResourceContents,
     ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
@@ -80,26 +81,50 @@ use mj_core::elicitation::{
 use mj_core::relay::{AcpActivityClock, ClaimedSteeringPrompt};
 use mj_core::worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
 
-/// Whether a session keeps the title Mjolnir took from the first prompt the
-/// user typed, rather than the title its harness reports.
-///
-/// Codex names a new thread by asking a model to title the text of its first
-/// prompt, every text block of it. Mjolnir's project memory travels in that
-/// prompt ahead of the user's words, so the name describes the memory
-/// ("Project memory instructions"), not the request (launch finding I2-1).
-fn keeps_mjolnir_title(harness: HarnessKind, receives_project_memory: bool) -> bool {
-    harness == HarnessKind::Codex && receives_project_memory
+/// The first block of a prompt the relay attached controller-only context to
+/// (project memory, shell results, a hand-off): an embedded resource named
+/// [`mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI`]. [`prompt_for_harness`]
+/// decides the form the harness's bridge receives.
+pub(crate) fn hidden_context_block(text: String) -> ContentBlock {
+    ContentBlock::Resource(EmbeddedResource::new(
+        EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+            text,
+            mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI,
+        )),
+    ))
 }
 
-/// The update without the harness's title, or `None` when the title was all
-/// it carried.
-fn without_harness_title(update: SessionUpdate) -> Option<SessionUpdate> {
-    let SessionUpdate::SessionInfoUpdate(mut info) = update else {
-        return Some(update);
-    };
-    info.title = agent_client_protocol::schema::MaybeUndefined::Undefined;
-    (!info.updated_at.is_undefined() || info.meta.is_some())
-        .then_some(SessionUpdate::SessionInfoUpdate(info))
+/// A prompt as the harness's bridge receives it.
+///
+/// Codex receives the hidden context as the embedded resource. codex-acp
+/// titles a new thread from the text blocks of its first prompt alone; given
+/// the context as the first text block, it named sessions after Mjolnir's
+/// project memory ("Project memory instructions") instead of the user's
+/// request (launch finding I2-1). The model still reads the resource, which
+/// codex-acp passes on as `{uri}\n<context ref="{uri}">\n{text}\n</context>`.
+///
+/// Every other harness receives the context as the text block it always has.
+/// Only Codex was seen to title a session after the memory, and ACP lets a
+/// client send embedded resources only to an agent that advertises them.
+pub(crate) fn prompt_for_harness(
+    harness: HarnessKind,
+    prompt: Vec<ContentBlock>,
+) -> Vec<ContentBlock> {
+    if harness == HarnessKind::Codex {
+        return prompt;
+    }
+    prompt
+        .into_iter()
+        .map(|block| match block {
+            ContentBlock::Resource(EmbeddedResource {
+                resource: EmbeddedResourceResource::TextResourceContents(resource),
+                ..
+            }) if resource.uri == mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI => {
+                ContentBlock::Text(TextContent::new(resource.text))
+            }
+            block => block,
+        })
+        .collect()
 }
 
 /// Private ACP metadata is provider-local and has no Hel projection. In

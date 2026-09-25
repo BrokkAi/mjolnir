@@ -993,12 +993,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
                 .expect("prompt command")
                 .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {
-                prompt.insert(
-                    0,
-                    agent_client_protocol::schema::v1::ContentBlock::Text(
-                        agent_client_protocol::schema::v1::TextContent::new(context.clone()),
-                    ),
-                );
+                prompt.insert(0, crate::acp::hidden_context_block(context.clone()));
             }
             Some(CommandRequest::Prompt { request_id, prompt })
         }

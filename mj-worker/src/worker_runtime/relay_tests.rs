@@ -1803,6 +1803,37 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
     coordinator.await.unwrap().unwrap();
 }
 
+/// The context the relay attached to a claimed prompt goes first, in the
+/// block the ACP runtime turns into what each harness receives.
+#[test]
+fn a_claimed_prompt_carries_its_hidden_context_first() {
+    let user = ContentBlock::Text(TextContent::new("ship it"));
+    let claimed = |hidden_prompt_context: Option<&str>| mj_core::relay::ClaimedRelayCommand {
+        command_id: "prompt-1".into(),
+        accepted_ordinal: 1,
+        command: RelayCommand::Prompt {
+            prompt: vec![user.clone()],
+        },
+        hidden_prompt_context: hidden_prompt_context.map(str::to_owned),
+        steering_prompt: None,
+    };
+    let prompt_of = |claimed| match unix::acp_command(&claimed) {
+        Some(CommandRequest::Prompt { prompt, .. }) => prompt,
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(
+        prompt_of(claimed(Some(
+            "<mj-project-memory>notes</mj-project-memory>"
+        ))),
+        vec![
+            crate::acp::hidden_context_block("<mj-project-memory>notes</mj-project-memory>".into()),
+            user.clone(),
+        ]
+    );
+    assert_eq!(prompt_of(claimed(None)), vec![user.clone()]);
+}
+
 #[tokio::test]
 async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     let temp = tempfile::tempdir().unwrap();

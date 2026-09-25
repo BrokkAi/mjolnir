@@ -827,6 +827,49 @@ fn hidden_prompt_context_is_removed_from_harness_visible_text() {
     );
 }
 
+/// Codex receives hidden context as an embedded resource, and codex-acp gives
+/// the model that block as `{uri}\n<context ref="{uri}">\n{text}\n</context>`.
+/// Codex keeps that text in its history of the prompt, where the Codex import
+/// reads it (content items joined by line breaks) and where codex-acp takes a
+/// fallback title from it after a load (joined by spaces, runs of white space
+/// collapsed).
+#[test]
+fn codex_wrapping_of_hidden_context_is_removed_from_harness_visible_text() {
+    use mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI as URI;
+
+    let wrapped = |context: &str| format!("{URI}\n<context ref=\"{URI}\">\n{context}\n</context>");
+    let memory = "<mj-project-memory>\nprivate memory\n</mj-project-memory>";
+    let shell = "<user_shell_command>private output</user_shell_command>";
+    let handoff = "Archived session restored from SessionWiki. The work so far.";
+
+    for context in [
+        memory.to_owned(),
+        format!("{memory}\n\n{shell}"),
+        handoff.to_owned(),
+    ] {
+        let history = format!("{}\nfirst prompt", wrapped(&context));
+        assert_eq!(strip_hidden_prompt_context(&history), "first prompt");
+        let title = history.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(strip_hidden_prompt_context(&title), "first prompt");
+        assert_eq!(
+            mj_core::state::normalize_session_title(&title).as_deref(),
+            Some("first prompt")
+        );
+    }
+    // A cut-off wrapping is hidden, wherever it was cut.
+    let whole = wrapped(memory);
+    for cut in [URI.len(), URI.len() + 12, whole.len() - 3] {
+        assert_eq!(strip_hidden_prompt_context(&whole[..cut]), "", "{cut}");
+    }
+    // The user's own words about the URI or a context tag stay visible.
+    for text in [
+        format!("{URI} is where Mjolnir keeps it"),
+        format!("explain <context ref=\"{URI}\"> to me"),
+    ] {
+        assert_eq!(strip_hidden_prompt_context(&text), text);
+    }
+}
+
 #[test]
 fn acp_activity_clock_is_shared_with_operational_status_but_not_persisted() {
     let temp = tempfile::tempdir().unwrap();

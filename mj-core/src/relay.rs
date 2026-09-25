@@ -99,13 +99,29 @@ pub const RELAY_HOT_EVENT_CAPACITY: usize = 32;
 pub const RELAY_REPLAY_CURSOR_CAPACITY: usize = 32;
 pub const NATIVE_SESSION_IDENTITY_FILE: &str = "native-session.json";
 
+/// The URI of the embedded resource that carries controller-only context to a
+/// bridge that receives it that way (Codex). codex-acp gives the model such a
+/// block as `{uri}\n<context ref="{uri}">\n{text}\n</context>`, and Codex
+/// keeps that text in its own history of the prompt.
+pub const HIDDEN_PROMPT_CONTEXT_URI: &str = "mj://prompt-context";
+
 /// Remove controller-only context that an ACP harness copied into a user-facing
-/// prompt or title. Hidden context is prepended as reserved XML-like blocks;
+/// prompt or title. Hidden context is prepended as reserved XML-like blocks,
+/// or as codex-acp's wrapping of the [`HIDDEN_PROMPT_CONTEXT_URI`] resource;
 /// an unterminated reserved block is treated as a truncated hidden value, not
 /// as text safe to display.
 pub fn strip_hidden_prompt_context(mut text: &str) -> &str {
     loop {
         text = text.trim_start();
+        if let Some(after_uri) = text.strip_prefix(HIDDEN_PROMPT_CONTEXT_URI) {
+            match after_hidden_context_resource(after_uri) {
+                Some(rest) => {
+                    text = rest;
+                    continue;
+                }
+                None => return text,
+            }
+        }
         let Some(after_open) = text.strip_prefix('<') else {
             return text;
         };
@@ -127,6 +143,27 @@ pub fn strip_hidden_prompt_context(mut text: &str) -> &str {
         };
         text = &after_open[close_start + close.len()..];
     }
+}
+
+/// What follows codex-acp's wrapping of the hidden context resource, given the
+/// text after its leading URI: empty when the wrapping is cut short, and
+/// `None` when the URI does not open one.
+fn after_hidden_context_resource(text: &str) -> Option<&str> {
+    const CLOSE: &str = "</context>";
+    let open = format!("<context ref=\"{HIDDEN_PROMPT_CONTEXT_URI}\">");
+    let text = text.trim_start();
+    let Some(inner) = text.strip_prefix(open.as_str()) else {
+        return open.starts_with(text).then_some("");
+    };
+    // The context is a run of reserved blocks (project memory, shell
+    // results), or a plain hand-off, so the wrapping closes after the reserved
+    // blocks or at the first close tag of the hand-off.
+    let inner = strip_hidden_prompt_context(inner);
+    Some(
+        inner
+            .find(CLOSE)
+            .map_or("", |close| &inner[close + CLOSE.len()..]),
+    )
 }
 
 fn reserved_hidden_context_prefix(text: &str) -> bool {

@@ -647,6 +647,7 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
+                let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();
                 // A prompt asking the harness to compact its context is
                 // answered by compacting, and the bridges report that with

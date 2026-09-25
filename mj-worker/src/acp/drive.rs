@@ -73,8 +73,6 @@ where
     let permission_tool_content = tool_content;
     let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
-    let notification_keeps_mjolnir_title =
-        keeps_mjolnir_title(spec.harness, spec.project_memory.is_some());
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
     let claude_result_count = ClaudeResultCount::default();
@@ -237,14 +235,6 @@ where
                 if session_update_has_native_history(&update) {
                     notification_resume_required.store(true, Ordering::Release);
                 }
-                let update = if notification_keeps_mjolnir_title {
-                    match without_harness_title(update) {
-                        Some(update) => update,
-                        None => return Ok(()),
-                    }
-                } else {
-                    update
-                };
                 notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
