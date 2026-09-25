@@ -1388,10 +1388,10 @@ pub(super) fn prompt_failure_warning(
     // A usage limit is named as one before anything else: Kimi sends its
     // weekly limit as ACP `auth_required` with a 403 message (R4-7), and the
     // credential marker would both mislabel it and ask for a credential sync.
-    if mj_core::diagnostic::TurnDiagnostic::from_acp(error).is_usage_limit() {
-        return format!("prompt failed (usage limit reached): {error}");
-    }
     if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+        if mj_core::diagnostic::TurnDiagnostic::from_acp(error).is_usage_limit() {
+            return format!("prompt failed (usage limit reached): {error}");
+        }
         return format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}");
     }
     let raw = error.to_string();
