@@ -116,6 +116,12 @@ pub fn collect_git_snapshot_with_progress(
     validate_component(&spec.id, "repository id")?;
     validate_archive_relative_path(&spec.relative_destination)?;
 
+    // A session can work in a subdirectory of its checkout, but its work is
+    // the whole checkout's, and a managed checkout is deleted on Stop. Every
+    // command runs from the top level, so work outside the subdirectory is
+    // kept and every path is named from where a restore starts.
+    let checkout = locate_checkout(runner, repository)?;
+    let repository = checkout.top_level.as_path();
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let clone_state = match &spec.history {
         GitHistoryMode::CloneFrom(base) => Some(collect_clone_refs(runner, repository, base)?),
@@ -127,7 +133,7 @@ pub fn collect_git_snapshot_with_progress(
     };
     let result = collect_git_contents(
         runner,
-        repository,
+        &checkout,
         spec,
         identity,
         history,
@@ -162,6 +168,7 @@ pub fn collect_git_metadata_snapshot(
             stash_stack: Vec::new(),
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
+            checkout_subdirectory: None,
             origin: identity.origin,
             push_urls: identity.push_urls,
             remote_workspace: false,
@@ -173,6 +180,49 @@ pub fn collect_git_metadata_snapshot(
         staged_patch: Vec::new(),
         unstaged_patch: Vec::new(),
         untracked_tar: Vec::new(),
+    })
+}
+
+/// A Git checkout, found from a directory somewhere inside it.
+struct CheckoutLocation {
+    top_level: PathBuf,
+    /// The directory's path below `top_level`; `None` at the top level.
+    subdirectory: Option<PathBuf>,
+}
+
+fn locate_checkout(runner: &dyn GitCommandRunner, directory: &Path) -> Result<CheckoutLocation> {
+    let output = git_bytes(
+        runner,
+        directory,
+        ["rev-parse", "--show-toplevel", "--show-prefix"],
+        &[],
+        "locate the Git checkout's top level",
+    )?;
+    // One line each; the prefix line is empty at the top level.
+    let output = output.strip_suffix(b"\n").unwrap_or(&output);
+    let (top_level, prefix) = output
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|split| (&output[..split], &output[split + 1..]))
+        .context("Git did not report the checkout's top level and prefix")?;
+    let top_level = mj_core::path_input::from_git_bytes(top_level)?;
+    ensure!(
+        top_level.is_absolute(),
+        "Git reported a relative checkout top level {}",
+        top_level.display()
+    );
+    let subdirectory: PathBuf = mj_core::path_input::from_git_bytes(prefix)?
+        .components()
+        .collect();
+    let subdirectory = if subdirectory.as_os_str().is_empty() {
+        None
+    } else {
+        validate_archive_relative_path(&subdirectory)?;
+        Some(subdirectory)
+    };
+    Ok(CheckoutLocation {
+        top_level,
+        subdirectory,
     })
 }
 
@@ -528,11 +578,13 @@ pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -
         }
         Err(error) => return Err(error).context("copy the real Git index for capture"),
     }
+    // `:/` names the whole working tree even when `repository` is a
+    // subdirectory of its checkout; `.` would stage only that subdirectory.
     let staged = git_success(
         runner,
         repository,
         GitCommand {
-            arguments: ["add", "-A", "--", "."]
+            arguments: ["add", "-A", "--", ":/"]
                 .into_iter()
                 .map(OsString::from)
                 .collect(),
@@ -870,13 +922,14 @@ fn select_git_history(
 
 fn collect_git_contents(
     runner: &dyn GitCommandRunner,
-    repository: &Path,
+    checkout: &CheckoutLocation,
     spec: &GitCollectionSpec,
     identity: CollectedGitIdentity,
     history: GitHistorySelection,
     include_untracked: bool,
     progress: &(dyn Fn(GitSnapshotProgress) -> Result<()> + Sync),
 ) -> Result<RepositorySnapshot> {
+    let repository = checkout.top_level.as_path();
     let GitHistorySelection {
         base_commit,
         bundle_arguments,
@@ -945,6 +998,7 @@ fn collect_git_contents(
             stash_stack: Vec::new(),
             id: spec.id.clone(),
             relative_destination: spec.relative_destination.clone(),
+            checkout_subdirectory: checkout.subdirectory.clone(),
             origin: identity.origin,
             push_urls: identity.push_urls,
             remote_workspace: false,
@@ -959,6 +1013,10 @@ fn collect_git_contents(
     })
 }
 
+/// Restore a snapshot into `repository`, the directory its paths are named
+/// from. For a snapshot that records a `checkout_subdirectory` that is the
+/// destination checkout's top level: its untracked files are named from
+/// there, and `git apply` run from a subdirectory skips every path outside it.
 pub fn restore_git_snapshot(
     runner: &dyn GitCommandRunner,
     repository: &Path,

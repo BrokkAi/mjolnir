@@ -128,6 +128,7 @@ pub(super) fn write_network_checkpoint_archive(
                 stash_stack: Vec::new(),
                 id: "project".into(),
                 relative_destination: "project".into(),
+                checkout_subdirectory: None,
                 origin: "https://fetch.example.test/project.git".into(),
                 push_urls: vec!["https://push.example.test/project.git".into()],
                 remote_workspace: true,

@@ -443,6 +443,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
                     remote_workspace: false,
                     id: repository.id.clone(),
                     relative_destination: repository.destination.clone(),
+                    checkout_subdirectory: None,
                     origin: repository.source_label(),
                     base_commit: String::new(),
                     head_commit: if repository.id == "one" {
@@ -512,6 +513,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
             remote_workspace: false,
             id: "project".into(),
             relative_destination: "project".into(),
+            checkout_subdirectory: None,
             origin: "https://github.com/archived/should-not-be-contacted.git".into(),
             base_commit: prerequisite.clone(),
             head_commit: head.clone(),

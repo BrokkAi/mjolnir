@@ -623,6 +623,9 @@ fn prepare_archive_view_with_part_size(
             repository.metadata.id
         );
         validate_archive_relative_path(&repository.metadata.relative_destination)?;
+        if let Some(subdirectory) = &repository.metadata.checkout_subdirectory {
+            validate_archive_relative_path(subdirectory)?;
+        }
         ensure!(
             !origin_contains_credentials(&repository.metadata.origin),
             "repository '{}' origin contains credentials",
@@ -719,7 +722,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_agent_reports(&descriptors) {
+        schema_version: if carries_checkout_subdirectory(&repositories) {
+            ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
+        } else if carries_agent_reports(&descriptors) {
             ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
         } else if repositories.iter().any(|repo| {
             !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
@@ -1300,7 +1305,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1333,9 +1339,19 @@ fn carries_agent_reports(payloads: &[PayloadDescriptor]) -> bool {
     })
 }
 
+/// Whether an archive holds a repository captured from a subdirectory of its
+/// checkout, which only a build that restores from the top level may read.
+fn carries_checkout_subdirectory(repositories: &[RepositoryManifest]) -> bool {
+    repositories
+        .iter()
+        .any(|repository| repository.metadata.checkout_subdirectory.is_some())
+}
+
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema =
-        if carries_agent_reports(&manifest.payloads) {
+        if carries_checkout_subdirectory(&manifest.repositories) {
+            ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
+        } else if carries_agent_reports(&manifest.payloads) {
             ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
         } else if manifest.repositories.iter().any(|repo| {
             !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
@@ -1348,6 +1364,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         manifest.schema_version == expected_schema
             || (expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
                 && manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT),
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         manifest.schema_version,
@@ -1422,6 +1439,9 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
             metadata.id
         );
         validate_archive_relative_path(&metadata.relative_destination)?;
+        if let Some(subdirectory) = &metadata.checkout_subdirectory {
+            validate_archive_relative_path(subdirectory)?;
+        }
         ensure!(
             !origin_contains_credentials(&metadata.origin),
             "repository '{}' origin contains credentials",

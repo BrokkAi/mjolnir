@@ -190,11 +190,40 @@ pub(super) fn restore_repositories_from_archive(
     for repository in &archive.manifest.repositories {
         let id = &repository.metadata.id;
         let snapshot = archived_repository_snapshot(archive, repository)?;
-        let path = workspace_root.join(&repository.metadata.relative_destination);
+        let path = checkout_top_level(
+            &workspace_root.join(&repository.metadata.relative_destination),
+            &repository.metadata,
+        )
+        .with_context(|| format!("restore repository {id:?}"))?;
         restore_git_snapshot(git, &path, &snapshot)
             .with_context(|| format!("restore repository {id:?}"))?;
     }
     Ok(())
+}
+
+/// The top level of the checkout a repository's session directory belongs to.
+///
+/// A session working in a subdirectory of its checkout is described by that
+/// subdirectory, while its snapshot covers the whole checkout, so the restore
+/// climbs back out of the subdirectory the snapshot recorded.
+fn checkout_top_level(
+    directory: &Path,
+    metadata: &crate::archive::RepositoryMetadata,
+) -> Result<PathBuf> {
+    let Some(subdirectory) = &metadata.checkout_subdirectory else {
+        return Ok(directory.to_path_buf());
+    };
+    ensure!(
+        directory.ends_with(subdirectory),
+        "{} is not the checkout subdirectory {} the checkpoint was taken from",
+        directory.display(),
+        subdirectory.display()
+    );
+    directory
+        .ancestors()
+        .nth(subdirectory.components().count())
+        .map(Path::to_path_buf)
+        .with_context(|| format!("{} has no checkout above it", directory.display()))
 }
 
 pub(super) fn archived_repository_snapshot(

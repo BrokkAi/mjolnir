@@ -584,6 +584,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -822,6 +823,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -863,6 +865,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -1703,6 +1706,105 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
         git(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]),
         archived_branch
     );
+}
+
+/// A session whose project is a subdirectory of its checkout still owns the
+/// whole checkout: Stop deletes a managed worktree, so work anywhere in it has
+/// to travel in the archive and come back at the same place in the checkout.
+#[test]
+fn a_subdirectory_session_restores_work_across_its_whole_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    fs::create_dir_all(repository.join("docs")).unwrap();
+    fs::write(repository.join("docs/guide.md"), b"guide").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "docs"]);
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    let checkout = temp.path().join("clones/session");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "mj/session",
+            &checkout.to_string_lossy(),
+            "HEAD",
+        ],
+    );
+    fs::write(checkout.join("README.md"), b"edited at the root").unwrap();
+    fs::write(checkout.join("docs/guide.md"), b"staged in docs").unwrap();
+    git(&checkout, &["add", "docs/guide.md"]);
+    fs::write(checkout.join("notes.txt"), b"untracked at the root").unwrap();
+    fs::write(checkout.join("docs/draft.md"), b"untracked in docs").unwrap();
+    // The controller describes a subdirectory project by its parent and its
+    // own name, so the repository the worker captures is `<checkout>/docs`.
+    spec.workspace_root = checkout.clone();
+    spec.repositories[0].relative_destination = "docs".into();
+    spec.repositories[0].capture = CheckpointRepositoryCapture::DeltaFrom { base_commit: base };
+    export_checkpoint(&spec).unwrap();
+    // An older build would unpack the untracked files inside `docs`; the
+    // schema makes it refuse the archive instead.
+    assert_eq!(
+        read_archive_verified(&archive_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
+    );
+
+    let assert_restored = |restored: &Path| {
+        let read = |path: &str| fs::read_to_string(restored.join(path)).ok();
+        let files =
+            ["notes.txt", "docs/draft.md", "draft.md", "README.md"].map(|path| (path, read(path)));
+        assert_eq!(
+            files,
+            [
+                ("notes.txt", Some("untracked at the root".to_owned())),
+                ("docs/draft.md", Some("untracked in docs".to_owned())),
+                ("draft.md", None),
+                ("README.md", Some("edited at the root".to_owned())),
+            ],
+            "work in {}",
+            restored.display()
+        );
+        assert_eq!(
+            git(restored, &["diff", "--cached", "--name-only"]),
+            "docs/guide.md",
+            "the staged change is staged again"
+        );
+    };
+
+    // Stop removes the managed worktree. An in-place resume recreates it from
+    // the retained branch and restores the archive through the project
+    // directory, in the same parent-and-name layout the export used.
+    git(
+        &repository,
+        &["worktree", "remove", "--force", &checkout.to_string_lossy()],
+    );
+    git(
+        &repository,
+        &["worktree", "add", &checkout.to_string_lossy(), "mj/session"],
+    );
+    restore_repositories(&archive_path, &checkout, &SystemGit).unwrap();
+    assert_restored(&checkout);
+
+    // A restore onto a named branch is handed the checkout's top level.
+    let other = temp.path().join("clones/other");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "mj/other",
+            &other.to_string_lossy(),
+            "mj/session",
+        ],
+    );
+    restore_single_repository_onto_branch(&archive_path, &other, "mj/other", &SystemGit).unwrap();
+    assert_restored(&other);
 }
 
 fn copy_archive_with_schema(source: &Path, destination: &Path, schema_version: u32) {

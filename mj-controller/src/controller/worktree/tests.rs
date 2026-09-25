@@ -692,6 +692,7 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
         remote_workspace: false,
         id: "project".into(),
         relative_destination: PathBuf::from("project"),
+        checkout_subdirectory: None,
         origin: "mj-local:project".into(),
         base_commit: String::new(),
         head_commit: head_commit.into(),
