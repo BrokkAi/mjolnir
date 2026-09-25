@@ -418,6 +418,11 @@ pub enum DashboardAction {
     CopyNativeSessionId {
         native_session_id: String,
     },
+    /// Copy a Mjolnir session's full ID to the clipboard, from the session
+    /// action menu or the palette.
+    CopySessionId {
+        session_id: String,
+    },
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },

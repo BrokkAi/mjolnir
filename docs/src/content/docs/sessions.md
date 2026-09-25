@@ -113,10 +113,15 @@ open the session's action menu. The menu groups its actions under dividers:
 - **Organize**: **Rename…**, **Pin…**, and **Unpin**.
 - **Lifecycle**: **Container settings** (container sessions only), **Move…**,
   **Suspend…**, and **Restart**.
-- After a plain divider: **Destroy…**.
+- After a plain divider: **Copy session ID** and **Destroy…**.
 
 The menu leaves out an action that does not apply to the session. An action
 that applies but cannot run yet stays in the menu, greyed, with the reason.
+
+**Copy session ID** puts the session's full ID on the clipboard, for commands
+such as `mj wait --session <id>`. The footer confirms the copy with the ID's
+first eight characters. The command palette (`prefix+:`) lists the same action
+under the session's name.
 
 ## Detach and reattach
 

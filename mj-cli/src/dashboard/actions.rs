@@ -62,6 +62,13 @@ pub(crate) fn apply_chat_toggle(
     }
 }
 
+/// What the notice bar says after the session menu's Copy session ID. The
+/// clipboard gets the full ID; the notice names the short form the rest of
+/// the dashboard uses.
+pub(crate) fn copied_session_id_notice(session_id: &str) -> String {
+    format!("Copied session ID {}", short_id(session_id))
+}
+
 /// Carries out one dashboard action.
 pub(crate) async fn apply_dashboard_action(
     context: &mut DashboardContext,
@@ -72,6 +79,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::None => {}
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;
+        }
+        DashboardAction::CopySessionId { session_id } => {
+            context.copy_text(&session_id, &copied_session_id_notice(&session_id))?;
         }
         DashboardAction::ToggleTranscriptRendering => {
             let (dashboard, chat) = context.dashboard_and_visible_chat();

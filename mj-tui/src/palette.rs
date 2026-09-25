@@ -116,6 +116,7 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::MoveSession,
     CommandId::SuspendSession,
     CommandId::RestartSession,
+    CommandId::CopySessionId,
     CommandId::DestroySession,
 ];
 
@@ -563,7 +564,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
                 | CommandId::RestartSession => 2,
-                CommandId::DestroySession => 3,
+                CommandId::CopySessionId | CommandId::DestroySession => 3,
                 _ => continue,
             };
             if section != Some(next) {
@@ -1014,9 +1015,33 @@ mod tests {
                 "Suspend…",
                 "Restart",
                 "---",
+                "Copy session ID",
                 "Destroy…",
             ]
         );
+    }
+
+    /// Copy session ID sits under the plain divider, directly above Destroy,
+    /// and hands the host the session's full ID to put on the clipboard.
+    #[test]
+    fn session_menu_copies_the_full_session_id_from_above_destroy() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
+        let destroy = row_of(&lines, "Destroy…").expect("Destroy");
+        assert_eq!(copy + 1, destroy, "{lines:#?}");
+
+        let copy = point(&lines, "Copy session ID");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
+        assert_eq!(
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy)),
+            DashboardAction::CopySessionId {
+                session_id: "session-1".into()
+            }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     /// The open session menu as its lines: a named divider as `[name]`, the
@@ -1096,6 +1121,12 @@ mod tests {
         let global = row_of(&lines, "Web viewer").expect("Web viewer");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
+        // The session group lists Copy session ID directly above Destroy,
+        // with the same label the session menu uses.
+        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
+        let destroy = row_of(&lines, "Destroy session…").expect("Destroy session");
+        assert!(heading < copy && copy + 1 == destroy, "{lines:#?}");
+        assert!(destroy < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < global, "{lines:#?}");
         // The palette never lists itself. Create and Sessions are listed even

@@ -54,6 +54,7 @@ pub enum CommandId {
     ChangedFiles,
     ContainerSettings,
     MoveSession,
+    CopySessionId,
     DestroySession,
     MarkAllRead,
     FilterSessions,
@@ -975,6 +976,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: move_session_available,
     },
     CommandSpec {
+        id: CommandId::CopySessionId,
+        label: "Copy session ID",
+        description: "Copy the selected session's full ID to the clipboard.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
         id: CommandId::DestroySession,
         label: "Destroy session…",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
@@ -1670,6 +1683,12 @@ impl DashboardState {
                 Availability::Hidden => DashboardAction::None,
             },
             CommandId::MoveSession => self.begin_move(),
+            CommandId::CopySessionId => self
+                .command_session()
+                .map(|session| session.id.clone())
+                .map_or(DashboardAction::None, |session_id| {
+                    DashboardAction::CopySessionId { session_id }
+                }),
             CommandId::DestroySession => {
                 let Some((session_id, name)) = self
                     .selected_session()

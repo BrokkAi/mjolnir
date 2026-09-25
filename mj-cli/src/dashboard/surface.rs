@@ -58,6 +58,24 @@ fn copy_selected_text(
     terminal_copy(text)
 }
 
+/// Copies `text` and says so on the notice bar with `notice`, or reports why
+/// the terminal clipboard refused it. A desktop clipboard failure arrives
+/// later, as [`DashboardIoUpdate::ClipboardWritten`].
+fn copy_and_report(
+    dashboard: &mut DashboardState,
+    text: &str,
+    notice: &str,
+    over_ssh: bool,
+    schedule_system_copy: impl FnOnce(&str),
+    terminal_copy: impl FnOnce(&str) -> Result<()>,
+) {
+    if let Err(error) = copy_selected_text(text, over_ssh, schedule_system_copy, terminal_copy) {
+        dashboard.set_failure_notice(format!("Copy to the terminal clipboard failed: {error:#}"));
+        return;
+    }
+    dashboard.set_notice(notice);
+}
+
 impl DashboardContext {
     /// Rebuilds the view on screen.
     ///
@@ -242,8 +260,10 @@ impl DashboardContext {
 
     pub(crate) fn copy_text(&mut self, text: &str, notice: &str) -> Result<()> {
         let updates = self.dashboard_io_tx.clone();
-        if let Err(error) = copy_selected_text(
+        copy_and_report(
+            &mut self.dashboard,
             text,
+            notice,
             running_over_ssh(|name| std::env::var_os(name)),
             |text| {
                 // Opening the desktop clipboard can block, so keep it off
@@ -251,12 +271,7 @@ impl DashboardContext {
                 spawn_clipboard_write(text.to_owned(), updates);
             },
             |text| self.terminal.copy_to_terminal_clipboard(text),
-        ) {
-            self.dashboard
-                .set_failure_notice(format!("Copy to the terminal clipboard failed: {error:#}"));
-            return Ok(());
-        }
-        self.dashboard.set_notice(notice);
+        );
         Ok(())
     }
 
@@ -388,6 +403,52 @@ mod tests {
             assert_eq!(system_text.as_deref(), Some("local selection"));
             assert_eq!(terminal_text.as_deref(), Some("local selection"));
         }
+    }
+
+    /// The session menu's Copy session ID puts the full ID on both
+    /// clipboards and names its short form on the notice bar. When the
+    /// terminal clipboard refuses it, the notice bar says that instead.
+    #[test]
+    fn copying_a_session_id_names_its_short_form_or_the_clipboard_failure() {
+        let session_id = "0123456789abcdef";
+        let notice = super::super::actions::copied_session_id_notice(session_id);
+        let mut dashboard = DashboardState::new(
+            Config::default(),
+            mj_core::state::State::default(),
+            BTreeMap::new(),
+        );
+        let mut system_text = None;
+        let mut terminal_text = None;
+        copy_and_report(
+            &mut dashboard,
+            session_id,
+            &notice,
+            false,
+            |text| system_text = Some(text.to_owned()),
+            |text| {
+                terminal_text = Some(text.to_owned());
+                Ok(())
+            },
+        );
+        assert_eq!(system_text.as_deref(), Some(session_id));
+        assert_eq!(terminal_text.as_deref(), Some(session_id));
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("Copied session ID 01234567")
+        );
+
+        copy_and_report(
+            &mut dashboard,
+            session_id,
+            &notice,
+            true,
+            |_| panic!("SSH copy must not open the remote desktop clipboard"),
+            |_| anyhow::bail!("terminal write failed"),
+        );
+        assert_eq!(
+            dashboard.notice().as_deref(),
+            Some("Copy to the terminal clipboard failed: terminal write failed")
+        );
     }
 
     #[test]
