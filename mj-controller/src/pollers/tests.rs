@@ -175,6 +175,38 @@ fn recoverable_error_session_stays_out_of_live_target_pollers() {
     assert!(credential_sync_targets(&recoverable_error).is_empty());
 }
 
+/// R7-3: a bare target has no container to sample, so the resource poller
+/// has nothing to ask it. It must skip the session without a warning: the
+/// dashboard rebuilds these targets on every poll, and each bare session
+/// used to log one warning each time (455 in 15 minutes with 12 sessions).
+/// Its worker is still polled.
+#[test]
+fn a_bare_session_is_left_out_of_resource_sampling_without_a_warning() {
+    let mut controller = podman_controller(SessionState::Running);
+    controller.config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    for session in controller.state.sessions.values_mut() {
+        session.target_template_id = "local-bare".into();
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/tmp/mj-workers").join(&session.id),
+        });
+    }
+
+    let log = crate::test_log::CapturedLog::default();
+    let resource_targets =
+        tracing::subscriber::with_default(log.clone(), || dashboard_resource_targets(&controller));
+    assert!(resource_targets.is_empty());
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    assert_eq!(
+        dashboard_worker_targets(&controller).len(),
+        1,
+        "the worker of a bare session is still polled"
+    );
+}
+
 /// A session gets its `target` as soon as the target exists, which is
 /// before its worker binary has finished being copied into place. Polling
 /// that window runs `execve` on a file `cp` still holds open for writing:

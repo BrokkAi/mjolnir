@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
@@ -110,70 +112,6 @@ while IFS= read -r request; do :; done
     mj_core::targets::set_ssh_retry_backoff_for_test(None);
 }
 
-/// Every event logged on this thread while it is the default subscriber, as
-/// its level and its fields written out, message included.
-#[cfg(unix)]
-#[derive(Clone, Default)]
-struct CapturedLog(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
-
-#[cfg(unix)]
-impl CapturedLog {
-    fn at_or_above(&self, level: tracing::Level) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(logged, _)| *logged <= level)
-            .map(|(_, text)| text.clone())
-            .collect()
-    }
-
-    fn at(&self, level: tracing::Level) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(logged, _)| *logged == level)
-            .map(|(_, text)| text.clone())
-            .collect()
-    }
-}
-
-#[cfg(unix)]
-impl tracing::Subscriber for CapturedLog {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Fields(String);
-        impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                use std::fmt::Write;
-                let _ = write!(self.0, " {}={value:?}", field.name());
-            }
-        }
-        let mut fields = Fields(String::new());
-        event.record(&mut fields);
-        self.0
-            .lock()
-            .unwrap()
-            .push((*event.metadata().level(), fields.0));
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 /// A relay proxy that the SSH server turns away once, in the way `ssh`
 /// reports it, and then answers hello.
 #[cfg(unix)]
@@ -228,7 +166,7 @@ async fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
         .into_iter()
         .filter(|text| text.contains("(MaxSessions); retrying"))
         .collect::<Vec<_>>();
-    assert_eq!(retries.len(), 1, "{:#?}", log.0.lock().unwrap());
+    assert_eq!(retries.len(), 1, "{:#?}", log.events());
     assert!(
         retries[0].contains("Session open refused by peer"),
         "the retry keeps what ssh said: {}",

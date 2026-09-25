@@ -47,4 +47,6 @@ pub mod image_pull_gate;
 pub mod recovery_gate;
 
 mod continuation;
+#[cfg(test)]
+mod test_log;
 mod upgrade;
