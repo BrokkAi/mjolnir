@@ -1381,7 +1381,7 @@ pull_policy = "never"
             raise ScenarioFailure(
                 f"a swallowed prompt was reported as success: {report!r}"
             )
-        if "error (prompt_unanswered)" not in report:
+        if not report.startswith("error") or "(failed: prompt unanswered)" not in report:
             raise ScenarioFailure(f"wait did not name the unanswered turn: {report!r}")
         if "may never have been acted on" not in report:
             raise ScenarioFailure(f"wait did not explain the unanswered turn: {report!r}")

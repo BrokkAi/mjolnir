@@ -270,6 +270,12 @@ and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
 
+The first line of a wait says how the turn ended in the same words as
+`mj sessions --session <id>`, for example
+`finished turn 16 (completed, end of turn) in 5.3s` or
+`error turn 4 (failed: harness inactive) in 30.3s`. With `--json`, the
+`stop_reason` field keeps the harness's own spelling, such as `EndTurn`.
+
 `mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores
 the verified checkpoint. Every selector is optional: the session's own record

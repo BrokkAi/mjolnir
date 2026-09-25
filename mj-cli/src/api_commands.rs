@@ -746,14 +746,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut summary = outcome_name(response.outcome).to_owned();
-    if let Some(stop_reason) = &response.stop_reason {
-        summary.push_str(&format!(" ({stop_reason})"));
-    }
     // The same number `mj prompt` printed and `mj wait --turn` takes. The
     // turn's position in the conversation is a different count, and printing
     // it here as well made one turn look like two (F-12); it stays in --json.
     if let Some(turn_id) = response.turn_id {
         summary.push_str(&format!(" turn {turn_id}"));
+    }
+    // How the turn ended, in the words `mj sessions` and the sub-agent notice
+    // use; the harness's own spelling (`EndTurn`) stays in --json (R12-1).
+    if let Some(stop_reason) = &response.stop_reason {
+        let ended = mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: stop_reason.clone(),
+        };
+        summary.push_str(&format!(" ({ended})"));
     }
     if let Some(elapsed_ms) = response.elapsed_ms {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
@@ -1561,7 +1566,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "quota_limit (QuotaLimit) turn 8");
+        assert_eq!(lines[0], "quota_limit turn 8 (failed: quota limit reached)");
         assert_eq!(
             lines
                 .iter()
@@ -1585,7 +1590,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "error (harness_inactive)");
+        assert_eq!(lines[0], "error (failed: harness inactive)");
 
         // F-12: `mj prompt` printed "turn 8" and `mj wait` "turn 1" for the
         // same turn. The wait names it by the number the prompt printed.
@@ -1667,6 +1672,64 @@ mod tests {
             ),
         ] {
             assert_eq!(with_outcome(outcome)[1], format!("last turn {words}"),);
+        }
+    }
+
+    /// Launch finding R12-1: `mj wait` printed the harness's stop reason as
+    /// the API returns it, "finished (EndTurn) turn 16 in 5.3s", while `mj
+    /// sessions` and the parent's sub-agent notice said "completed, end of
+    /// turn". `mj wait` and `mj prompt --wait` use the same words, placed as
+    /// the notice places them; `--json` keeps the stop reason unchanged.
+    #[test]
+    fn a_wait_says_how_the_turn_ended_in_the_words_mj_sessions_uses() {
+        let finished = wait_response(
+            "finished",
+            serde_json::json!({"stop_reason": "EndTurn", "turn_id": 16, "elapsed_ms": 5300}),
+        );
+        assert_eq!(
+            wait_report_lines(&finished)[0],
+            "finished turn 16 (completed, end of turn) in 5.3s"
+        );
+        assert_eq!(
+            serde_json::to_value(&finished).unwrap()["stop_reason"],
+            "EndTurn",
+            "--json prints the stop reason as the API returns it"
+        );
+        for (outcome, stop_reason, words) in [
+            ("finished", "end_turn", "completed, end of turn"),
+            (
+                "input_required",
+                "awaiting_input",
+                "completed, waiting for input",
+            ),
+            ("cancelled", "Cancelled", "interrupted"),
+            ("quota_limit", "QuotaLimit", "failed: quota limit reached"),
+            ("error", "MaxTokens", "failed: max tokens"),
+            ("error", "prompt_unanswered", "failed: prompt unanswered"),
+        ] {
+            let response = wait_response(
+                outcome,
+                serde_json::json!({"stop_reason": stop_reason, "turn_id": 2}),
+            );
+            assert_eq!(
+                wait_report_lines(&response)[0],
+                format!("{outcome} turn 2 ({words})")
+            );
+            // The same words `mj sessions --session` prints for that turn.
+            let mut session = response.session.clone();
+            session.last_turn_outcome = Some(
+                serde_json::from_value(serde_json::json!({
+                    "command_id": "prompt-1",
+                    "completed_ordinal": 3,
+                    "completed_at_ms": 0,
+                    "outcome": {"kind": "completed", "stop_reason": stop_reason},
+                }))
+                .unwrap(),
+            );
+            assert_eq!(
+                session_report_lines(&session, 0)[1],
+                format!("last turn {words}")
+            );
         }
     }
 
