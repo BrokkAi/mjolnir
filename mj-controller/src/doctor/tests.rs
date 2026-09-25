@@ -192,6 +192,70 @@ fn a_config_without_an_enabled_profile_cannot_start_sessions() {
     assert!(!check.detail.contains("bundle"), "{}", check.detail);
 }
 
+/// With no config.toml, doctor said "Fix config.toml, then rerun `mj doctor
+/// --json`" for two checks, although there was no file to fix and a person
+/// reading the report does not need `--json` (launch finding R14-3,
+/// reverify-14 cli/020). Those checks now say how to write the first
+/// configuration, and a broken file's checks point at plain `mj doctor`.
+#[test]
+fn checks_waiting_for_a_config_say_how_to_get_one_without_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("config.toml");
+    let run = |path: &Path| {
+        run_with_config_path(
+            path,
+            &AlwaysFailingExecutor,
+            ApplePlatform::Linux,
+            DoctorOptions { smoke: false },
+        )
+    };
+    let find = |checks: &[DoctorCheck], id: &str| {
+        checks
+            .iter()
+            .find(|check| check.id == id)
+            .unwrap_or_else(|| panic!("{id} is reported"))
+            .clone()
+    };
+
+    let checks = run(&missing);
+    for check in &checks {
+        let text = format!(
+            "{} {}",
+            check.detail,
+            check.remediation.as_deref().unwrap_or_default()
+        );
+        assert!(
+            !text.contains("Fix config.toml")
+                && !text.contains("config.toml is valid")
+                && !text.contains("--json"),
+            "{} advises fixing a file that does not exist: {text}",
+            check.id
+        );
+    }
+    for id in ["harness.profiles", "worker.containers"] {
+        let check = find(&checks, id);
+        assert_eq!(check.status, CheckStatus::Fixable, "{id}");
+        let remediation = check.remediation.unwrap_or_default();
+        assert!(
+            remediation.contains("Run `mj`")
+                && remediation.contains("`mj setup`")
+                && remediation.contains("rerun `mj doctor`"),
+            "{id}: {remediation}"
+        );
+    }
+
+    let invalid = directory.path().join("invalid.toml");
+    std::fs::write(&invalid, "version = \n").unwrap();
+    let checks = run(&invalid);
+    for id in ["harness.profiles", "worker.containers"] {
+        assert_eq!(
+            find(&checks, id).remediation.as_deref(),
+            Some("Fix config.toml, then rerun `mj doctor`."),
+            "{id}"
+        );
+    }
+}
+
 /// A newer build's configuration is the one case doctor cannot read and the
 /// user cannot repair in the file, so no check in the run may send them to fix
 /// TOML; the checks that depend on a configuration skip and say why.

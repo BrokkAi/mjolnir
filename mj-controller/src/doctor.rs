@@ -439,16 +439,49 @@ Podman prerequisites. Resolve every `fixable` status before starting a session.\
 
 /// Why `mj doctor` has no configuration for the checks that need one.
 ///
-/// The two cases call for opposite advice, so every dependent check is told
+/// The cases call for different advice, so every dependent check is told
 /// which one it is: a file this build cannot read because a newer Mjolnir
 /// wrote it is not broken, and telling the user to fix or replace it would
-/// destroy that build's settings.
+/// destroy that build's settings; a file that does not exist yet has nothing
+/// to fix (R14-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigGap {
     /// A newer Mjolnir wrote the file; the value is the version it carries.
     NewerVersion(u32),
-    /// The file is missing, or is not valid Mjolnir TOML.
+    /// There is no file yet. The first `mj` that adds an agent profile, or
+    /// `mj setup`, writes it.
+    Missing,
+    /// The file is not valid Mjolnir TOML.
     Unreadable,
+}
+
+impl ConfigGap {
+    /// What a dependent check waits for, completing "cannot be checked
+    /// until ...".
+    fn awaited(self) -> &'static str {
+        match self {
+            ConfigGap::NewerVersion(_) => "this Mjolnir can read config.toml",
+            ConfigGap::Missing => "config.toml exists",
+            ConfigGap::Unreadable => "config.toml is valid",
+        }
+    }
+
+    /// The fix for a check that waits for a configuration it can read.
+    ///
+    /// It names plain `mj doctor`: the checks are the same in the human and
+    /// the JSON report, and a person reading the human one has no use for
+    /// `--json` (R14-3).
+    fn remediation(self) -> &'static str {
+        match self {
+            ConfigGap::NewerVersion(_) => {
+                "Update Mjolnir to the build that wrote config.toml or newer, then rerun `mj doctor`."
+            }
+            ConfigGap::Missing => {
+                "Run `mj` and add an agent profile, or run `mj setup`; either one writes config.toml. Then rerun `mj doctor`."
+            }
+            ConfigGap::Unreadable => "Fix config.toml, then rerun `mj doctor`.",
+        }
+    }
 }
 
 /// What a dependent check works from: the loaded configuration, or why there
@@ -473,7 +506,7 @@ fn newer_config_skip(id: &str, title: &str, version: u32) -> DoctorCheck {
 fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>, Vec<DoctorCheck>) {
     if !path.exists() {
         return (
-            Err(ConfigGap::Unreadable),
+            Err(ConfigGap::Missing),
             vec![DoctorCheck::fixable(
                 "config",
                 "Mjolnir configuration",
@@ -560,12 +593,12 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
                 version,
             )];
         }
-        Err(ConfigGap::Unreadable) => {
+        Err(gap @ (ConfigGap::Missing | ConfigGap::Unreadable)) => {
             return vec![DoctorCheck::fixable(
                 "harness.profiles",
                 "Harness profiles",
-                "Harness homes cannot be checked until config.toml is valid.",
-                "Fix config.toml, then rerun `mj doctor --json`.",
+                format!("Harness homes cannot be checked until {}.", gap.awaited()),
+                gap.remediation(),
             )];
         }
     };
@@ -858,11 +891,14 @@ fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Do
         Err(ConfigGap::NewerVersion(version)) => {
             return newer_config_skip("runtime.podman", "Rootless Podman", version);
         }
-        Err(ConfigGap::Unreadable) => {
+        Err(gap @ (ConfigGap::Missing | ConfigGap::Unreadable)) => {
             return DoctorCheck::unsupported(
                 "runtime.podman",
                 "Rootless Podman",
-                "Podman prerequisites cannot be evaluated until config.toml is valid.",
+                format!(
+                    "Podman prerequisites cannot be evaluated until {}.",
+                    gap.awaited()
+                ),
             );
         }
     };
@@ -1003,11 +1039,14 @@ fn docker_checks(
         Err(ConfigGap::NewerVersion(version)) => {
             return vec![newer_config_skip("runtime.docker", "Docker", version)];
         }
-        Err(ConfigGap::Unreadable) => {
+        Err(gap @ (ConfigGap::Missing | ConfigGap::Unreadable)) => {
             return vec![DoctorCheck::unsupported(
                 "runtime.docker",
                 "Docker",
-                "Docker prerequisites cannot be evaluated until config.toml is valid.",
+                format!(
+                    "Docker prerequisites cannot be evaluated until {}.",
+                    gap.awaited()
+                ),
             )];
         }
     };
@@ -2246,12 +2285,15 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                 version,
             )];
         }
-        Err(ConfigGap::Unreadable) => {
+        Err(gap @ (ConfigGap::Missing | ConfigGap::Unreadable)) => {
             return vec![DoctorCheck::fixable(
                 "worker.containers",
                 "Container worker binary",
-                "Worker availability cannot be checked until config.toml is valid.",
-                "Fix config.toml, then rerun `mj doctor --json`.",
+                format!(
+                    "Worker availability cannot be checked until {}.",
+                    gap.awaited()
+                ),
+                gap.remediation(),
             )];
         }
     };
