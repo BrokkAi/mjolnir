@@ -117,9 +117,9 @@ pub(super) enum ExchangeKind {
 /// connection before authentication rather than the worker being unreachable.
 pub(super) struct ConnectFailure {
     pub(super) error: anyhow::Error,
-    /// How the SSH server turned the proxy away, when it did. The worker was
-    /// never reached, so the launch may be retried.
-    pub(super) refusal: Option<mj_core::targets::SshRefusal>,
+    /// How the SSH server turned the proxy away, when it did, and what `ssh`
+    /// printed. The worker was never reached, so the launch may be retried.
+    pub(super) refusal: Option<(mj_core::targets::SshRefusal, String)>,
 }
 
 impl ConnectFailure {

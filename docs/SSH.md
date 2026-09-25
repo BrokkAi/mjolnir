@@ -69,8 +69,8 @@ the two spare sessions.
 
 If the server refuses a session anyway, the command never started, so Mjolnir
 retries it, up to three attempts with a growing delay. The dashboard's own
-Git reads for the conversation header and the capacity probe retry the same
-way. A refused session that gets in on a retry is logged only at debug level;
+Git reads for the conversation header, the capacity probe, and the relay
+connection to each session's worker retry the same way. A refused session that gets in on a retry is logged only at debug level;
 one still refused on its last attempt is logged as a warning that names
 "refused another session on a shared connection (MaxSessions)". A
 connection closed before authentication (`MaxStartups`) is always a

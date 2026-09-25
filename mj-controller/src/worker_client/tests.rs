@@ -110,6 +110,161 @@ while IFS= read -r request; do :; done
     mj_core::targets::set_ssh_retry_backoff_for_test(None);
 }
 
+/// Every event logged on this thread while it is the default subscriber, as
+/// its level and its fields written out, message included.
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+
+#[cfg(unix)]
+impl CapturedLog {
+    fn at_or_above(&self, level: tracing::Level) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(logged, _)| *logged <= level)
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+
+    fn at(&self, level: tracing::Level) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(logged, _)| *logged == level)
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+impl tracing::Subscriber for CapturedLog {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(self.0, " {}={value:?}", field.name());
+            }
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        self.0
+            .lock()
+            .unwrap()
+            .push((*event.metadata().level(), fields.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A relay proxy that the SSH server turns away once, in the way `ssh`
+/// reports it, and then answers hello.
+#[cfg(unix)]
+fn relay_proxy_refused_once(directory: &std::path::Path, refusal: &str) -> CommandSpec {
+    let counter = directory.join("attempts");
+    let script = format!(
+        r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -eq 0 ]; then
+  printf '{refusal}' >&2
+  exit 255
+fi
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
+while IFS= read -r request; do :; done
+"#,
+        counter = counter.display(),
+        session = SESSION_ID
+    );
+    CommandSpec::new("sh", ["-c".to_owned(), script])
+        .ssh_destination("build@10.0.0.1")
+        .purpose("refused relay fixture")
+}
+
+/// R7-1: a shared SSH connection at `MaxSessions` refuses one more session
+/// many times while sessions start, and the retry gets in. Neither the retry
+/// nor the proxy's own stderr is a warning then; the refusal is logged once,
+/// at debug level, by the shared refusal routine.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_refused_once(
+        directory.path(),
+        r"mux_client_request_session: session request failed: Session open refused by peer\nConnection closed by UNKNOWN port 65535\n",
+    );
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+    };
+    mj_core::targets::set_ssh_retry_backoff_for_test(None);
+    connected.expect("the refused session is retried");
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
+    let retries = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|text| text.contains("(MaxSessions); retrying"))
+        .collect::<Vec<_>>();
+    assert_eq!(retries.len(), 1, "{:#?}", log.0.lock().unwrap());
+    assert!(
+        retries[0].contains("Session open refused by peer"),
+        "the retry keeps what ssh said: {}",
+        retries[0]
+    );
+}
+
+/// A connection dropped before authentication can mean a master died, so its
+/// retry stays a warning, and it still names what ssh said.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relay_proxy_dropped_before_authentication_still_warns() {
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_refused_once(
+        directory.path(),
+        r"kex_exchange_identification: read: Connection reset by peer\n",
+    );
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+    };
+    mj_core::targets::set_ssh_retry_backoff_for_test(None);
+    connected.expect("the dropped connection is retried");
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("before authentication; retrying")
+            && warnings[0].contains("kex_exchange_identification"),
+        "{}",
+        warnings[0]
+    );
+}
+
 /// A proxy that fails for its own reasons is reported on the first
 /// attempt, keeping the existing hello error and its stderr tail.
 #[cfg(unix)]
@@ -131,11 +286,23 @@ exit 1
         .ssh_destination("build@10.0.0.1")
         .purpose("broken relay fixture");
 
-    let Err(error) =
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
         RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
-    else {
+    };
+    let Err(error) = connected else {
         panic!("a proxy that exits 1 is a real failure");
     };
+    // Not a refusal, so it is a warning, and the proxy's own complaint is in it.
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("worker socket path is too long")
+            && warnings[0].contains("relay proxy disconnected during hello"),
+        "{}",
+        warnings[0]
+    );
 
     let reported = format!("{error:#}");
     assert!(

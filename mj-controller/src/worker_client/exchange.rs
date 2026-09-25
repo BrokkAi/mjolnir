@@ -64,21 +64,12 @@ impl RelayClient {
             protocol_version: RELAY_PROTOCOL_VERSION,
             request,
         };
-        let line = match self
+        // Not logged here: a proxy the SSH server turned away also fails
+        // hello, and only the connect that classifies it knows which it was.
+        let line = self
             .exchange(&envelope, operation, timeout, ExchangeKind::Handshake)
-            .await
-        {
-            Ok(line) => line,
-            Err(error) => {
-                log_relay_client_failure(self, operation, &request_id, &error);
-                return Err(error);
-            }
-        };
-        let result = decode_relay_hello_response(&line, &request_id);
-        if let Err(error) = &result {
-            log_relay_client_failure(self, operation, &request_id, error);
-        }
-        result
+            .await?;
+        decode_relay_hello_response(&line, &request_id)
     }
 
     /// Write one request frame and read the reply that belongs to it.
