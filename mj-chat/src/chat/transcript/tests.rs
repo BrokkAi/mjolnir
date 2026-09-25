@@ -490,9 +490,9 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let title_start = header[..header.find("update the title").unwrap()]
         .chars()
         .count() as u16;
-    assert_eq!(buffer[(2, 0)].fg, theme::palette().text);
+    assert_eq!(buffer[(2, 0)].fg, theme::palette().muted);
     for x in title_start..title_start + "update the title".len() as u16 {
-        assert_eq!(buffer[(x, 0)].fg, theme::palette().secondary);
+        assert_eq!(buffer[(x, 0)].fg, theme::palette().text);
     }
 }
 
@@ -513,8 +513,8 @@ fn the_transcript_border_follows_the_hosts_pane_focus() {
         terminal.backend().buffer()[(0, 0)].fg
     };
 
-    assert_eq!(border(true), theme::palette().accent);
-    assert_eq!(border(false), theme::palette().border);
+    assert_eq!(Some(border(true)), theme::border(true).fg);
+    assert_eq!(Some(border(false)), theme::border(false).fg);
 }
 
 /// A host that draws its own chips at the right of the title row tells the
@@ -2102,7 +2102,7 @@ fn changing_theme_recolors_cached_conversation_without_changing_text() {
 #[test]
 fn blank_rows_inside_messages_keep_the_role_gutter() {
     for (role, color) in [
-        (ChatRole::User, theme::palette().accent),
+        (ChatRole::User, theme::palette().secondary),
         (ChatRole::Agent, theme::palette().border),
     ] {
         let entry = ChatEntry::plain(1, role, "1. first\n\n2. second");

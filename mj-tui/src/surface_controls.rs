@@ -233,9 +233,9 @@ pub(crate) fn render_workspace_menu(frame: &mut Frame, area: Rect, dashboard: &D
     let focused = dashboard.focus() == Focus::Workspaces
         && dashboard.workspace_control_focus == crate::workspaces::WorkspaceControlFocus::Menu;
     let style = if focused || form.is_armed(control) {
-        theme::selection(true)
+        theme::focus_control()
     } else {
-        theme::muted()
+        theme::muted().patch(theme::raised())
     };
     frame.render_widget(
         Paragraph::new(theme::glyphs().workspace_menu).style(style),
@@ -263,7 +263,9 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
             && dashboard.session_action_focus == Some(id)
             && !dashboard.modal_open();
         let style = if enabled && (focused || form.is_armed(control)) {
-            theme::selection(true)
+            theme::focus_control()
+        } else if enabled && id == CommandId::NewSessionWizard {
+            theme::active_control()
         } else if enabled {
             ratatui::style::Style::default()
                 .fg(theme::palette().text)
@@ -510,7 +512,9 @@ mod tests {
         let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
         assert_eq!(
             terminal.backend().buffer()[(create.0, create.1)].bg,
-            theme::palette().selection,
+            theme::focus_control()
+                .bg
+                .expect("focused button background"),
             "the keyboard-focused action uses the focused button style"
         );
 

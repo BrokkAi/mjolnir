@@ -14,20 +14,17 @@ use crate::text_input::TextInput;
 use crate::theme;
 
 fn focus_style() -> Style {
-    Style::new()
-        .fg(theme::palette().background)
-        .bg(theme::palette().accent)
-        .add_modifier(Modifier::BOLD)
+    theme::focus_control()
 }
 fn normal_style() -> Style {
     Style::new()
         .fg(theme::palette().text)
-        .patch(theme::raised())
+        .bg(theme::palette().selection)
 }
 fn disabled_style() -> Style {
     Style::new()
         .fg(theme::palette().muted)
-        .patch(theme::raised())
+        .bg(theme::palette().surface_raised)
 }
 
 fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
@@ -455,6 +452,11 @@ impl TextField {
         );
         frame.render_widget(
             Paragraph::new(input.value())
+                .style(if enabled {
+                    theme::field(focused && form.is_focused(id))
+                } else {
+                    theme::field(false).fg(theme::palette().muted)
+                })
                 .wrap(Wrap { trim: false })
                 .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
             area,
@@ -558,11 +560,7 @@ impl TextField {
         } else {
             form.register_with_cursor_map(id, kind, area, true, cursor_map);
         }
-        let style = if focused && form.is_focused(id) {
-            normal_style().add_modifier(Modifier::UNDERLINED)
-        } else {
-            normal_style()
-        };
+        let style = theme::field(focused && form.is_focused(id));
         frame.render_widget(Paragraph::new(visible).style(style), area);
         if focused && form.is_focused(id) && content.width > 0 && content.height > 0 {
             let cursor = cursor_width.saturating_sub(scroll);

@@ -1595,8 +1595,8 @@ fn a_notice_set_through_a_shared_handle_shows_in_the_chat_footer_in_yellow() {
         .collect::<String>();
     assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
     assert_eq!(
-        buffer[(buffer.area.x, footer_row)].fg,
-        theme::palette().text
+        Some(buffer[(buffer.area.x, footer_row)].fg),
+        theme::key_hint().fg
     );
 }
 

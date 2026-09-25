@@ -392,12 +392,12 @@ pub(crate) struct QuotaTableRow {
 impl QuotaTableRow {
     pub(crate) fn into_row(self) -> Row<'static> {
         Row::new([
-            Cell::from(self.profile),
-            Cell::from(self.harness),
+            Cell::from(self.profile).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.harness).style(theme::muted()),
             Cell::from(self.weekly),
-            Cell::from(self.weekly_reset),
+            Cell::from(self.weekly_reset).style(theme::muted()),
             Cell::from(self.five_hour),
-            Cell::from(self.five_hour_reset),
+            Cell::from(self.five_hour_reset).style(theme::muted()),
         ])
     }
 }
@@ -634,14 +634,18 @@ pub(crate) fn render_quotas(
         // first column has no heading; it keeps the width the heading gave it.
         .header(
             Row::new(["", "Harness", "Weekly", "Resets", "5H", "Resets"])
-                .style(theme::muted().add_modifier(Modifier::BOLD)),
+                .style(theme::muted().patch(theme::raised())),
         )
         .row_highlight_style(if quotas_focused {
             theme::selection(true)
         } else {
             Style::default()
         })
-        .highlight_symbol(if quotas_focused { "› " } else { "  " })
+        .highlight_symbol(if quotas_focused {
+            theme::glyphs().selected
+        } else {
+            "  "
+        })
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
     let mut offset = dashboard.quota_scroll.get();
@@ -664,6 +668,19 @@ pub(crate) fn render_quotas(
             .then_some(dashboard.quota_index),
     );
     frame.render_stateful_widget(table, area, &mut state);
+    if dashboard.config.enabled_profiles().next().is_none() {
+        frame.render_widget(
+            Paragraph::new("Add an agent profile in Settings.")
+                .style(theme::muted())
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x.saturating_add(3),
+                area.y.saturating_add(2),
+                area.width.saturating_sub(4),
+                area.height.saturating_sub(3),
+            ),
+        );
+    }
     dashboard.quota_scroll.set(state.offset());
     render_session_scrollbar(
         frame,

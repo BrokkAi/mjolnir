@@ -490,7 +490,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
             };
             assert_eq!(cell.symbol(), glyph);
             if size == PaneSize::Standard {
-                assert_eq!(cell.bg, theme::palette().surface_raised);
+                assert_eq!(Some(cell.bg), theme::active_control().bg);
                 assert_eq!(cell.fg, theme::palette().accent);
                 assert!(cell.modifier.contains(Modifier::BOLD));
             } else {
@@ -586,7 +586,7 @@ fn unavailable_sessions_maximum_is_hidden_and_returns_on_resize() {
         .map(|(_, _, area)| *area)
         .expect("visible Standard control");
     let cell = &narrow.backend().buffer()[(standard.x + 1, standard.y)];
-    assert_eq!(cell.bg, theme::palette().surface_raised);
+    assert_eq!(Some(cell.bg), theme::active_control().bg);
     assert_eq!(cell.fg, theme::palette().accent);
     assert!(cell.modifier.contains(Modifier::BOLD));
 
@@ -618,7 +618,7 @@ fn unavailable_sessions_maximum_is_hidden_and_returns_on_resize() {
     let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
     assert_eq!(maximum.right(), sessions_area.right() - 1);
     let cell = &wide.backend().buffer()[(maximum.x + 1, maximum.y)];
-    assert_eq!(cell.bg, theme::palette().surface_raised);
+    assert_eq!(Some(cell.bg), theme::active_control().bg);
     assert_eq!(cell.fg, theme::palette().accent);
     assert!(cell.modifier.contains(Modifier::BOLD));
 }
@@ -758,7 +758,7 @@ fn tab_focus_never_changes_band_geometry() {
 }
 
 #[test]
-fn sessions_in_an_expanded_project_have_a_blank_row_and_only_the_caret_marks_selection() {
+fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_cards() {
     let mut first = running_session();
     first.id = "session-first".into();
     first.project_directory = Some("/projects/shared".into());
@@ -792,13 +792,23 @@ fn sessions_in_an_expanded_project_have_a_blank_row_and_only_the_caret_marks_sel
         .iter()
         .position(|line| line.contains("Second session"))
         .expect("second session row") as u16;
-    assert!(
-        (first_y..first_y + 4).all(|y| {
-            (dashboard.pane_areas.expect("pane areas")[0].x + 1
-                ..dashboard.pane_areas.expect("pane areas")[0].right() - 1)
-                .all(|x| buffer[(x, y)].bg != theme::palette().muted)
-        }),
-        "selection must not paint a background"
+    assert_eq!(
+        buffer[(
+            cell_column(&lines[first_y as usize], "First session"),
+            first_y
+        )]
+            .bg,
+        theme::palette().selection,
+        "the selected session is distinguished from the surrounding project"
+    );
+    assert_eq!(
+        buffer[(
+            cell_column(&lines[second_y as usize], "Second session"),
+            second_y
+        )]
+            .bg,
+        theme::palette().surface,
+        "unselected sessions stay on the quiet panel surface"
     );
     assert!(lines[first_y as usize].contains("› "));
     assert!(lines[first_y as usize].contains("First session"));
@@ -1285,7 +1295,7 @@ fn marking_all_read_removes_the_unread_tint_from_an_idle_session() {
             .iter()
             .position(|line| line.contains("podman"))
             .expect("session row");
-        buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
+        buffer[(cell_column(&lines[row], "Idle"), row as u16)].fg
     };
     assert_eq!(
         row_color(&mut dashboard),
@@ -1838,10 +1848,10 @@ fn every_footer_hint_dispatches_the_command_it_names() {
     }
 }
 
-/// Expanded output keeps the transcript's rich formatting without adding
-/// a second role rail.
+/// Expanded output flattens source newlines into a compact preview, with
+/// one quiet gutter separating it from the session's identity and status.
 #[test]
-fn an_expanded_agent_excerpt_flattens_newlines_without_a_transcript_gutter() {
+fn an_expanded_agent_excerpt_flattens_newlines_with_one_preview_gutter() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     apply_materialized_transcript(
@@ -1865,12 +1875,20 @@ fn an_expanded_agent_excerpt_flattens_newlines_without_a_transcript_gutter() {
         .iter()
         .find(|line| line.contains("reliability reply"))
         .expect("the agent excerpt row");
-    // The rounded pane contributes one edge on each side; the excerpt
-    // must not duplicate the conversation's interior rail.
-    let session_cell = agent.split("││").next().unwrap_or(agent.as_str());
+    let pane = dashboard.pane_areas.expect("session pane")[0];
+    let session_cell = agent
+        .chars()
+        .skip(usize::from(pane.x + 1))
+        .take(usize::from(pane.width.saturating_sub(2)))
+        .collect::<String>();
     assert!(
-        !session_cell.trim_matches('\u{2502}').contains('\u{2502}'),
-        "the excerpt carries no transcript rail: {agent:?}"
+        session_cell.starts_with("  │ reliability reply"),
+        "the source newline is flattened inside the preview: {agent:?}"
+    );
+    assert_eq!(
+        session_cell.matches('│').count(),
+        1,
+        "the excerpt has one rail, with no nested transcript chrome: {agent:?}"
     );
 }
 
@@ -2982,7 +3000,7 @@ fn the_minimized_rows_truncate_rather_than_wrap() {
 }
 
 #[test]
-fn read_idle_session_stays_blue_in_expanded_and_collapsed_rows() {
+fn read_idle_session_distinguishes_status_from_identity_in_expanded_and_collapsed_rows() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     // The detach cursor sits past the only agent message, so nothing is
@@ -3019,12 +3037,14 @@ fn read_idle_session_stays_blue_in_expanded_and_collapsed_rows() {
             .collect::<String>();
         assert!(!status.contains("unread"));
         let pane = dashboard.pane_areas.expect("pane areas")[0];
+        let identity_x = cell_column(&status, "podman");
         assert!(
-            (pane.x + 1..pane.right() - 1)
+            (pane.x + 1..identity_x)
                 .filter(|x| summary_text_cell(&buffer[(*x, status_y)]))
                 .all(|x| buffer[(x, status_y)].fg == theme::palette().session_idle),
             "{collapsed}: {status}"
         );
+        assert_eq!(buffer[(identity_x, status_y)].fg, theme::palette().muted);
     }
 }
 
@@ -3280,6 +3300,31 @@ fn host_capacity_usage() -> DeploymentCapacityUsage {
         logical_cores: 8,
         disk_total_bytes: None,
     }
+}
+
+#[test]
+fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            logical_cores: 8,
+            disk_total_bytes: None,
+        })),
+        now_epoch_seconds(),
+    );
+
+    let rendered = drawn_dashboard(&mut dashboard, 200);
+    assert!(
+        rendered.contains("CPU unavailable · RAM unavailable"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("0% CPU"), "{rendered}");
+    assert!(!rendered.contains("0% RAM"), "{rendered}");
 }
 
 fn drawn_dashboard(dashboard: &mut DashboardState, width: u16) -> String {
@@ -3661,7 +3706,7 @@ fn launch_clock_names_concurrent_stages_in_lifecycle_order() {
 }
 
 #[test]
-fn focused_panes_use_accented_rounded_borders_without_focus_title_text() {
+fn focused_panes_use_quiet_rounded_borders_and_accent_titles_without_focus_labels() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     let backend = TestBackend::new(120, 40);
@@ -3697,8 +3742,12 @@ fn focused_panes_use_accented_rounded_borders_without_focus_title_text() {
         let pane_index = if focus == Focus::Quota { 2 } else { 1 };
         let area = dashboard.pane_areas.expect("pane areas")[pane_index];
         let border = &terminal.backend().buffer()[(area.x, area.y)];
-        assert_eq!(border.fg, theme::palette().accent);
-        assert!(border.modifier.contains(Modifier::BOLD));
+        assert_eq!(Some(border.fg), theme::border(true).fg);
+        assert_eq!(border.modifier, theme::border(true).add_modifier);
+        assert_eq!(
+            terminal.backend().buffer()[(area.x + 2, area.y)].fg,
+            theme::palette().accent,
+        );
     }
 }
 
@@ -3797,7 +3846,7 @@ fn empty_config_renders_onboarding_with_the_workspace_name() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Mjolnir needs a little fuel."));
+    assert!(rendered.contains("Make room for your next idea."));
     assert!(rendered.contains("personal"));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('e'))),

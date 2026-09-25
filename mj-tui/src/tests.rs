@@ -3353,7 +3353,7 @@ fn clicking_the_zoom_chip_unzooms() {
 /// style, and its neighbour does not, so the focused pane is visible without
 /// reading the composer.
 #[test]
-fn the_focused_pane_draws_an_accented_transcript_border() {
+fn the_focused_pane_draws_a_distinct_transcript_border() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
@@ -3372,9 +3372,9 @@ fn the_focused_pane_draws_an_accented_transcript_border() {
     };
     let buffer = terminal.backend().buffer();
     assert_eq!(
-        buffer[corner(&dashboard, second)].fg,
-        mj_chat::theme::palette().accent,
-        "the focused pane's transcript border is accented"
+        Some(buffer[corner(&dashboard, second)].fg),
+        mj_chat::theme::border(true).fg,
+        "the focused pane's transcript border uses the focused style"
     );
     assert_eq!(
         buffer[corner(&dashboard, first)].fg,

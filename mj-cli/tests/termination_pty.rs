@@ -23,6 +23,205 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
+const PTY_ROWS: usize = 24;
+const PTY_COLUMNS: usize = 80;
+
+/// Keep the terminal's current cells independently of the captured byte log.
+/// Ratatui can retain an unchanged space and move the cursor over it, so the
+/// words visible together on screen need not be contiguous in the PTY stream.
+struct PtyOutput {
+    raw: Vec<u8>,
+    parser: vte::Parser,
+    screen: PtyScreen,
+}
+
+impl PtyOutput {
+    fn new() -> Self {
+        Self {
+            raw: Vec::new(),
+            parser: vte::Parser::new(),
+            screen: PtyScreen::new(),
+        }
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.raw.extend_from_slice(bytes);
+        self.parser.advance(&mut self.screen, bytes);
+    }
+
+    /// Start a new raw capture without forgetting unchanged screen cells.
+    fn clear(&mut self) {
+        self.raw.clear();
+    }
+}
+
+impl std::ops::Deref for PtyOutput {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+struct PtyScreen {
+    cells: Vec<Vec<String>>,
+    row: usize,
+    column: usize,
+    saved_cursor: (usize, usize),
+}
+
+impl PtyScreen {
+    fn new() -> Self {
+        Self {
+            cells: vec![vec![" ".into(); PTY_COLUMNS]; PTY_ROWS],
+            row: 0,
+            column: 0,
+            saved_cursor: (0, 0),
+        }
+    }
+
+    fn contents(&self) -> String {
+        self.cells
+            .iter()
+            .map(|row| row.concat())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn newline(&mut self) {
+        if self.row + 1 == PTY_ROWS {
+            self.cells.remove(0);
+            self.cells.push(vec![" ".into(); PTY_COLUMNS]);
+        } else {
+            self.row += 1;
+        }
+    }
+}
+
+/// Interpret the cursor and erasure operations emitted by the crossterm
+/// backend. VTE owns escape/UTF-8 parsing, including sequences split between
+/// reads; styles and input-mode changes do not affect the text projection.
+impl vte::Perform for PtyScreen {
+    fn print(&mut self, character: char) {
+        let text = character.to_string();
+        let width = ratatui::text::Span::raw(text.clone()).width();
+        if width == 0 {
+            if self.column > 0 {
+                self.cells[self.row][self.column.min(PTY_COLUMNS) - 1].push(character);
+            }
+            return;
+        }
+        if self.column + width > PTY_COLUMNS {
+            self.newline();
+            self.column = 0;
+        }
+        self.cells[self.row][self.column] = text;
+        for column in self.column + 1..self.column + width {
+            self.cells[self.row][column].clear();
+        }
+        self.column += width;
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\r' => self.column = 0,
+            b'\n' | 0x0b | 0x0c => self.newline(),
+            b'\x08' => self.column = self.column.saturating_sub(1),
+            b'\t' => self.column = ((self.column / 8 + 1) * 8).min(PTY_COLUMNS - 1),
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _: bool, action: char) {
+        let values = params
+            .iter()
+            .map(|value| value[0] as usize)
+            .collect::<Vec<_>>();
+        let value = |index: usize| values.get(index).copied().unwrap_or(0);
+        let distance = value(0).max(1);
+        if !intermediates.is_empty() {
+            if intermediates == b"?" && matches!(action, 'h' | 'l') && values.contains(&1049) {
+                *self = Self::new();
+            }
+            return;
+        }
+        match action {
+            'H' | 'f' => {
+                self.row = value(0).max(1).saturating_sub(1).min(PTY_ROWS - 1);
+                self.column = value(1).max(1).saturating_sub(1).min(PTY_COLUMNS - 1);
+            }
+            'A' => self.row = self.row.saturating_sub(distance),
+            'B' | 'e' => self.row = (self.row + distance).min(PTY_ROWS - 1),
+            'C' | 'a' => self.column = (self.column + distance).min(PTY_COLUMNS - 1),
+            'D' => self.column = self.column.saturating_sub(distance),
+            'E' | 'F' => {
+                self.row = if action == 'E' {
+                    (self.row + distance).min(PTY_ROWS - 1)
+                } else {
+                    self.row.saturating_sub(distance)
+                };
+                self.column = 0;
+            }
+            'G' | '`' => self.column = distance.saturating_sub(1).min(PTY_COLUMNS - 1),
+            'd' => self.row = distance.saturating_sub(1).min(PTY_ROWS - 1),
+            'J' | 'K' => {
+                let cursor = self.row * PTY_COLUMNS + self.column.min(PTY_COLUMNS - 1);
+                for (row_index, row) in self.cells.iter_mut().enumerate() {
+                    for (column, cell) in row.iter_mut().enumerate() {
+                        let position = row_index * PTY_COLUMNS + column;
+                        let erase = match value(0) {
+                            0 => position >= cursor,
+                            1 => position <= cursor,
+                            2 | 3 => true,
+                            _ => false,
+                        };
+                        if erase && (action == 'J' || row_index == self.row) {
+                            *cell = " ".into();
+                        }
+                    }
+                }
+            }
+            'X' => {
+                let start = self.column.min(PTY_COLUMNS - 1);
+                self.cells[self.row][start..(start + distance).min(PTY_COLUMNS)].fill(" ".into());
+            }
+            's' => self.saved_cursor = (self.row, self.column),
+            'u' => (self.row, self.column) = self.saved_cursor,
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, _: &[u8], _: bool, byte: u8) {
+        match byte {
+            b'7' => self.saved_cursor = (self.row, self.column),
+            b'8' => (self.row, self.column) = self.saved_cursor,
+            b'c' => *self = Self::new(),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn screen_waits_follow_cursor_redraws_and_do_not_match_erased_text() {
+    let mut output = PtyOutput::new();
+    let mut bytes = b"\x1b[1;1Hworking".repeat(6_000);
+    bytes.extend_from_slice("\x1b[2J\x1b[5;10HNew\x1b[5;14Hworkspace\x1b[6;10Hcafé".as_bytes());
+    assert!(bytes.len() > 65_536);
+    // Small chunks split both escape sequences and UTF-8 characters.
+    for chunk in bytes.chunks(7) {
+        output.extend_from_slice(chunk);
+    }
+    assert!(!ExpectedOutput::Bytes(b"New workspace").matches(&output));
+    assert!(ExpectedOutput::Visible(b"New workspace").matches(&output));
+    assert!(output.screen.contents().contains("café"));
+
+    output.clear();
+    assert!(output.is_empty());
+    assert!(ExpectedOutput::Visible(b"New workspace").matches(&output));
+    output.extend_from_slice(b"\x1b[5;10H\x1b[K");
+    assert!(ExpectedOutput::Hidden(b"New workspace").matches(&output));
+    assert!(output.screen.contents().contains("café"));
+}
 
 /// The detach chord: `ctrl+b` (byte 0x02) then `q`. The prefix is matched as
 /// Control on every platform, so this needs no per-platform encoding.
@@ -110,7 +309,7 @@ fn duplicate(fd: RawFd) -> File {
     unsafe { File::from_raw_fd(copy) }
 }
 
-fn drain(master: &mut File, output: &mut Vec<u8>) {
+fn drain(master: &mut File, output: &mut PtyOutput) {
     let mut buffer = [0_u8; 4096];
     loop {
         match master.read(&mut buffer) {
@@ -124,24 +323,73 @@ fn drain(master: &mut File, output: &mut Vec<u8>) {
     }
 }
 
-fn wait_for_ready(child: &mut Child, master: &mut File, output: &mut Vec<u8>, marker: &[u8]) {
+fn wait_for_ready(child: &mut Child, master: &mut File, output: &mut PtyOutput, marker: &[u8]) {
     wait_for_output_until(
         master,
         output,
-        marker,
+        ExpectedOutput::Visible(marker),
         Instant::now() + STARTUP_TIMEOUT,
         Some(child),
     );
 }
 
-fn wait_for_output(master: &mut File, output: &mut Vec<u8>, marker: &[u8], deadline: Instant) {
-    wait_for_output_until(master, output, marker, deadline, None);
+fn wait_for_output(master: &mut File, output: &mut PtyOutput, marker: &[u8], deadline: Instant) {
+    wait_for_output_until(
+        master,
+        output,
+        ExpectedOutput::Bytes(marker),
+        deadline,
+        None,
+    );
+}
+
+fn wait_for_screen(master: &mut File, output: &mut PtyOutput, marker: &[u8], deadline: Instant) {
+    wait_for_output_until(
+        master,
+        output,
+        ExpectedOutput::Visible(marker),
+        deadline,
+        None,
+    );
+}
+
+fn wait_for_wizard_close(master: &mut File, output: &mut PtyOutput) {
+    wait_for_output_until(
+        master,
+        output,
+        ExpectedOutput::Hidden(b"New session"),
+        Instant::now() + TIMEOUT,
+        None,
+    );
+}
+
+#[derive(Debug)]
+enum ExpectedOutput<'a> {
+    Bytes(&'a [u8]),
+    Visible(&'a [u8]),
+    Hidden(&'a [u8]),
+}
+
+impl ExpectedOutput<'_> {
+    fn matches(&self, output: &PtyOutput) -> bool {
+        match self {
+            Self::Bytes(marker) => output.windows(marker.len()).any(|window| window == *marker),
+            Self::Visible(marker) => output
+                .screen
+                .contents()
+                .contains(std::str::from_utf8(marker).unwrap()),
+            Self::Hidden(marker) => !output
+                .screen
+                .contents()
+                .contains(std::str::from_utf8(marker).unwrap()),
+        }
+    }
 }
 
 fn wait_for_output_until(
     master: &mut File,
-    output: &mut Vec<u8>,
-    marker: &[u8],
+    output: &mut PtyOutput,
+    expected: ExpectedOutput<'_>,
     deadline: Instant,
     mut child: Option<&mut Child>,
 ) {
@@ -150,7 +398,7 @@ fn wait_for_output_until(
         .any(|window| window == ENTER_ALTERNATE_SCREEN);
     loop {
         drain(master, output);
-        if output.windows(marker.len()).any(|window| window == marker) {
+        if expected.matches(output) {
             return;
         }
         if !answered_device_query
@@ -167,19 +415,21 @@ fn wait_for_output_until(
             && let Some(status) = child.try_wait().expect("poll PTY startup")
         {
             panic!(
-                "PTY child {} exited during startup with {status}; expected {marker:?}; output: {:?}",
+                "PTY child {} exited during startup with {status}; expected {expected:?}; screen: {}; output: {:?}",
                 child.id(),
+                output.screen.contents(),
                 String::from_utf8_lossy(output)
             );
         }
         assert!(
             Instant::now() < deadline,
-            "PTY child did not emit {marker:?}; phase: {}; output: {:?}",
+            "PTY child did not reach {expected:?}; phase: {}; screen: {}; output: {:?}",
             if child.is_some() {
                 "dashboard startup"
             } else {
                 "interaction"
             },
+            output.screen.contents(),
             String::from_utf8_lossy(output)
         );
         thread::sleep(Duration::from_millis(10));
@@ -189,7 +439,7 @@ fn wait_for_output_until(
 fn wait_for_exit(
     child: &mut Child,
     master: &mut File,
-    output: &mut Vec<u8>,
+    output: &mut PtyOutput,
     reason: &str,
 ) -> ExitStatus {
     let deadline = Instant::now() + TIMEOUT;
@@ -240,7 +490,7 @@ fn spawn_dashboard_pty() -> DashboardPty {
 #[test]
 fn an_open_terminal_automatically_reexecs_after_an_upgrade() {
     let mut fixture = spawn_dashboard_pty_with_idle_exit(false);
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -261,7 +511,7 @@ fn an_open_terminal_automatically_reexecs_after_an_upgrade() {
         b"reconnecting this terminal",
         Instant::now() + STARTUP_TIMEOUT,
     );
-    wait_for_output(
+    wait_for_screen(
         &mut fixture.master,
         &mut output,
         READY_MARKER,
@@ -406,8 +656,8 @@ image = "ubuntu:24.04"
     let mut master_fd = -1;
     let mut slave_fd = -1;
     let window_size = libc::winsize {
-        ws_row: 24,
-        ws_col: 80,
+        ws_row: PTY_ROWS as u16,
+        ws_col: PTY_COLUMNS as u16,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -525,7 +775,7 @@ image = "ubuntu:24.04"
 #[test]
 fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
     let mut fixture = spawn_dashboard_pty();
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -575,7 +825,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
         ..
     } = spawn_dashboard_pty_with_local_target(false, false, true);
     let database = storage.path().join("data/hel/mj.sqlite3");
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     // Ordinary background ticks must leave
     // the workspace empty until the user explicitly starts work.
@@ -590,7 +840,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     master
         .write_all(NEW_SESSION_KEY)
         .expect("open New session wizard");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         b"New session \xc2\xb7 1/4 profile",
@@ -598,20 +848,20 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     );
     // Explicit New always enters the full wizard. The first two steps already
     // have deterministic fixture defaults, while the project step requires
-    // the real temporary checkout path. Later titles arrive as terminal diff
-    // updates, so wait for each changed title suffix rather than a full redraw.
+    // the real temporary checkout path. Wait for the visible title, including
+    // unchanged cells retained across terminal diff updates.
     master.write_all(b"\r").expect("choose fixture profile");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"target \xe2\x94\x80",
+        b"New session \xc2\xb7 2/4 target",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").expect("choose fixture target");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"local project",
+        b"New session \xc2\xb7 3/4 local project",
         Instant::now() + TIMEOUT,
     );
     let project = storage.path().canonicalize().unwrap();
@@ -619,10 +869,10 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
         .write_all(project.to_string_lossy().as_bytes())
         .expect("enter fixture project");
     master.write_all(b"\r").expect("validate fixture project");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"review \xe2\x94\x80",
+        b"New session \xc2\xb7 4/4 review",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").expect("create wizard session");
@@ -663,39 +913,43 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     // selector or Open/New picker is interposed before the wizard.
     assert!(!rendered.contains("Open workspace"));
 
+    // The durable record can precede the next rendered frame. Synchronize
+    // the next command with the visible wizard closing after submission.
+    wait_for_wizard_close(&mut master, &mut output);
+
     // New remains explicit and uses the same full wizard whether the first
     // launch is pending or its failed provisional session has been removed.
     // This second invocation uses the same explicit shortcut.
     output.clear();
     master.write_all(NEW_SESSION_KEY).unwrap();
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         b"New session \xc2\xb7 1/4 profile",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"target \xe2\x94\x80",
+        b"New session \xc2\xb7 2/4 target",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"local project",
+        b"New session \xc2\xb7 3/4 local project",
         Instant::now() + TIMEOUT,
     );
     master
         .write_all(project.to_string_lossy().as_bytes())
         .unwrap();
     master.write_all(b"\r").unwrap();
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
-        b"review \xe2\x94\x80",
+        b"New session \xc2\xb7 4/4 review",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
@@ -728,6 +982,8 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     assert!(created.draft_input.is_empty());
     assert!(!String::from_utf8_lossy(&output).contains("What would you like to do?"));
 
+    wait_for_wizard_close(&mut master, &mut output);
+
     // This fake profile cannot launch a real agent. Quitting during its
     // background launch must still release the terminal promptly.
     master.write_all(QUIT_KEY).unwrap();
@@ -744,7 +1000,7 @@ fn sigterm_restores_real_pty_terminal() {
         mut child,
     } = spawn_dashboard_pty();
 
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     assert_eq!(
         unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
@@ -799,7 +1055,7 @@ fn sigterm_restores_real_pty_terminal() {
 #[test]
 fn control_backslash_prefix_detaches_from_a_real_terminal() {
     let mut fixture = spawn_dashboard_pty_with_prefix(true, false, false, Some(r"ctrl+\"));
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -830,7 +1086,7 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty();
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
 
     // The detach chord. Escape belongs to the composer and to modals now; it
@@ -887,7 +1143,7 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty_with_idle_exit(false);
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     output.clear();
     // Shift-Tab from the Sessions pane lands on the workspace pane's pinned
@@ -898,13 +1154,13 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         .write_all(b"\x1b[Z")
         .expect("focus the workspace hamburger");
     master.write_all(b"\r").expect("run the Workspaces command");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         b"Workspaces",
         Instant::now() + TIMEOUT,
     );
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         b"New workspace",
@@ -953,12 +1209,12 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
         original_termios: before,
         mut child,
     } = spawn_dashboard_pty_fixture(false, true);
-    let mut output = Vec::new();
+    let mut output = PtyOutput::new();
     // The quit hint can be split by cursor movements during a differential redraw.
     wait_for_ready(child.child_mut(), &mut master, &mut output, b"quits.");
     master.write_all(b"\x1b").expect("cancel opening");
     output.clear();
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         // Ratatui writes only changed cells; the preceding words share cells
@@ -969,10 +1225,10 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
     // A background tick must not restart the cancelled request.
     thread::sleep(Duration::from_millis(1100));
     drain(&mut master, &mut output);
-    assert!(!String::from_utf8_lossy(&output).contains("quits."));
+    assert!(ExpectedOutput::Hidden(b"quits.").matches(&output));
     output.clear();
     master.write_all(b"\r").expect("retry opening");
-    wait_for_output(
+    wait_for_screen(
         &mut master,
         &mut output,
         b"quits.",
@@ -1011,7 +1267,7 @@ fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
         wait_for_ready(
             child.child_mut(),
             &mut master,
-            &mut Vec::new(),
+            &mut PtyOutput::new(),
             READY_MARKER,
         );
     }))
