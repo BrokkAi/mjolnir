@@ -66,7 +66,7 @@ Discovery is read-only and safe to repeat. Bundle creation uses existing idempot
 
 ## Artifacts and Notes
 
-Parent owns terminal/CLI, documentation, integration, and this plan. Separate child sessions own discovery backend and web assets/tests. Browser screenshots are generated under the ignored `tests/e2e/web/test-results/project-picker/` directory. The browser creates single-repository projects and can reuse existing multi-repository projects; creating a new multi-repository group remains available in the terminal. This task does not implement the rest of issue #1128's account and machine onboarding.
+Parent owns terminal/CLI, documentation, integration, and this plan. Separate child sessions own discovery backend and web assets/tests. Browser screenshots are generated under the ignored `tests/e2e/web/test-results/project-picker/` directory. The inspected [mobile folder picker](../docs/project-picker-mobile.png) is retained for PR review. The browser creates single-repository projects and can reuse existing multi-repository projects; creating a new multi-repository group remains available in the terminal. This task does not implement the rest of issue #1128's account and machine onboarding.
 
 ## Interfaces and Dependencies
 
