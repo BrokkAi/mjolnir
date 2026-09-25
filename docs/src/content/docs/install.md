@@ -20,7 +20,7 @@ The installer selects the release for the current Linux or macOS architecture, v
 - `mj-voice-worker`, used for local dictation
 - static x86_64 and ARM64 Linux session workers for remote and container targets
 
-If `~/.local/bin` is not already on `PATH`, the installer offers to update the detected shell profile. Open a new shell before running `mj`, or add the directory to `PATH` yourself.
+If `~/.local/bin` is not already on `PATH`, the installer offers to update the detected shell profile. Open a new shell before running `mj`, or add the directory to `PATH` yourself. The installer's last line tells you to run `mj`; see [First run](#first-run).
 
 Pin a release or choose another destination with environment variables:
 
@@ -162,7 +162,16 @@ mj doctor
 
 `mj doctor` checks the controller, configuration, harness credentials, targets, and required workers. Resolve reported errors before launching a session; the [troubleshooting guide](/troubleshooting/) explains the common failures.
 
-Next, follow the [quickstart](/quickstart/) for first-run setup. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
+## First run
+
+Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, or Muse Code), so install and sign in to one first. Then go to a project directory and run `mj`:
+
+```sh
+cd path/to/your/repository
+mj
+```
+
+`mj setup` is optional: run it before `mj` to find installed agents and container runtimes from the shell. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
 
 ## Uninstall
 
