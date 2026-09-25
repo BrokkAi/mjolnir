@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.0.5"
 
 OWNER="${MJOLNIR_GITHUB_OWNER:-BrokkAi}"
 INSTALL_DIR="${MJOLNIR_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
@@ -573,6 +573,8 @@ main() {
   ensure_install_dir_on_path
 
   log "done"
+  # The first-run path the README, the install page and the quickstart share.
+  log 'Run `mj` to start.'
 }
 
 main "$@"
