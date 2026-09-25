@@ -383,8 +383,11 @@ impl ActiveChat {
 
     /// Starts, finishes or cancels dictation, exactly as clicking the
     /// microphone does. Nothing happens while dictation is unavailable and no
-    /// recording is running.
-    pub fn toggle_dictation(&mut self) {
+    /// recording is running; then the answer is why, for the host to put in
+    /// its shared notices as it does for every chord that cannot run, so the
+    /// reason is kept in Recent messages rather than cut at the edge of this
+    /// conversation's own status line (launch finding R5-6).
+    pub fn toggle_dictation(&mut self) -> Option<String> {
         let action = self.state.dictation_toggle_action();
         if action == ChatAction::None {
             let reason = self.dictation_unavailable_notice();
@@ -393,12 +396,12 @@ impl ActiveChat {
                 %reason,
                 "dictation key pressed while dictation is unavailable"
             );
-            self.state.set_notice(reason);
-            return;
+            return Some(reason);
         }
         // Dictation never asks the host to leave the conversation, so there
         // is no outcome to forward.
         let _ = self.dispatch(action);
+        None
     }
 
     /// Leaves the conversation: stops any dictation and reports how far the

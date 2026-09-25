@@ -54,7 +54,11 @@ pub(crate) fn apply_chat_toggle(
     };
     match toggle {
         ChatToggle::TranscriptRendering => chat.toggle_transcript_rendering(),
-        ChatToggle::Dictation => chat.toggle_dictation(),
+        ChatToggle::Dictation => {
+            if let Some(reason) = chat.toggle_dictation() {
+                dashboard.set_notice(reason);
+            }
+        }
     }
 }
 

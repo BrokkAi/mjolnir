@@ -112,9 +112,11 @@ mod worker {
         } else {
             "mj-voice-worker"
         });
+        // What to do comes before the path, which can be long enough to
+        // push it past the edge of a one-line notice (launch finding R5-6).
         anyhow::ensure!(
             worker.is_file(),
-            "voice dictation helper is missing: {}; install it beside mj or set MJ_VOICE_WORKER",
+            "the voice dictation helper is not installed: install mj-voice-worker beside mj or set MJ_VOICE_WORKER (looked for {})",
             worker.display()
         );
         Ok(worker)
@@ -491,6 +493,32 @@ mod tests {
             assert!(!line.contains('\n'), "protocol lines must be single-line");
             assert_eq!(parse_event(&line), Some(event));
         }
+    }
+
+    /// Launch finding R5-6: the helper's path came before what to do, so a
+    /// one-line notice cut off "install it beside mj or set MJ_VOICE_WORKER".
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn a_missing_voice_helper_says_what_to_do_before_the_path() {
+        // The test binary has no helper beside it; an explicit override is
+        // the one setup that would give it one.
+        if mj_core::config::env_override_os("VOICE_WORKER").is_some() {
+            return;
+        }
+        let reason = voice_input_unavailable_reason().expect("no helper beside the test binary");
+        let remedy = reason
+            .find("install mj-voice-worker beside mj or set MJ_VOICE_WORKER")
+            .unwrap_or_else(|| panic!("{reason}"));
+        let path = reason
+            .find("(looked for ")
+            .unwrap_or_else(|| panic!("{reason}"));
+        assert!(
+            reason.starts_with(
+                "Dictation is unavailable. The voice dictation helper is not installed"
+            ),
+            "{reason}"
+        );
+        assert!(remedy < path, "{reason}");
     }
 
     #[cfg(not(target_os = "android"))]

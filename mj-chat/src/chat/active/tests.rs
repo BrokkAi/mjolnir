@@ -839,10 +839,9 @@ async fn the_dictation_chord_says_why_dictation_is_unavailable() {
         Notices::default(),
     );
 
-    chat.toggle_dictation();
+    let notice = chat.toggle_dictation().expect("the chord explains itself");
 
     assert!(!chat.state.voice_active);
-    let notice = chat.state.notice().expect("the chord explains itself");
     assert!(notice.starts_with("Dictation is unavailable"), "{notice}");
     assert_eq!(chat.draft(), "");
 
@@ -852,9 +851,8 @@ async fn the_dictation_chord_says_why_dictation_is_unavailable() {
         Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
     ));
     chat.state.clear_notice();
-    chat.toggle_dictation();
     assert_eq!(
-        chat.state.notice().as_deref(),
+        chat.toggle_dictation().as_deref(),
         Some(io::DICTATION_NEEDS_A_CODEX_PROFILE)
     );
     assert!(!chat.state.voice_active);

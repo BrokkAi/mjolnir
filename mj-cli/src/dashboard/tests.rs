@@ -1084,6 +1084,37 @@ async fn prefix_t_toggles_rendering_of_the_visible_chat_from_a_pane() {
     );
 }
 
+/// Launch finding R5-6: the dictation chord's reason went to the
+/// conversation's own status line, one line cut at the pane's edge, and never
+/// reached Recent messages. It now goes to the shared notices, like the other
+/// chords that cannot run.
+#[tokio::test]
+async fn the_dictation_chord_reports_why_it_cannot_run_in_the_shared_notices() {
+    let mut dashboard = populated_dashboard();
+    let notices = Notices::default();
+    dashboard.share_notices(notices.clone());
+    let mut chat = open_test_chat_with_notices("dictation-unavailable", notices.clone());
+
+    super::actions::apply_chat_toggle(
+        &mut dashboard,
+        Some(&mut chat),
+        super::actions::ChatToggle::Dictation,
+    );
+
+    let notice = dashboard.notice().expect("the chord explains itself");
+    assert!(notice.starts_with("Dictation is unavailable"), "{notice}");
+    assert!(
+        notices.history().iter().any(|record| record.text == notice),
+        "the reason is kept for Recent messages"
+    );
+    assert!(
+        !chat
+            .notice()
+            .is_some_and(|own| own.starts_with("Dictation")),
+        "not in the conversation's own line"
+    );
+}
+
 /// Resume is a chord like new session: the pane letter it used to answer
 /// is gone, so this is the only way in from the composer.
 #[test]
