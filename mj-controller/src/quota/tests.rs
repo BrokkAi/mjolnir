@@ -618,6 +618,131 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     assert!(server.await.unwrap_err().is_cancelled());
 }
 
+/// Launch finding R12-2 (also R11): the Profiles pane showed the claude
+/// quota as "unavailable" for about eight minutes, and neither the daemon's
+/// nor the dashboard's log said why. A failed probe was stored as the
+/// report's error and logged nowhere; the pane shows only a short label for
+/// it. The reason is logged at info when a profile's quota stops being
+/// readable, once while it keeps failing the same way, and again when it can
+/// be read.
+///
+/// Other quota tests reach the same log lines on their own threads, and
+/// tracing decides once per process whether a line is wanted, so this runs
+/// alone in a child process with a global subscriber.
+#[test]
+fn a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once() {
+    const TEST: &str = "a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once";
+    const CHILD: &str = "MJ_QUOTA_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(quota_failure_and_recovery_are_logged_once(log));
+}
+
+async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::CapturedLog) {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("auth.json"),
+        br#"{"providers":{"meta":{"access_token":"profile-token"}}}"#,
+    )
+    .unwrap();
+    let status = Arc::new(Mutex::new(StatusCode::INTERNAL_SERVER_ERROR));
+    let app = Router::new()
+        .route(
+            "/muse-code/key",
+            post(|State(status): State<Arc<Mutex<StatusCode>>>| async move {
+                let status = *status.lock().unwrap();
+                let body = if status == StatusCode::OK {
+                    serde_json::json!({"subs_usage": {"weekly": {"used_percent": 1}}})
+                } else {
+                    serde_json::json!({})
+                };
+                (status, Json(body))
+            }),
+        )
+        .with_state(status.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let request = QuotaRefreshRequest {
+        profile_id: "muse".into(),
+        harness: HarnessKind::Muse,
+        source_home: directory.path().to_path_buf(),
+        environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
+        cwd: directory.path().to_path_buf(),
+        provider: None,
+    };
+    // Lines logged at exactly info that contain `text`.
+    let said = |text: &str| {
+        log.events()
+            .into_iter()
+            .filter(|(level, line)| *level == tracing::Level::INFO && line.contains(text))
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+    };
+    let mut manager = QuotaManager::default();
+
+    manager
+        .refresh_profiles(vec![request.clone()], |_| async {})
+        .await;
+    let error = manager.reports()["muse"]
+        .error
+        .clone()
+        .expect("a failed probe");
+    let unreadable = said("could not read the profile's quota");
+    assert_eq!(
+        unreadable.len(),
+        1,
+        "{:#?}",
+        log.at_or_above(tracing::Level::INFO)
+    );
+    assert!(
+        unreadable[0].contains("profile_id=muse")
+            && unreadable[0].contains(&format!("error={error:?}"))
+            && unreadable[0].contains("shown_as=\"unavailable\""),
+        "{unreadable:#?}"
+    );
+
+    // Failing the same way again is not news.
+    manager
+        .refresh_profiles(vec![request.clone()], |_| async {})
+        .await;
+    assert_eq!(said("could not read the profile's quota").len(), 1);
+
+    // Readable again, which is said once too.
+    *status.lock().unwrap() = StatusCode::OK;
+    manager
+        .refresh_profiles(vec![request.clone()], |_| async {})
+        .await;
+    assert_eq!(manager.reports()["muse"].error, None);
+    manager.refresh_profiles(vec![request], |_| async {}).await;
+    let readable = said("can be read again");
+    assert_eq!(
+        readable.len(),
+        1,
+        "{:#?}",
+        log.at_or_above(tracing::Level::INFO)
+    );
+    assert!(readable[0].contains("profile_id=muse"), "{readable:#?}");
+    assert_eq!(said("could not read the profile's quota").len(), 1);
+
+    manager.shutdown().await;
+    server.abort();
+}
+
 /// macOS reads the quota from Claude Code itself and never opens the
 /// credentials file, so the expiry this asserts is not a state it can reach.
 /// Running it there would also spawn the real `claude` binary.
