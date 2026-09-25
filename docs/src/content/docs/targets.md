@@ -18,8 +18,9 @@ command is required. A target that is checking or unavailable cannot advance;
 **prefix+shift+r** in the picker rechecks all targets. Dashboard
 **prefix+shift+r** refreshes host capacity. So does **Refresh** in the menu
 under the dashboard's Targets title (click the title, or press `.` while the
-pane has focus); the same menu's **Settings…** opens Settings → Runtimes. The optional
-`mj doctor --smoke` command exercises container creation and removal.
+pane has focus). The same menu's **Runtimes…** opens Settings → Runtimes, and
+its **Machines…** opens Settings → Machines. The optional `mj doctor --smoke`
+command exercises container creation and removal.
 
 ## Capability matrix
 

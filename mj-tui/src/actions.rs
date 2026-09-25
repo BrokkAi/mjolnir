@@ -1127,7 +1127,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::TargetsMenu,
         label: "Targets pane menu",
-        description: "Open the menu under the Targets title: refresh targets and quotas, or open the runtime settings. Clicking the title opens it too.",
+        description: "Open the menu under the Targets title: refresh targets and quotas, or open the runtime or machine settings. Clicking the title opens it too.",
         scope: Scope::Targets,
         pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
         action: None,
@@ -1356,7 +1356,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 const PALETTE_HIDDEN: &[CommandId] = &[
     CommandId::Palette,         // already open when the list is drawn
     CommandId::SwitchWorkspace, // the numbered keys act on the visible tab strip
-    CommandId::TargetsMenu,     // the Targets title opens it, and it lists two palette commands
+    CommandId::TargetsMenu,     // the Targets title opens it, and it lists three palette commands
     CommandId::ProfilesMenu,    // the Profiles title opens it, and it lists two palette commands
 ];
 
