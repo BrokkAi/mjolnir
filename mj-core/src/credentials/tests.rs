@@ -413,6 +413,80 @@ fn auth_failure_phrases_match_and_near_misses_do_not() {
     ));
 }
 
+/// R14-1: when its refresh token is rejected, Codex fails the prompt with
+/// this error (reverify-14 cli/011, cli/013). Neither its sentence nor its
+/// `codexErrorInfo` counted as an auth failure, so no credential
+/// reconciliation ran and no `mj login` notice appeared.
+#[test]
+fn a_codex_refresh_failure_is_an_auth_failure() {
+    const SENTENCE: &str =
+        "Your access token could not be refreshed. Please log out and sign in again.";
+    let event = |observation| RelayEvent {
+        format: crate::relay::RELAY_EVENT_FORMAT_V1,
+        ordinal: 1,
+        previous_digest: crate::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        digest: "a".repeat(64),
+        recorded_at_ms: 1,
+        command_id: None,
+        observation,
+    };
+    let failed_turn = |data: serde_json::Value| {
+        let error = agent_client_protocol::Error::internal_error().data(data);
+        event(RelayObservation::CommandCompleted {
+            command_id: "prompt-1".into(),
+            outcome: crate::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "error".into(),
+                diagnostic: Some(crate::diagnostic::TurnDiagnostic::from_acp(&error)),
+                usage: None,
+            },
+        })
+    };
+
+    assert!(auth_failure_signature(HarnessKind::Codex, SENTENCE));
+    // The turn that failed this way reports it, whether or not a warning
+    // repeats the sentence.
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": SENTENCE,
+            "codexErrorInfo": "unauthorized"
+        }))),
+        Some(CredentialSyncReason::AuthenticationFailure)
+    );
+    // The error kind alone is enough when Codex words the sentence
+    // differently.
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": "Your session ended.",
+            "codexErrorInfo": "unauthorized"
+        }))),
+        Some(CredentialSyncReason::AuthenticationFailure)
+    );
+
+    // Near misses: agent prose about an HTTP 401, another thing that could
+    // not be refreshed, and a turn that failed for another reason.
+    assert!(!auth_failure_signature(
+        HarnessKind::Codex,
+        "The endpoint returns 401 Unauthorized until the header is set."
+    ));
+    assert!(!auth_failure_signature(
+        HarnessKind::Codex,
+        "The page could not be refreshed."
+    ));
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "codexErrorInfo": "responseStreamDisconnected"
+        }))),
+        None
+    );
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": "You’ve hit your usage limit.",
+            "codexErrorInfo": "usageLimitExceeded"
+        }))),
+        None
+    );
+}
+
 #[test]
 fn only_harness_observations_request_credential_sync() {
     use agent_client_protocol::schema::v1::{

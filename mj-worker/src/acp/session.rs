@@ -19,6 +19,7 @@ pub(super) async fn serve_session(
     plan_implementation_slot: &PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: &AgentOutputCount,
+    last_agent_message: &LastAgentMessage,
     claude_result_count: &ClaudeResultCount,
     session_updates_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
@@ -708,6 +709,7 @@ pub(super) async fn serve_session(
                 }
                 let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();
+                last_agent_message.clear();
                 // A prompt asking the harness to compact its context is
                 // answered by compacting, and the bridges report that with
                 // banners rather than with agent output. Judging such a turn
@@ -872,14 +874,20 @@ pub(super) async fn serve_session(
                                     // the log; the conversation gets one line.
                                     tracing::warn!(harness = ?spec.harness, error = %error, "prompt failed");
                                     let failed = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
-                                    let (stop_reason, warning) =
-                                        prompt_error_outcome(spec.harness, &error, &failed);
+                                    let (stop_reason, warning) = prompt_error_outcome(
+                                        spec.harness,
+                                        &error,
+                                        &failed,
+                                        &last_agent_message.text(),
+                                    );
                                     diagnostic = Some(failed);
-                                    emit_runtime_event(
-                                        events,
-                                        RuntimeEvent::Warning { message: warning },
-                                    )
-                                    .await?;
+                                    if let Some(message) = warning {
+                                        emit_runtime_event(
+                                            events,
+                                            RuntimeEvent::Warning { message },
+                                        )
+                                        .await?;
+                                    }
                                     stop_reason
                                 }
                             };
@@ -1276,6 +1284,7 @@ pub(super) async fn serve_session(
                                     let plan = state.plan;
                                     let continuation = format!("The user approved the following plan. Implement it now; the preceding permission cancellation was mj's mode-transition handling.\n\n{plan}");
                                     updates_before = agent_output_count.get();
+                                    last_agent_message.clear();
                                     asked_to_compact = false;
                                     spec.step_clock.begin_turn();
                                     prompt_sent_after = claude_result_count.get();

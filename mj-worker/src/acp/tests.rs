@@ -1354,11 +1354,13 @@ fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
         "codexErrorInfo": "usageLimitExceeded"
     }));
     let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
-    let (stop_reason, warning) = prompt_error_outcome(HarnessKind::Codex, &error, &diagnostic);
+    let (stop_reason, warning) = prompt_error_outcome(HarnessKind::Codex, &error, &diagnostic, "");
     assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
     assert_eq!(
-        warning,
-        "prompt failed: You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:20 PM."
+        warning.as_deref(),
+        Some(
+            "prompt failed: You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:20 PM."
+        )
     );
 
     // Another Codex error names its kind when it has no sentence of its own.
@@ -1368,11 +1370,12 @@ fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
         HarnessKind::Codex,
         &bare,
         &mj_core::diagnostic::TurnDiagnostic::from_acp(&bare),
+        "",
     );
     assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
     assert_eq!(
-        warning,
-        "prompt failed: Internal error (responseStreamDisconnected)"
+        warning.as_deref(),
+        Some("prompt failed: Internal error (responseStreamDisconnected)")
     );
 
     // An error whose data carries an authentication code keeps its text:
@@ -1384,7 +1387,9 @@ fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
         HarnessKind::Claude,
         &auth,
         &mj_core::diagnostic::TurnDiagnostic::from_acp(&auth),
+        "Request failed",
     );
+    let warning = warning.expect("a warning that carries an auth code is never left out");
     assert!(
         mj_core::credentials::auth_failure_signature(HarnessKind::Claude, &warning),
         "{warning}"
@@ -2805,6 +2810,197 @@ async fn a_harness_with_real_config_options_still_uses_the_standard_acp_request(
     assert_eq!(request["method"], "session/set_config_option");
     assert_eq!(request["params"]["configId"], "model");
     assert_eq!(request["params"]["value"], "opus");
+}
+
+/// Codex's error when OpenAI rejects its refresh token (R14-1; reverify-14
+/// cli/011, cli/013).
+const CODEX_REFRESH_FAILURE: &str =
+    "Your access token could not be refreshed. Please log out and sign in again.";
+
+/// Fails every prompt the way codex-acp 1.13.3 failed one in reverify-14
+/// (tmux/012): Codex's own account of the turn arrives as agent text, then
+/// the prompt fails with the same sentence and `codexErrorInfo:
+/// "unauthorized"`. The first prompt streams that text, the second streams
+/// nothing, and the third streams the sentence and then a thought, which ends
+/// that agent message.
+async fn codex_refresh_failure_bridge(stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    let mut prompts = 0;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let messages = match method {
+            "initialize" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}
+            })],
+            "session/new" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {
+                    "sessionId": "refresh-failure",
+                    "modes": {
+                        "currentModeId": "agent",
+                        "availableModes": [{"id": "agent", "name": "Agent"}],
+                    },
+                }
+            })],
+            "session/prompt" => {
+                prompts += 1;
+                let streamed = match prompts {
+                    1 => vec![
+                        serde_json::json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "Warning: Falling back from WebSockets to HTTPS transport. stream disconnected before completion: websocket closed by server before response.completed\n\n"},
+                        }),
+                        serde_json::json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": CODEX_REFRESH_FAILURE},
+                        }),
+                    ],
+                    2 => Vec::new(),
+                    _ => vec![
+                        serde_json::json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": CODEX_REFRESH_FAILURE},
+                        }),
+                        serde_json::json!({
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": {"type": "text", "text": "Retrying."},
+                        }),
+                    ],
+                };
+                let mut messages = streamed
+                    .into_iter()
+                    .map(|update| {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {"sessionId": "refresh-failure", "update": update},
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": {
+                            "message": CODEX_REFRESH_FAILURE,
+                            "codexErrorInfo": "unauthorized",
+                        },
+                    },
+                }));
+                messages
+            }
+            _ if !id.is_null() => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {}
+            })],
+            _ => continue,
+        };
+        for message in messages {
+            if write
+                .write_all(format!("{message}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// R14-1: Codex could not refresh its login, streamed its sentence as agent
+/// text and then failed the prompt with the same sentence. The conversation
+/// showed it twice, as the agent's message and as Mjolnir's warning row, and
+/// nothing recognized it as an auth failure. The warning now appears only
+/// when the turn's last agent message does not already say it, it stays one
+/// readable line that credential sync recognizes, and the failed turn carries
+/// Codex's error kind either way.
+#[tokio::test]
+async fn a_failure_the_harness_already_streamed_is_not_repeated_as_a_warning() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(codex_refresh_failure_bridge(bridge_stream));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = reload_fallback_spec(HarnessKind::Codex);
+    spec.resume_session = None;
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let mut turn = async |request_id: &str| {
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: request_id.into(),
+                prompt: vec![ContentBlock::Text(TextContent::new("Reply with pong."))],
+            })
+            .await
+            .unwrap();
+        let mut warnings = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("the runtime keeps reporting")
+                .expect("the runtime keeps its event channel");
+            match event {
+                // The session's opening warnings are not about the turn.
+                RuntimeEvent::Warning { message } if message.starts_with("prompt failed") => {
+                    warnings.push(message)
+                }
+                RuntimeEvent::PromptFinished {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                } => {
+                    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
+                    let diagnostic = diagnostic.expect("a failed prompt carries its diagnostic");
+                    assert_eq!(diagnostic.code.as_deref(), Some("unauthorized"));
+                    assert_eq!(diagnostic.message, CODEX_REFRESH_FAILURE);
+                    return warnings;
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Streamed as the last agent message: no second copy.
+    assert_eq!(turn("streamed").await, Vec::<String>::new());
+
+    // Not streamed: the warning is the sentence on one line, and credential
+    // sync recognizes it.
+    let expected = format!("prompt failed: {CODEX_REFRESH_FAILURE}");
+    let warnings = turn("silent").await;
+    assert_eq!(warnings, vec![expected.clone()]);
+    assert!(mj_core::credentials::auth_failure_signature(
+        HarnessKind::Codex,
+        &warnings[0]
+    ));
+
+    // A thought ended the message that said it, so the warning is not a
+    // repeat of the last agent message.
+    assert_eq!(turn("thought").await, vec![expected]);
+
+    driver.abort();
+    bridge.abort();
 }
 
 #[tokio::test]

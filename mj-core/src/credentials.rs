@@ -27,7 +27,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::{AuthScheme, HarnessKind, HarnessProfile};
-use crate::relay::{RelayEvent, RelayObservation};
+use crate::diagnostic::TurnDiagnostic;
+use crate::relay::{RelayCommandOutcome, RelayEvent, RelayObservation};
 use crate::targets::CommandSpec;
 
 /// Credential files are small JSON or YAML documents. The cap keeps a hostile or
@@ -430,10 +431,14 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 4] = [
+const AUTH_FAILURE_PHRASES: [&str; 6] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
+    // Codex, when its refresh token is rejected (R14-1): "Your access token
+    // could not be refreshed. Please log out and sign in again."
+    "access token could not be refreshed",
+    "log out and sign in again",
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
@@ -472,6 +477,26 @@ pub fn auth_failure_signature(_kind: HarnessKind, text: &str) -> bool {
     contains_auth_failure_signature(text)
 }
 
+/// Error kinds a harness names beside a failed turn when the provider
+/// rejected its login. Codex sends `codexErrorInfo: "unauthorized"` (R14-1),
+/// and a turn's diagnostic keeps that kind as its code. Matched against the
+/// code only, never against free text, where "401 Unauthorized" is common.
+const AUTH_FAILURE_ERROR_KINDS: [&str; 1] = ["unauthorized"];
+
+/// Whether a failed turn's diagnostic says the provider rejected the
+/// session's login: by its error kind, or by an auth failure phrase in its
+/// message. A usage limit is never one, as in the worker's warning label.
+pub fn turn_diagnostic_reports_auth_failure(diagnostic: &TurnDiagnostic) -> bool {
+    if diagnostic.is_usage_limit() {
+        return false;
+    }
+    diagnostic.code.as_deref().is_some_and(|code| {
+        AUTH_FAILURE_ERROR_KINDS
+            .iter()
+            .any(|kind| code.eq_ignore_ascii_case(kind))
+    }) || contains_auth_failure_signature(&diagnostic.message)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSyncReason {
@@ -493,10 +518,24 @@ pub struct CredentialSyncCause {
 }
 
 /// Detect a reason for immediate credential reconciliation only in relay
-/// observations originating from the harness. Durable prompt commands are
+/// observations originating from the harness: its warnings, its agent text,
+/// and the diagnostic of a turn it failed. Durable prompt commands are
 /// deliberately excluded, so user text cannot trigger a sync.
+///
+/// The failed turn counts on its own because the worker leaves out a warning
+/// that only repeats the harness's last agent message (R14-1).
 pub fn relay_event_credential_sync_reason(event: &RelayEvent) -> Option<CredentialSyncReason> {
     match &event.observation {
+        RelayObservation::CommandCompleted {
+            outcome:
+                RelayCommandOutcome::Prompt {
+                    diagnostic: Some(diagnostic),
+                    ..
+                },
+            ..
+        } if turn_diagnostic_reports_auth_failure(diagnostic) => {
+            Some(CredentialSyncReason::AuthenticationFailure)
+        }
         RelayObservation::Warning { message } if contains_auth_failure_signature(message) => {
             Some(CredentialSyncReason::AuthenticationFailure)
         }
