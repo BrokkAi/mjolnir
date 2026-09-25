@@ -1032,6 +1032,7 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
+    dashboard::initialize_first_run_config().await?;
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
     let selected = if let Some(resume) = &resume

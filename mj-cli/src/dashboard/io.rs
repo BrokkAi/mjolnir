@@ -994,6 +994,7 @@ impl DashboardContext {
                         self.dashboard.set_state(self.controller.state.clone());
                         self.refresh_chat_context();
                         self.refresh_poll_targets();
+                        self.refresh_quotas_if_profiles_changed();
                     }
                     Err(error) => self
                         .dashboard

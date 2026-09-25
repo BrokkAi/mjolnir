@@ -1009,11 +1009,17 @@ impl DashboardState {
     }
 
     /// Keep launch errors independent of the transient shared status line.
+    ///
+    /// The status line still said "Launching … via …" after a failure, since
+    /// only a successful launch replaced it (launch finding R13-8). The
+    /// failure replaces it now, with the dialog's own first sentence, while
+    /// the details stay in the dialog.
     pub fn show_launch_failure(
         &mut self,
         error: impl Into<String>,
         retry: Option<DashboardAction>,
     ) {
+        self.set_failure_notice("The session could not start.");
         let previous = Box::new(self.mode.clone());
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::LaunchFailed {
             error: error.into(),

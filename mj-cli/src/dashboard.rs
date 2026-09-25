@@ -476,6 +476,27 @@ fn launch_repository_top_level() -> Option<std::path::PathBuf> {
     (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
 }
 
+/// Write the first-run configuration for an interactive dashboard, before
+/// the daemon starts.
+///
+/// The daemon reads the configuration when it starts. Written after that,
+/// the daemon's first snapshot carried the older configuration without the
+/// new profile; the dashboard took it, dropped the profile's quota refresh,
+/// then reloaded the file and got the profile back with no refresh on the
+/// way, so its row read "refreshing…" for good (launch finding R13-8).
+pub(crate) async fn initialize_first_run_config() -> Result<()> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(|| {
+        mj_controller::setup::initialize_local_startup_config(&config_path())
+    })
+    .await
+    .context("initialize startup configuration task failed")?
+}
+
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
@@ -492,11 +513,6 @@ pub(crate) async fn run_dashboard_for_workspace(
         return Ok(DashboardExit::Normal);
     }
 
-    tokio::task::spawn_blocking(|| {
-        mj_controller::setup::initialize_local_startup_config(&config_path())
-    })
-    .await
-    .context("initialize startup configuration task failed")??;
     let workspaces = crate::daemon::connect_or_start()
         .await?
         .list_workspaces()

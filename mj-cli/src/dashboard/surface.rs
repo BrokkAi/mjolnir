@@ -321,6 +321,45 @@ impl DashboardContext {
         generation
     }
 
+    /// Asks for fresh quotas only when the configured profiles are not the
+    /// ones the last refresh asked about.
+    ///
+    /// A configuration reload can bring back a profile that an earlier,
+    /// staler configuration had dropped from the refresh. That profile then
+    /// had no report and no refresh on the way, and its row read
+    /// "refreshing…" until something else asked again (launch finding
+    /// R13-8).
+    pub(crate) fn refresh_quotas_if_profiles_changed(&mut self) {
+        let wanted = quota_refresh_profiles(&self.controller);
+        if !quota_batch_asks_about(&self.quota_profiles_tx.borrow().profiles, &wanted) {
+            self.request_quota_refresh();
+        }
+    }
+}
+
+/// Whether a quota batch already sent asks about exactly the profiles
+/// `wanted` names, with the same harness, home and environment.
+pub(crate) fn quota_batch_asks_about(
+    sent: &[mj_controller::quota::QuotaRefreshRequest],
+    wanted: &[mj_controller::quota::QuotaRefreshRequest],
+) -> bool {
+    let key = |request: &mj_controller::quota::QuotaRefreshRequest| {
+        (
+            request.profile_id.clone(),
+            request.harness,
+            request.source_home.clone(),
+            request.environment.clone(),
+        )
+    };
+    sent.len() == wanted.len()
+        && sent
+            .iter()
+            .map(key)
+            .collect::<std::collections::BTreeSet<_>>()
+            == wanted.iter().map(key).collect()
+}
+
+impl DashboardContext {
     /// Republishes what the pollers should watch, leaving out sessions a
     /// lifecycle operation currently owns.
     pub(crate) fn refresh_poll_targets(&self) {

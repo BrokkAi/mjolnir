@@ -994,6 +994,46 @@ fn the_literal_prefix_reaches_the_composer_as_backward_char() {
     assert!(!dashboard.prefix_pending());
 }
 
+/// On a first run the daemon published a configuration older than the file:
+/// the dashboard took it, sent a quota refresh without the new `codex`
+/// profile, then reloaded the file and got the profile back. Nothing asked
+/// about it again, so its row read "refreshing…" for good (launch finding
+/// R13-8). A reload whose profiles differ from the last refresh's asks
+/// again; an unchanged one does not start another probe.
+#[test]
+fn a_reload_asks_for_quotas_again_only_when_the_profiles_changed() {
+    let profile = |home: &str| mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Codex,
+        home: home.into(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let request = |id: &str, home: &str| {
+        mj_controller::quota::QuotaRefreshRequest::for_profile(
+            id,
+            &profile(home),
+            std::path::PathBuf::from("/work"),
+        )
+    };
+    let codex = [request("codex", "/home/user/.codex")];
+
+    assert!(!surface::quota_batch_asks_about(&[], &codex));
+    assert!(surface::quota_batch_asks_about(&codex, &codex));
+    assert!(!surface::quota_batch_asks_about(
+        &codex,
+        &[request("codex", "/home/user/other-codex")]
+    ));
+    assert!(!surface::quota_batch_asks_about(
+        &codex,
+        &[
+            request("codex", "/home/user/.codex"),
+            request("work", "/home/user/work-codex")
+        ]
+    ));
+}
+
 /// One key refreshes both support panes, from wherever the keyboard is —
 /// including the composer, and including over an open dialog, because
 /// asking for fresh figures cannot disturb what is on screen.
