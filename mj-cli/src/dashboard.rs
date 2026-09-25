@@ -826,6 +826,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             actions::apply_dashboard_action(&mut context, action).await?;
             // Input or a background result can open an isolated creation
             // review; either way its prerequisite check starts here.
+            if let Some(discovery) = context.dashboard.take_project_discovery() {
+                actions::apply_dashboard_action(&mut context, discovery).await?;
+            }
             if let Some(check) = context.dashboard.take_prerequisite_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }

@@ -28,6 +28,7 @@ pub mod native_agent;
 pub mod path_completion;
 pub mod path_input;
 pub mod project_memory;
+pub mod project_picker;
 pub mod refusal;
 pub mod relay;
 pub mod remote_git;

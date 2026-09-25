@@ -282,6 +282,10 @@ pub(crate) enum DashboardIoUpdate {
         episode_id: u64,
         result: std::result::Result<Option<String>, String>,
     },
+    ProjectDiscovery {
+        context: String,
+        result: std::result::Result<mj_controller::project_picker::ProjectDiscovery, String>,
+    },
     PathCompletions {
         context: String,
         prefix: String,
@@ -1262,6 +1266,9 @@ impl DashboardContext {
                 episode_id,
                 result,
             } => self.apply_worker_diagnosis(session_id, episode_id, result),
+            DashboardIoUpdate::ProjectDiscovery { context, result } => {
+                self.dashboard.apply_project_discovery(&context, result);
+            }
             DashboardIoUpdate::PathCompletions {
                 context,
                 prefix,

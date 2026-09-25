@@ -53,11 +53,22 @@ pub(crate) fn capacity_table_rows(
         .capacity_details
         .values()
         .map(|detail| {
-            let capacity = if detail.refreshing {
-                format!("refreshing{}", theme::glyphs().ellipsis)
+            let staleness = capacity_staleness(detail, now_epoch_seconds);
+            let mut in_use = if detail.refreshing {
+                vec![Span::styled(
+                    format!("refreshing{}", theme::glyphs().ellipsis),
+                    theme::muted(),
+                )]
             } else {
                 match (&detail.target.kind, &detail.usage) {
                     (DeploymentCapacityKind::Host, Some(usage)) => {
+                        let reading_style = |headroom| {
+                            Style::default().fg(if staleness.is_some() {
+                                theme::palette().muted
+                            } else {
+                                headroom_color(headroom)
+                            })
+                        };
                         let memory_percent = if usage.memory_total_bytes == 0 {
                             0
                         } else {
@@ -65,29 +76,47 @@ pub(crate) fn capacity_table_rows(
                                 / u128::from(usage.memory_total_bytes))
                             .min(100)
                         };
-                        format!(
-                            "{}% CPU{sep}{memory_percent}% RAM",
-                            usage.cpu_percent.unwrap_or(0),
-                            sep = theme::footer_separator(),
-                        )
+                        let cpu = usage.cpu_percent.map_or_else(
+                            || Span::styled("CPU unavailable", theme::muted()),
+                            |cpu| {
+                                Span::styled(
+                                    format!("{cpu}% CPU"),
+                                    reading_style(100_u8.saturating_sub(cpu)),
+                                )
+                            },
+                        );
+                        let memory = if usage.memory_total_bytes == 0 {
+                            Span::styled("RAM unavailable", theme::muted())
+                        } else {
+                            Span::styled(
+                                format!("{memory_percent}% RAM"),
+                                reading_style(100_u8.saturating_sub(memory_percent as u8)),
+                            )
+                        };
+                        vec![
+                            cpu,
+                            Span::styled(theme::footer_separator(), theme::muted()),
+                            memory,
+                        ]
                     }
-                    (DeploymentCapacityKind::AwsFleet, Some(usage)) => format!(
-                        "{} · {} cores · {} RAM · {} disk",
-                        fleet_vm_label(detail),
-                        usage.logical_cores,
-                        format_resource_bytes(usage.memory_total_bytes),
-                        format_resource_bytes(usage.disk_total_bytes.unwrap_or(0))
-                    ),
+                    (DeploymentCapacityKind::AwsFleet, Some(usage)) => {
+                        vec![Span::raw(format!(
+                            "{} · {} cores · {} RAM · {} disk",
+                            fleet_vm_label(detail),
+                            usage.logical_cores,
+                            format_resource_bytes(usage.memory_total_bytes),
+                            format_resource_bytes(usage.disk_total_bytes.unwrap_or(0))
+                        ))]
+                    }
                     // A fleet with nothing running has no capacity figures,
                     // and the count is the whole answer.
                     (DeploymentCapacityKind::AwsFleet, None) if detail.on_demand => {
-                        fleet_vm_label(detail)
+                        vec![Span::raw(fleet_vm_label(detail))]
                     }
-                    _ => "unavailable".into(),
+                    _ => vec![Span::styled("unavailable", theme::muted())],
                 }
             };
-            let mut in_use = vec![Span::raw(capacity)];
-            if let Some(staleness) = capacity_staleness(detail, now_epoch_seconds) {
+            if let Some(staleness) = staleness {
                 in_use.push(Span::styled(
                     format!("  · {staleness}"),
                     Style::default().fg(theme::palette().muted),
@@ -185,8 +214,8 @@ pub(crate) fn render_capacity(
     let table = Table::new(
         rows.into_iter().map(|row| {
             Row::new([
-                Cell::from(row.host),
-                Cell::from(row.targets),
+                Cell::from(row.host).style(Style::default().add_modifier(Modifier::BOLD)),
+                Cell::from(row.targets).style(theme::muted()),
                 Cell::from(row.in_use),
             ])
         }),
@@ -195,7 +224,7 @@ pub(crate) fn render_capacity(
     .column_spacing(2)
     .header(
         Row::new(["Host / fleet", "Targets", "In Use"])
-            .style(theme::muted().add_modifier(Modifier::BOLD)),
+            .style(theme::muted().patch(theme::raised())),
     )
     .row_highlight_style(if focused {
         theme::selection(true)
@@ -224,6 +253,24 @@ pub(crate) fn render_capacity(
         (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),
     );
     frame.render_stateful_widget(table, area, &mut state);
+    if dashboard.capacity_details.is_empty() {
+        let message = if dashboard.config.targets.is_empty() {
+            "Add a target in Settings."
+        } else {
+            "Waiting for target readings."
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(theme::muted())
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x.saturating_add(3),
+                area.y.saturating_add(2),
+                area.width.saturating_sub(4),
+                area.height.saturating_sub(3),
+            ),
+        );
+    }
     dashboard.targets_scroll.set(state.offset());
     render_session_scrollbar(
         frame,

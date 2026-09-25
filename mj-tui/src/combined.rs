@@ -1367,10 +1367,10 @@ fn render_empty_transcript(
             (transcript_area.height - 1 - top).min(4),
         );
         let invitation = match reason {
-            EmptyConversation::NoLiveSession => {
-                "A little spark. Something extraordinary.".to_owned()
+            EmptyConversation::NoLiveSession => "Create a session to start building.".to_owned(),
+            EmptyConversation::NoConversationOpen => {
+                "Select a session to open its conversation.".to_owned()
             }
-            EmptyConversation::NoConversationOpen => "Your next idea starts here.".to_owned(),
             EmptyConversation::Opening => format!(
                 "Bringing your conversation into focus{}",
                 theme::glyphs().ellipsis

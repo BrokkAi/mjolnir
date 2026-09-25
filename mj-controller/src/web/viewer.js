@@ -384,6 +384,7 @@ function applyRoute() {
   // half-answered rather than keeping it to surprise the next visit.
   if (name !== 'new') {
     abortPendingNewPreflight();
+    cancelProjectRequests();
     newDraft = null;
   }
   if (name !== 'move') moveDraft = null;
@@ -1353,8 +1354,8 @@ function handleSessionMenuKeydown(event) {
 /// clone plan on the review step; raw local targets still validate their
 /// project directory before that review.
 const NEW_STEPS = [
-  { key: 'profile', title: 'Profile', applies: () => true },
-  { key: 'target', title: 'Target', applies: () => true },
+  { key: 'profile', title: 'Account', applies: () => true },
+  { key: 'target', title: 'Where to run', applies: () => true },
   { key: 'project', title: 'Project', applies: () => true },
   { key: 'review', title: 'Review', applies: () => true },
 ];
@@ -1378,7 +1379,7 @@ function freshDraft() {
     step: 0,
     profileId: snapshot?.profiles[0]?.id || '',
     targetId: snapshot?.targets[0]?.id || '',
-    bundleId: snapshot?.bundles[0]?.id || '',
+    bundleId: '',
     projectDirectory: '',
     title: '',
     remoteRepositories: [],
@@ -1390,8 +1391,13 @@ function freshDraft() {
     mjolnirSubagents: false,
     worktreeSelection: null,
     bundleSource: '',
+    bundleSources: [],
+    projectMultiple: false,
     creatingBundle: false,
-    showBundleSource: false,
+    createdBundleId: '',
+    projectCreateController: null,
+    projectPicker: freshProjectPicker(),
+    projectPickers: {},
     projectDirectories: {},
   };
 }
@@ -1427,6 +1433,7 @@ function renderNewForm() {
   if (!newDraft || newDraft.workspaceId !== selectedWorkspaceId()) {
     if (newDraft && newDraft.workspaceId !== selectedWorkspaceId()) {
       abortPendingNewPreflight();
+      cancelProjectRequests();
     }
     newDraft = freshDraft();
     newError.textContent = '';
@@ -1440,7 +1447,13 @@ function renderNewForm() {
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
-    project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
+    project: step.key === 'project' ? [
+      newDraft.targetId, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
+      newDraft.projectMultiple, newDraft.bundleSources,
+      targetIsBare(newDraft.targetId)
+        ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
+        : newDraft.projectPicker.mode === 'home' ? [snapshot.bundles, [...recentProjectIds()].sort()] : null,
+    ] : null,
     remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
@@ -1461,7 +1474,7 @@ function renderNewForm() {
   switch (step.key) {
     case 'profile': {
       body.append(
-        pickerField('Profile', 'new-profile', snapshot.profiles, newDraft.profileId, value => {
+        pickerField('Account', 'new-profile', snapshot.profiles, newDraft.profileId, value => {
           newDraft.profileId = value;
         }),
       );
@@ -1469,7 +1482,10 @@ function renderNewForm() {
     }
     case 'target': {
       body.append(
-        pickerField('Target', 'new-target', snapshot.targets, newDraft.targetId, value => {
+        pickerField('Where to run', 'new-target', snapshot.targets, newDraft.targetId, value => {
+          cancelProjectRequests();
+          newDraft.projectPicker = freshProjectPicker();
+          newDraft.projectPickers = {};
           newDraft.projectDirectories[newDraft.targetId] = newDraft.projectDirectory;
           newDraft.targetId = value;
           newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
@@ -1508,7 +1524,7 @@ function renderNewForm() {
         }
         body.append(
           pathField(
-            'Project directory',
+            'Project files',
             'new-project-directory',
             newDraft.projectDirectory,
             value => {
@@ -1523,61 +1539,24 @@ function renderNewForm() {
             },
           ),
         );
-      } else {
-        body.append(
-          pickerField('Bundle', 'new-bundle', snapshot.bundles, newDraft.bundleId, value => {
-            newDraft.bundleId = value;
-            newDraft.preflighted = false;
-            newDraft.remoteRepositories = [];
-            newDraft.localChangesExcluded = false;
-            newDraft.preflightError = '';
-          }),
-        );
-        const create = el('button', 'secondary', 'Create bundle');
-        create.type = 'button';
-        create.onclick = () => {
-          newDraft.showBundleSource = !newDraft.showBundleSource;
-          renderNewForm();
-          document.querySelector('#new-bundle-source')?.focus();
-        };
-        body.append(create);
-        if (newDraft.showBundleSource || !snapshot.bundles.length) {
-          body.append(
-            pathField(
-              'Repository source',
-              'new-bundle-source',
-              newDraft.bundleSource,
-              value => {
-                newDraft.bundleSource = value;
-              },
-              // A bundle source may be a URL or an `owner/repo` shorthand, and
-              // a path here belongs to the controller's own machine.
-              { host: () => null, kind: 'directories', applies: looksLikePath },
-            ),
-          );
-          body.append(el('p', 'dim', 'Use a GitHub owner/repository or URL, or an existing repository path with a network remote. The isolated session starts from the remote default branch and excludes local unpublished changes.'));
-          const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
-          save.type = 'button';
-          save.onclick = createNewBundle;
-          body.append(save);
+        if (newDraft.projectPicker.mode !== 'target-directory') {
+          body.append(el('p', 'dim', `These folders are on ${newDraft.targetId}, where the session will run.`));
         }
+        body.append(projectButton('Browse folders', () => setProjectMode('target-directory'), 'new-project-browse'));
+        if (newDraft.projectPicker.mode === 'target-directory') renderProjectBrowser(body);
+      } else {
+        renderProjectChooser(body);
       }
-      body.append(
-        textField('Title (optional)', 'new-title', newDraft.title, value => {
-          newDraft.title = value;
-        }),
-      );
       break;
     }
     default: {
       const review = el('dl', 'review');
       const rows = [
-        ['Profile', newDraft.profileId],
-        ['Target', newDraft.targetId],
+        ['Account', newDraft.profileId],
+        ['Where to run', newDraft.targetId],
         targetIsBare(newDraft.targetId)
-          ? ['Project directory', newDraft.projectDirectory]
-          : ['Bundle', newDraft.bundleId],
-        ['Name', newDraft.title.trim() || derivedTitle()],
+          ? ['Project files', newDraft.projectDirectory]
+          : ['Project', newDraft.bundleId],
       ];
       if (newDraft.localChangesExcluded) {
         rows.push(['Local changes', 'Excluded (unpublished commits and dirty files)']);
@@ -1593,7 +1572,11 @@ function renderNewForm() {
       for (const [term, value] of rows) {
         review.append(el('dt', '', term), el('dd', '', value));
       }
-      body.append(review);
+      const title = textField('Title (optional)', 'new-title', newDraft.title, value => {
+        newDraft.title = value;
+      });
+      title.querySelector('input').placeholder = derivedTitle();
+      body.append(review, title);
       const worktree = el('label', 'field-inline');
       const checkbox = el('input');
       checkbox.type = 'checkbox';
@@ -1634,10 +1617,11 @@ function renderNewForm() {
     newNextButton.textContent = 'Checking…';
   }
   const busy = newDraft.committing === true || newDraft.creatingBundle;
+  newNextButton.hidden = step.key === 'project' && !targetIsBare(newDraft.targetId);
   newNextButton.disabled = busy || checking || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
-  newBackButton.disabled ||= busy;
+  newBackButton.disabled ||= newDraft.committing === true;
   for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
-  if (focused?.type === 'checkbox' && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
+  if (focused?.id && !caret && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
   if (caret && !busy) {
     const input = document.getElementById(caret.id);
     input?.focus({ preventScroll: true });
@@ -1657,33 +1641,402 @@ function pickerField(label, id, items, value, onChange) {
   return field;
 }
 
-async function createNewBundle() {
+function freshProjectPicker() {
+  return { mode: 'home', query: '', path: '', filter: '', locationOpen: false, entries: [], directory: null, parent: null,
+    truncated: false, loading: false, loaded: false, error: '', controller: null, timer: null, revision: 0 };
+}
+
+function cancelProjectDiscovery(picker) {
+  if (!picker) return;
+  clearTimeout(picker.timer);
+  picker.controller?.abort();
+  picker.controller = null;
+  picker.loading = false;
+  picker.revision++;
+}
+
+function cancelProjectRequests() {
+  if (newDraft?.projectPicker.loading) newDraft.projectPicker.error = 'Loading cancelled.';
+  cancelProjectDiscovery(newDraft?.projectPicker);
+  newDraft?.projectCreateController?.abort();
+  if (newDraft) {
+    newDraft.projectCreateController = null;
+    newDraft.creatingBundle = false;
+  }
+}
+
+function projectButton(label, action, id) {
+  const button = el('button', 'secondary', label);
+  button.type = 'button';
+  if (id) button.id = id;
+  button.onclick = action;
+  return button;
+}
+
+function setProjectMode(mode) {
+  cancelProjectDiscovery(newDraft.projectPicker);
+  newDraft.projectPickers[newDraft.projectPicker.mode] = newDraft.projectPicker;
+  const picker = newDraft.projectPicker = newDraft.projectPickers[mode] || freshProjectPicker();
+  picker.mode = mode;
+  if (mode === 'target-directory' && !picker.path) picker.path = newDraft.projectDirectory || '~/';
+  newError.textContent = '';
+  if (['github', 'directory', 'target-directory'].includes(mode) && !picker.loaded && !picker.error) {
+    discoverProjects();
+  } else {
+    renderNewForm();
+  }
+  document.getElementById(mode === 'url' ? 'new-project-source' : mode === 'github' ? 'new-project-search' : 'new-project-current-folder')?.focus();
+}
+
+function renderProjectChooser(body) {
+  const picker = newDraft.projectPicker;
+  const home = picker.mode === 'home';
+  body.append(el('h2', '', 'Choose a project'));
+  if (home) body.append(el('p', 'dim', 'Pick a saved project or find a repository to start from.'));
+  const sources = el('div', home ? 'project-sources' : 'project-sources project-source-tabs');
+  sources.setAttribute('role', 'group');
+  sources.setAttribute('aria-label', 'Find a project');
+  for (const [mode, title, detail] of [
+    ['github', 'GitHub', 'Your repositories and search'],
+    ['directory', 'Browse folders', 'On your Mjolnir computer'],
+    ['url', 'Paste URL', 'GitHub URL or owner/repository'],
+  ]) {
+    const button = projectButton('', () => setProjectMode(mode), `new-project-${mode}`);
+    button.setAttribute('aria-pressed', String(picker.mode === mode));
+    button.append(el('span', '', home ? title : { github: 'GitHub', directory: 'Folders', url: 'URL' }[mode]));
+    if (home) button.append(el('small', 'dim', detail));
+    sources.append(button);
+  }
+  body.append(sources);
+  if (home && !newDraft.projectMultiple) {
+    // Keep configured multi-repository projects usable without exposing the
+    // storage format or asking people to name another object.
+    const recentIds = recentProjectIds();
+    for (const [title, projects] of [
+      ['Recent projects', snapshot.bundles.filter(project => recentIds.has(project.id))],
+      ['Saved projects', snapshot.bundles.filter(project => !recentIds.has(project.id))],
+    ]) {
+      if (!projects.length) continue;
+      const list = el('div', 'project-results');
+      body.append(el('h3', '', title));
+      for (const project of projects) {
+        const button = projectButton('', () => {
+          newDraft.bundleId = project.id;
+          advanceNew();
+        }, `new-saved-project-${project.id}`);
+        button.classList.add('project-result');
+        button.append(el('span', '', project.id));
+        const repositories = project.repositories || [];
+        if (repositories.length) button.append(el('small', 'dim', repositories.map(repo => repo.github || repo.id).join(' · ')));
+        list.append(button);
+      }
+      body.append(list);
+    }
+    if (!snapshot.bundles.length) body.append(el('p', 'dim', 'Your projects will appear here after you choose a repository.'));
+  } else if (!home) {
+    body.append(projectButton('Recent & saved projects', () => setProjectMode('home'), 'new-project-saved'));
+    if (picker.mode === 'url') {
+      body.append(pathField('GitHub URL or owner/repository', 'new-project-source', newDraft.bundleSource, value => {
+        newDraft.bundleSource = value;
+      }));
+      body.append(el('p', 'dim', 'You can also enter a repository path on the computer running Mjolnir.'));
+      const use = projectButton(newDraft.projectMultiple ? 'Add repository' : newDraft.creatingBundle ? 'Opening project…' : 'Use repository', () => selectProjectRepository(), 'new-project-use');
+      body.append(use);
+    } else {
+      renderProjectBrowser(body);
+    }
+  }
+  if (newDraft.projectMultiple) {
+    const repositories = el('ol', 'project-repositories');
+    repositories.setAttribute('aria-label', 'Selected repositories');
+    for (const [index, source] of newDraft.bundleSources.entries()) {
+      const row = el('li');
+      row.append(el('span', '', `${source}${index === 0 ? ' · Primary' : ''}`));
+      const remove = projectButton('Remove', () => {
+        newDraft.bundleSources.splice(index, 1);
+        newDraft.bundleId = '';
+        newDraft.createdBundleId = '';
+        newError.textContent = '';
+        renderNewForm();
+      });
+      remove.setAttribute('aria-label', `Remove ${source}`);
+      row.append(remove);
+      repositories.append(row);
+    }
+    body.append(el('p', 'dim', 'Choose repositories to open together. The primary repository is where the agent starts.'), repositories);
+    const use = projectButton(newDraft.creatingBundle ? 'Opening project…' : 'Use project', () => createNewProject([...newDraft.bundleSources]), 'new-project-use-group');
+    use.disabled = !newDraft.bundleSources.length;
+    body.append(use);
+  }
+  body.append(projectButton(newDraft.projectMultiple ? 'Select one repository' : 'Select multiple repositories', () => {
+    newDraft.projectMultiple = !newDraft.projectMultiple;
+    newDraft.bundleSources = [];
+    newError.textContent = '';
+    renderNewForm();
+  }, 'new-project-multiple'));
+}
+
+function selectProjectRepository(selectedSource) {
   const draft = newDraft;
   if (!draft || draft.creatingBundle) return;
-  const source = draft.bundleSource.trim();
+  const source = (selectedSource ?? draft.bundleSource).trim();
   if (!source) {
-    newError.textContent = 'Enter a repository source for the bundle.';
+    newError.textContent = 'Paste a GitHub URL, owner/repository, or repository path.';
     return;
   }
+  if (!draft.projectMultiple) return createNewProject([source]);
+  if (draft.bundleSources.includes(source)) {
+    newError.textContent = 'This repository is already in the project.';
+    return;
+  }
+  draft.bundleSources.push(source);
+  if (selectedSource === undefined) draft.bundleSource = '';
+  draft.bundleId = '';
+  draft.createdBundleId = '';
+  draft.preflighted = false;
+  newError.textContent = '';
+  renderNewForm();
+}
+
+function recentProjectIds() {
+  return new Set(snapshot.sessions.filter(session => session.workspace_id === newDraft.workspaceId).map(session => session.bundle_id));
+}
+
+function scheduleProjectDiscovery(picker) {
+  cancelProjectDiscovery(picker);
+  picker.entries = [];
+  picker.loading = true;
+  picker.loaded = false;
+  picker.error = '';
+  picker.timer = setTimeout(() => {
+    if (newDraft?.projectPicker === picker) discoverProjects();
+  }, PATH_SUGGESTION_DELAY_MS);
+  renderNewForm();
+}
+
+function renderProjectBrowser(body) {
+  const picker = newDraft.projectPicker;
+  const github = picker.mode === 'github';
+  const targetDirectory = picker.mode === 'target-directory';
+  const browser = el('section', 'project-browser');
+  browser.setAttribute('aria-label', github ? 'GitHub repositories' : 'Folders');
+  if (github) {
+    const search = textField('Search GitHub repositories', 'new-project-search', picker.query, value => {
+      picker.query = value;
+      scheduleProjectDiscovery(picker);
+    });
+    search.querySelector('input').onkeydown = event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        discoverProjects();
+      }
+    };
+    browser.append(search);
+    if (picker.query) browser.append(projectButton('Clear search', () => {
+      picker.query = '';
+      discoverProjects();
+      document.getElementById('new-project-search')?.focus();
+    }, 'new-project-clear'));
+    browser.append(el('p', 'dim', 'Uses the GitHub account on the computer running Mjolnir.'));
+  } else {
+    browser.append(el('p', 'dim', targetDirectory
+      ? `Browsing folders on ${newDraft.targetId}, where the session will run.`
+      : 'Folders on the computer running Mjolnir.'));
+    const currentFolder = el('p', 'project-location', picker.directory ?? (picker.path || 'Home'));
+    currentFolder.id = 'new-project-current-folder';
+    currentFolder.tabIndex = -1;
+    browser.append(currentFolder);
+    const navigation = el('div', 'row');
+    const up = projectButton('Up', () => browseProjectFolder(picker.parent), 'new-project-up');
+    up.disabled = picker.parent === null || picker.loading;
+    navigation.append(up, projectButton('Home', () => browseProjectFolder(targetDirectory ? '~/' : ''), 'new-project-home'));
+    browser.append(navigation);
+    const disclosure = el('details', 'project-location-input');
+    disclosure.open = picker.locationOpen;
+    disclosure.ontoggle = () => {
+      if (disclosure.isConnected) picker.locationOpen = disclosure.open;
+    };
+    const toggle = el('summary', '', 'Go to folder…');
+    toggle.id = 'new-project-location-toggle';
+    toggle.onclick = event => {
+      // Native toggle events are deferred; discovery or input can redraw first.
+      event.preventDefault();
+      picker.locationOpen = disclosure.open = !disclosure.open;
+    };
+    disclosure.append(toggle);
+    const location = pathField('Folder path', 'new-project-location', picker.path, value => {
+      cancelProjectDiscovery(picker);
+      picker.path = value;
+      picker.entries = [];
+      picker.directory = null;
+      picker.parent = null;
+      picker.loaded = false;
+      picker.error = '';
+      renderNewForm();
+    });
+    const go = () => browseProjectFolder(picker.path);
+    location.querySelector('input').onkeydown = event => {
+      if (event.key === 'Enter') { event.preventDefault(); go(); }
+    };
+    disclosure.append(location, projectButton('Go', go, 'new-project-go'));
+    browser.append(disclosure);
+    const filter = textField(targetDirectory ? 'Folder name starts with' : 'Filter folder names', 'new-project-folder-filter', picker.filter, value => {
+      picker.filter = value;
+      scheduleProjectDiscovery(picker);
+    });
+    filter.querySelector('input').onkeydown = event => {
+      if (event.key === 'Enter') { event.preventDefault(); discoverProjects(); }
+    };
+    browser.append(filter);
+  }
+  const status = el('p', 'dim');
+  status.setAttribute('role', picker.error ? 'alert' : 'status');
+  if (newDraft.creatingBundle) status.textContent = 'Opening project…';
+  else if (picker.loading) status.textContent = github ? 'Loading repositories…' : 'Loading folders…';
+  else if (picker.error) status.textContent = picker.error;
+  else if (picker.loaded) status.textContent = picker.entries.length ? `${picker.entries.length} ${picker.entries.length === 1 ? 'result' : 'results'}` : github ? 'No repositories found.' : 'No folders or repositories found here.';
+  else if (!github) status.textContent = 'Choose Go to browse this folder.';
+  browser.append(status);
+  if (picker.loading) browser.append(projectButton('Cancel loading', () => {
+    cancelProjectDiscovery(picker);
+    picker.error = 'Loading cancelled.';
+    renderNewForm();
+  }, 'new-project-cancel'));
+  if (picker.error) browser.append(projectButton('Retry', () => discoverProjects(), 'new-project-retry'));
+  if (github && !picker.error && picker.loaded && !picker.entries.length && !picker.loading) {
+    browser.append(el('p', 'dim', 'Try another search, browse folders, or paste a GitHub URL.'));
+  }
+  if (!picker.loading && !picker.error) {
+    if (targetDirectory && picker.loaded) browser.append(projectButton('Use this folder', () => {
+      newDraft.projectDirectory = picker.directory;
+      newDraft.projectDirectories[newDraft.targetId] = picker.directory;
+      advanceNew();
+    }, 'new-project-use-folder'));
+    const list = el('div', 'project-results');
+    for (const entry of picker.entries) {
+      const button = projectButton('', () => {
+        if (entry.kind === 'directory') {
+          browseProjectFolder(entry.source);
+        } else {
+          selectProjectRepository(entry.source);
+        }
+      });
+      button.classList.add('project-result');
+      button.append(el('span', '', entry.name), el('small', 'dim', entry.description || (entry.kind === 'directory' ? 'Open folder' : entry.source)));
+      button.append(el('small', 'project-result-action', entry.kind === 'directory' ? 'Browse →' : newDraft.projectMultiple ? 'Add repository →' : 'Use repository →'));
+      const row = el('div', 'project-result-row');
+      row.append(button);
+      if (!github && entry.kind === 'repository') {
+        const open = projectButton('Open folder', () => browseProjectFolder(entry.source));
+        open.setAttribute('aria-label', `Open folder ${entry.name}`);
+        row.append(open);
+      }
+      list.append(row);
+    }
+    browser.append(list);
+    if (picker.truncated) browser.append(el('p', 'dim', github ? 'More repositories are available. Narrow your search.' : 'More folders are available. Filter by folder name to find them.'));
+  }
+  body.append(browser);
+}
+
+function browseProjectFolder(path) {
+  newDraft.projectPicker.path = path;
+  newDraft.projectPicker.filter = '';
+  newDraft.projectPicker.locationOpen = false;
+  discoverProjects();
+  document.getElementById('new-project-current-folder')?.focus();
+}
+
+// The completion protocol uses path text, including remote paths. Never apply
+// browser-device filesystem rules or send a target path to local discovery.
+function projectPathNavigation(path) {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  const directory = `${normalized}/`;
+  const slash = normalized.lastIndexOf('/');
+  const parent = slash >= 0 ? normalized.slice(0, slash + 1) : null;
+  return { directory, parent };
+}
+
+async function discoverProjects() {
+  const draft = newDraft;
+  if (!draft) return;
+  const picker = draft.projectPicker;
+  cancelProjectDiscovery(picker);
+  const controller = new AbortController();
+  picker.controller = controller;
+  picker.loading = true;
+  picker.loaded = false;
+  picker.error = '';
+  picker.entries = [];
+  picker.revision++;
+  const remote = picker.mode === 'target-directory';
+  const navigation = remote ? projectPathNavigation(picker.path.trim() || '~/') : null;
+  const body = remote ? { target_id: draft.targetId, prefix: navigation.directory + picker.filter, kind: 'directories' }
+    : picker.mode === 'github' ? { kind: 'github', query: picker.query.trim() } : { kind: 'directory', path: picker.path.trim() };
+  if (!remote && picker.mode === 'directory' && picker.filter) body.filter = picker.filter;
+  const current = () => newDraft === draft && draft.projectPicker === picker && picker.controller === controller && !controller.signal.aborted;
+  renderNewForm();
+  try {
+    const result = await request(remote ? '/api/paths/complete' : '/api/projects/discover', {
+      method: 'POST', signal: controller.signal, body: JSON.stringify(body),
+    });
+    if (!current()) return;
+    if (remote) {
+      picker.entries = (result.candidates || []).map(source => ({ name: source, source, kind: 'directory' }));
+      picker.directory = navigation.directory;
+      picker.parent = navigation.parent;
+    } else {
+      picker.entries = result.entries || [];
+      picker.directory = result.directory;
+      picker.parent = result.parent;
+    }
+    if (picker.directory !== null) picker.path = picker.directory;
+    picker.truncated = result.truncated === true;
+    picker.loaded = true;
+  } catch (error) {
+    if (current()) picker.error = error.message;
+  } finally {
+    if (current()) {
+      picker.controller = null;
+      picker.loading = false;
+      picker.revision++;
+      renderNewForm();
+    }
+  }
+}
+
+async function createNewProject(sources) {
+  const draft = newDraft;
+  if (!draft || draft.creatingBundle) return;
+  if (!sources.length) {
+    newError.textContent = 'Choose at least one repository.';
+    return;
+  }
+  const controller = new AbortController();
+  draft.projectCreateController = controller;
+  const current = () => newDraft === draft && draft.projectCreateController === controller && !controller.signal.aborted;
   draft.creatingBundle = true;
   newError.textContent = '';
   renderNewForm();
   try {
-    const result = await request('/api/bundles', { method: 'POST', body: JSON.stringify({ source }) });
-    if (newDraft !== draft) return;
+    const result = await request('/api/bundles', { method: 'POST', signal: controller.signal, body: JSON.stringify({ sources }) });
+    if (!current()) return;
     draft.bundleId = result.bundle_id;
-    draft.showBundleSource = false;
-    draft.bundleSource = '';
+    draft.createdBundleId = result.bundle_id;
     draft.preflighted = false;
     draft.remoteRepositories = [];
     draft.localChangesExcluded = false;
     draft.preflightError = '';
-    await refresh();
-  } catch (error) {
-    if (newDraft === draft) newError.textContent = error.message;
-  } finally {
     draft.creatingBundle = false;
-    if (newDraft === draft) renderNewForm();
+    await advanceNew();
+  } catch (error) {
+    if (current()) newError.textContent = error.message;
+  } finally {
+    if (current()) {
+      draft.projectCreateController = null;
+      draft.creatingBundle = false;
+      renderNewForm();
+    }
   }
 }
 
@@ -1909,17 +2262,17 @@ async function advanceNew() {
   const step = steps[newDraft.step];
   newError.textContent = '';
   if (step.key === 'profile' && !snapshot.profiles.some(p => p.id === newDraft.profileId)) {
-    newError.textContent = 'Choose an available profile before continuing.';
+    newError.textContent = 'Choose an available account before continuing.';
     return;
   }
   if (step.key === 'target' && !snapshot.targets.some(t => t.id === newDraft.targetId)) {
-    newError.textContent = 'Choose an available target before continuing.';
+    newError.textContent = 'Choose where to run before continuing.';
     return;
   }
 
   if (step.key === 'project') {
-    if (!targetIsBare(newDraft.targetId) && !snapshot.bundles.some(b => b.id === newDraft.bundleId)) {
-      newError.textContent = 'Choose or create a bundle before continuing.';
+    if (!targetIsBare(newDraft.targetId) && !snapshot.bundles.some(b => b.id === newDraft.bundleId) && (!newDraft.createdBundleId || newDraft.createdBundleId !== newDraft.bundleId)) {
+      newError.textContent = 'Choose a project before continuing.';
       return;
     }
     if (targetIsBare(newDraft.targetId) && !newDraft.projectDirectory.trim()) {
@@ -5967,6 +6320,7 @@ for (const panel of [targetsPanel, quotaPanel]) {
 newBackButton.onclick = () => {
   if (!newDraft || newDraft.step === 0) return;
   abortPendingNewPreflight();
+  cancelProjectRequests();
   newDraft.step -= 1;
   newError.textContent = '';
   renderNewForm();
@@ -5975,10 +6329,11 @@ newBackButton.onclick = () => {
 newForm.onsubmit = async event => {
   event.preventDefault();
   try {
-    if (document.activeElement?.id === 'new-bundle-source') {
-      await createNewBundle();
+    if (document.activeElement?.id === 'new-project-source') {
+      await selectProjectRepository();
       return;
     }
+    if (newDraft && visibleSteps()[newDraft.step].key === 'project' && !targetIsBare(newDraft.targetId)) return;
     await advanceNew();
   } catch (err) {
     newError.textContent = err.message;

@@ -314,14 +314,15 @@ impl DashboardState {
     pub fn path_input_context(&self) -> String {
         let draft = match &self.mode {
             Mode::New(w) => format!(
-                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.project_directory.value(),
                 w.new_bundle_source.value(),
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
-                w.mounts.access
+                w.mounts.access,
+                w.project_picker.context()
             ),
             Mode::Resume(w) => format!(
                 "resume:{}:{:?}:{:?}:{:?}:{:?}:{:?}",

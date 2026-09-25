@@ -210,11 +210,13 @@ pub(super) async fn action(
 }
 
 pub(super) const MAX_BUNDLE_SOURCE_CHARS: usize = 1024;
+const MAX_BUNDLE_SOURCES: usize = 32;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateBundleRequest {
-    pub(super) source: String,
+    pub(super) source: Option<String>,
+    pub(super) sources: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,9 +232,26 @@ pub(super) async fn create_bundle(
     State(state): State<ServerState>,
     Json(request): Json<CreateBundleRequest>,
 ) -> Result<Json<CreateBundleResponse>, ApiError> {
-    Ok(Json(CreateBundleResponse {
-        bundle_id: create_quick_bundle(&state, request.source).await?,
-    }))
+    let bundle_id = match (request.source, request.sources) {
+        (Some(source), None) => create_quick_bundle(&state, source).await?,
+        (None, Some(sources)) => {
+            if sources.is_empty() || sources.len() > MAX_BUNDLE_SOURCES {
+                return Err(ApiError::bad_request(
+                    "provide between 1 and 32 repository sources",
+                ));
+            }
+            for source in &sources {
+                validate_bundle_source(source)?;
+            }
+            request_bundle(&state, String::new(), Some(sources)).await?
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "provide either source or sources, but not both",
+            ));
+        }
+    };
+    Ok(Json(CreateBundleResponse { bundle_id }))
 }
 
 /// Create or reuse the quick bundle for one repository source.
@@ -244,6 +263,11 @@ pub(super) async fn create_quick_bundle(
     state: &ServerState,
     source: String,
 ) -> Result<String, ApiError> {
+    validate_bundle_source(&source)?;
+    request_bundle(state, source, None).await
+}
+
+fn validate_bundle_source(source: &str) -> Result<(), ApiError> {
     if source.trim().is_empty() {
         return Err(ApiError::bad_request("repository source cannot be empty"));
     }
@@ -252,10 +276,22 @@ pub(super) async fn create_quick_bundle(
             "repository source must contain 1024 characters or fewer",
         ));
     }
+    Ok(())
+}
+
+async fn request_bundle(
+    state: &ServerState,
+    source: String,
+    exact_sources: Option<Vec<String>>,
+) -> Result<String, ApiError> {
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .bundle_tx
-        .send(BundleRequest { source, reply })
+        .send(BundleRequest {
+            source,
+            exact_sources,
+            reply,
+        })
         .await
         .map_err(|_| ApiError::controller_unavailable())?;
     result
@@ -555,6 +591,27 @@ pub(super) async fn complete_path(
                 "the controller could not list that directory",
             )
         })
+}
+
+pub(super) async fn discover_projects(
+    State(state): State<ServerState>,
+    Json(request): Json<crate::project_picker::ProjectDiscoveryRequest>,
+) -> Result<Json<crate::project_picker::ProjectDiscovery>, ApiError> {
+    crate::project_picker::validate_request(&request)
+        .map_err(|error| ApiError::bad_request(crate::project_picker::error_message(&error)))?;
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .preflight_tx
+        .send(PreflightRequest::DiscoverProjects(
+            ProjectDiscoveryPreflight { request, reply },
+        ))
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(|message| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, message))
 }
 
 #[derive(Debug, Clone, Deserialize)]

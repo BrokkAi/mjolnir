@@ -18,7 +18,9 @@ pub(crate) fn render_transcript(
     let render_started = std::time::Instant::now();
     let viewport_height = usize::from(area.height.saturating_sub(2));
     chat.last_viewport_height = viewport_height;
-    let block = theme::panel(pane_focused).padding(Padding::horizontal(1));
+    let block = theme::panel(pane_focused)
+        .style(theme::base())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     let content_width = inner.width;
     let window = chat.viewport(content_width, viewport_height);
@@ -111,14 +113,15 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
         columns.push(chat.header_profile.clone());
         columns.join("  ")
     };
-    let style = theme::title(false);
+    let style = if chat.header_target.is_empty() || chat.header_profile.is_empty() {
+        theme::title(false)
+    } else {
+        theme::hint_description()
+    };
     let mut spans = vec![Span::styled(format!(" {summary}"), style)];
     if !chat.header_title.is_empty() {
         spans.push(Span::styled("  ", style));
-        spans.push(Span::styled(
-            chat.header_title.clone(),
-            style.fg(theme::palette().secondary),
-        ));
+        spans.push(Span::styled(chat.header_title.clone(), theme::title(false)));
     }
     let suffix = match (chat.anchor, chat.render_mode) {
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => " ".to_owned(),
@@ -297,11 +300,17 @@ pub(crate) fn render_transcript_entry_with_options(
             theme::muted(),
         ));
     }
-    out.extend(wrap_styled_line(
-        Line::from(header),
-        width,
-        ROLE_GUTTER_WIDTH,
-    ));
+    out.extend(
+        wrap_styled_line(Line::from(header), width, ROLE_GUTTER_WIDTH)
+            .into_iter()
+            .map(|line| {
+                if entry.role == ChatRole::User {
+                    line.style(theme::raised())
+                } else {
+                    line
+                }
+            }),
+    );
     out.extend(entry_body_rows_with_options(
         entry,
         width,
@@ -460,7 +469,7 @@ fn tool_row_presentation(entry: &ChatEntry) -> (&'static str, &'static str, Styl
 pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
     match entry.role {
         ChatRole::User => {
-            let style = Style::default().fg(theme::palette().accent);
+            let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
                 glyph: role_glyph(entry),
                 label: user_label(entry).into(),
@@ -470,7 +479,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
             }
         }
         ChatRole::Agent => {
-            let style = Style::default().fg(theme::palette().secondary);
+            let style = Style::default().fg(theme::palette().accent);
             EntryVisual {
                 glyph: role_glyph(entry),
                 label: "Agent".into(),

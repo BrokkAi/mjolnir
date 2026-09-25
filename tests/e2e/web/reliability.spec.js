@@ -129,9 +129,9 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // The New flow asks one thing per screen and reviews before committing.
     await page.getByRole('button', { name: 'New session' }).click();
     await expect(page).toHaveURL(/\/new$/);
-    await expect(page.locator('#new-progress')).toContainText('Profile');
+    await expect(page.locator('#new-progress')).toContainText('Account');
     await page.getByRole('button', { name: 'Next' }).click();
-    await expect(page.locator('#new-progress')).toContainText('Target');
+    await expect(page.locator('#new-progress')).toContainText('Where to run');
     // Config::with_local_targets also offers container candidates. Select the
     // bare host explicitly so this scenario exercises the directory flow.
     await page.locator('#new-target').getByRole('radio', { name: /^localhost/ }).check();
@@ -140,10 +140,9 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // rather than offering a bundle.
     await expect(page.locator('#new-project-directory')).toBeVisible();
     await page.locator('#new-project-directory').fill(projectDirectory);
-    await page.locator('#new-title').fill(title);
     await page.getByRole('button', { name: 'Next' }).click();
     await expect(page.locator('#new-progress')).toContainText('Review');
-    await expect(page.locator('.review')).toContainText(title);
+    await page.locator('#new-title').fill(title);
     await page.getByRole('button', { name: 'Start' }).click();
     stage('session-requested');
 

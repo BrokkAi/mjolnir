@@ -856,8 +856,8 @@ fn the_active_tab_is_highlighted_without_focus() {
     let y = buffer.area.y + row as u16;
     let active = buffer.area.x + cell_column(&lines[row], "Mjolnir");
     let inactive = buffer.area.x + cell_column(&lines[row], "Import");
-    assert_eq!(buffer[(active, y)].bg, theme::palette().accent);
-    assert_eq!(buffer[(inactive, y)].bg, theme::palette().surface_raised);
+    assert_eq!(Some(buffer[(active, y)].bg), theme::focus_control().bg);
+    assert_eq!(buffer[(inactive, y)].bg, theme::palette().selection);
 }
 
 /// Hel never modifies a harness home, so a native-only row has no destroy action.
