@@ -1,5 +1,13 @@
 use super::*;
 
+/// Marks the boundary between a provider's replay of old history and the live
+/// updates of this connection. A resumed worker starts with updates off so a
+/// `session/load` replay does not duplicate turns the durable relay already
+/// holds; every way a session opens must call this once its updates are live.
+pub(super) fn accept_live_session_updates(session_updates_enabled: &AtomicBool) {
+    session_updates_enabled.store(true, Ordering::Release);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -180,7 +188,8 @@ pub(super) async fn serve_session(
                 .resume
                 .is_some()
         {
-            session_updates_enabled.store(true, Ordering::Release);
+            // `session/resume` does not replay, so everything it sends is live.
+            accept_live_session_updates(session_updates_enabled);
             let resumed = connection
                 .send_request(resume_session_request(spec, session_id.clone()))
                 .block_task()
@@ -272,7 +281,7 @@ pub(super) async fn serve_session(
                 }
                 // The response is the boundary between provider replay and
                 // future live updates for this connection.
-                session_updates_enabled.store(true, Ordering::Release);
+                accept_live_session_updates(session_updates_enabled);
                 Some((session_id, config_options, modes))
             }
             None => None,
@@ -284,6 +293,11 @@ pub(super) async fn serve_session(
         if let Some((id, options, modes)) = loaded_session {
             (id, options, modes, true)
         } else {
+            // A new native session has no history to replay, whether this is a
+            // first launch or a resume that replaced an unused session. Without
+            // this, a fallback from a failed reload dropped every reply the new
+            // session sent for the rest of the worker's life (R8-1).
+            accept_live_session_updates(session_updates_enabled);
             let created = connection
                 .send_request(new_session_request(spec, true))
                 .block_task()

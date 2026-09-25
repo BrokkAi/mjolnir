@@ -1,10 +1,10 @@
 //! Exercise native recovery through a real, disposable worker process.
 #![cfg(unix)]
 
-use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, TextContent};
 use mj_core::relay::{
-    RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayObservation,
-    RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponsePayload,
+    RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayCommandOutcome,
+    RelayObservation, RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponsePayload,
 };
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
 use mj_worker::relay::DurableRelay;
@@ -90,6 +90,13 @@ for line in sys.stdin:
                   "availableModes": [{{"id": "agent", "name": "Guardian"}},
                                      {{"id": "auto", "name": "Auto"}}]}}}}
     elif method == "session/prompt":
+        # Answer the way a real agent does: the reply streams as an update on
+        # the session the prompt named, then the prompt returns (R8-1).
+        print(json.dumps({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+            "sessionId": request["params"]["sessionId"],
+            "update": {{"sessionUpdate": "agent_message_chunk",
+                        "content": {{"type": "text", "text": "recovered reply"}}}}}}}}),
+              flush=True)
         result = {{"stopReason": "end_turn"}}
     else:
         result = {{}}
@@ -277,10 +284,31 @@ for line in sys.stdin:
         &event.observation,
         RelayObservation::Warning { message } if message.contains("new empty session")
     )));
-    assert!(events.iter().any(|event| matches!(
-        &event.observation,
-        RelayObservation::CommandCompleted { command_id, .. } if command_id == "queued-prompt"
-    )));
+    // The replacement session is live, not a replay: the reply reaches the
+    // journal and the turn ends answered rather than `prompt_unanswered` (R8-1).
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.observation,
+            RelayObservation::SessionUpdate { update } if matches!(
+                update.as_ref(),
+                SessionUpdate::AgentMessageChunk(chunk) if matches!(
+                    &chunk.content,
+                    ContentBlock::Text(text) if text.text == "recovered reply"
+                )
+            )
+        )),
+        "{events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.observation,
+            RelayObservation::CommandCompleted {
+                command_id,
+                outcome: RelayCommandOutcome::Prompt { stop_reason, .. },
+            } if command_id == "queued-prompt" && stop_reason == "EndTurn"
+        )),
+        "{events:#?}"
+    );
 }
 
 #[test]
