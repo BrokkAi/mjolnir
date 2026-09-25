@@ -625,13 +625,44 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
         .await;
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
 
-    // The review opens and captures what it reviews.
-    let (_, action, _reply) = manager
+    // Preparation captures the change before it chooses a reviewer (I2-10).
+    // Only a turn that changed something goes on to choose one.
+    let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
-    assert!(matches!(action, ReviewerAction::CaptureDelta { .. }));
-    assert!(
-        environment.background_waits() >= 2,
+    assert_eq!(
+        environment.background_waits(),
+        0,
+        "the capture comes before the reviewer choice"
+    );
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+
+    // The copy's lease cancels the first choice. The review waits, chooses
+    // again, opens, and starts work on the capture.
+    let (_, action, _reply) = manager
+        .next_reviewer(|_, action| {
+            matches!(
+                action,
+                ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
+            )
+        })
+        .await;
+    assert!(matches!(
+        action,
+        ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
+    ));
+    assert_eq!(
+        environment.background_waits(),
+        2,
         "the retry waited for background work first"
     );
     assert!(
@@ -661,6 +692,21 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
         .await;
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    // Preparation captures the change before it chooses a reviewer (I2-10).
+    // Only a turn that changed something reaches the refused choice.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
     tokio::time::timeout(Duration::from_secs(5), async {
         while host.refuses_prompt(session) {
             tokio::task::yield_now().await;
