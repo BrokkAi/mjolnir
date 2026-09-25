@@ -298,6 +298,8 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             {
                 lease.invalidate();
             }
+            // Only Unix leases own a shared session slot; free it before backoff.
+            #[cfg(unix)]
             drop(ssh_session);
             if attempt < attempts {
                 let delay = ssh_retry_delay(attempt);

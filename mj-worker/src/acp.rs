@@ -59,8 +59,8 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigValueId, SessionId, SessionModeState, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TerminalExitStatus,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextResourceContents,
-    ToolCallUpdateFields, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCallUpdateFields,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectTo, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -111,7 +111,10 @@ pub fn worker_exit_reason(error: &anyhow::Error) -> String {
 /// (project memory, shell results, a hand-off): an embedded resource named
 /// [`mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI`]. [`prompt_for_harness`]
 /// decides the form the harness's bridge receives.
+#[cfg(any(unix, test))]
 pub(crate) fn hidden_context_block(text: String) -> ContentBlock {
+    use agent_client_protocol::schema::v1::TextResourceContents;
+
     ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
             text,

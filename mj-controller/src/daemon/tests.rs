@@ -2848,8 +2848,6 @@ async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout
     );
 }
 
-const DESTROY_INDEX_TEST_CHILD: &str = "MJ_TEST_DESTROY_INDEX_CHILD";
-
 /// R2-11: a session that was created and destroyed between two SessionWiki
 /// passes was never findable, because destroy deleted its record and stored
 /// conversation and no pass had indexed them. `mj sessions --session <id>`
@@ -2858,6 +2856,7 @@ const DESTROY_INDEX_TEST_CHILD: &str = "MJ_TEST_DESTROY_INDEX_CHILD";
 #[cfg(unix)]
 #[tokio::test]
 async fn a_destroyed_session_is_still_found_by_its_id() {
+    const DESTROY_INDEX_TEST_CHILD: &str = "MJ_TEST_DESTROY_INDEX_CHILD";
     const TEST: &str = "a_destroyed_session_is_still_found_by_its_id";
     if std::env::var_os(DESTROY_INDEX_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
