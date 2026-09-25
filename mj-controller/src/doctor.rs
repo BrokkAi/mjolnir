@@ -2743,9 +2743,10 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                 parts.push(residue.refs.join(", "));
             }
             if !residue.scratch_indexes.is_empty() {
-                parts.push(format!(
-                    "{} leftover scratch index file(s)",
-                    residue.scratch_indexes.len()
+                parts.push(mj_core::text::counted(
+                    residue.scratch_indexes.len(),
+                    "leftover scratch index file",
+                    "leftover scratch index files",
                 ));
             }
             format!("{}: {}", repository.display(), parts.join("; "))

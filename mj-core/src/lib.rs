@@ -41,6 +41,7 @@ pub mod subagent;
 pub mod subprocess;
 pub mod targets;
 pub mod test_hooks;
+pub mod text;
 pub mod transcript;
 pub mod usage;
 pub mod worker_build;

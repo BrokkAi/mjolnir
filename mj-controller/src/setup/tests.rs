@@ -954,7 +954,9 @@ fn smoke_test_prints_its_outcome_and_how_long_it_took() {
     let (result, line) = last_line(&FakeExecutor::succeeds());
     assert!(result.is_ok());
     assert!(line.starts_with("Smoke test passed in "), "{line}");
-    assert!(line.contains("second(s)"), "{line}");
+    // Launch finding R5-10: "2 second(s)" became "2 seconds".
+    assert!(line.contains(" second"), "{line}");
+    assert!(!line.contains("(s)"), "{line}");
 
     let (result, line) = last_line(&FakeExecutor {
         commands: RefCell::new(vec![]),

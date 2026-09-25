@@ -515,7 +515,7 @@ fn a_running_session_reports_how_long_the_harness_has_been_quiet() {
     );
     assert_eq!(
         silence_note(&classify(&quiet_turn), NOW).as_deref(),
-        Some("no harness activity for about 11 minute(s)")
+        Some("no harness activity for about 11 minutes")
     );
 
     // A tool call is running, which is the ordinary reason for silence. The
@@ -625,4 +625,15 @@ fn inferred_idle_preserves_owned_background_work_and_foreground_precedence() {
     facts.goal_running = false;
     facts.capacity_retry_armed = true;
     assert!(!classify(&facts).is_idle());
+}
+
+/// Launch finding R5-10: "Smoke test passed in 2 second(s)." A duration
+/// agrees its unit with the count, as every counted noun does since C-12.
+#[test]
+fn a_duration_agrees_its_unit_with_the_count() {
+    assert_eq!(describe_duration(1_000), "1 second");
+    assert_eq!(describe_duration(2_400), "2 seconds");
+    assert_eq!(describe_duration(0), "0 seconds");
+    assert_eq!(describe_duration(90_000), "about 1 minute");
+    assert_eq!(describe_duration(11 * MINUTE), "about 11 minutes");
 }

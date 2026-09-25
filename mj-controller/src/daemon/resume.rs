@@ -686,10 +686,13 @@ impl RuntimeState {
                 .await
             {
                 let remaining = sessions.len() - index - 1;
-                bail!(
-                    "force-destroying session {session_id} failed: {error:#}; \
-                     {remaining} session(s) in the workspace remain"
-                );
+                // The verb agrees with the count as well as the noun.
+                let remaining = if remaining == 1 {
+                    "1 session in the workspace remains".to_owned()
+                } else {
+                    format!("{remaining} sessions in the workspace remain")
+                };
+                bail!("force-destroying session {session_id} failed: {error:#}; {remaining}");
             }
         }
         blocking({

@@ -1527,7 +1527,7 @@ mod tests {
             serde_json::json!({
                 "stop_reason": "harness_inactive",
                 "diagnostic": {
-                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minute(s).",
+                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minutes.",
                     "code": "harness_inactive"
                 }
             }),

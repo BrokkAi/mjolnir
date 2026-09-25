@@ -1318,8 +1318,10 @@ pub(crate) fn render_workspace_manager(
             draft_count,
             ..
         } => {
+            let sessions = crate::widgets::counted(*session_count, "session", "sessions");
+            let drafts = crate::widgets::counted(*draft_count, "saved draft", "saved drafts");
             let text = format!(
-                "Close {workspace_name:?}?\n\nSuspend {session_count} session(s), including active sub-agents.\nResumable histories are preserved.\nDiscard {draft_count} saved draft(s) and any unsent composer text.\nRemove this workspace after all sessions are suspended."
+                "Close {workspace_name:?}?\n\nSuspend {sessions}, including active sub-agents.\nResumable histories are preserved.\nDiscard {drafts} and any unsent composer text.\nRemove this workspace after all sessions are suspended."
             );
             frame.render_widget(
                 Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),

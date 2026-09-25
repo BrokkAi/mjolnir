@@ -1289,7 +1289,12 @@ pub(crate) fn confirmation_body(
             }
             if *active_children > 0 {
                 lines.push(Line::raw(format!(
-                    "This also suspends {active_children} active sub-agent(s) first."
+                    "This also suspends {} first.",
+                    crate::widgets::counted(
+                        *active_children,
+                        "active sub-agent",
+                        "active sub-agents"
+                    )
                 )));
             }
             (" Suspend session? ", lines)

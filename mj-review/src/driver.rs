@@ -730,8 +730,12 @@ impl TurnReviewDriver {
         }
         if !started.is_empty() {
             self.status = format!(
-                "{} specialist lane(s) running…",
-                self.outstanding_lanes.len()
+                "{} running…",
+                mj_core::text::counted(
+                    self.outstanding_lanes.len(),
+                    "specialist lane",
+                    "specialist lanes"
+                )
             );
         }
         started

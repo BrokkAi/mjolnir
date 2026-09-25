@@ -1691,8 +1691,8 @@ async fn recover(args: RecoverArgs) -> Result<()> {
                 }
                 if scan.hidden_other_instances > 0 {
                     eprintln!(
-                        "note: {} worker(s) created by other or unknown instances were not listed; pass --all-instances to include them",
-                        scan.hidden_other_instances
+                        "note: {} created by other or unknown instances were not listed; pass --all-instances to include them",
+                        mj_core::text::counted(scan.hidden_other_instances, "worker", "workers")
                     );
                 }
                 for warning in &scan.warnings {

@@ -1377,8 +1377,17 @@ fn write_summary(
     runtimes: &[(RuntimeKind, String)],
 ) -> Result<()> {
     writeln!(output, "Mjolnir will add to {}:", config_path.display())?;
-    writeln!(output, "  {} profile(s)", config.profiles.len())?;
-    writeln!(output, "  {} bundle(s)", config.bundles.len())?;
+    let counted = mj_core::text::counted;
+    writeln!(
+        output,
+        "  {}",
+        counted(config.profiles.len(), "profile", "profiles")
+    )?;
+    writeln!(
+        output,
+        "  {}",
+        counted(config.bundles.len(), "bundle", "bundles")
+    )?;
     if config
         .targets
         .values()
