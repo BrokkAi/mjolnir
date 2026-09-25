@@ -3414,6 +3414,57 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     );
 }
 
+/// A fresh restore into a reused local worker root must not write through a
+/// staged home that is a link to a profile home, so the cleanup before it
+/// unlinks one. A staged home of the session's own is left for the install to
+/// overwrite, and the profile home is never touched.
+#[cfg(unix)]
+#[test]
+fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_home = directory.path().join(".codex");
+    std::fs::create_dir_all(profile_home.join("sessions")).unwrap();
+    std::fs::write(profile_home.join("auth.json"), "{}").unwrap();
+    for linked in [true, false] {
+        let worker_root = directory
+            .path()
+            .join(if linked { "linked" } else { "staged" })
+            .join(SESSION);
+        std::fs::create_dir_all(&worker_root).unwrap();
+        let staged_home = worker_root.join("profile");
+        if linked {
+            std::os::unix::fs::symlink(&profile_home, &staged_home).unwrap();
+        } else {
+            std::fs::create_dir_all(&staged_home).unwrap();
+            std::fs::write(staged_home.join("auth.json"), "{}").unwrap();
+        }
+
+        let cleanup = clear_relay_state_plan(
+            &TargetLocator::LocalBare {
+                worker_root: worker_root.to_string_lossy().into_owned(),
+            },
+            SESSION,
+        )
+        .unwrap()
+        .unwrap();
+        let output = ProcessExecutor.execute(&cleanup).unwrap();
+
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if linked {
+            assert!(std::fs::symlink_metadata(&staged_home).is_err());
+        } else {
+            assert!(staged_home.join("auth.json").is_file());
+        }
+        assert!(profile_home.join("auth.json").is_file());
+        assert!(profile_home.join("sessions").is_dir());
+    }
+}
+
 /// An in-place harness replacement keeps the environment, so the reset has to
 /// take the old harness out of it: its daemon, its relay state, the installed
 /// worker files, and its per-session profile home.

@@ -16,13 +16,14 @@
 //! and a checkpoint then find the files the harness is using. Nothing is copied
 //! into or out of the profile home.
 //!
-//! Two writers must never go through the link: installing worker files, which
-//! would copy a stage over the person's own configuration, and the skills
-//! sync, which would replace their skills tree. Installing replaces the link
-//! with a new directory, and the credential sync leaves a session alone while
-//! its staged home is a link. The link goes when the worker root does, at
-//! close or when the harness is replaced in place; a resume then stages the
-//! session like any other.
+//! Three writers must never go through the link: installing worker files,
+//! which would copy a stage over the person's own configuration, a restore,
+//! which would write a native session there, and the skills sync, which would
+//! replace their skills tree. Installing replaces the link with a new
+//! directory, the cleanup before a fresh restore unlinks it, and the credential
+//! sync leaves a session alone while its staged home is a link. The link goes
+//! when the worker root does, at close or when the harness is replaced in
+//! place; a resume then stages the session like any other.
 //!
 //! **Replicas of ended sessions.** Such a session kept Mjolnir's replica of its
 //! project memory at `<profile home>/projects/hel-<key>-<session>/`, and
