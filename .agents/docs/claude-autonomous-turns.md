@@ -107,7 +107,13 @@ observations:
   `SetSessionMode` request is waiting for its answer: the adapter publishes
   some notices as agent text while it answers one (a switch to a model without
   Auto mode sends `**Auto mode unavailable:** …`), and no model cycle, so no
-  result, follows them (launch finding R4-2).
+  result, follows them (launch finding R4-2). Nor does output that arrives
+  while a new bridge sets its session up, from `agent_initialized` until
+  `session_opened` (the load or new-session request and the model and mode
+  applied after it): a resumed session on a model without Auto mode gets the
+  same notice there (launch finding R8-4). Agent text in that window, with no
+  prompt running and no turn open, is journaled as a `notice` row instead of
+  a session update.
 - `harness_turn_settled { origin }`, appended by
   `DurableRelay::claude_turn_result` when a result that the prompt loop was not
   asked to take arrives while a turn is open. Any result settles the turn,

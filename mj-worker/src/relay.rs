@@ -99,6 +99,11 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    /// A bridge has connected and its session is not open yet: the load or
+    /// new-session request and the model and mode applied after it. Output
+    /// in this window answers no prompt (R8-4). Never recovered from the
+    /// journal: every bridge start records its own `AgentInitialized`.
+    session_setup: bool,
     checkpoint_only: bool,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
@@ -378,6 +383,7 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: None,
             acp_ready: false,
+            session_setup: false,
             checkpoint_only,
             steering_supported: None,
             automatic_steering: false,
@@ -851,6 +857,15 @@ impl DurableRelay {
             | RelayObservation::Closed => Some(false),
             _ => None,
         };
+        let session_setup = match &observation {
+            RelayObservation::AgentInitialized { .. } => Some(true),
+            RelayObservation::SessionOpened { .. }
+            | RelayObservation::SessionConfigured { .. }
+            | RelayObservation::SessionRestarted
+            | RelayObservation::Closing
+            | RelayObservation::Closed => Some(false),
+            _ => None,
+        };
         // A restart or a close ends the harness process that owned whatever it
         // had left running, so nothing it reported is still alive.
         if matches!(
@@ -864,6 +879,9 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
             self.acp_ready = ready;
+        }
+        if let Some(setup) = session_setup {
+            self.session_setup = setup;
         }
         Ok(ordinal)
     }
@@ -903,6 +921,15 @@ impl DurableRelay {
         let ack = claude && self.is_claude_stop_acknowledgement(&update);
         if ack {
             self.claude_pending_stops.pop_first();
+        }
+        // The adapter publishes notices as agent text at times no model cycle
+        // runs. Such text is a notice row of its own, so it neither opens a
+        // turn that nothing would end nor joins the previous reply.
+        if claude
+            && !ack
+            && let Some(message) = self.notice_outside_any_turn(&update)
+        {
+            return self.record_observation(RelayObservation::Notice { message });
         }
         if claude && !ack && self.opens_harness_turn(&update) {
             self.append_relay_event(
@@ -1028,14 +1055,39 @@ impl DurableRelay {
         self.persist_activity_transition()
     }
 
+    /// Whether agent output arriving now belongs to no turn: no prompt runs,
+    /// no harness turn is open, and the session is still being set up. The
+    /// Claude adapter reports a resumed session's Auto mode fallback as agent
+    /// text while the session loads and its model is applied (R8-4).
+    fn output_outside_any_turn(&self) -> bool {
+        self.session_setup
+            && self.snapshot.active_prompt.is_none()
+            && self.snapshot.harness_turn.is_none()
+    }
+
+    /// The notice row for agent text that belongs to no turn, without the
+    /// adapter's Markdown emphasis, which a notice row would show literally.
+    fn notice_outside_any_turn(&self, update: &SessionUpdate) -> Option<String> {
+        if !self.output_outside_any_turn() {
+            return None;
+        }
+        let message = background::agent_chunk_text(update)?
+            .replace("**", "")
+            .trim()
+            .to_owned();
+        (!message.is_empty()).then_some(message)
+    }
+
     /// Whether this update reveals the harness working with nothing of Hel's
     /// in flight, which is what opens a harness-initiated turn. Output that
     /// arrives while a configuration request waits for its answer belongs to
-    /// that request.
+    /// that request, and output while the session is set up belongs to no
+    /// turn.
     fn opens_harness_turn(&self, update: &SessionUpdate) -> bool {
         is_agent_output(update)
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
+            && !self.session_setup
             && !self.configuration_request_in_flight()
             && !matches!(
                 self.snapshot.execution,
