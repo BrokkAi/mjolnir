@@ -17,7 +17,7 @@ use crate::targets::{
 };
 
 use super::backend::{
-    ContainerOverrides, backend_bundle, backend_locator, backend_target,
+    ContainerOverrides, TargetCheck, backend_bundle, backend_locator, backend_target,
     configure_github_token_environment, controller_github_token, locator_after_provision,
     preflight_target, use_github_https_urls,
 };
@@ -504,7 +504,7 @@ impl Controller {
             {
                 use_github_https_urls(bundle);
             }
-            preflight_target(template, executor)?;
+            preflight_target(template, executor, TargetCheck::Launch)?;
             let prepared_cache = bundle.as_mut().and_then(|bundle| {
                 git_cache::prepare(
                     &target,

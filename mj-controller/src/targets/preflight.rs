@@ -146,7 +146,20 @@ pub enum DockerUnavailable {
 }
 
 impl DockerUnavailable {
-    /// What to do before a launch can use Docker.
+    /// What to do before Docker can run sessions, for a check made before
+    /// anything is launched, such as the session wizard's target row. It
+    /// does not mention Retry launch, which only the launch-failure dialog
+    /// offers (launch finding R6-3).
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::NotInstalled => "Install Docker or choose another target.",
+            Self::NotRunning { .. } => "Start Docker.",
+            Self::NotAnswering { .. } => "Fix what it reports.",
+        }
+    }
+
+    /// What to do after a launch failed this check: the same advice, then
+    /// the failure dialog's Retry launch.
     pub fn launch_remedy(&self) -> &'static str {
         match self {
             Self::NotInstalled => "Install Docker or choose another target, then Retry launch.",

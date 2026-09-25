@@ -541,7 +541,7 @@ impl Controller {
             "destination profile home is unavailable; configure the profile before moving"
         );
         super::worker_binary::preflight_worker_binary(target)?;
-        super::backend::preflight_target(target, executor)?;
+        super::backend::preflight_target(target, executor, super::backend::TargetCheck::Launch)?;
         let source_harness = previous
             .as_ref()
             .filter(|operation| {
