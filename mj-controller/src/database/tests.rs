@@ -5269,6 +5269,61 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     );
 }
 
+/// A parent's suspend lists the children it stopped on the parent, in the
+/// order it stopped them. A suspend that runs again after a restart updates a
+/// child already listed instead of listing it twice, a full state save from
+/// any controller copy leaves the list alone, and the list goes with the
+/// parent's record.
+#[test]
+fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
+    use mj_core::subagent::StoppedSubagent;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, child) = subagent_pair(&path);
+    let stopped = |id: &str, handed_back: bool| StoppedSubagent {
+        child_session_id: id.into(),
+        title: format!("title {id}"),
+        task: Some("say ready".into()),
+        handed_back,
+    };
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+    record_stopped_subagents_to(
+        &path,
+        &parent.id,
+        &[stopped(&child.id, false), stopped("other-child", true)],
+    )
+    .unwrap();
+    record_stopped_subagents_to(&path, &parent.id, &[stopped(&child.id, true)]).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id).unwrap(),
+        [stopped(&child.id, true), stopped("other-child", true)]
+    );
+
+    // The child's own record is gone; a full save of that state keeps the list.
+    let mut state = load_state_from(&path).unwrap();
+    state.subagents.remove(&child.id);
+    state.sessions.remove(&child.id);
+    save_state_to(&path, &state).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    delete_session_from(&path, &parent.id).unwrap();
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The ordinal of the parent's newest prompt is recorded only for a sub-agent
 /// child, and a late write for an older prompt never moves it back.
 #[test]

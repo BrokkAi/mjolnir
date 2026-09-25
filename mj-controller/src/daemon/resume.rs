@@ -129,21 +129,9 @@ impl RuntimeState {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
     ) -> Result<()> {
-        let children = blocking({
-            let session_id = session_id.clone();
-            move || {
-                let controller = Controller::load()?;
-                Ok(active_child_session_ids(&controller.state, &session_id))
-            }
-        })
-        .await?;
-        for child_id in children {
-            Box::pin(self.suspend_session(child_id.clone()))
-                .await
-                .with_context(|| {
-                    format!("suspend sub-agent {child_id} before discarding parent changes")
-                })?;
-        }
+        // The parent goes back to an older recovery copy, and its sub-agents
+        // stop exactly as they do when it is suspended.
+        self.stop_subagents_for_suspend(&session_id).await?;
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
@@ -502,7 +490,7 @@ impl RuntimeState {
     /// pass, then indexes the sessions on their own. A destroy is never
     /// refused for this: when the index cannot take the sessions, the log
     /// says why and the destroy goes ahead.
-    async fn index_before_destroy(self: &Arc<Self>, session_id: &str) {
+    pub(super) async fn index_before_destroy(self: &Arc<Self>, session_id: &str) {
         use crate::sessionwiki::IndexedBeforeDestroy;
         let outcome = self
             .wiki()
@@ -591,7 +579,7 @@ impl RuntimeState {
 
     /// [`Self::force_destroy_session`] once the session and its sub-agents
     /// have been indexed.
-    async fn force_destroy_indexed_session(
+    pub(super) async fn force_destroy_indexed_session(
         self: &Arc<Self>,
         session_id: String,
         branch: BranchDisposition,

@@ -615,6 +615,95 @@ pub fn report_state(
     }
 }
 
+/// A sub-agent that Mjolnir stopped when its parent was suspended. The
+/// parent's record keeps one of these per child until the parent's model has
+/// been told, on the first prompt after the parent resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedSubagent {
+    pub child_session_id: String,
+    /// The child's listed title when it was stopped.
+    pub title: String,
+    /// One line of the task the parent gave it, when the spawn recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Whether the child had handed back its report for the parent's newest
+    /// task; see [`has_handed_back`].
+    pub handed_back: bool,
+}
+
+/// Longest task line a [`StoppedSubagent`] keeps, in characters.
+pub const STOPPED_TASK_CHARS: usize = 160;
+
+/// How [`handback_prompt_note`] begins, whatever directory it names.
+const HANDBACK_NOTE_OPENING: &str = "You are a Mjolnir sub-agent. ";
+
+/// One line of the task a parent gave a child, from the child's first prompt:
+/// the parent's instructions without the handback note Mjolnir puts before
+/// them, and without the context and file ranges the parent attached after
+/// them. `report_dir` is the directory that note names, when one was recorded.
+#[must_use]
+pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<String> {
+    let mut task = initial_prompt;
+    if let Some(rest) = report_dir.and_then(|directory| {
+        task.strip_prefix(handback_prompt_note(directory).as_str())
+            .and_then(|rest| rest.strip_prefix("\n\n"))
+    }) {
+        task = rest;
+    } else if task.starts_with(HANDBACK_NOTE_OPENING)
+        && let Some((_, rest)) = task.split_once("\n\n")
+    {
+        task = rest;
+    }
+    for attachment in ["\n\n<parent_context>", "\n\n--- source "] {
+        if let Some((instructions, _)) = task.split_once(attachment) {
+            task = instructions;
+        }
+    }
+    let line = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= STOPPED_TASK_CHARS {
+        return Some(line);
+    }
+    let kept: String = line.chars().take(STOPPED_TASK_CHARS - 1).collect();
+    Some(format!("{}…", kept.trim_end()))
+}
+
+/// Whether a child had handed back its report for the parent's newest task:
+/// it is not working, a finished turn answers the parent's newest prompt, and
+/// that answer is final. The answer is the report the child handed back, or,
+/// for a child without the tool or one that ignored its reminder, the last
+/// message of a turn that finished normally. A turn that failed, was
+/// interrupted or stopped to ask a question has not handed anything back.
+///
+/// `working` says the child has a turn running or its execution is not idle.
+#[must_use]
+pub fn has_handed_back(
+    handback_tool: bool,
+    report: &SubagentReport,
+    working: bool,
+    last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    now_ms: i64,
+) -> bool {
+    let Some(turn) = last_turn else {
+        return false;
+    };
+    if working || awaiting_prompt(report.awaited_ordinal, Some(turn)) {
+        return false;
+    }
+    match report_state(handback_tool, report, Some(turn), &[], now_ms) {
+        ReportState::Delivered(_) => true,
+        ReportState::Pending { .. } => false,
+        ReportState::Fallback => matches!(
+            &turn.outcome,
+            crate::state::TurnOutcomeKind::Completed { stop_reason }
+                if crate::state::classify_prompt_completion(stop_reason)
+                    == crate::state::PromptCompletion::Finished
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,5 +1128,93 @@ mod tests {
             next.contains("Call wait again") && next.contains("not a failure"),
             "{next}"
         );
+    }
+
+    #[test]
+    fn a_task_summary_is_one_line_of_the_parents_own_instructions() {
+        let report_dir = "/workspace/p/.mj-agents/c1";
+        let prompt = format!(
+            "{}\n\nFix the parser.\nKeep the tests green.\n\n<parent_context>\nprivate\n</parent_context>\n\n--- source \"a.rs\", lines 1-2 (one-based, inclusive) ---\nfn a() {{}}",
+            handback_prompt_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&prompt, Some(report_dir)).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        // Without the recorded directory the note is still recognised.
+        assert_eq!(
+            task_summary(&prompt, None).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        // A child without the tool has no note before its instructions.
+        assert_eq!(
+            task_summary("Review the docs.", None).as_deref(),
+            Some("Review the docs.")
+        );
+        assert_eq!(task_summary("  \n ", None), None);
+        let long = "word ".repeat(100);
+        let cut = task_summary(&long, None).unwrap();
+        assert_eq!(cut.chars().count(), STOPPED_TASK_CHARS);
+        assert!(cut.ends_with("word…"), "{cut}");
+    }
+
+    #[test]
+    fn a_child_has_handed_back_only_when_its_final_report_answers_the_newest_prompt() {
+        let task = finished("task", "end_turn");
+        let delivered = SubagentReport {
+            handback: handback("task"),
+            ..SubagentReport::default()
+        };
+        assert!(has_handed_back(true, &delivered, false, Some(&task), 0));
+        // Still working, never finished a turn, or given a newer prompt.
+        assert!(!has_handed_back(true, &delivered, true, Some(&task), 0));
+        assert!(!has_handed_back(true, &delivered, false, None, 0));
+        let newer = SubagentReport {
+            awaited_ordinal: Some(9),
+            ..delivered.clone()
+        };
+        assert!(!has_handed_back(true, &newer, false, Some(&task), 0));
+        // Owes a report and has not been reminded, or was reminded just now.
+        assert!(!has_handed_back(
+            true,
+            &SubagentReport::default(),
+            false,
+            Some(&task),
+            0
+        ));
+        let reminded = SubagentReport {
+            reminder: reminder("task"),
+            ..SubagentReport::default()
+        };
+        assert!(!has_handed_back(true, &reminded, false, Some(&task), 1_000));
+        // Its last message is the report once the reminder went unanswered,
+        // and always for a child without the tool.
+        assert!(has_handed_back(
+            true,
+            &reminded,
+            false,
+            Some(&task),
+            1_000 + HANDBACK_REMINDER_GRACE_MS
+        ));
+        assert!(has_handed_back(
+            false,
+            &SubagentReport::default(),
+            false,
+            Some(&task),
+            0
+        ));
+        // A turn that failed or asked a question handed nothing back.
+        for stop_reason in ["cancelled", "awaiting_input", "refusal"] {
+            assert!(
+                !has_handed_back(
+                    false,
+                    &SubagentReport::default(),
+                    false,
+                    Some(&finished("task", stop_reason)),
+                    0
+                ),
+                "{stop_reason}"
+            );
+        }
     }
 }

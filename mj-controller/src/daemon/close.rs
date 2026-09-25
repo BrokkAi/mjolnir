@@ -110,25 +110,111 @@ impl RuntimeState {
         acknowledge_unpublished_work: bool,
     ) -> Result<()> {
         self.prepare_suspension(session_id).await?;
-        let children = blocking({
-            let session_id = session_id.to_owned();
+        self.stop_subagents_for_suspend(session_id).await?;
+        self.close_requested_session_with_ack(session_id.to_owned(), acknowledge_unpublished_work)
+            .await
+    }
+
+    /// Stop every active Mjolnir sub-agent of a parent that is being
+    /// suspended, so only the parent is checkpointed.
+    ///
+    /// A child's durable output is the report it hands back, so a child is
+    /// stopped and removed the way a destroy removes one, with no checkpoint
+    /// of its own; its conversation is put into SessionWiki first, so it stays
+    /// searchable. The children are listed on the parent's record before any
+    /// of them is stopped, so the parent's model can be told about them when
+    /// the parent resumes.
+    ///
+    /// Only reading and recording that list can fail this. A child that
+    /// cannot be stopped is logged and its records are removed anyway: it
+    /// never fails the parent's suspend.
+    pub(super) async fn stop_subagents_for_suspend(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+    ) -> Result<()> {
+        let stopped = blocking({
+            let parent_session_id = parent_session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
-                Ok(active_child_session_ids(&controller.state, &session_id))
+                let stopped = active_child_session_ids(&controller.state, &parent_session_id)
+                    .iter()
+                    .map(|child_id| {
+                        crate::controller::stopped_subagent(&controller.state, child_id)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if !stopped.is_empty() {
+                    crate::database::record_stopped_subagents(&parent_session_id, &stopped)?;
+                }
+                Ok(stopped)
+            }
+        })
+        .await
+        .context("list the sub-agents this suspend stops")?;
+        if stopped.is_empty() {
+            return Ok(());
+        }
+        let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
+        tracing::info!(
+            session_id = %parent_session_id,
+            stopped = stopped.len(),
+            not_handed_back,
+            "stopping sub-agents before suspending their parent"
+        );
+        // One pass indexes the parent's whole tree, so each child is
+        // destroyed below without indexing it again.
+        self.index_before_destroy(parent_session_id).await;
+        for child in stopped {
+            let child_id = child.child_session_id;
+            // A sub-agent borrows its parent's worker and owns no branch.
+            let Err(error) = Box::pin(
+                self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep),
+            )
+            .await
+            else {
+                continue;
+            };
+            tracing::warn!(
+                session_id = %parent_session_id,
+                %child_id,
+                error = format!("{error:#}"),
+                "could not stop a sub-agent for its parent's suspend; removing its records"
+            );
+            if let Err(error) = self.remove_subagent_records(&child_id).await {
+                tracing::warn!(
+                    session_id = %parent_session_id,
+                    %child_id,
+                    error = format!("{error:#}"),
+                    "could not remove the records of a sub-agent its parent's suspend stopped"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget a sub-agent whose stop failed: its record, its relation to the
+    /// parent, its conversation and its attachments. Its worker lives on the
+    /// parent's target, which the parent's suspend releases next.
+    async fn remove_subagent_records(self: &Arc<Self>, child_id: &str) -> Result<()> {
+        self.preempt_active_lifecycle(child_id).await?;
+        blocking({
+            let child_id = child_id.to_owned();
+            move || {
+                if let Err(error) = mj_core::attachment::AttachmentStore::controller(&child_id)
+                    .and_then(|store| store.remove_session_data())
+                {
+                    tracing::warn!(
+                        %child_id,
+                        error = format!("{error:#}"),
+                        "could not remove a stopped sub-agent's attachments"
+                    );
+                }
+                crate::database::delete_session(&child_id)
             }
         })
         .await?;
-        for child_id in children {
-            if let Err(error) = Box::pin(self.suspend_session(child_id.clone())).await {
-                tracing::warn!(%child_id, error = format!("{error:#}"), "child suspension failed");
-                return Err(mj_core::refusal::Refusal::precondition(format!(
-                    "sub-agent {child_id} could not be suspended; inspect that session and retry"
-                ))
-                .into());
-            }
-        }
-        self.close_requested_session_with_ack(session_id.to_owned(), acknowledge_unpublished_work)
-            .await
+        self.reload_controller().await?;
+        self.publish_revision();
+        Ok(())
     }
 
     pub(super) async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {

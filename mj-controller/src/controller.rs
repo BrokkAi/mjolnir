@@ -92,7 +92,7 @@ pub use resume::{
     raw_conversion_preview_for,
 };
 pub use reviewer::reviewer_stager;
-pub use subagents::RegisterSubagentRequest;
+pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     worker_binary_prerequisite_for_arch,

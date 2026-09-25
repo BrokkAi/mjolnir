@@ -365,6 +365,55 @@ impl Controller {
     }
 }
 
+/// Whether a sub-agent child has handed back its report for its parent's
+/// newest task, from what the store holds; see
+/// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
+/// that has never finished a turn, has not.
+pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
+    let Some(relation) = crate::database::load_subagent(child_session_id)? else {
+        return Ok(false);
+    };
+    let Some((execution, active_turn, last_turn)) =
+        crate::database::load_materialized_turn_outcome(child_session_id)?
+    else {
+        return Ok(false);
+    };
+    let report = crate::database::load_subagent_report(child_session_id)?;
+    let working = active_turn.is_some()
+        || !matches!(execution, mj_core::state::MaterializedExecutionState::Idle);
+    Ok(mj_core::subagent::has_handed_back(
+        relation.handback_tool,
+        &report,
+        working,
+        last_turn.as_ref(),
+        mj_core::clock::epoch_millis(),
+    ))
+}
+
+/// What a parent's record keeps about a child its suspend stops: the child's
+/// listed title, one line of its task, and whether it had handed back.
+pub fn stopped_subagent(
+    state: &mj_core::state::State,
+    child_session_id: &str,
+) -> Result<mj_core::subagent::StoppedSubagent> {
+    let relation = state
+        .subagents
+        .get(child_session_id)
+        .with_context(|| format!("unknown sub-agent session {child_session_id}"))?;
+    let title = state
+        .sessions
+        .get(child_session_id)
+        .map_or(relation.task_name.as_str(), SessionRecord::listed_title)
+        .to_owned();
+    let report_dir = crate::database::load_subagent_report(child_session_id)?.report_dir;
+    Ok(mj_core::subagent::StoppedSubagent {
+        child_session_id: child_session_id.to_owned(),
+        title,
+        task: mj_core::subagent::task_summary(&relation.initial_prompt, report_dir.as_deref()),
+        handed_back: subagent_has_handed_back(child_session_id)?,
+    })
+}
+
 fn sibling_path(path: &Path, parent_id: &str, child_id: &str) -> Result<PathBuf> {
     ensure!(
         path.ends_with(parent_id),

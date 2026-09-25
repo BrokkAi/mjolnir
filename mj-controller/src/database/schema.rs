@@ -596,6 +596,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: adds one table that only this build reads. It lists the
+    // sub-agents a parent's suspend stopped until the parent's model has been
+    // told. It is not a column of `sessions` because a full state save
+    // rewrites every session row from whatever copy the saving controller
+    // holds, which could drop the list or bring back one already delivered.
+    // Rows go with their parent's session row.
+    if version < 52 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS stopped_subagents (
+                 parent_session_id TEXT NOT NULL
+                     REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 child_session_id TEXT NOT NULL,
+                 record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+                 PRIMARY KEY(parent_session_id, child_session_id)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (52, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 52;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

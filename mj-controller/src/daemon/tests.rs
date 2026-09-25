@@ -3361,51 +3361,171 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     assert!(!restarted.close_is_requested(&session.id));
 }
 
+/// Suspending a parent stops its sub-agents instead of suspending them, and
+/// checkpoints only the parent. Each child is removed the way a destroy
+/// removes one, after SessionWiki has taken its conversation, and the parent's
+/// record lists what was stopped for its model. A child that cannot be
+/// stopped the ordinary way is removed anyway and never fails the parent.
 #[cfg(unix)]
 #[tokio::test]
-async fn failed_child_suspension_reports_the_child_on_the_retained_parent() {
-    const NAME: &str = "failed_child_suspension_reports_the_child_on_the_retained_parent";
-    const CHILD: &str = "MJ_TEST_SUSPENSION_CHILD_FAILURE";
+async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent() {
+    const NAME: &str = "suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent";
+    const CHILD: &str = "MJ_TEST_SUSPEND_STOPS_SUBAGENTS";
     if std::env::var_os(CHILD).is_none() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        // SessionWiki walks every harness store under the home directory, so
+        // the child process gets an empty home and an index of its own.
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
         crate::controller::test_support::IsolatedTest::new(
             crate::controller::test_support::test_name(module_path!(), NAME),
         )
         .env(CHILD, "1")
-        .isolated_store(root.path())
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
         .run();
         return;
     }
+    use mj_core::subagent::StoppedSubagent;
+
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Parent suspension").unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut parent = runtime_test_session("parent-suspend", &workspace.id, SessionState::Running);
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let finished_id = "11111111111111111111111111111111";
+    let stuck_id = "22222222222222222222222222222222";
+    // A parent with nothing to checkpoint yet, so its own suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
     parent.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(&parent.id),
+        worker_root: root.path().join(parent_id),
     });
     crate::database::save_session(&parent).unwrap();
-    let mut child = runtime_test_session("child-suspend", &workspace.id, SessionState::Running);
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(&child.id),
+
+    // A child that finished its task and handed back its report.
+    let mut finished = runtime_test_session(finished_id, &workspace.id, SessionState::Running);
+    finished.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(finished_id),
     });
-    crate::database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id))
-        .unwrap();
-    let state = test_runtime_state_loading_the_store();
+    finished.session_title_override = Some("Fix the parser".into());
+    let mut relation = runtime_test_subagent(finished_id, parent_id);
+    relation.initial_prompt = "Fix the off-by-one in the parser.".into();
+    relation.handback_tool = true;
+    crate::database::save_subagent_session(&finished, &relation).unwrap();
+    let mut conversation = mj_core::state::MaterializedSession::empty(finished_id);
+    conversation.applied_event_ordinal = 3;
+    conversation.applied_event_digest = format!("{:064x}", 3);
+    conversation.last_activity_at_ms = Some(1_700_000_000_003);
+    for (position, body) in [
+        mj_core::transcript::TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "fix the parser"})],
+        },
+        mj_core::transcript::TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "fixed"}})],
+            streaming: false,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let position = position as u64 + 1;
+        let streamed = matches!(body, mj_core::transcript::TranscriptBody::Agent { .. });
+        conversation
+            .transcript
+            .push(Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: format!("item-{position}"),
+                position,
+                latest_content_event_ordinal: streamed.then_some(position),
+                created_at_ms: 1_700_000_000_000 + position as i64,
+                last_changed_at_ms: 1_700_000_000_000 + position as i64,
+                body,
+            }));
+    }
+    conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "task-1".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 3,
+        completed_at_ms: 1_700_000_000_003,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    });
+    crate::database::save_materialized_session(&conversation).unwrap();
     assert!(
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            state.suspend_session(parent.id.clone())
+        crate::database::record_subagent_handback(
+            finished_id,
+            &mj_core::subagent::SubagentHandback {
+                command_id: "task-1".into(),
+                message: "Fixed the parser.".into(),
+                recorded_at_ms: 1_700_000_000_002,
+            },
         )
+        .unwrap()
+    );
+
+    // A child still at work on an SSH target whose settings are gone from
+    // the configuration, so the ordinary stop cannot reach it.
+    let mut stuck = runtime_test_session(stuck_id, &workspace.id, SessionState::Running);
+    stuck.title = "Review the docs".into();
+    stuck.target_template_id = "removed-target".into();
+    stuck.target = Some(mj_core::state::TargetLocator::SshBare {
+        host: "builder.invalid".into(),
+        workspace: PathBuf::from(format!(".local/share/hel/workspaces/{stuck_id}")),
+        worker_id: Some(stuck_id.into()),
+    });
+    crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
+        .unwrap();
+    // The index exists but has not seen either child yet.
+    sessionwiki::index::open().unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(parent_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    for child in [finished_id, stuck_id] {
+        assert!(
+            !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
+            "sub-agent {child} is removed, not suspended"
+        );
+    }
+    assert_eq!(
+        crate::database::load_stopped_subagents(parent_id).unwrap(),
+        [
+            StoppedSubagent {
+                child_session_id: finished_id.into(),
+                title: "Fix the parser".into(),
+                task: Some("Fix the off-by-one in the parser.".into()),
+                handed_back: true,
+            },
+            StoppedSubagent {
+                child_session_id: stuck_id.into(),
+                title: "Review the docs".into(),
+                task: Some("do the task".into()),
+                handed_back: false,
+            },
+        ]
+    );
+    // The removed child's conversation is still found by its id.
+    let found = state
+        .wiki_session(finished_id.to_owned())
         .await
         .unwrap()
-        .is_err()
-    );
-    let restored = crate::database::load_state().unwrap();
-    assert_eq!(restored.sessions[&parent.id].target, parent.target);
-    assert!(
-        restored.sessions[&parent.id]
-            .public_error()
-            .unwrap()
-            .contains(&child.id)
-    );
+        .expect("the stopped sub-agent is found by its id");
+    assert_eq!(found.status, mj_client::daemon::WikiSessionStatus::Archived);
 }

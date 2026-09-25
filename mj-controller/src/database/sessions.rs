@@ -125,6 +125,67 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
         .collect()
 }
 
+/// Record, on the parent's session, the sub-agents its suspend is about to
+/// stop. A child already listed keeps its place and takes the newer details,
+/// so a suspend that runs again after a restart lists each child once.
+pub fn record_stopped_subagents(
+    parent_session_id: &str,
+    stopped: &[mj_core::subagent::StoppedSubagent],
+) -> Result<()> {
+    let parent_session_id = parent_session_id.to_owned();
+    let stopped = stopped.to_vec();
+    submit_database_write("record_stopped_subagents", move |_| {
+        record_stopped_subagents_to(&database_path(), &parent_session_id, &stopped)
+    })
+}
+
+pub(super) fn record_stopped_subagents_to(
+    path: &Path,
+    parent_session_id: &str,
+    stopped: &[mj_core::subagent::StoppedSubagent],
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for child in stopped {
+        tx.execute(
+            "INSERT INTO stopped_subagents(parent_session_id, child_session_id, record_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(parent_session_id, child_session_id) DO UPDATE SET
+                 record_json = excluded.record_json",
+            params![
+                parent_session_id,
+                child.child_session_id,
+                serde_json::to_string(child)?
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The sub-agents a suspend of this session stopped and its model has not
+/// been told about yet, in the order they were recorded.
+pub fn load_stopped_subagents(
+    parent_session_id: &str,
+) -> Result<Vec<mj_core::subagent::StoppedSubagent>> {
+    load_stopped_subagents_from(&database_path(), parent_session_id)
+}
+
+pub(super) fn load_stopped_subagents_from(
+    path: &Path,
+    parent_session_id: &str,
+) -> Result<Vec<mj_core::subagent::StoppedSubagent>> {
+    let connection = open_reader(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM stopped_subagents
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get::<_, String>(0))?
+        .map(|row| serde_json::from_str(&row?).context("decode stopped sub-agent record"))
+        .collect()
+}
+
 /// Everything recorded about one child's report. A child with nothing
 /// recorded yet reads as the empty report.
 pub fn load_subagent_report(child_session_id: &str) -> Result<mj_core::subagent::SubagentReport> {
