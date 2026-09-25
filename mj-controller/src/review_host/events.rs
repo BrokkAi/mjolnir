@@ -112,6 +112,9 @@ pub(super) struct Prepared {
     /// handoff. Such a review skips reviewer processes and retries the exact
     /// primary command id.
     pub(super) resume_forward: Option<PendingForward>,
+    /// What the turn changed, when preparation captured it before choosing a
+    /// reviewer. The review starts from this capture instead of asking again.
+    pub(super) captured: Option<Vec<mj_core::relay::RepoDelta>>,
 }
 
 pub(super) struct PendingOpen {

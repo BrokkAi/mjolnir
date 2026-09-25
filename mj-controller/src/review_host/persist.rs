@@ -137,7 +137,17 @@ impl HostState {
                         let requests = driver.forward(command_id);
                         (driver, requests)
                     } else {
-                        TurnReviewDriver::start(seed)
+                        let (mut driver, requests) = TurnReviewDriver::start(seed);
+                        // Preparation already captured the change, so the
+                        // review starts from that capture instead of asking
+                        // the worker for the same one again.
+                        match pending.prepared.captured {
+                            Some(deltas) => {
+                                let requests = driver.delta_captured(deltas);
+                                (driver, requests)
+                            }
+                            None => (driver, requests),
+                        }
                     };
                 self.reviews.insert(
                     session_id.clone(),

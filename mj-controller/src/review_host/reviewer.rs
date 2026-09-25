@@ -157,6 +157,45 @@ pub(super) async fn prepare(
             "prompts are queued; the review waits for them".to_owned(),
         ));
     }
+    let state = {
+        let session = session_id.to_owned();
+        let environment = environment.clone();
+        tokio::task::spawn_blocking(move || environment.load_state(&session))
+            .await
+            .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+            .map_err(StartRefusal)?
+    };
+    // Capture what the turn changed before choosing a reviewer. Choosing one
+    // can take minutes (an Auto choice asks each candidate profile), and a
+    // turn that changed nothing needs no reviewer at all (I2-10). A capture
+    // that fails here is left to the review, which captures again and reports
+    // the failure the way it always has.
+    let captured = match handle
+        .reviewer(ReviewerAction::CaptureDelta {
+            baselines: state.baselines.clone(),
+        })
+        .await
+    {
+        Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
+        _ => None,
+    };
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(StartRefusal("review preparation cancelled".into()));
+    }
+    if captured
+        .as_deref()
+        .is_some_and(|deltas| !mj_review::delta::has_changes(deltas))
+    {
+        return Ok(Prepared {
+            state,
+            // No reviewer process starts for a turn with nothing to review.
+            reviewer: ReviewerIdentity::default(),
+            tier,
+            materialized: Box::new(snapshot.materialized),
+            resume_forward: None,
+            captured,
+        });
+    }
     let reviewer =
         resolve_after_background_work(environment, &handle, session_id, config, &cancelled)
             .await
@@ -167,19 +206,17 @@ pub(super) async fn prepare(
     let profile = reviewer.profile.clone();
     let session = session_id.to_owned();
     let environment = environment.clone();
-    let state = tokio::task::spawn_blocking(move || {
-        environment.check(&session, &profile)?;
-        environment.load_state(&session)
-    })
-    .await
-    .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
-    .map_err(StartRefusal)?;
+    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+        .await
+        .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+        .map_err(StartRefusal)?;
     Ok(Prepared {
         state,
         reviewer: reviewer.clone(),
         tier,
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
+        captured,
     })
 }
 
@@ -226,6 +263,7 @@ pub(super) async fn prepare_recovery(
         tier: ReviewTier::Quick,
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
+        captured: None,
     }))
 }
 

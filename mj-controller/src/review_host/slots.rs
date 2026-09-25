@@ -45,7 +45,13 @@ impl ReviewSlot {
             tier: self.driver.tier(),
             phase: self.driver.phase().clone(),
             roles: self.driver.roles(),
-            status: format!("{} · {}", self.reviewer.description(), self.driver.status()),
+            // A review that needed no reviewer (nothing changed, or only a
+            // handoff to finish) has no reviewer to describe.
+            status: if self.reviewer.profile.is_empty() {
+                self.driver.status().to_owned()
+            } else {
+                format!("{} · {}", self.reviewer.description(), self.driver.status())
+            },
             verdict,
         }
     }
