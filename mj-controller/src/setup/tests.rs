@@ -43,12 +43,21 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
     );
 }
 
+/// First launch as it finds this machine: `home` is the Codex home it would
+/// use, and `on_path` whether the `codex` command is installed.
+#[cfg(unix)]
+fn first_launch(path: &Path, home: &Path, on_path: bool) -> Result<()> {
+    initialize_local_startup_config_with(path, || Ok(home.to_path_buf()), || on_path)
+}
+
 #[cfg(unix)]
 #[test]
 fn first_terminal_launch_writes_a_local_codex_config_once() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    initialize_local_startup_config(&path).unwrap();
+    let home = directory.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    first_launch(&path, &home, false).unwrap();
     let config = Config::load_from(&path).unwrap();
     assert_eq!(config.profiles["codex"].kind, HarnessKind::Codex);
     assert!(config.profiles["codex"].home.is_absolute());
@@ -58,8 +67,35 @@ fn first_terminal_launch_writes_a_local_codex_config_once() {
     ));
     assert!(config.bundles.is_empty());
     let written = fs::read(&path).unwrap();
-    initialize_local_startup_config(&path).unwrap();
+    first_launch(&path, &home, false).unwrap();
     assert_eq!(fs::read(&path).unwrap(), written);
+}
+
+/// With no configuration, the first `mj` added a `codex` profile for a
+/// `~/.codex` that did not exist and a `codex` command that was not
+/// installed. Nothing said so: the wizard offered the profile and the launch
+/// failed naming Node.js (launch finding R13-1). With no sign of Codex the
+/// first launch now writes nothing, so the dashboard opens on the Get
+/// started panel.
+#[cfg(unix)]
+#[test]
+fn first_launch_without_codex_adds_no_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let home = directory.path().join(".codex");
+
+    first_launch(&path, &home, false).unwrap();
+
+    assert!(!path.exists(), "nothing is written for an absent Codex");
+    assert!(Config::load_from(&path).unwrap().profiles.is_empty());
+
+    // Codex installed but not yet signed in still gets the default profile:
+    // its login is the next step, and launch preflight and doctor say so.
+    first_launch(&path, &home, true).unwrap();
+    assert_eq!(
+        Config::load_from(&path).unwrap().profiles["codex"].kind,
+        HarnessKind::Codex
+    );
 }
 
 #[cfg(unix)]
@@ -67,21 +103,23 @@ fn first_terminal_launch_writes_a_local_codex_config_once() {
 fn local_startup_preserves_existing_settings_and_ignores_disabled_startup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
+    let home = directory.path().join(".codex");
+    fs::create_dir(&home).unwrap();
     let mut config = Config::default();
     config.phone.enabled = false;
     config.save_to(&path).unwrap();
-    initialize_local_startup_config(&path).unwrap();
+    first_launch(&path, &home, false).unwrap();
     assert!(!Config::load_from(&path).unwrap().phone.enabled);
 
     // Even a partially configured installation belongs to the user.
     let configured = "version = 2\n# keep this comment\n[targets.custom]\nkind = 'local-bare'\n";
     fs::write(&path, configured).unwrap();
-    initialize_local_startup_config(&path).unwrap();
+    first_launch(&path, &home, false).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), configured);
 
     let disabled = "version = 2\n[startup]\nenabled = false\n";
     fs::write(&path, disabled).unwrap();
-    initialize_local_startup_config(&path).unwrap();
+    first_launch(&path, &home, false).unwrap();
     let bootstrapped = Config::load_from(&path).unwrap();
     assert!(
         serde_json::to_value(&bootstrapped)
@@ -97,7 +135,7 @@ fn local_startup_preserves_existing_settings_and_ignores_disabled_startup() {
 
     let newer = "version = 999\nfuture_field = true\n";
     fs::write(&path, newer).unwrap();
-    assert!(initialize_local_startup_config(&path).is_err());
+    assert!(first_launch(&path, &home, false).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), newer);
 }
 

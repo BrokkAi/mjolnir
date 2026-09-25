@@ -358,6 +358,70 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
     check().unwrap();
 }
 
+/// On a host with neither Codex nor Node.js, the launch failed with "Codex
+/// launch preflight failed on local host; Node.js 22+ and npm must be
+/// available on the target PATH: Node.js is missing from PATH", which never
+/// says Codex is missing (launch finding R13-1). The failure now starts by
+/// saying so, with the install command `mj login` gives.
+#[cfg(unix)]
+#[test]
+fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = |kind| HarnessProfile {
+        enabled: true,
+        kind,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )]),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let failure = |kind| {
+        format!(
+            "{:#}",
+            preflight_harness(
+                &mj_core::config::TargetTemplate::LocalBare,
+                &profile(kind),
+                &ProcessExecutor,
+            )
+            .unwrap_err()
+        )
+    };
+
+    let codex = failure(HarnessKind::Codex);
+    assert!(
+        codex.starts_with(
+            "Codex is not installed on local host: `codex` is not on PATH. Install it with \
+             `npm install -g @openai/codex` (Node.js 22 or newer), sign in to it, then retry \
+             the launch: Node.js is missing from PATH"
+        ),
+        "{codex}"
+    );
+    let claude = failure(HarnessKind::Claude);
+    assert!(
+        claude.starts_with(
+            "Claude Code is not installed on local host: `claude` is not on PATH. Install it \
+             with `npm install -g @anthropic-ai/claude-code`, sign in to it, then retry the \
+             launch: Node.js is missing from PATH"
+        ),
+        "{claude}"
+    );
+
+    // With the agent's own command installed, only Node.js is missing, and
+    // the failure says that as before.
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", "#!/bin/sh\nexit 0\n");
+    let codex = failure(HarnessKind::Codex);
+    assert!(
+        codex.starts_with(
+            "Codex launch preflight failed on local host; Node.js 22+ and npm must be available \
+             on the target PATH: Node.js is missing from PATH"
+        ),
+        "{codex}"
+    );
+}
+
 #[test]
 fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() {
     use mj_core::config::HarnessKind;

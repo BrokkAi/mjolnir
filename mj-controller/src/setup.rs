@@ -148,28 +148,61 @@ pub enum SetupOutcome {
 /// Give an unconfigured terminal installation a local Codex profile and target
 /// without making remote/container setup a prerequisite for explicit session
 /// creation. This only writes configuration; it never creates a session.
+///
+/// Only when Codex is on this machine, though: its home exists or the `codex`
+/// command is on PATH. Otherwise nothing is written. The dashboard then opens
+/// on the Get started panel, which says no agent was found, and the next
+/// launch after Codex is installed adds the profile (launch finding R13-1).
 pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        let config = Config::load_from(config_path)?;
-        if config.is_unconfigured() {
-            let kind = HarnessKind::Codex;
-            let home = std::env::var_os(kind.home_env())
-                .map(|value| kind.home_from_environment(value))
-                .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
-                .context("locate Codex home for the default local profile")?;
-            let home = std::path::absolute(home).context("resolve Codex profile home")?;
-            Config::update_to(config_path, |fresh| {
-                if fresh.is_unconfigured() {
-                    configure_local_startup(fresh, home);
-                }
-                Ok(())
-            })?;
-        }
+        let kind = HarnessKind::Codex;
+        initialize_local_startup_config_with(
+            config_path,
+            || {
+                std::env::var_os(kind.home_env())
+                    .map(|value| kind.home_from_environment(value))
+                    .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
+                    .context("locate Codex home for the default local profile")
+            },
+            || {
+                crate::targets::program_on_path(
+                    kind.cli_binary_name(),
+                    std::env::var_os("PATH").as_deref(),
+                )
+            },
+        )?;
     }
     // Local bare targets are unsupported on Windows; retain explicit setup.
     #[cfg(not(unix))]
     let _ = config_path;
+    Ok(())
+}
+
+/// [`initialize_local_startup_config`] with the two facts it reads from this
+/// machine supplied: where the Codex home would be, and whether the `codex`
+/// command is installed.
+#[cfg(unix)]
+fn initialize_local_startup_config_with(
+    config_path: &Path,
+    codex_home: impl FnOnce() -> Result<PathBuf>,
+    codex_on_path: impl FnOnce() -> bool,
+) -> Result<()> {
+    let config = Config::load_from(config_path)?;
+    if !config.is_unconfigured() {
+        return Ok(());
+    }
+    let home = codex_home()?;
+    if !home.exists() && !codex_on_path() {
+        return Ok(());
+    }
+    let home = std::path::absolute(home).context("resolve Codex profile home")?;
+    Config::update_to(config_path, |fresh| {
+        if fresh.is_unconfigured() {
+            configure_local_startup(fresh, home);
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 

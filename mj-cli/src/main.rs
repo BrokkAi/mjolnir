@@ -1464,18 +1464,10 @@ fn login_spawn_error(
     if error.kind() != io::ErrorKind::NotFound {
         return error.into();
     }
-    let install = match kind {
-        mj_core::config::HarnessKind::Codex => {
-            " Install it with `npm install -g @openai/codex` (Node.js 22 or newer),".to_owned()
-        }
-        mj_core::config::HarnessKind::Claude => {
-            " Install it with `npm install -g @anthropic-ai/claude-code`,".to_owned()
-        }
-        other => format!(" Install the {} CLI,", other.display_name()),
-    };
     anyhow::anyhow!(
-        "`{program}` is not installed or is not on PATH, so the {} login cannot run.{install} then run `mj login --profile {profile_id}` again.",
-        kind.display_name()
+        "`{program}` is not installed or is not on PATH, so the {} login cannot run. {}, then run `mj login --profile {profile_id}` again.",
+        kind.display_name(),
+        kind.install_advice()
     )
 }
 

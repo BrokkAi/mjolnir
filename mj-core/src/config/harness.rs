@@ -373,6 +373,20 @@ impl HarnessKind {
         }
     }
 
+    /// How to install this harness's own CLI, as the start of a sentence:
+    /// "Install it with `npm install -g @openai/codex` (Node.js 22 or
+    /// newer)". `mj login` and launch preflight say it when the CLI is
+    /// missing.
+    pub fn install_advice(self) -> String {
+        match self {
+            Self::Codex => {
+                "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)".to_owned()
+            }
+            Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
+            other => format!("Install the {} CLI", other.display_name()),
+        }
+    }
+
     /// Every harness by product name, in [`Self::ALL`] order, as a list that
     /// ends with "or": "Codex, Claude Code, Kimi Code, Grok Build, or Muse
     /// Code". Messages that say no agent was found use it, so each one names
