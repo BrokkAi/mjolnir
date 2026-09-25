@@ -103,6 +103,21 @@ Jev checks are recorded in local diagnostic logs, including scores, thresholds, 
 
 Exact inputs contain conversation text and live runtime facts. They are stored in `jev-decisions/decisions.*.jsonl` under the daemon data directory and each worker root, with four rotating 8 MiB segments per owner. HTTP authentication headers and configured TypeSafe keys are not recorded. The hosted proxy does not log request content. Details expire through rotation; no permanent audit database or history backfill is created.
 
+## Session actions
+
+The **⋯** button on a session row, `.` on the Sessions pane, and `prefix+.`
+open the session's action menu. The menu groups its actions under dividers:
+
+- **Content**: **Changed files** lists the files the session's checkout has
+  changed, with the branch and its distance from upstream.
+- **Organize**: **Rename…**, **Pin…**, and **Unpin**.
+- **Lifecycle**: **Container settings** (container sessions only), **Move…**,
+  **Suspend…**, and **Restart**.
+- After a plain divider: **Destroy…**.
+
+The menu leaves out an action that does not apply to the session. An action
+that applies but cannot run yet stays in the menu, greyed, with the reason.
+
 ## Detach and reattach
 
 `prefix+q` detaches the current terminal client. Active turns, shell commands, and queued prompts keep running under the daemon.

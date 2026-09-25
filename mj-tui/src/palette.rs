@@ -568,10 +568,10 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
             };
             if section != Some(next) {
                 match next {
+                    0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
                     2 => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
-                    3 => lines.push(PaletteLine::Separator),
-                    _ => {}
+                    _ => lines.push(PaletteLine::Separator),
                 }
                 section = Some(next);
             }
@@ -989,15 +989,52 @@ mod tests {
         assert!(!joined.contains(" Recent "), "{joined}");
         assert!(!joined.contains(" Run "), "{joined}");
 
+        let content = row_of(&lines, "Content").expect("Content");
         let changed = row_of(&lines, "Changed files").expect("Changed files");
         let organize = row_of(&lines, "Organize").expect("Organize");
         let rename = row_of(&lines, "Rename…").expect("Rename");
         let lifecycle = row_of(&lines, "Lifecycle").expect("Lifecycle");
         let suspend = row_of(&lines, "Suspend…").expect("Suspend");
         let destroy = row_of(&lines, "Destroy…").expect("Destroy");
-        assert!(changed < organize && organize < rename, "{lines:#?}");
-        assert!(rename < lifecycle && lifecycle < suspend, "{lines:#?}");
-        assert!(suspend < destroy, "{lines:#?}");
+        assert!(content < changed && changed < organize, "{lines:#?}");
+        assert!(organize < rename && rename < lifecycle, "{lines:#?}");
+        assert!(lifecycle < suspend && suspend < destroy, "{lines:#?}");
+        assert_eq!(
+            session_menu_layout(&dashboard),
+            [
+                "[Content]",
+                "Changed files",
+                "[Organize]",
+                "Rename…",
+                "Pin…",
+                "Unpin",
+                "[Lifecycle]",
+                "Container settings",
+                "Move…",
+                "Suspend…",
+                "Restart",
+                "---",
+                "Destroy…",
+            ]
+        );
+    }
+
+    /// The open session menu as its lines: a named divider as `[name]`, the
+    /// unnamed divider as `---`, and each command by its menu label.
+    fn session_menu_layout(dashboard: &DashboardState) -> Vec<String> {
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the session menu is open");
+        };
+        palette_lines(dashboard, palette)
+            .into_iter()
+            .map(|line| match line {
+                PaletteLine::Heading(heading) => format!("[{heading}]"),
+                PaletteLine::Separator => "---".to_owned(),
+                PaletteLine::Command(index) => {
+                    session_menu_label(palette.entries[index].id).to_owned()
+                }
+            })
+            .collect()
     }
 
     #[test]
