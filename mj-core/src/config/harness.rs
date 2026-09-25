@@ -312,6 +312,20 @@ impl HarnessKind {
         }
     }
 
+    /// Home-relative paths inside a synced skills directory that the harness
+    /// writes and maintains itself. Skills sync neither reads, copies, nor
+    /// replaces them.
+    ///
+    /// Claude Code provisions `skills/synced/<org>_<user>/` from the user's
+    /// claude.ai account and re-syncs it on its own; `skills/.trash/` is where
+    /// it moves skills it removed.
+    pub const fn harness_owned_skill_paths(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["skills/synced", "skills/.trash"],
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse => &[],
+        }
+    }
+
     /// Lowercase stable identifier used in config, storage, and the HTTP API.
     pub const fn id(self) -> &'static str {
         match self {

@@ -40,7 +40,18 @@ pub(super) fn append_hel_target_environment(
 }
 
 pub(super) fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
-    copy_profile_entry_within(source, destination, &HashSet::new())
+    copy_profile_entry_within(source, destination, &HashSet::new(), &[])
+}
+
+/// [`copy_profile_entry`], leaving out the paths in `excluded`. Each is
+/// compared with the path the walk reaches it by, below `source` as given,
+/// not with where a link resolves.
+pub(super) fn copy_profile_entry_except(
+    source: &Path,
+    destination: &Path,
+    excluded: &[PathBuf],
+) -> Result<()> {
+    copy_profile_entry_within(source, destination, &HashSet::new(), excluded)
 }
 
 /// Copy one profile entry, following symlinks so a profile home that links its
@@ -51,6 +62,7 @@ pub(super) fn copy_profile_entry_within(
     source: &Path,
     destination: &Path,
     entered: &HashSet<PathBuf>,
+    excluded: &[PathBuf],
 ) -> Result<()> {
     std::fs::symlink_metadata(source)
         .with_context(|| format!("read staged profile entry metadata {}", source.display()))?;
@@ -114,13 +126,17 @@ pub(super) fn copy_profile_entry_within(
         // Sibling entries in one directory are independent, so recurse in
         // parallel; this is the level most likely to hold many files (e.g. a
         // skills or plugins tree).
-        entries.par_iter().try_for_each(|entry| {
-            copy_profile_entry_within(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                &entered,
-            )
-        })?;
+        entries
+            .par_iter()
+            .filter(|entry| !excluded.contains(&entry.path()))
+            .try_for_each(|entry| {
+                copy_profile_entry_within(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    &entered,
+                    excluded,
+                )
+            })?;
         std::fs::set_permissions(destination, metadata.permissions()).with_context(|| {
             format!(
                 "set permissions for staged profile directory {}",

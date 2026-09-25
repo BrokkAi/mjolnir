@@ -2804,6 +2804,49 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     );
 }
 
+/// Claude Code provisions `skills/synced/` from the user's claude.ai account,
+/// and keeps `skills/.trash/`, in whatever home it runs from, the session's
+/// included. Launch leaves both to Claude Code rather than copying the
+/// user's 4 MB of them into every session.
+#[test]
+fn staging_leaves_claude_codes_synced_skills_to_claude_code() {
+    let home = tempfile::tempdir().unwrap();
+    for (relative, contents) in [
+        ("skills/review/SKILL.md", "review skill\n"),
+        ("skills/synced/.bucket-org_user", ""),
+        ("skills/synced/org_user/manifest.json", "{}"),
+        ("skills/synced/org_user/docx/SKILL.md", "docx\n"),
+        ("skills/.trash/1789646711611/pdf/SKILL.md", "old pdf\n"),
+    ] {
+        let path = home.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    let staged = tempfile::tempdir().unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
+        "review skill\n"
+    );
+    assert!(!staged.path().join("skills/synced").exists());
+    assert!(!staged.path().join("skills/.trash").exists());
+    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+    assert_eq!(installed, expected);
+}
+
 /// Launch finding R4-8: a profile home linked `skills/tufte-viz` from
 /// elsewhere, and the linked skill held a 2.2 MB demo. Staging copied both
 /// through the link; the session's worker then failed every skills poll on the

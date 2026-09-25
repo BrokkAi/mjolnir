@@ -337,6 +337,9 @@ symbolic links:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 
+Claude Code's own `skills/synced/` and `skills/.trash/` directories are not
+copied; see [Skills synchronization](#skills-synchronization).
+
 History, caches, SSH and GPG keys, shell dotfiles, cloud configuration, editor
 state, and package-registry credentials are not copied merely because they sit
 under your user home. A raw local session uses the configured local harness home
@@ -371,6 +374,13 @@ Every supported harness resolves user skills from `skills/` beneath its profile
 home. Mjolnir treats the controller copy as authoritative and pushes it to live
 sessions on the same reconciliation cycle. This direction is deliberate: a
 session cannot overwrite the canonical skills tree on your machine.
+
+Claude Code also keeps skills of its own under `skills/`. It provisions
+`skills/synced/` from your claude.ai account and moves skills it removes into
+`skills/.trash/`. Both directories belong to Claude Code, which keeps them
+current in whatever home it runs from, including a session's home. Mjolnir does
+not stage, compare, or push them, and it never replaces or removes them in a
+session.
 
 The sync has protective limits:
 

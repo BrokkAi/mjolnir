@@ -153,6 +153,11 @@ enum Links {
 /// worker reads its session's home, and how the sync reads a home a session
 /// runs out of directly. [`collect_profile_skills`] reads a home that launch
 /// staging copies instead.
+///
+/// Both leave out the paths the harness maintains itself
+/// ([`HarnessKind::harness_owned_skill_paths`]), such as the skills Claude
+/// Code syncs from the user's claude.ai account: the harness keeps its own
+/// copy current in every home, so Mjolnir neither compares nor copies it.
 pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
     collect(kind, home, Links::Skip)
 }
@@ -172,7 +177,11 @@ fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive
         if !root.exists() {
             continue;
         }
-        collect_tree(&root, dir, &mut entries, links, &[])
+        let walk = Walk {
+            links,
+            harness_owned: kind.harness_owned_skill_paths(),
+        };
+        collect_tree(&root, dir, &mut entries, walk, &[])
             .with_context(|| format!("collect skills from {}", root.display()))?;
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -226,15 +235,25 @@ pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
     Ok(archive)
 }
 
+/// How one collection walks a skills tree.
+#[derive(Debug, Clone, Copy)]
+struct Walk {
+    links: Links,
+    /// Home-relative paths the harness maintains itself; the walk leaves them
+    /// out ([`HarnessKind::harness_owned_skill_paths`]).
+    harness_owned: &'static [&'static str],
+}
+
 /// `entered` holds the resolved directories already entered on this branch of
 /// the walk, which stops a followed link that points back at an ancestor.
 fn collect_tree(
     root: &Path,
     prefix: &str,
     entries: &mut Vec<SkillsEntry>,
-    links: Links,
+    walk: Walk,
     entered: &[std::path::PathBuf],
 ) -> Result<()> {
+    let links = walk.links;
     let mut entered = entered.to_vec();
     if links == Links::Follow {
         let resolved = std::fs::canonicalize(root)
@@ -256,6 +275,9 @@ fn collect_tree(
             bail!("skills file name {} is not valid UTF-8", path.display());
         };
         let relative = format!("{prefix}/{name}");
+        if walk.harness_owned.contains(&relative.as_str()) {
+            continue;
+        }
         let mut metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
             if links == Links::Skip {
@@ -273,7 +295,7 @@ fn collect_tree(
             };
         }
         if metadata.is_dir() {
-            collect_tree(&path, &relative, entries, links, &entered)?;
+            collect_tree(&path, &relative, entries, walk, &entered)?;
             continue;
         }
         if !metadata.is_file() {
@@ -343,20 +365,40 @@ fn first_report_of_skipped_skill(path: &Path) -> bool {
 /// failure mid-install never leaves a half-written tree. A symlinked
 /// destination is refused rather than followed, and entry paths outside the
 /// harness's synced directories are rejected outright.
+///
+/// The paths the harness maintains itself
+/// ([`HarnessKind::harness_owned_skill_paths`]) are not Mjolnir's to replace:
+/// an archive entry inside one is ignored like any other entry outside the
+/// whitelist, and whatever the session home holds there moves into the new
+/// tree unchanged.
 pub fn install_skills(kind: HarnessKind, home: &Path, archive: &SkillsArchive) -> Result<()> {
+    let harness_owned = kind.harness_owned_skill_paths();
     for dir in kind.synced_skill_dirs() {
         let entries = archive
             .entries
             .iter()
-            .filter(|entry| entry.path == *dir || entry.path.starts_with(&format!("{dir}/")))
+            .filter(|entry| within(&entry.path, dir))
+            .filter(|entry| !harness_owned.iter().any(|owned| within(&entry.path, owned)))
             .collect::<Vec<_>>();
-        install_tree(home, dir, &entries)
+        let kept = harness_owned
+            .iter()
+            .filter_map(|owned| owned.strip_prefix(&format!("{dir}/")))
+            .collect::<Vec<_>>();
+        install_tree(home, dir, &entries, &kept)
             .with_context(|| format!("install skills into {}", home.join(dir).display()))?;
     }
     Ok(())
 }
 
-fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry]) -> Result<()> {
+/// Whether a `/`-separated path is `directory` or lies beneath it.
+fn within(path: &str, directory: &str) -> bool {
+    path.strip_prefix(directory)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Swap `entries` in as the tree at `dir`, carrying the destination's `kept`
+/// children (names directly under `dir`) into the new tree as they are.
+fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry], kept: &[&str]) -> Result<()> {
     let destination = home.join(dir);
     let incoming = home.join(format!("{dir}.hel-incoming"));
     let retired = home.join(format!("{dir}.hel-retired"));
@@ -379,23 +421,29 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry]) -> Result<()> 
             );
         }
     }
-    if !entries.is_empty() {
-        for entry in entries {
-            let relative = entry
-                .path
-                .strip_prefix(&format!("{dir}/"))
-                .context("skills entry escaped its synced directory")?;
-            let target = incoming.join(relative);
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&target, &entry.bytes)?;
+    let kept = kept
+        .iter()
+        .copied()
+        .filter(|name| std::fs::symlink_metadata(destination.join(name)).is_ok())
+        .collect::<Vec<_>>();
+    for entry in entries {
+        let relative = entry
+            .path
+            .strip_prefix(&format!("{dir}/"))
+            .context("skills entry escaped its synced directory")?;
+        let target = incoming.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        std::fs::write(&target, &entry.bytes)?;
+    }
+    if !kept.is_empty() {
+        std::fs::create_dir_all(&incoming)?;
     }
     if destination.exists() {
         std::fs::rename(&destination, &retired)?;
     }
-    if entries.is_empty() {
+    if entries.is_empty() && kept.is_empty() {
         if let Err(error) = std::fs::remove_dir_all(&retired)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -407,7 +455,19 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry]) -> Result<()> 
         }
         return Ok(());
     }
-    if let Err(error) = std::fs::rename(&incoming, &destination) {
+    let swapped = move_children(&retired, &incoming, &kept).and_then(|()| {
+        std::fs::rename(&incoming, &destination).map_err(|error| {
+            if let Err(return_error) = move_children(&incoming, &retired, &kept) {
+                tracing::error!(
+                    retired = %retired.display(),
+                    error = %format!("{return_error:#}"),
+                    "could not return the harness's own skills to the previous tree after a failed swap"
+                );
+            }
+            anyhow::Error::new(error)
+        })
+    });
+    if let Err(error) = swapped {
         // Restore the previous tree so a failed swap never strands a session
         // without skills it had before.
         if let Err(restore_error) = std::fs::rename(&retired, &destination) {
@@ -430,6 +490,32 @@ fn install_tree(home: &Path, dir: &str, entries: &[&SkillsEntry]) -> Result<()> 
             %error,
             "could not remove retired skills tree after a successful swap"
         );
+    }
+    Ok(())
+}
+
+/// Move the named children of `from` into `to`. A failure moves the children
+/// already moved back, so the harness's own directories stay in one tree.
+fn move_children(from: &Path, to: &Path, names: &[&str]) -> Result<()> {
+    for (index, name) in names.iter().enumerate() {
+        if let Err(error) = std::fs::rename(from.join(name), to.join(name)) {
+            for moved in &names[..index] {
+                if let Err(back_error) = std::fs::rename(to.join(moved), from.join(moved)) {
+                    tracing::error!(
+                        path = %to.join(moved).display(),
+                        error = %back_error,
+                        "could not move a harness-owned skills directory back"
+                    );
+                }
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "move {} to {}",
+                    from.join(name).display(),
+                    to.join(name).display()
+                )
+            });
+        }
     }
     Ok(())
 }
@@ -517,7 +603,21 @@ mod tests {
     fn every_harness_syncs_a_skills_directory() {
         for kind in HarnessKind::ALL {
             assert_eq!(kind.synced_skill_dirs(), &["skills"]);
+            // Install carries a harness-owned path across by moving it, which
+            // works for a direct child of a synced directory only.
+            for owned in kind.harness_owned_skill_paths() {
+                assert!(
+                    kind.synced_skill_dirs().iter().any(|dir| owned
+                        .strip_prefix(&format!("{dir}/"))
+                        .is_some_and(|name| !name.is_empty() && !name.contains('/'))),
+                    "{kind:?} {owned}"
+                );
+            }
         }
+        assert_eq!(
+            HarnessKind::Claude.harness_owned_skill_paths(),
+            &["skills/synced", "skills/.trash"]
+        );
     }
 
     #[test]
@@ -808,6 +908,129 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Claude Code's own synced skills, as it lays them out under a Claude
+    /// home: a `.bucket-…` marker and an `<org>_<user>` directory holding a
+    /// manifest and one directory per skill, plus the `.trash` directory it
+    /// moves removed skills into.
+    fn write_claude_code_synced_skills(home: &Path) {
+        write(home, "skills/synced/.bucket-org_user", b"");
+        write(home, "skills/synced/org_user/manifest.json", b"{}");
+        write(home, "skills/synced/org_user/docx/SKILL.md", b"docx");
+        write(
+            home,
+            "skills/synced/org_user/docx/ooxml/schema.xsd",
+            b"schema",
+        );
+        write(home, "skills/.trash/1789646711611/pdf/SKILL.md", b"old pdf");
+    }
+
+    /// Claude Code provisions `skills/synced/` from the user's claude.ai
+    /// account and re-syncs it on its own; on the launch host its Office
+    /// schemas alone were 4.2 MB, enough to push the tree over the archive
+    /// limit. Mjolnir leaves it, and Claude Code's `.trash`, out of every
+    /// collection of a Claude home.
+    #[test]
+    fn claude_codes_own_synced_skills_are_left_out_of_collection() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/review/SKILL.md", b"review");
+        write_claude_code_synced_skills(home.path());
+
+        let user = [SkillsEntry {
+            path: "skills/review/SKILL.md".into(),
+            bytes: b"review".to_vec(),
+        }];
+        assert_eq!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries(),
+            user
+        );
+        assert_eq!(
+            collect_profile_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries(),
+            user
+        );
+        let mut session = user.to_vec();
+        session.extend(managed_skills(HarnessKind::Claude));
+        session.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            session_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries(),
+            session
+        );
+
+        // The directories are Claude Code's, not a rule about the name: in
+        // another harness's home a skill called `synced` is the user's.
+        let codex = collect_skills(HarnessKind::Codex, home.path()).unwrap();
+        assert!(
+            codex
+                .entries()
+                .iter()
+                .any(|entry| entry.path == "skills/synced/org_user/docx/SKILL.md"),
+            "{codex:?}"
+        );
+    }
+
+    /// A session's Claude Code keeps its own synced skills under the session
+    /// home, and a copy that an earlier sync or launch put there cannot be
+    /// told apart from it. An install replaces only what Mjolnir owns, and
+    /// never writes into Claude Code's directories.
+    #[test]
+    fn install_leaves_claude_codes_synced_skills_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/old/SKILL.md", b"old");
+        write_claude_code_synced_skills(home.path());
+
+        let pushed = archive(&[
+            ("skills/review/SKILL.md", b"review"),
+            ("skills/synced/org_user/docx/SKILL.md", b"pushed over"),
+        ]);
+        install_skills(HarnessKind::Claude, home.path(), &pushed).unwrap();
+
+        assert_eq!(
+            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
+            b"review"
+        );
+        assert!(!home.path().join("skills/old").exists());
+        for (relative, bytes) in [
+            ("skills/synced/.bucket-org_user", &b""[..]),
+            ("skills/synced/org_user/manifest.json", b"{}"),
+            ("skills/synced/org_user/docx/SKILL.md", b"docx"),
+            ("skills/synced/org_user/docx/ooxml/schema.xsd", b"schema"),
+            ("skills/.trash/1789646711611/pdf/SKILL.md", b"old pdf"),
+        ] {
+            assert_eq!(
+                std::fs::read(home.path().join(relative)).unwrap(),
+                bytes,
+                "{relative}"
+            );
+        }
+        assert!(!home.path().join("skills.hel-incoming").exists());
+        assert!(!home.path().join("skills.hel-retired").exists());
+        // The session reports what Mjolnir pushed, so the next reconcile
+        // finds nothing to do.
+        assert_eq!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries(),
+            [SkillsEntry {
+                path: "skills/review/SKILL.md".into(),
+                bytes: b"review".to_vec(),
+            }]
+        );
+
+        // Removing every Mjolnir skill still leaves Claude Code's own.
+        install_skills(HarnessKind::Claude, home.path(), &SkillsArchive::default()).unwrap();
+        assert!(!home.path().join("skills/review").exists());
+        assert_eq!(
+            std::fs::read(home.path().join("skills/synced/org_user/docx/SKILL.md")).unwrap(),
+            b"docx"
+        );
+        assert!(home.path().join("skills/.trash").exists());
     }
 
     #[test]

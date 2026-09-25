@@ -201,10 +201,18 @@ pub(in crate::controller) fn stage_profile(
     // Allowlist entries (and, within each, a copied directory's children) are
     // independent of one another, so copying them concurrently shortens the
     // stage step for profiles with large skills/plugins trees.
+    // What the harness maintains itself inside an allowlisted entry, such as
+    // the skills Claude Code syncs from the user's claude.ai account, stays
+    // behind: the harness provisions its own copy in the session home.
+    let harness_owned = harness
+        .harness_owned_skill_paths()
+        .iter()
+        .map(|owned| source.join(owned))
+        .collect::<Vec<_>>();
     allowlist.par_iter().try_for_each(|name| -> Result<()> {
         let from = source.join(name);
         if from.exists() {
-            copy_profile_entry(&from, &destination.join(name))?;
+            copy_profile_entry_except(&from, &destination.join(name), &harness_owned)?;
         }
         Ok(())
     })?;
