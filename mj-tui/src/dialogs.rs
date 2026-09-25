@@ -1504,7 +1504,16 @@ impl DashboardState {
                     self.begin_setup();
                     DashboardAction::None
                 } else if index == 1 {
-                    retry.map(|action| *action).unwrap_or(DashboardAction::None)
+                    let retry = retry.map(|action| *action).unwrap_or(DashboardAction::None);
+                    // A retried restore holds its archive as the wizard's
+                    // Resume does, so reopening the archive cannot start a
+                    // second restore beside it.
+                    if let DashboardAction::RestoreArchivedSession { wiki_id, .. } = &retry
+                        && !self.claim_archive_restore(wiki_id)
+                    {
+                        return DashboardAction::None;
+                    }
+                    retry
                 } else {
                     DashboardAction::None
                 }

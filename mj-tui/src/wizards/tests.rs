@@ -2856,6 +2856,146 @@ fn restoring_an_archive_names_the_step_and_the_archived_session() {
     assert!(rendered.contains("Pomegranate work"), "{rendered}");
 }
 
+/// Opens the restore wizard for `wiki_id`, walks it to the review, and
+/// presses its Restore button.
+fn press_archive_restore(dashboard: &mut DashboardState, wiki_id: &str) -> DashboardAction {
+    assert_eq!(
+        dashboard.begin_archive_restore(wiki_id.into(), "Pomegranate work".into(), None, None),
+        DashboardAction::None
+    );
+    ready_key(dashboard, key(KeyCode::Enter));
+    ready_key(dashboard, key(KeyCode::Enter));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected the restore wizard, got {:?}", dashboard.mode);
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
+    ready_key(dashboard, key(KeyCode::Enter))
+}
+
+fn restores(action: &DashboardAction, expected: &str) -> bool {
+    matches!(action, DashboardAction::RestoreArchivedSession { wiki_id, .. } if wiki_id == expected)
+}
+
+/// Restore on a restore's review closes the wizard, as a live resume does
+/// once its launch starts. The restore used to leave the review open, and a
+/// second press restored the archive a second time.
+#[test]
+fn restoring_an_archive_closes_the_wizard_when_restore_is_pressed() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let action = press_archive_restore(&mut dashboard, "wiki-1");
+    assert!(restores(&action, "wiki-1"), "{action:?}");
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "{:?}",
+        dashboard.mode
+    );
+
+    let second = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        !matches!(second, DashboardAction::RestoreArchivedSession { .. }),
+        "{second:?}"
+    );
+}
+
+/// Until a restore reports back, its archive cannot be restored again.
+/// Opening it is refused with a notice; other archives are not held up.
+#[test]
+fn an_archive_cannot_be_restored_again_until_its_restore_reports_back() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let first = press_archive_restore(&mut dashboard, "wiki-1");
+    assert!(restores(&first, "wiki-1"), "{first:?}");
+
+    assert_eq!(
+        dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into(), None, None),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "{:?}",
+        dashboard.mode
+    );
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Restore already started.")
+    );
+
+    let other = press_archive_restore(&mut dashboard, "wiki-2");
+    assert!(restores(&other, "wiki-2"), "{other:?}");
+
+    // The dashboard loop ends the restore when the daemon registers the
+    // new session. After that the archive can be restored again.
+    dashboard.finish_archive_restore(&first);
+    let again = press_archive_restore(&mut dashboard, "wiki-1");
+    assert!(restores(&again, "wiki-1"), "{again:?}");
+}
+
+/// The review refuses Restore for an archive whose restore has already
+/// started, whatever started it, and keeps the draft on screen.
+#[test]
+fn pressing_restore_after_the_restore_started_returns_no_action() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into(), None, None);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(dashboard.claim_archive_restore("wiki-1"));
+
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review),
+        "{:?}",
+        dashboard.mode
+    );
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Restore already started.")
+    );
+}
+
+/// A failed restore shows the launch-failure dialog over the dashboard, not
+/// over a restore review that could be pressed again. Its Retry sends the
+/// same restore once, and that retry holds the archive until it reports back.
+#[test]
+fn a_failed_restore_reports_the_failure_and_retries_it_once() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let restore = press_archive_restore(&mut dashboard, "wiki-1");
+    assert!(restores(&restore, "wiki-1"), "{restore:?}");
+
+    // What the dashboard loop does with the restore's failure report.
+    dashboard.finish_archive_restore(&restore);
+    dashboard.show_launch_failure("wiki restore failed", Some(restore.clone()));
+    let mut terminal = Terminal::new(TestBackend::new(90, 25)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw launch failure");
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("Launch failed"), "{text}");
+    assert!(text.contains("wiki restore failed"), "{text}");
+
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), restore);
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "{:?}",
+        dashboard.mode
+    );
+    assert_eq!(
+        dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into(), None, None),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "{:?}",
+        dashboard.mode
+    );
+
+    dashboard.finish_archive_restore(&restore);
+    let again = press_archive_restore(&mut dashboard, "wiki-1");
+    assert!(restores(&again, "wiki-1"), "{again:?}");
+}
+
 #[test]
 fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     let mut dashboard = dashboard_with_session(stopped_session());

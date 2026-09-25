@@ -1438,6 +1438,10 @@ impl DashboardContext {
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
                 let session_id = registered.session.id.clone();
+                // A restore has its session now; the archive may be restored
+                // again from here on.
+                self.dashboard
+                    .finish_archive_restore(&registered.retry_launch);
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
@@ -1487,6 +1491,7 @@ impl DashboardContext {
                 error,
                 retry_launch,
             } => {
+                self.dashboard.finish_archive_restore(&retry_launch);
                 self.dashboard
                     .show_launch_failure(error, Some(*retry_launch));
             }

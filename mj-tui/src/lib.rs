@@ -932,6 +932,11 @@ pub struct DashboardState {
     /// Monotonic identity for move preparation requests. This lives outside
     /// the wizard so a late reply cannot match a newly opened wizard.
     pub(crate) next_move_preparation_request_id: u64,
+    /// Archived transcripts, by wiki id, whose restore has been sent and has
+    /// not reported back yet. The restore wizard closes as soon as it sends
+    /// the restore, so this, not the wizard, is what keeps a second press or
+    /// a reopened wizard from restoring the same transcript twice.
+    pub(crate) archive_restores_in_flight: BTreeSet<String>,
     pub(crate) notices: Notices,
     /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
@@ -1104,6 +1109,7 @@ impl DashboardState {
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             next_move_preparation_request_id: 0,
+            archive_restores_in_flight: BTreeSet::new(),
             notices: Notices::default(),
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),

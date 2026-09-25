@@ -160,6 +160,11 @@ impl DashboardState {
                 .set("Restoring needs a profile and a target template.");
             return DashboardAction::None;
         }
+        // A wizard opened now could only end in a refused Restore.
+        if self.archive_restore_in_flight(&wiki_id) {
+            self.notices.set(super::resume::ARCHIVE_RESTORE_IN_FLIGHT);
+            return DashboardAction::None;
+        }
         // The same lists the wizard indexes into: `resume_wizard_profiles` for
         // an archive source, and every configured target.
         let profile = profile_id
