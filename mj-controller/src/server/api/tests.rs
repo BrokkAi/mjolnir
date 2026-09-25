@@ -1344,6 +1344,9 @@ async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
         session.lifecycle = ViewerLifecycleCategory::Failed;
         session.has_error = true;
         session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        // A checkpoint from an earlier suspension is what makes resume a
+        // way out (launch finding R6-1).
+        session.has_checkpoint = true;
         session.capabilities.prompt = false;
         session.capabilities.resume = true;
         session.capabilities.destroy = true;
@@ -1368,6 +1371,48 @@ async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
     );
     assert!(body.contains("mj resume --session session-1"), "{body}");
     assert!(body.contains("mj destroy --session session-1"), "{body}");
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
+/// Launch finding R6-1: a launch that failed before it saved a checkpoint was
+/// refused with advice to `mj resume` it, and that resume then failed in the
+/// background with "session has no checkpoint". The refusal names only what
+/// can work: destroying the session.
+#[tokio::test]
+async fn a_prompt_to_a_session_that_failed_before_its_first_checkpoint_offers_only_destroy() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        // The fixture record has no checkpoint, like a launch that failed
+        // before its first one. The capabilities are what the phone
+        // projection publishes for a failed session with no operation.
+        let session = &mut snapshot.sessions[0];
+        session.state = "error".into();
+        session.lifecycle = ViewerLifecycleCategory::Failed;
+        session.has_error = true;
+        session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        session.capabilities.prompt = false;
+        session.capabilities.resume = true;
+        session.capabilities.destroy = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"are you there"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await.to_string();
+    assert!(!body.contains("mj resume"), "{body}");
+    assert!(body.contains("before it saved a checkpoint"), "{body}");
+    assert!(body.contains("mj destroy --session session-1"), "{body}");
+    assert!(
+        body.contains("worker bootstrap failed: operation cancelled"),
+        "{body}"
+    );
     assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
@@ -3196,6 +3241,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
+    session.has_checkpoint = true;
     session.capabilities.resume = true;
     session.capabilities.prompt = false;
     session.incompatible_resume_targets.clear();
@@ -3312,6 +3358,70 @@ fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
     let refusal = resume_refusal(&session);
     assert!(refusal.contains("wait until it is suspended"), "{refusal}");
     assert!(!refusal.contains("close"), "{refusal}");
+}
+
+/// Launch finding R6-1: `mj resume` on a session with no checkpoint was
+/// accepted, and the daemon's resume then failed with "session has no
+/// checkpoint" where the caller never saw it. The API now refuses it at once,
+/// with that reason, the way it refuses every other resume that cannot work.
+#[tokio::test]
+async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            make_stopped(snapshot);
+            // A launch that failed before its first checkpoint.
+            let session = &mut snapshot.sessions[0];
+            session.has_checkpoint = false;
+            session.state = "error".into();
+            session.lifecycle = ViewerLifecycleCategory::Failed;
+            session.has_error = true;
+            session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        });
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the resume was admitted instead of refused")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    let error = body["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("session has no checkpoint"), "{error}");
+    assert!(error.contains("mj destroy --session session-1"), "{error}");
+    assert!(actions.try_recv().is_err(), "no resume reaches the daemon");
+}
+
+/// Launch finding R6-1: the published session says whether its record holds
+/// a checkpoint, which is what the resume route and the prompt refusal read.
+#[test]
+fn a_published_session_says_whether_it_has_a_checkpoint() {
+    let (config, mut state) = sample_config_state();
+    let record = state.sessions.get_mut("session-1").unwrap();
+    record.state = mj_core::state::SessionState::Error;
+    assert!(record.checkpoint.is_none());
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(!snapshot.sessions[0].has_checkpoint);
+
+    state.sessions.get_mut("session-1").unwrap().checkpoint =
+        Some(mj_core::state::CheckpointMetadata {
+            archive_path: "/private/archive.hel.zip".into(),
+            sha256: "a".repeat(64),
+            created_at: "now".into(),
+            event_frontier: 3,
+        });
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(snapshot.sessions[0].has_checkpoint);
+    let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();
+    assert!(
+        !published.contains("/private/archive.hel.zip"),
+        "{published}"
+    );
 }
 
 #[tokio::test]

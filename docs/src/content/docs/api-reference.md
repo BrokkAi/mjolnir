@@ -561,8 +561,10 @@ that fails answers `stopped` with the reason.
 
 This is the same operation the terminal's Resume wizard runs, with the same
 repository preflight and the same cross-harness handoff. A running session is
-refused with `409` — close it first, or use a move to change where a live
-session runs. Model and effort are not part of this request: apply them with
+refused with `409` — suspend it first, or use a move to change where a live
+session runs. A session with no checkpoint to restore, such as one whose launch
+failed before its first checkpoint, is refused with `409` too; remove it with
+`mj destroy`. Model and effort are not part of this request: apply them with
 `PATCH /sessions/{id}/config` once the wait returns.
 
 ### Get the work out
