@@ -8,13 +8,22 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::InitializeRequest;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Client};
 
+/// A store that holds one workspace named "editor", written without a daemon.
+/// `mj acp` checks its `--workspace` against the store when no daemon runs
+/// (launch finding R6-2), so the adapter serves only for a name it holds.
+fn store_with_editor_workspace(data: &std::path::Path) {
+    std::fs::create_dir_all(data).unwrap();
+    mj_controller::database::create_workspace_at(&data.join("mj.sqlite3"), "editor").unwrap();
+}
+
 /// The adapter answers a handshake, and reaching it never starts a daemon: a
-/// consumer must be able to launch the agent before anything is configured.
+/// consumer must be able to launch the agent before any daemon runs.
 #[tokio::test]
 async fn the_acp_command_answers_initialize_without_starting_a_daemon() {
     let storage = tempfile::tempdir().unwrap();
     let data = storage.path().join("data");
     let config = storage.path().join("config");
+    store_with_editor_workspace(&data);
     let agent = AcpAgent::new(
         AcpAgentConfig::new(env!("CARGO_BIN_EXE_mj"))
             .arg("acp")
@@ -74,6 +83,38 @@ fn the_acp_command_without_a_workspace_exits_with_how_to_make_one() {
     );
 }
 
+/// Launch finding R6-2: with no daemon running, `mj acp --workspace nosuch`
+/// exited 0 without a word once its input closed (cli/023), and through a
+/// client it started a daemon (3.5 s) only to refuse at `session/new`
+/// (cli/024). Like `mj new`, it now checks the name against the store at
+/// start, refuses with the list, exits 1, and starts no daemon.
+#[test]
+fn an_unknown_workspace_is_refused_at_start_from_the_store_without_a_daemon() {
+    let storage = tempfile::tempdir().unwrap();
+    let data = storage.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    mj_controller::database::create_workspace_at(&data.join("mj.sqlite3"), "alpha").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mj"))
+        .args(["acp", "--workspace", "nosuch"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", storage.path().join("config"))
+        .env("MJ_DAEMON_OWNER_PID", std::process::id().to_string())
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "nothing is served");
+    assert!(stderr.contains("unknown workspace \"nosuch\""), "{stderr}");
+    assert!(stderr.contains("alpha"), "{stderr}");
+    assert!(stderr.contains("mj workspaces create NAME"), "{stderr}");
+    assert!(
+        !data.join("daemon.json").exists(),
+        "refusing must not start the daemon"
+    );
+}
+
 /// A consumer that stops its agent with a signal rather than closing the pipe
 /// still gets its exit policy, and an adapter that created nothing has nothing
 /// to retire, so it leaves promptly and successfully without reaching for a
@@ -86,6 +127,7 @@ async fn a_terminated_adapter_applies_its_exit_policy_and_exits_cleanly() {
     let storage = tempfile::tempdir().unwrap();
     let data = storage.path().join("data");
     let config = storage.path().join("config");
+    store_with_editor_workspace(&data);
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mj"))
         .args(["acp", "--workspace", "editor", "--on-exit", "destroy"])
         .env("MJ_DATA_DIR", &data)

@@ -592,7 +592,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         (None, Some(name)) => {
             // An unknown name is refused without starting a stopped daemon,
             // as a missing one is (launch findings R2-14 and R5-9).
-            crate::refuse_unknown_workspace(name, true).await?;
+            crate::refuse_unknown_workspace(name).await?;
             Some(crate::resolve_store_workspace(Some(name)).await?)
         }
         (None, None) => return Err(crate::workspace_required("mj new").await),

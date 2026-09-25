@@ -25,7 +25,7 @@ mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
 
 | Flag | Meaning |
 | --- | --- |
-| `--workspace <name>` | The workspace the sessions are created in. Required: every session lives in a workspace the dashboard and the web viewer list. Without it `mj acp` exits at once, listing the workspaces and how to create one (`mj workspaces create <name>`). When the daemon is running, a name no workspace has is refused the same way at start; otherwise the first `session/new` refuses it. |
+| `--workspace <name>` | The workspace the sessions are created in. Required: every session lives in a workspace the dashboard and the web viewer list. Without it `mj acp` exits at once, listing the workspaces and how to create one (`mj workspaces create <name>`). A name no workspace has is refused the same way at start, checked against the running daemon's workspaces or, when no daemon is running, against the saved ones, so no daemon is started just to refuse it. |
 | `--profile <id>` | The [profile](/profiles/) whose account and harness run the session. Omitted follows your saved default. |
 | `--target <id>` | The [target](/targets/) the session runs on: this machine, a container, an SSH host, or an EC2 instance. Omitted follows your saved default. |
 | `--bundle <id>` | The [bundle](/workspaces-bundles/) to provision on a managed target. Without one, the working directory the client submits becomes the project, which is what a local target needs. |

@@ -561,10 +561,10 @@ async fn run_command(
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
             };
-            // A running daemon answers at once. Without one the adapter must
-            // not start one before a client asks for a session, so the name is
-            // checked then, and a refusal is reported when the adapter exits.
-            refuse_unknown_workspace(&workspace, false).await?;
+            // A running daemon's list, or the store's when none runs, as for
+            // `mj new`: an unknown name is refused before anything is served
+            // and without starting a daemon (launch finding R6-2).
+            refuse_unknown_workspace(&workspace).await?;
             let workspace = Some(workspace);
             acp::serve(args, workspace)
                 .await
@@ -1143,7 +1143,7 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
 /// not exist yet has none. A list that cannot be read is left out rather than
 /// hiding the reason.
 pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
-    let workspaces = listed_workspaces_without_starting(true).await;
+    let workspaces = listed_workspaces_without_starting().await;
     let workspaces = workspaces.map(|workspaces| {
         workspaces
             .into_iter()
@@ -1153,12 +1153,10 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
     anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
 }
 
-/// The workspaces as a running daemon lists them or, when no daemon runs and
-/// `read_store` allows it, as the store holds them. Never starts a daemon.
-/// `None` when no list could be read.
-async fn listed_workspaces_without_starting(
-    read_store: bool,
-) -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+/// The workspaces as a running daemon lists them or, when no daemon runs, as
+/// the store holds them. Never starts a daemon. `None` when no list could be
+/// read.
+async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
     match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
             .list_workspaces()
@@ -1174,9 +1172,6 @@ async fn listed_workspaces_without_starting(
             })
             .ok(),
         Err(error) if daemon::daemon_not_running(&error).is_some() => {
-            if !read_store {
-                return None;
-            }
             tokio::task::spawn_blocking(stored_workspaces)
                 .await
                 .ok()
@@ -1190,12 +1185,12 @@ async fn listed_workspaces_without_starting(
 }
 
 /// Refuse a `--workspace` name that no workspace carries, before anything
-/// starts a daemon (launch finding R5-9). The list comes from a running
-/// daemon or, when `read_store` allows it and none runs, from the store, as
-/// in [`workspace_required`]. A name that cannot be checked is let through;
-/// the daemon refuses it later if it is unknown.
-pub(crate) async fn refuse_unknown_workspace(name: &str, read_store: bool) -> Result<()> {
-    let Some(workspaces) = listed_workspaces_without_starting(read_store).await else {
+/// starts a daemon (launch findings R5-9 and R6-2). The list comes from a
+/// running daemon or, when none runs, from the store, as in
+/// [`workspace_required`]. A name that cannot be checked is let through; the
+/// daemon refuses it later if it is unknown.
+pub(crate) async fn refuse_unknown_workspace(name: &str) -> Result<()> {
+    let Some(workspaces) = listed_workspaces_without_starting().await else {
         return Ok(());
     };
     let wanted = name.trim().to_lowercase();
