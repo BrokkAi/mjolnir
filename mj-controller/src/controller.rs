@@ -1253,7 +1253,7 @@ pub(super) fn removable_profile_root(
         targets::TargetLocator::LocalBare { .. }
             if profile.kind == mj_core::config::HarnessKind::Muse =>
         {
-            local_muse_profile_root(session_id)
+            targets::local_muse_profile_root(session_id)
                 .to_string_lossy()
                 .into_owned()
         }
@@ -1272,14 +1272,6 @@ pub(super) fn removable_profile_root(
             format!(".local/share/hel/profiles/{session_id}")
         }
     }
-}
-
-/// Where a Muse session on this machine keeps its per-session profile root,
-/// which lies under the data directory rather than the worker root.
-pub(crate) fn local_muse_profile_root(session_id: &str) -> PathBuf {
-    mj_core::config::data_dir()
-        .join("profiles")
-        .join(session_id)
 }
 
 /// Resolve the login home on the machine that owns an editable path.

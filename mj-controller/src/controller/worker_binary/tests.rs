@@ -4533,6 +4533,107 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
     }
 }
 
+/// A local session's project-memory replica lands in its staged home and goes
+/// with the session. Closing the session removes the staged home with the
+/// replica inside, both for a harness staged under the worker root and for
+/// Muse, whose root lies under the data directory. The profile home it was
+/// staged from keeps its login and gains no `projects/` directory.
+#[cfg(unix)]
+#[test]
+fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_CLOSE_REMOVES_REPLICA_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "closing_a_local_session_removes_its_staged_home_and_memory_replica",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (index, kind) in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Muse]
+        .into_iter()
+        .enumerate()
+    {
+        let session_id = format!("{:032x}", index + 1);
+        let home = directory.path().join(format!("{}-home", kind.id()));
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.clone(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let marker = profile.authentication_marker();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, login_bytes(kind, 1)).unwrap();
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+        let (_, memory, target_home) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &locator,
+            &session_id,
+            None,
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+        let target_home = PathBuf::from(target_home);
+        assert!(memory.root.starts_with(&target_home), "{kind:?}");
+
+        // Stage and install as `prepare_worker_files` does on this machine.
+        let canonical = canonical_memory_root(&memory.project_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("MEMORY.md"), "- a remembered fact\n").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        stage_profile(&profile, stage.path()).unwrap();
+        stage_memory_replica(&memory, &target_home, stage.path()).unwrap();
+        std::fs::create_dir_all(&worker_root).unwrap();
+        for entry in std::fs::read_dir(stage.path()).unwrap() {
+            let entry = entry.unwrap();
+            copy_profile_entry(&entry.path(), &target_home.join(entry.file_name())).unwrap();
+        }
+        assert!(memory.root.join("MEMORY.md").is_file(), "{kind:?}");
+
+        targets::close_plan(&locator, &session_id)
+            .unwrap()
+            .execute(&targets::ProcessExecutor)
+            .unwrap();
+
+        assert!(!memory.root.exists(), "{kind:?}: the replica goes");
+        assert!(!target_home.exists(), "{kind:?}: the staged home goes");
+        assert!(!worker_root.exists(), "{kind:?}");
+        assert!(marker.is_file(), "{kind:?}: the profile keeps its login");
+        assert!(!home.join("projects").exists(), "{kind:?}");
+        assert!(
+            canonical.join("MEMORY.md").is_file(),
+            "the canonical project memory outlives the session"
+        );
+    }
+}
+
 /// Claude reads Mjolnir's MCP servers from its staged profile. A parent's
 /// entry serves delegation; a child's serves only `handback`, and the role
 /// travels in the arguments so one worker binary can serve either.

@@ -74,6 +74,21 @@ pub(super) async fn run_daemon_runtime(
         .await
         .context("earlier sessions' profile home link task failed")?;
     }
+    // Earlier releases left each such session's project-memory replica in the
+    // profile home, where nothing removed it when the session ended.
+    {
+        let config = config.clone();
+        let state = controller.state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::controller::local_profile_homes::remove_replicas_left_in_profile_homes(
+                &config,
+                &state,
+                &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(15)),
+            )
+        })
+        .await
+        .context("leftover project-memory replica cleanup task failed")?;
+    }
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .await
         .context("bind Mjolnir daemon loopback endpoint")?;

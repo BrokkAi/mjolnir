@@ -1,15 +1,16 @@
-//! Local bare sessions that an earlier release started from the profile home
-//! itself.
+//! What earlier releases left in the profile homes on this machine.
 //!
 //! Before this release, a local bare session of most harnesses ran straight out
 //! of the person's profile home, such as `~/.codex`. Every session now runs from
 //! a staged home at `<worker root>/profile`, and the controller derives every
 //! path it uses (the launch configuration, a checkpoint's harness home, the
-//! project-memory replica) from that one rule. A session an earlier release
-//! started is still running from the profile home, with its login, its native
-//! transcript and its project-memory replica there.
+//! project-memory replica) from that one rule. Daemon start deals with two
+//! kinds of leftovers from the old way.
 //!
-//! So that the rule still holds for such a session, daemon start puts a
+//! **Sessions still running from a profile home.** A session an earlier
+//! release started is still running from the profile home, with its login, its
+//! native transcript and its project-memory replica there. So that the rule
+//! still holds for such a session, daemon start puts a
 //! symbolic link at the staged path that points at the home the installed
 //! worker was started with. A restart with a refreshed launch configuration
 //! and a checkpoint then find the files the harness is using. Nothing is copied
@@ -22,11 +23,19 @@
 //! its staged home is a link. The link goes when the worker root does, at
 //! close or when the harness is replaced in place; a resume then stages the
 //! session like any other.
+//!
+//! **Replicas of ended sessions.** Such a session kept Mjolnir's replica of its
+//! project memory at `<profile home>/projects/hel-<key>-<session>/`, and
+//! closing the session left it there. Daemon start removes the ones whose
+//! session has ended ([`remove_replicas_of_ended_sessions`]).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use mj_core::config::HarnessKind;
 use mj_core::state::{State, TargetLocator};
+
+use crate::targets::{CommandExecutor, CommandSpec};
 
 /// A session whose staged home was linked to the profile home its worker runs
 /// from.
@@ -161,6 +170,192 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// A project-memory replica an earlier release left in a profile home, as the
+/// daemon found and removed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedReplica {
+    pub session_id: String,
+    /// The `projects/hel-<key>-<session>` directory.
+    pub directory: PathBuf,
+    /// Whether the directory itself is gone. A Claude Code project directory
+    /// also holds the session's native transcripts, which stay where they are.
+    pub removed_directory: bool,
+}
+
+/// The entries Mjolnir itself writes into a replica directory.
+const REPLICA_ENTRIES: [&str; 2] = ["memory", ".hel-memory-baseline"];
+
+/// Remove the project-memory replicas that earlier releases left in profile
+/// homes for sessions that have ended.
+///
+/// A directory is left alone while its session is in `live_sessions`, this
+/// instance's store, or while a running process names the session in its
+/// arguments. A local worker's arguments carry its worker root, which ends in
+/// the session id, so the second rule spares the running sessions of another
+/// Mjolnir instance that shares the profile home and keeps its own store. Only
+/// Mjolnir's own entries, `memory/` and `.hel-memory-baseline/`, are removed;
+/// the directory goes too when nothing else is left in it.
+pub fn remove_replicas_of_ended_sessions(
+    homes: impl IntoIterator<Item = PathBuf>,
+    live_sessions: &BTreeSet<String>,
+    running_process_arguments: &[String],
+) -> Vec<RemovedReplica> {
+    let mut removed = Vec::new();
+    let mut seen = BTreeSet::new();
+    for home in homes {
+        if !seen.insert(home.clone()) {
+            continue;
+        }
+        let projects = home.join("projects");
+        let entries = match std::fs::read_dir(&projects) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %projects.display(),
+                    "could not look for leftover project-memory replicas: {error}"
+                );
+                continue;
+            }
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(session_id) = name.to_str().and_then(replica_session_id) else {
+                continue;
+            };
+            if live_sessions.contains(session_id)
+                || running_process_arguments
+                    .iter()
+                    .any(|arguments| arguments.contains(session_id))
+            {
+                continue;
+            }
+            let directory = entry.path();
+            // Only a real directory is entered; a link is never followed.
+            if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
+                continue;
+            }
+            match remove_replica(&directory) {
+                // A Claude project directory whose replica went at an earlier
+                // start: only the session's native transcripts are left.
+                Ok(None) => {}
+                Ok(Some(removed_directory)) => {
+                    tracing::info!(
+                        session_id,
+                        directory = %directory.display(),
+                        removed_directory,
+                        "removed the project-memory replica an earlier release left for an ended session"
+                    );
+                    removed.push(RemovedReplica {
+                        session_id: session_id.to_owned(),
+                        directory,
+                        removed_directory,
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    session_id,
+                    directory = %directory.display(),
+                    "could not remove a leftover project-memory replica: {error}"
+                ),
+            }
+        }
+    }
+    removed
+}
+
+/// The session id in a replica directory name, `hel-<16 hex>-<32 hex>`, the
+/// only shape the project-memory replica slug takes.
+fn replica_session_id(name: &str) -> Option<&str> {
+    let (key, session_id) = name.strip_prefix("hel-")?.split_once('-')?;
+    let lower_hex = |text: &str, length: usize| {
+        text.len() == length
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    (lower_hex(key, 16) && lower_hex(session_id, 32)).then_some(session_id)
+}
+
+/// Remove Mjolnir's entries from one replica directory, then the directory
+/// itself when nothing else is in it. Returns whether the directory is gone,
+/// or `None` when nothing was removed.
+fn remove_replica(directory: &Path) -> std::io::Result<Option<bool>> {
+    let mut removed_entry = false;
+    for name in REPLICA_ENTRIES {
+        let path = directory.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path)?,
+            Ok(_) => std::fs::remove_file(&path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+        removed_entry = true;
+    }
+    match std::fs::remove_dir(directory) {
+        Ok(()) => Ok(Some(true)),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            Ok(removed_entry.then_some(false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The argument lists of every process running on this machine, or `None`
+/// when they cannot be listed. The same `ps` options work on Linux and macOS,
+/// and `-ww` keeps long arguments whole.
+pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<String>> {
+    let command = CommandSpec::new("ps", ["-A", "-ww", "-o", "args="])
+        .purpose("list running processes before removing leftover project-memory replicas");
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect(),
+        ),
+        Ok(output) => {
+            tracing::warn!(
+                status = output.status,
+                "could not list running processes: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!("could not list running processes: {error:#}");
+            None
+        }
+    }
+}
+
+/// Daemon start's cleanup of replicas that earlier releases left in the homes
+/// of the configured profiles. Nothing is removed when the running processes
+/// cannot be listed, because a live session of another instance could not be
+/// told apart from an ended one.
+pub fn remove_replicas_left_in_profile_homes(
+    config: &mj_core::config::Config,
+    state: &State,
+    executor: &impl CommandExecutor,
+) -> Vec<RemovedReplica> {
+    let Some(running) = running_process_arguments(executor) else {
+        tracing::warn!("left earlier releases' project-memory replicas in place");
+        return Vec::new();
+    };
+    let live_sessions = state.sessions.keys().cloned().collect::<BTreeSet<_>>();
+    let removed = remove_replicas_of_ended_sessions(
+        config.profiles.values().map(|profile| profile.home.clone()),
+        &live_sessions,
+        &running,
+    );
+    if !removed.is_empty() {
+        tracing::info!(
+            count = removed.len(),
+            "removed project-memory replicas that earlier releases left in profile homes"
+        );
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +465,134 @@ mod tests {
 
         // A second daemon start finds the links in place and changes nothing.
         assert!(link_profile_homes_of_earlier_sessions(&state).is_empty());
+    }
+
+    const KEY: &str = "d4ef94e0b5b8a9f4";
+
+    fn replica(home: &Path, session_id: &str) -> PathBuf {
+        let directory = home
+            .join("projects")
+            .join(format!("hel-{KEY}-{session_id}"));
+        for entry in REPLICA_ENTRIES {
+            std::fs::create_dir_all(directory.join(entry)).unwrap();
+            std::fs::write(directory.join(entry).join("MEMORY.md"), "- a fact\n").unwrap();
+        }
+        directory
+    }
+
+    /// Replicas an earlier release left in profile homes are removed once
+    /// their session has ended, and only then. Measured on fixture homes: a
+    /// Codex home with one replica per case, and a Claude home whose replica
+    /// directory also holds the session's native transcript.
+    #[test]
+    fn replicas_of_ended_sessions_are_removed_and_every_other_directory_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let codex = directory.path().join(".codex");
+        let claude = directory.path().join(".claude");
+        let stored = "0146ce088c16780675b6523eeab52218";
+        let running_elsewhere = "0858ecafaa06ecd148aa8bcf70bba899";
+        let ended = "189221e5da4a3e6ede59b26a668d55d4";
+        let ended_claude = "5a74db9c320cfb00d9f27fc092adf16b";
+        let stored_replica = replica(&codex, stored);
+        let running_replica = replica(&codex, running_elsewhere);
+        let ended_replica = replica(&codex, ended);
+        let claude_replica = replica(&claude, ended_claude);
+        std::fs::write(claude_replica.join("native.jsonl"), "{}\n").unwrap();
+        // Directories that are not replicas: the harness's own project
+        // directory, and names that only look like a replica.
+        for other in [
+            codex.join("projects/-home-me-app/native.jsonl"),
+            codex.join(format!("projects/hel-{KEY}-not-a-session/memory/MEMORY.md")),
+            codex.join(format!("projects/hel-{KEY}/memory/MEMORY.md")),
+        ] {
+            std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+            std::fs::write(&other, "kept").unwrap();
+        }
+        let live = BTreeSet::from([stored.to_owned()]);
+        // Another Mjolnir instance's worker for a session this store does not
+        // know, as `ps` shows it.
+        let running = vec![format!(
+            "/home/me/.local/share/mj-lab/workers/{running_elsewhere}/hel worker run --root \
+             /home/me/.local/share/mj-lab/workers/{running_elsewhere}"
+        )];
+
+        let removed = remove_replicas_of_ended_sessions(
+            [codex.clone(), claude.clone(), codex.clone()],
+            &live,
+            &running,
+        );
+
+        assert_eq!(
+            removed,
+            vec![
+                RemovedReplica {
+                    session_id: ended.to_owned(),
+                    directory: ended_replica.clone(),
+                    removed_directory: true,
+                },
+                RemovedReplica {
+                    session_id: ended_claude.to_owned(),
+                    directory: claude_replica.clone(),
+                    removed_directory: false,
+                },
+            ]
+        );
+        assert!(!ended_replica.exists());
+        assert!(stored_replica.join("memory/MEMORY.md").is_file());
+        assert!(running_replica.join("memory/MEMORY.md").is_file());
+        // The Claude transcript stays; only Mjolnir's entries went.
+        assert!(claude_replica.join("native.jsonl").is_file());
+        assert!(!claude_replica.join("memory").exists());
+        assert!(!claude_replica.join(".hel-memory-baseline").exists());
+        assert!(codex.join("projects/-home-me-app/native.jsonl").is_file());
+        assert!(
+            codex
+                .join(format!("projects/hel-{KEY}-not-a-session/memory/MEMORY.md"))
+                .is_file()
+        );
+        assert!(
+            codex
+                .join(format!("projects/hel-{KEY}/memory/MEMORY.md"))
+                .is_file()
+        );
+
+        // A second daemon start finds nothing more to remove.
+        assert!(remove_replicas_of_ended_sessions([codex, claude], &live, &running).is_empty());
+    }
+
+    /// When the running processes cannot be listed, a live session of another
+    /// instance cannot be told from an ended one, so nothing is removed.
+    #[test]
+    fn nothing_is_removed_when_running_processes_cannot_be_listed() {
+        struct FailingPs;
+        impl CommandExecutor for FailingPs {
+            fn execute(
+                &self,
+                _command: &CommandSpec,
+            ) -> anyhow::Result<crate::targets::CommandOutput> {
+                anyhow::bail!("ps is not installed")
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join(".codex");
+        let ended = replica(&home, "189221e5da4a3e6ede59b26a668d55d4");
+        let mut config = mj_core::config::Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Codex,
+                home,
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+
+        assert!(
+            remove_replicas_left_in_profile_homes(&config, &State::default(), &FailingPs)
+                .is_empty()
+        );
+        assert!(ended.join("memory/MEMORY.md").is_file());
     }
 }

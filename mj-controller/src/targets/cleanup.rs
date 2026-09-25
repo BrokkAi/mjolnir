@@ -38,11 +38,15 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
     let command = match locator {
         TargetLocator::LocalBare { .. } => {
             // The daemon dies before its root does: a survivor's next durable
-            // write would recreate the directory this command removes.
+            // write would recreate the directory this command removes. The
+            // session's staged profile home, and with it the project-memory
+            // replica and native history inside, goes with the worker root;
+            // a Muse session's lies under the data directory instead.
             let script = format!(
-                "{}\nrm -rf -- {}\n",
+                "{}\nrm -rf -- {} {}\n",
                 stop_worker_daemon_script(&session_worker_root),
                 posix_quote(&session_worker_root),
+                posix_quote(&local_muse_profile_root(session_id).to_string_lossy()),
             );
             CommandSpec::new("sh", ["-c", script.as_str()]).purpose(
                 "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
@@ -155,6 +159,15 @@ exit "$status""#;
     })
 }
 
+/// Where a Muse session on this machine keeps its per-session profile root,
+/// which lies under the data directory rather than the worker root, so closing
+/// the session names it separately.
+pub fn local_muse_profile_root(session_id: &str) -> PathBuf {
+    mj_core::config::data_dir()
+        .join("profiles")
+        .join(session_id)
+}
+
 /// Stop and remove only a child session's private worker state from a target
 /// owned by its parent. This never removes the target or project workspace.
 pub fn borrowed_worker_cleanup_plan(
@@ -165,7 +178,12 @@ pub fn borrowed_worker_cleanup_plan(
     let worker_root = worker_root(locator, child_session_id)?;
     let mut script = stop_worker_daemon_script(&worker_root);
     script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
-    if !matches!(locator, TargetLocator::LocalBare { .. }) {
+    if matches!(locator, TargetLocator::LocalBare { .. }) {
+        script.push_str(&format!(
+            "rm -rf -- {}\n",
+            posix_quote(&local_muse_profile_root(child_session_id).to_string_lossy()),
+        ));
+    } else {
         script.push_str(&format!(
             "rm -rf -- {} {}\n",
             posix_quote(&format!("/var/lib/hel/profiles/{child_session_id}")),

@@ -3194,7 +3194,13 @@ fn local_bare_worker_commands_are_direct_and_cleanup_is_exact() {
     assert_eq!(close.commands[0].args[0], "-c");
     let script = &close.commands[0].args[1];
     assert!(script.contains(&format!("hel_root='{worker_root}'")));
-    assert!(script.ends_with(&format!("rm -rf -- '{worker_root}'\n")));
+    // The worker root holds every staged profile home but Muse's, whose root
+    // lies under the data directory, so both go.
+    let muse_root = local_muse_profile_root(SESSION);
+    assert!(script.ends_with(&format!(
+        "rm -rf -- '{worker_root}' '{}'\n",
+        muse_root.display()
+    )));
 }
 
 /// A leaked daemon that survives teardown recreates the root it is asked
