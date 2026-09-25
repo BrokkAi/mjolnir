@@ -139,7 +139,8 @@ pub struct WorkerLaunchConfig {
     /// to the harness's home variable, which those releases always set.
     #[serde(default)]
     pub harness_home: PathBuf,
-    /// File name inside the staged harness home that proves authentication.
+    /// Path, relative to the staged harness home, of the file that proves
+    /// authentication, such as `auth.json` or `credentials/kimi-code.json`.
     /// An API-key profile is proven by its harness configuration file rather
     /// than a credential file, so the controller decides the name and the
     /// worker does not re-derive it. Configs persisted by older releases omit

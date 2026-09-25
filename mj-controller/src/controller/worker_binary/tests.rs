@@ -4258,6 +4258,281 @@ fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
     );
 }
 
+/// A fixture harness home shaped like a real one: the login and settings a
+/// session needs, next to native history, logs, caches and the skills the
+/// harness maintains itself. Each entry is `(home-relative path, whether a
+/// staged home gets it)`.
+fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
+    match kind {
+        HarnessKind::Codex => &[
+            ("auth.json", true),
+            ("config.toml", true),
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            (
+                "sessions/2026/09/25/rollout-2026-09-25T09-00-00-native.jsonl",
+                false,
+            ),
+            ("history.jsonl", false),
+            ("session_index.jsonl", false),
+            ("state_5.sqlite", false),
+            ("logs_2.sqlite", false),
+            ("thread_history_1.sqlite", false),
+            ("models_cache.json", false),
+            ("shell_snapshots/snapshot.sh", false),
+            (
+                "projects/hel-0123456789abcdef-0123456789abcdef0123456789abcdef/memory/MEMORY.md",
+                false,
+            ),
+            ("skills/.system/imagegen/SKILL.md", false),
+        ],
+        HarnessKind::Claude => &[
+            (".credentials.json", true),
+            (".claude.json", true),
+            ("settings.json", true),
+            ("CLAUDE.md", true),
+            ("skills/review/SKILL.md", true),
+            ("projects/-home-me-app/native.jsonl", false),
+            ("history.jsonl", false),
+            ("todos/native.json", false),
+            ("shell-snapshots/snapshot.sh", false),
+            ("statsig/cache", false),
+            ("skills/synced/account/SKILL.md", false),
+        ],
+        HarnessKind::Kimi => &[
+            ("credentials/kimi-code.json", true),
+            ("config.toml", true),
+            ("device_id", true),
+            ("skills/review/SKILL.md", true),
+            ("sessions/native/context.jsonl", false),
+            ("session_index.jsonl", false),
+            ("user-history/history.jsonl", false),
+            ("logs/kimi.log", false),
+            ("workspaces.json", false),
+            ("telemetry/events.json", false),
+        ],
+        HarnessKind::Grok => &[
+            ("auth.json", true),
+            ("config.toml", true),
+            ("agent_id", true),
+            ("skills/review/SKILL.md", true),
+            ("sessions/native/session_search.sqlite", false),
+            ("active_sessions.json", false),
+            ("logs/grok.log", false),
+            ("models_cache.json", false),
+            ("memory-v2/store.json", false),
+        ],
+        HarnessKind::Muse => &[
+            ("auth.json", true),
+            ("settings.json", true),
+            ("trust.json", true),
+            ("skills/review/SKILL.md", true),
+            ("cache/models.json", false),
+            ("logs/muse.log", false),
+        ],
+    }
+}
+
+/// Every regular file under `root`, as `/`-separated relative paths.
+fn files_under(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).unwrap();
+                files.insert(
+                    relative
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+        }
+    }
+    files
+}
+
+/// A staged home is what a session runs from on every target, this machine
+/// included. It gets exactly the login and settings the session needs, so the
+/// harness is signed in, and none of the profile home's native history, logs
+/// or caches.
+#[test]
+fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
+    for kind in HarnessKind::ALL {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        for (path, _) in fixture_home_entries(kind) {
+            let path = home.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, br#"{"fixture":true}"#).unwrap();
+        }
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+
+        let expected = fixture_home_entries(kind)
+            .iter()
+            .filter(|(_, staged)| *staged)
+            .map(|(path, _)| (*path).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(files_under(staged.path()), expected, "{kind:?}");
+        assert!(
+            mj_core::config::harness_authentication_marker(kind, staged.path()).is_file(),
+            "{kind:?} is signed in from its staged home"
+        );
+    }
+}
+
+/// A login as each harness writes it. A higher `generation` is a fresher copy
+/// of the same grant, which is what the credential sync orders copies by.
+fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
+    let login = match kind {
+        HarnessKind::Codex => serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+            },
+            "last_refresh": format!("2026-09-{:02}T09:00:00Z", 10 + generation),
+        }),
+        HarnessKind::Claude => serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": format!("access-{generation}"),
+                "refreshToken": format!("refresh-{generation}"),
+                "expiresAt": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
+        HarnessKind::Kimi => serde_json::json!({
+            "access_token": format!("access-{generation}"),
+            "refresh_token": format!("refresh-{generation}"),
+            "expires_at": 1_790_000_000_i64 + generation,
+        }),
+        HarnessKind::Grok => serde_json::json!({
+            "https://auth.x.ai::1": {
+                "key": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+                "expires_at": format!("2026-10-{:02}T09:00:00Z", 10 + generation),
+            }
+        }),
+        HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+    };
+    serde_json::to_vec(&login).unwrap()
+}
+
+/// The credential sync pushes a rotated login into a local session's staged
+/// home as it does into a container session's. The launch configuration tells
+/// the worker which file of its staged home holds the login. The sync compares
+/// that file with the profile's, finds the profile's fresher, and the worker's
+/// install writes it into the file the harness reads.
+#[test]
+fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
+    use mj_core::config::harness_authentication_marker;
+    use mj_core::credentials::{
+        SyncAction, read_credential_file, reconcile, write_credential_file,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+        let session_id = format!("{:032x}", index + 1);
+        let home = directory.path().join(format!("{}-home", kind.id()));
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.clone(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let canonical = profile.authentication_marker();
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let (launch, _, target_home) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &locator,
+            &session_id,
+            None,
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+
+        // The session runs from its own staged home, never the profile home,
+        // and its harness is pointed there on every operating system.
+        assert_eq!(launch.harness_home, PathBuf::from(&target_home), "{kind:?}");
+        assert_ne!(launch.harness_home, home, "{kind:?}");
+        assert_eq!(
+            kind.home_from_environment(&launch.environment[kind.home_env()]),
+            launch.harness_home,
+            "{kind:?}"
+        );
+        // Where the worker's credential endpoint reads and installs, which
+        // must be the file the harness reads its login from.
+        let endpoint = launch
+            .harness_home
+            .join(launch.authentication_marker.as_deref().unwrap());
+        assert_eq!(
+            endpoint,
+            harness_authentication_marker(kind, &launch.harness_home),
+            "{kind:?}"
+        );
+        // Muse's staged root lies under the data directory; the rest of the
+        // exchange is the same for it, except that Muse stores no refresh
+        // time, so the sync never orders two different Muse copies.
+        if kind == HarnessKind::Muse {
+            continue;
+        }
+        stage_profile(&profile, &launch.harness_home).unwrap();
+
+        // The profile's login rotates while the session runs.
+        std::fs::write(&canonical, login_bytes(kind, 2)).unwrap();
+        let (profile_copy, profile_bytes) = read_credential_file(kind, &canonical).unwrap();
+        let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+        assert_eq!(
+            reconcile(&profile_copy, &session_copy),
+            SyncAction::Push,
+            "{kind:?}"
+        );
+        write_credential_file(kind, &endpoint, &profile_bytes).unwrap();
+
+        assert_eq!(
+            std::fs::read(harness_authentication_marker(kind, &launch.harness_home)).unwrap(),
+            login_bytes(kind, 2),
+            "{kind:?}"
+        );
+        assert_eq!(std::fs::read(&canonical).unwrap(), login_bytes(kind, 2));
+    }
+}
+
 /// Claude reads Mjolnir's MCP servers from its staged profile. A parent's
 /// entry serves delegation; a child's serves only `handback`, and the role
 /// travels in the arguments so one worker binary can serve either.

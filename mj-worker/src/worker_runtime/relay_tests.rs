@@ -675,26 +675,34 @@ fn installed_credentials_are_owner_only() {
 
 #[test]
 fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
-    let home = tempfile::tempdir().unwrap();
-    let mut config = launch_config(&home.path().to_string_lossy());
-    config.harness = HarnessKind::Kimi;
-    config.environment = BTreeMap::from([(
-        "KIMI_CODE_HOME".to_owned(),
-        home.path().to_string_lossy().into_owned(),
-    )]);
-    let endpoint = credential_endpoint(&config).unwrap();
-    let bytes = serde_json::to_vec(&serde_json::json!({
-        "access_token": "access",
-        "expires_at": 1_755_000_000,
-    }))
-    .unwrap();
+    // A configuration persisted before the controller stated the marker, and
+    // one stating it the way the controller does now: both install where Kimi
+    // reads its login.
+    for stated in [None, Some("credentials/kimi-code.json".to_owned())] {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = launch_config(&home.path().to_string_lossy());
+        config.harness = HarnessKind::Kimi;
+        config.authentication_marker = stated.clone();
+        config.environment = BTreeMap::from([(
+            "KIMI_CODE_HOME".to_owned(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+        let endpoint = credential_endpoint(&config).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "access_token": "access",
+            "expires_at": 1_755_000_000,
+        }))
+        .unwrap();
 
-    unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
+        unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
 
-    assert_eq!(
-        std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
-        bytes
-    );
+        assert_eq!(
+            std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
+            bytes,
+            "{stated:?}"
+        );
+        assert!(!home.path().join("kimi-code.json").exists(), "{stated:?}");
+    }
 }
 
 #[test]

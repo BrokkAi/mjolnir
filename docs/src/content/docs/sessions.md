@@ -333,6 +333,8 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
+The Import view and `mj import` read the home of each enabled profile. A session Mjolnir runs writes its native history into its own staged home instead, on this machine as on every other target, so it never appears in the Import view, and your harness's own resume command, such as `codex resume` or `claude --resume`, does not list it either. Find it on the **Mjolnir** or **Archived** tab. See [Native session history](/profiles/#native-session-history).
+
 For scripting, select a specific native UUID or the latest session:
 
 ```sh

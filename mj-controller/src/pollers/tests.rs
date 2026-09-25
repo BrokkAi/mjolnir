@@ -827,6 +827,77 @@ fn a_healthy_credential_cycle_stays_out_of_the_ui() {
     );
 }
 
+/// Every harness's session on this machine is reconciled the way its session in
+/// a container is: against the same canonical profile home, with only the
+/// GitHub token left out. A local session an earlier release started from the
+/// profile home itself is left out while its staged home is a link to that
+/// home, because a push would go through the link into the person's own home.
+#[test]
+fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
+    let directory = tempfile::tempdir().unwrap();
+    for kind in mj_core::config::HarnessKind::ALL {
+        let mut controller = podman_controller(SessionState::Running);
+        let home = directory.path().join(kind.id());
+        std::fs::create_dir_all(&home).unwrap();
+        controller.config.profiles.insert(
+            kind.id().into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind,
+                home: home.clone(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        controller.config.targets.insert(
+            "local-bare".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let session = controller.state.sessions.values_mut().next().unwrap();
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        let session_id = session.id.clone();
+
+        let in_container = credential_sync_targets(&controller);
+        assert_eq!(in_container.len(), 1, "{kind:?}");
+        assert_eq!(in_container[0].profile_home, home, "{kind:?}");
+        assert_eq!(in_container[0].harness, kind);
+        assert!(in_container[0].sync_github_token, "{kind:?}");
+
+        let worker_root = directory
+            .path()
+            .join("workers")
+            .join(kind.id())
+            .join(&session_id);
+        std::fs::create_dir_all(worker_root.join("profile")).unwrap();
+        let session = controller.state.sessions.get_mut(&session_id).unwrap();
+        session.target_template_id = "local-bare".into();
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let on_this_machine = credential_sync_targets(&controller);
+        assert_eq!(on_this_machine.len(), 1, "{kind:?}");
+        assert_eq!(on_this_machine[0].profile_home, home, "{kind:?}");
+        assert_eq!(on_this_machine[0].harness, kind);
+        assert_eq!(
+            on_this_machine[0].authenticates_with_api_key,
+            in_container[0].authenticates_with_api_key
+        );
+        assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+
+        // Muse's staged root lies under the data directory, and Muse never
+        // ran from its profile home, so it has no linked form.
+        #[cfg(unix)]
+        if kind != mj_core::config::HarnessKind::Muse {
+            std::fs::remove_dir(worker_root.join("profile")).unwrap();
+            std::os::unix::fs::symlink(&home, worker_root.join("profile")).unwrap();
+            assert!(credential_sync_targets(&controller).is_empty(), "{kind:?}");
+        }
+    }
+}
+
 #[test]
 fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
     use mj_core::state::TargetLocator;

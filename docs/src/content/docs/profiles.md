@@ -355,13 +355,33 @@ Credential bytes travel only in direct controller-to-worker messages. They are
 excluded from the durable event journal and recovery archives. Fingerprints and
 freshness timestamps may appear in logs; credential contents do not.
 
+## Native session history
+
+A harness writes its own record of a session, such as a Codex rollout under
+`sessions/` or a Claude Code transcript under `projects/`, into the home it runs
+from. For a session Mjolnir runs, that is the session's staged home, not your
+profile home, on this machine as on any other target. Mjolnir includes the
+native record in the session's checkpoints and removes it with the session.
+
+What this means:
+
+- Your harness's own resume command, such as `codex resume` or
+  `claude --resume`, does not list sessions that Mjolnir runs. Find and resume
+  them through Mjolnir instead: the **Mjolnir** and **Archived** tabs of the
+  session dialog (`prefix+g`), `mj resume`, or `sessionwiki search`.
+- The **Import** tab and `mj import` read your profile homes, so they list only
+  sessions you ran outside Mjolnir.
+
 ## Credential reconciliation
 
 The daemon reconciles every profile with its live sessions about once per
 minute and may trigger an immediate pass after an authentication failure.
-Normally the controller-side profile home is canonical and replaces older
-session copies. If a rotating login becomes fresher inside a session, that copy
-can become canonical and then propagate to sibling sessions.
+Every session, including one on this machine, has its own copy of the login in
+its staged home. Normally the controller-side profile home is canonical and
+replaces older session copies. If a rotating login becomes fresher inside a
+session, that copy can become canonical and then propagate to sibling sessions.
+Several sessions of one profile therefore hold copies of one rotating grant,
+just as container sessions do.
 
 Codex logins are refreshed ahead of expiry when possible. For Claude, prefer the
 long-lived setup token above. A reconciliation failure is surfaced rather than

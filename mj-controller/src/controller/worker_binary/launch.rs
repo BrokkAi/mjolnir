@@ -600,11 +600,15 @@ pub(super) fn worker_launch_config(
             review_capture: false,
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
-            // The staged home mirrors the profile home, so the controller's
-            // marker file name is the one the worker must check.
+            // The staged home mirrors the profile home, so the marker's path
+            // within the profile home is the one the worker must check and
+            // the credential sync must write. Kimi's is nested
+            // (`credentials/kimi-code.json`); its file name alone named a file
+            // at the top of the staged home that Kimi never reads.
             authentication_marker: profile
                 .authentication_marker()
-                .file_name()
+                .strip_prefix(&profile.home)
+                .ok()
                 .map(|name| name.to_string_lossy().into_owned()),
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,
