@@ -74,8 +74,9 @@ impl DashboardState {
     /// Sessions has its own buttons, so it has no title menu.
     pub(crate) fn begin_support_pane_menu(&mut self, pane: SupportPane) {
         let (index, title, settings) = match pane {
+            SupportPane::Targets => (1, "Targets", CommandId::ManageTargets),
             SupportPane::Quota => (2, "Profiles", CommandId::ManageProfiles),
-            SupportPane::Sessions | SupportPane::Targets => return,
+            SupportPane::Sessions => return,
         };
         let entries = vec![
             (
@@ -753,35 +754,6 @@ mod tests {
         (popup.x + 1, popup.y + 1 + index)
     }
 
-    /// User request 2026-09-25: the Profiles title is a dropdown. Clicking it
-    /// opens a small menu hanging under the title, with Refresh and
-    /// Settings…, and leaves the keyboard where it was.
-    #[test]
-    fn clicking_the_profiles_title_opens_its_menu_under_the_title() {
-        let mut d = dashboard_with_session(running_session());
-        d.focus_prompt();
-        let lines = drawn(&mut d, 140, 40);
-        let pane = d.pane_areas.expect("pane areas")[2];
-        let title = point(&lines, "Profiles ▾");
-        assert_eq!(title.1, pane.y, "the dropdown mark is on the title row");
-
-        assert_eq!(click(&mut d, title), DashboardAction::None);
-        assert!(d.pane_menu.is_some());
-        assert_eq!(d.focus(), Focus::Prompt);
-
-        let (lines, popup) = drawn_menu(&mut d);
-        assert_eq!((popup.x, popup.y), (pane.x + 1, pane.y + 1), "{lines:#?}");
-        assert!(lines[usize::from(popup.y)].contains("Profiles"));
-        let (x, y) = entry(popup, 0);
-        assert_eq!(
-            cell_text(&lines, x, y, "Refresh".len()),
-            "Refresh",
-            "{lines:#?}"
-        );
-        let (x, y) = entry(popup, 1);
-        assert_eq!(cell_text(&lines, x, y, 9), "Settings…", "{lines:#?}");
-    }
-
     /// The text drawn in `width` cells from (`x`, `y`).
     fn cell_text(lines: &[String], x: u16, y: u16, width: usize) -> String {
         lines[usize::from(y)]
@@ -791,93 +763,162 @@ mod tests {
             .collect()
     }
 
+    /// The two panes with a title menu: the pane, its index in `pane_areas`,
+    /// the name on its title, the focus that owns it, and the command its
+    /// Settings… entry runs.
+    const TITLE_MENUS: [(SupportPane, usize, &str, Focus, CommandId); 2] = [
+        (
+            SupportPane::Targets,
+            1,
+            "Targets",
+            Focus::Targets,
+            CommandId::ManageTargets,
+        ),
+        (
+            SupportPane::Quota,
+            2,
+            "Profiles",
+            Focus::Quota,
+            CommandId::ManageProfiles,
+        ),
+    ];
+
+    /// User request 2026-09-25: the Targets and Profiles titles are
+    /// dropdowns. Clicking one opens a small menu hanging under that title,
+    /// with Refresh and Settings…, and leaves the keyboard where it was.
+    #[test]
+    fn clicking_a_support_pane_title_opens_its_menu_under_the_title() {
+        for (_, index, name, _, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            d.focus_prompt();
+            let lines = drawn(&mut d, 140, 40);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            let title = point(&lines, &format!("{name} ▾"));
+            assert_eq!(title.1, pane.y, "{name}: the dropdown mark is on the title");
+
+            assert_eq!(click(&mut d, title), DashboardAction::None);
+            assert!(d.pane_menu.is_some(), "{name}");
+            assert_eq!(d.focus(), Focus::Prompt, "{name}");
+
+            let (lines, popup) = drawn_menu(&mut d);
+            assert_eq!(
+                (popup.x, popup.y),
+                (pane.x + 1, pane.y + 1),
+                "{name}: {lines:#?}"
+            );
+            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
+            let (x, y) = entry(popup, 0);
+            assert_eq!(cell_text(&lines, x, y, 7), "Refresh", "{lines:#?}");
+            let (x, y) = entry(popup, 1);
+            assert_eq!(cell_text(&lines, x, y, 9), "Settings…", "{lines:#?}");
+        }
+    }
+
     /// Refresh runs the refresh `prefix+shift+r` runs, and Settings… opens
-    /// Setup on the same page as "Manage agent profiles".
+    /// Setup on the same page as "Manage runtimes" (Targets) or "Manage
+    /// agent profiles" (Profiles).
     #[test]
-    fn the_profiles_menu_refreshes_and_opens_the_profile_settings() {
-        let mut d = dashboard_with_session(running_session());
-        let lines = drawn(&mut d, 140, 40);
-        let title = point(&lines, "Profiles ▾");
-        click(&mut d, title);
-        let (_, popup) = drawn_menu(&mut d);
-        assert_eq!(click(&mut d, entry(popup, 0)), DashboardAction::RefreshAll);
-        assert!(d.pane_menu.is_none());
-        assert!(matches!(d.mode, Mode::Dashboard));
+    fn a_title_menu_refreshes_and_opens_the_pane_settings() {
+        for (_, _, name, _, settings) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            let lines = drawn(&mut d, 140, 40);
+            let title = point(&lines, &format!("{name} ▾"));
+            click(&mut d, title);
+            let (_, popup) = drawn_menu(&mut d);
+            assert_eq!(
+                click(&mut d, entry(popup, 0)),
+                DashboardAction::RefreshAll,
+                "{name}"
+            );
+            assert!(d.pane_menu.is_none());
+            assert!(matches!(d.mode, Mode::Dashboard));
 
-        drawn(&mut d, 140, 40);
-        click(&mut d, title);
-        let (_, popup) = drawn_menu(&mut d);
-        assert_eq!(click(&mut d, entry(popup, 1)), DashboardAction::None);
-        assert!(d.pane_menu.is_none());
-        let mut expected = dashboard_with_session(running_session());
-        expected.dispatch_command(CommandId::ManageProfiles);
-        assert!(matches!(d.mode, Mode::Setup(_)));
-        assert_eq!(d.dialog_layer_key(), expected.dialog_layer_key());
+            drawn(&mut d, 140, 40);
+            click(&mut d, title);
+            let (_, popup) = drawn_menu(&mut d);
+            assert_eq!(click(&mut d, entry(popup, 1)), DashboardAction::None);
+            assert!(d.pane_menu.is_none());
+            let mut expected = dashboard_with_session(running_session());
+            expected.dispatch_command(settings);
+            assert!(matches!(d.mode, Mode::Setup(_)), "{name}");
+            assert_eq!(d.dialog_layer_key(), expected.dialog_layer_key(), "{name}");
+        }
     }
 
-    /// The keyboard path: `.` on the focused Profiles pane opens the same
-    /// menu, Enter runs the entry under the cursor, and Esc closes it
-    /// without running anything.
+    /// The keyboard path: `.` on the focused pane opens the same menu, Enter
+    /// runs the entry under the cursor, and Esc closes it without running
+    /// anything.
     #[test]
-    fn dot_opens_the_profiles_menu_and_esc_closes_it() {
-        let mut d = dashboard_with_session(running_session());
-        drawn(&mut d, 140, 40);
-        d.focus = Focus::Quota;
-        assert_eq!(d.handle_key(key(KeyCode::Char('.'))), DashboardAction::None);
-        let (_, popup) = drawn_menu(&mut d);
-        let pane = d.pane_areas.expect("pane areas")[2];
-        assert_eq!((popup.x, popup.y), (pane.x + 1, pane.y + 1));
-        assert_eq!(d.handle_key(key(KeyCode::Esc)), DashboardAction::None);
-        assert!(d.pane_menu.is_none());
-        assert!(matches!(d.mode, Mode::Dashboard));
-        assert_eq!(d.focus(), Focus::Quota);
+    fn dot_opens_the_focused_pane_menu_and_esc_closes_it() {
+        for (_, index, name, focus, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            drawn(&mut d, 140, 40);
+            d.focus = focus;
+            assert_eq!(d.handle_key(key(KeyCode::Char('.'))), DashboardAction::None);
+            let (lines, popup) = drawn_menu(&mut d);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            assert_eq!((popup.x, popup.y), (pane.x + 1, pane.y + 1), "{name}");
+            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
+            assert_eq!(d.handle_key(key(KeyCode::Esc)), DashboardAction::None);
+            assert!(d.pane_menu.is_none(), "{name}");
+            assert!(matches!(d.mode, Mode::Dashboard));
+            assert_eq!(d.focus(), focus);
 
-        d.handle_key(key(KeyCode::Char('.')));
-        assert_eq!(
-            d.handle_key(key(KeyCode::Enter)),
-            DashboardAction::RefreshAll
-        );
-        d.handle_key(key(KeyCode::Char('.')));
-        d.handle_key(key(KeyCode::Down));
-        assert_eq!(d.handle_key(key(KeyCode::Enter)), DashboardAction::None);
-        assert!(matches!(d.mode, Mode::Setup(_)));
+            d.handle_key(key(KeyCode::Char('.')));
+            assert_eq!(
+                d.handle_key(key(KeyCode::Enter)),
+                DashboardAction::RefreshAll,
+                "{name}"
+            );
+            d.handle_key(key(KeyCode::Char('.')));
+            d.handle_key(key(KeyCode::Down));
+            assert_eq!(d.handle_key(key(KeyCode::Enter)), DashboardAction::None);
+            assert!(matches!(d.mode, Mode::Setup(_)), "{name}");
+        }
     }
 
-    /// A minimized Profiles pane is one row just above the footer, so its
-    /// menu opens upward, still starting under the title's first column.
+    /// Minimized, Targets and Profiles are the last two rows above the
+    /// footer, so neither has room for the menu under its title and the
+    /// menu opens upward, still starting at the title's first column.
     #[test]
-    fn the_minimized_profiles_menu_opens_above_its_row() {
-        let mut d = dashboard_with_session(running_session());
-        d.set_pane_size(SupportPane::Quota, crate::PaneSize::Minimized);
-        drawn(&mut d, 140, 40);
-        d.focus = Focus::Quota;
-        d.handle_key(key(KeyCode::Char('.')));
-        let (lines, popup) = drawn_menu(&mut d);
-        let pane = d.pane_areas.expect("pane areas")[2];
-        assert_eq!(pane.height, 1);
-        assert_eq!(popup.bottom(), pane.y, "{lines:#?}");
-        assert_eq!(popup.x, pane.x + 1);
-        let (x, y) = entry(popup, 0);
-        assert_eq!(cell_text(&lines, x, y, "Refresh".len()), "Refresh");
+    fn a_minimized_pane_menu_opens_above_its_row() {
+        for (_, index, name, focus, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            for pane in [SupportPane::Targets, SupportPane::Quota] {
+                d.set_pane_size(pane, crate::PaneSize::Minimized);
+            }
+            drawn(&mut d, 140, 40);
+            d.focus = focus;
+            d.handle_key(key(KeyCode::Char('.')));
+            let (lines, popup) = drawn_menu(&mut d);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            assert_eq!(pane.height, 1, "{name}");
+            assert!(popup.bottom() <= pane.y, "{name}: {lines:#?}");
+            assert_eq!(popup.x, pane.x + 1, "{name}");
+            let (x, y) = entry(popup, 0);
+            assert_eq!(cell_text(&lines, x, y, 7), "Refresh", "{lines:#?}");
+        }
     }
 
     /// The size chips share the title row with the dropdown and keep their
     /// own clicks: a chip resizes the pane and opens no menu.
     #[test]
-    fn the_profiles_size_controls_still_resize_the_pane() {
-        let mut d = dashboard_with_session(running_session());
-        drawn(&mut d, 140, 40);
-        for size in [crate::PaneSize::Minimized, crate::PaneSize::Standard] {
-            let chip = d
-                .pane_size_control_areas
-                .iter()
-                .find(|(pane, chip, _)| *pane == SupportPane::Quota && *chip == size)
-                .map(|(_, _, area)| *area)
-                .expect("the size chip is drawn");
-            click(&mut d, (chip.x + 1, chip.y));
-            assert_eq!(d.pane_size(SupportPane::Quota), size);
-            assert!(d.pane_menu.is_none());
+    fn the_size_controls_on_a_menu_title_still_resize_the_pane() {
+        for (pane_id, _, name, _, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
             drawn(&mut d, 140, 40);
+            for size in [crate::PaneSize::Minimized, crate::PaneSize::Standard] {
+                let chip = d
+                    .pane_size_control_areas
+                    .iter()
+                    .find(|(pane, chip, _)| *pane == pane_id && *chip == size)
+                    .map(|(_, _, area)| *area)
+                    .expect("the size chip is drawn");
+                click(&mut d, (chip.x + 1, chip.y));
+                assert_eq!(d.pane_size(pane_id), size, "{name}");
+                assert!(d.pane_menu.is_none(), "{name}");
+                drawn(&mut d, 140, 40);
+            }
         }
     }
 }

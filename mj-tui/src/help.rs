@@ -101,6 +101,7 @@ fn group(id: CommandId) -> &'static str {
         | CycleFocusReverse
         | CycleFocusedPaneSize
         | TogglePanePreset
+        | TargetsMenu
         | ProfilesMenu => GROUPS[3],
         ToggleTranscriptRendering | ToggleDictation => GROUPS[4],
         ChangeGoSetup | TargetActions | EditProfile | Refresh | OpenConfig | ManageProfiles

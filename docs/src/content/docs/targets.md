@@ -16,7 +16,9 @@ the target picker. Add SSH and AWS connections or customize runtime defaults in
 **prefix+s Settings → Machines** and **prefix+s Settings → Runtimes**. No setup
 command is required. A target that is checking or unavailable cannot advance;
 **prefix+shift+r** in the picker rechecks all targets. Dashboard
-**prefix+shift+r** refreshes host capacity. The optional
+**prefix+shift+r** refreshes host capacity. So does **Refresh** in the menu
+under the dashboard's Targets title (click the title, or press `.` while the
+pane has focus); the same menu's **Settings…** opens Settings → Runtimes. The optional
 `mj doctor --smoke` command exercises container creation and removal.
 
 ## Capability matrix

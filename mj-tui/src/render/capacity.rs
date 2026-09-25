@@ -150,7 +150,32 @@ pub(crate) fn render_capacity(
     let rows = capacity_table_rows(dashboard, now_epoch_seconds);
     let column_widths = capacity_column_widths(&rows);
     let focused = dashboard.focus == Focus::Targets;
-    let block = theme::panel(focused).title(" Targets ");
+    // On the combined surface (`size` is set) the title opens the pane's
+    // menu, and says so with a dropdown mark.
+    let label = crate::surface_controls::pane_title_label("Targets", size.is_some());
+    let pressed = size.is_some_and(|_| {
+        let title_budget = pane_title_content_width(
+            area.width,
+            dashboard.pane_maximize_enabled(SupportPane::Targets),
+        );
+        crate::surface_controls::register_pane_title_menu(
+            dashboard,
+            SupportPane::Targets,
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                u16::try_from(Line::raw(label.as_str()).width())
+                    .unwrap_or(u16::MAX)
+                    .min(title_budget),
+                area.height.min(1),
+            ),
+        )
+    });
+    let block = theme::panel(focused).title(if pressed {
+        Span::styled(label, theme::selection(true))
+    } else {
+        Span::raw(label)
+    });
     let block = size.map_or(block.clone(), |size| {
         block.title(pane_size_controls(
             size,
