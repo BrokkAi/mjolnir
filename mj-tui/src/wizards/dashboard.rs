@@ -337,6 +337,11 @@ impl DashboardState {
         if id == WizardControl::Back {
             let step = match wizard.step() {
                 WizardStep::Target => WizardStep::Profile,
+                WizardStep::Bundle | WizardStep::ProjectDirectory
+                    if wizard.target_step_skipped() =>
+                {
+                    WizardStep::Profile
+                }
                 WizardStep::Bundle | WizardStep::ProjectDirectory => WizardStep::Target,
                 step => step,
             };

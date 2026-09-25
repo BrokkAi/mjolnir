@@ -57,6 +57,7 @@ impl DashboardState {
             profile,
             bundle,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::new(Vec::new()),
 
             new_bundle_selected: 0,
@@ -127,6 +128,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
@@ -183,6 +185,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
@@ -242,6 +245,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
@@ -311,6 +315,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(
                 Vec::new(),
                 operation

@@ -109,11 +109,15 @@ on the dashboard. The full new-session wizard walks through:
 3. A project bundle, or an absolute project directory for a bare target.
 4. A final review, where supported targets can also receive attached directories.
 
+When only one target is available and it has no size to set, such as
+`localhost` on a host without Podman or Docker, the wizard chooses it and skips
+step 2. The review still shows the target.
+
 <figure class="shot">
   <a class="shot__zoom" href={shotNewSession.src} aria-label="Open the full-size screenshot: new-session profile selection">
     <Image src={shotNewSession} alt="Mjolnir new-session wizard at the profile-selection step over the terminal dashboard" />
   </a>
-  <figcaption>The four-step wizard starts with a harness profile, then resolves the target and project before launch.</figcaption>
+  <figcaption>The wizard starts with a harness profile, then resolves the target and project before launch.</figcaption>
 </figure>
 
 Press `Enter` to confirm. Mjolnir provisions the selected target in the background, starts the harness, and returns focus to the Prompt pane when the session is ready. The Sessions pane shows launch progress and reports failures instead of freezing the interface.

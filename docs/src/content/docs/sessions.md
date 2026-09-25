@@ -55,9 +55,15 @@ Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
 dashboard. The full wizard resolves four things:
 
 1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or Muse Code and the credentials to use.
-2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
-3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
+2. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
+3. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
+
+When only one target is available and it has no size to set, the wizard
+chooses that target and skips the target step. For example, on a host without
+Podman or Docker, `localhost` is the only target. The step numbers then count
+three steps, and the review still shows the target. A container or EC2 target
+keeps its step even when it is the only one, because you set its size there.
 
 **Create isolated checkout** on the final review controls whether a bare Git
 session gets a separate checkout or uses the selected directory directly. It
@@ -176,7 +182,9 @@ Provider archive metadata is shown read-only. Pressing Enter on a row opens the
 resume wizard, which lets you:
 
 - keep the original profile or choose another harness profile;
-- choose a compatible target and adjust its resources;
+- choose a compatible target and adjust its resources (when only one target
+  suits the session and it has no size to set, the wizard chooses it and
+  skips that step);
 - review or update repository origins if the archived Git history no longer exists at the configured source;
 - keep the pending prompt queue or discard it before launch.
 
@@ -249,7 +257,8 @@ Use **Move…** from the session action menu when a live session should continue
 with another profile, target, or both. Move is one daemon-owned operation: it
 prepares and checks the destination, interrupts the active turn only after you
 confirm, captures a verified checkpoint, and restores the same logical session
-on the destination.
+on the destination. Like the resume wizard, the Move wizard skips its target
+step when only one target suits the session and it has no size to set.
 
 How much is rebuilt depends on what changes. When the target, the attached
 directories, and the resource allocation all stay the same, Move replaces only

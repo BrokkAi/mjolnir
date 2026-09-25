@@ -1024,7 +1024,8 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         .collect::<String>();
     assert!(rendered.contains("No guardian approval mode"));
 
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so Enter on the profile step passes the
+    // target step.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected local project directory step")
@@ -2982,8 +2983,9 @@ fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
 
 #[test]
 fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
+    // The fixture's podman stays beside the bare target, so the target step
+    // has a choice and is shown.
     let mut config = config();
-    config.targets.clear();
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
@@ -3020,8 +3022,9 @@ fn resume_target_next_mouse_release_advances_to_review() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
+    // The fixture's podman stays beside the bare target: this checkout can
+    // move into a container, so the target step has a choice and is shown.
     let mut config = config();
-    config.targets.clear();
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
@@ -3755,6 +3758,349 @@ fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
     assert_eq!(target_ids, ["podman"]);
 }
 
+/// The fixture's targets plus the other standard local ones that
+/// `Config::with_local_targets` supplies on Linux: `localhost`, `podman` and
+/// `docker`.
+fn standard_local_targets_config() -> mj_core::config::Config {
+    let mut config = config();
+    let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
+        panic!("the fixture's podman target is a Podman container");
+    };
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config
+        .targets
+        .insert("docker".into(), TargetTemplate::LocalDocker { container });
+    config
+}
+
+/// A bare SSH target, which has no size to set.
+fn bare_ssh_target() -> TargetTemplate {
+    TargetTemplate::SshBare {
+        ssh: SshConnection {
+            host: "builder.example.com".into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        permissions: mj_core::config::PermissionMode::Guardian,
+        workspace_prefix: ".local/share/hel/workspaces".into(),
+    }
+}
+
+/// Answers the availability checks a wizard starts on its profile step, as
+/// the dashboard loop would: the targets in `unavailable` fail and every
+/// other one is ready.
+fn answer_target_checks(dashboard: &mut DashboardState, unavailable: &[&str]) {
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the profile step checks the targets");
+    };
+    for id in target_ids {
+        let result = if unavailable.contains(&id.as_str()) {
+            Err(format!("{id} is not installed"))
+        } else {
+            Ok(())
+        };
+        dashboard.apply_target_readiness(generation, id, result);
+    }
+}
+
+/// Activates the open wizard's Back button from the keyboard: Tab from
+/// Cancel, which comes just before it, then Enter.
+fn press_back(dashboard: &mut DashboardState) -> DashboardAction {
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.form.get_mut().focus(WizardControl::Cancel),
+        Mode::Resume(wizard) => wizard.form.get_mut().focus(WizardControl::Cancel),
+        _ => panic!("expected a wizard"),
+    }
+    dashboard.handle_key(key(KeyCode::Tab));
+    let focused = match &dashboard.mode {
+        Mode::New(wizard) => wizard.form.borrow().focused(),
+        Mode::Resume(wizard) => wizard.form.borrow().focused(),
+        _ => None,
+    };
+    assert_eq!(focused, Some(WizardControl::Back));
+    dashboard.handle_key(key(KeyCode::Enter))
+}
+
+fn new_wizard(dashboard: &DashboardState) -> &NewWizard {
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard
+}
+
+/// On a host without Podman or Docker, localhost is the only target the
+/// target step offers, so the wizard chooses it and goes from the profile
+/// step to the project step. The titles count three steps, Back skips the
+/// hidden step, and the review names the target.
+#[test]
+fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
+    // The last session ran on podman, so the draft starts there.
+    let session = stopped_session();
+    let state = State {
+        sessions: BTreeMap::from([(session.id.clone(), session)]),
+        ..State::default()
+    };
+    let mut dashboard =
+        DashboardState::new(standard_local_targets_config(), state, BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    assert_eq!(
+        nth_key(&dashboard.config.targets, new_wizard(&dashboard).target),
+        "podman"
+    );
+    answer_target_checks(&mut dashboard, &["podman", "docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("New session · 1/3 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert!(wizard.target_step_skipped);
+    assert_eq!(
+        nth_key(&dashboard.config.targets, wizard.target),
+        "localhost"
+    );
+    let project = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(
+        project.contains("New session · 2/3 local project"),
+        "{project}"
+    );
+
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
+    dashboard.handle_paste("/work/project");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory {
+            target_template_id: "localhost".into(),
+            directory: "/work/project".into(),
+        }
+    );
+    dashboard.apply_project_directory_validation("/work/project", Ok(()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("New session · 3/3 review"), "{review}");
+    assert!(review.contains("Target: localhost"), "{review}");
+
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+}
+
+/// A second target the step could offer keeps the step: one that is ready,
+/// and one whose availability check has not answered yet.
+#[test]
+fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
+    for podman_ready in [true, false] {
+        let mut dashboard = DashboardState::new(
+            standard_local_targets_config(),
+            State::default(),
+            BTreeMap::new(),
+        );
+        open_new_session_wizard(&mut dashboard);
+        if podman_ready {
+            answer_target_checks(&mut dashboard, &["docker"]);
+        } else {
+            let Some(DashboardAction::CheckTargetReadiness { generation, .. }) =
+                dashboard.take_prerequisite_check()
+            else {
+                panic!("the profile step checks the targets");
+            };
+            dashboard.apply_target_readiness(
+                generation,
+                "docker".into(),
+                Err("docker is not installed".into()),
+            );
+        }
+        let profile = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(profile.contains("New session · 1/4 profile"), "{profile}");
+
+        dashboard.handle_key(key(KeyCode::Enter));
+        let wizard = new_wizard(&dashboard);
+        assert_eq!(
+            wizard.step,
+            WizardStep::Target,
+            "podman ready: {podman_ready}"
+        );
+        assert!(!wizard.target_step_skipped);
+        let target = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(target.contains("New session · 2/4 target"), "{target}");
+    }
+}
+
+/// A container target is sized on the target step, so even as the only
+/// target its step is shown.
+#[test]
+fn a_lone_container_target_keeps_its_step_for_sizing() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &[]);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("New session · 2/4 target"), "{target}");
+}
+
+/// A stopped session that opens a directory on an SSH host, with that host's
+/// bare target added to the standard local ones.
+fn dashboard_with_raw_ssh_session(state: SessionState) -> DashboardState {
+    let mut session = stopped_session();
+    session.state = state;
+    session.target_template_id = "machine".into();
+    session.project_directory = Some("/srv/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    dashboard
+        .config
+        .targets
+        .insert("machine".into(), bare_ssh_target());
+    dashboard
+}
+
+/// A session that opens a directory on an SSH host can only resume on a bare
+/// target there. Every other target is ready, but it cannot use them, so the
+/// wizard chooses the SSH target without showing the step.
+#[test]
+fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
+    let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Stopped);
+    assert_eq!(
+        dashboard.begin_resume_for("session-1"),
+        DashboardAction::None
+    );
+    answer_target_checks(&mut dashboard, &[]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Resume · 1/2 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert!(wizard.target_step_skipped);
+    assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "machine");
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("Resume · 2/2 review"), "{review}");
+    assert!(review.contains("Target: machine"), "{review}");
+
+    press_back(&mut dashboard);
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    let DashboardAction::PreflightResumeRepositories { launch } =
+        dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Resume on the review starts the resume");
+    };
+    assert!(matches!(
+        launch.as_ref(),
+        DashboardAction::ResumeSession { target_template_id, .. } if target_template_id == "machine"
+    ));
+}
+
+/// A checkout on this machine can resume in place or move into a container,
+/// so a ready podman is a second choice and the step is shown.
+#[test]
+fn resume_shows_the_target_step_when_two_targets_suit_the_session() {
+    let mut session = stopped_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    assert_eq!(
+        dashboard.begin_resume_for("session-1"),
+        DashboardAction::None
+    );
+    answer_target_checks(&mut dashboard, &["docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Resume · 1/3 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(!wizard.target_step_skipped);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("Resume · 2/3 new target"), "{target}");
+}
+
+/// Move uses the resume wizard's rule: a live session on an SSH host can only
+/// move to a bare target there, so the step is skipped and the move is
+/// prepared for that target at once.
+#[test]
+fn move_skips_the_target_step_when_only_one_target_suits_the_session() {
+    let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Running);
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    answer_target_checks(&mut dashboard, &[]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Move · 1/2 profile"), "{profile}");
+
+    let preparation = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(
+            &preparation,
+            DashboardAction::MoveSession {
+                target_template_id,
+                preparation_request_id: Some(_),
+                ..
+            } if target_template_id == "machine"
+        ),
+        "{preparation:?}"
+    );
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert!(wizard.target_step_skipped);
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("Move · 2/2 confirm"), "{review}");
+    assert!(review.contains("Target: machine"), "{review}");
+
+    press_back(&mut dashboard);
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Profile);
+    assert!(
+        !wizard.preparing,
+        "leaving the review drops its preparation"
+    );
+}
+
+/// A live checkout on this machine can also move into a ready podman, so the
+/// Move wizard shows its target step.
+#[test]
+fn move_shows_the_target_step_when_two_targets_suit_the_session() {
+    let mut session = running_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    answer_target_checks(&mut dashboard, &["docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Move · 1/3 profile"), "{profile}");
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(!wizard.target_step_skipped);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("Move · 2/3 new target"), "{target}");
+}
+
 fn ctrl_space() -> KeyEvent {
     KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
 }
@@ -3945,7 +4291,7 @@ fn dashboard_at_local_project_step(history: &[&str]) -> DashboardState {
     }
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(
         matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::ProjectDirectory),
@@ -3974,7 +4320,7 @@ fn the_local_project_starts_as_the_repository_mj_was_started_in() {
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     dashboard.set_launch_project_directory(Some("/home/me/demo".into()));
     ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected the local project step")
@@ -4021,7 +4367,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 3;
     assert!(
         lines[field].contains("/work/remembered"),
         "the field draws its value: {:?}",
@@ -4135,7 +4481,7 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 3;
     let buttons = row_of(&lines, "Cancel");
     assert!(
         lines[field].contains("/srv/pro"),
@@ -4239,7 +4585,7 @@ fn opening_the_new_wizard_refreshes_recent_projects() {
     stored.remember_project_directory("local", std::path::Path::new("/work/used-this-run"));
     dashboard.apply_mount_history(stored.mount_history);
 
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected the New wizard")

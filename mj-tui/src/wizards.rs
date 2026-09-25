@@ -137,6 +137,10 @@ pub(crate) struct NewWizard {
     pub(crate) profile: usize,
     bundle: usize,
     pub(crate) target: usize,
+    /// Whether the draft passed the target step without showing it, because
+    /// that step offered one target and nothing else to decide. Back and the
+    /// step numbers in the title then leave that step out.
+    pub(crate) target_step_skipped: bool,
     pub(crate) mounts: MountWizard,
 
     pub(crate) new_bundle_selected: usize,
@@ -170,6 +174,7 @@ impl PartialEq for NewWizard {
             && self.profile == other.profile
             && self.bundle == other.bundle
             && self.target == other.target
+            && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.new_bundle_selected == other.new_bundle_selected
             && self.new_bundle_repositories == other.new_bundle_repositories
@@ -405,6 +410,10 @@ pub(crate) struct ResumeWizard {
 
     pub(crate) profile: usize,
     pub(crate) target: usize,
+    /// Whether the draft passed the target step without showing it, because
+    /// that step offered one target and nothing else to decide. Back and the
+    /// step numbers in the title then leave that step out.
+    pub(crate) target_step_skipped: bool,
     pub(crate) mounts: MountWizard,
 
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
@@ -428,6 +437,7 @@ impl PartialEq for ResumeWizard {
             && self.step == other.step
             && self.profile == other.profile
             && self.target == other.target
+            && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.resource_allocation == other.resource_allocation
             && self.aws_options == other.aws_options

@@ -31,6 +31,29 @@ fn launch_directory_chosen(dashboard: &DashboardState, wizard: &NewWizard) -> bo
         .is_some_and(|launch| std::path::Path::new(wizard.project_directory.trim()) == launch)
 }
 
+/// Whether the wizard's title leaves the target step out of its step
+/// numbers. On the profile step this is a forecast of whether Next there
+/// would pass the target step.
+fn target_step_hidden<W: WizardDraft>(dashboard: &DashboardState, wizard: &W) -> bool {
+    match wizard.step() {
+        WizardStep::Profile => dashboard.lone_target(wizard).is_some(),
+        _ => wizard.target_step_skipped(),
+    }
+}
+
+/// A step's place in its wizard's title, such as `2/4`. `position` and
+/// `total` count every step, with the target step second; a hidden target
+/// step is taken out of both.
+fn step_counter(position: usize, total: usize, target_hidden: bool) -> String {
+    let hidden = usize::from(target_hidden);
+    let position = if position > 2 {
+        position - hidden
+    } else {
+        position
+    };
+    format!("{position}/{}", total - hidden)
+}
+
 pub(crate) fn begin_form_frame(form: &mut Dialog<WizardControl>, _initial: WizardControl) {
     form.begin_frame();
 }
@@ -49,9 +72,14 @@ pub(crate) fn render_new_wizard(
     let focused_before_frame = form.focused();
     let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
+    let target_hidden = target_step_hidden(dashboard, wizard);
     if wizard.step == WizardStep::Review {
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&dashboard.config.targets[&target_id]);
+        let title = format!(
+            " New session · {} review ",
+            step_counter(4, 4, target_hidden)
+        );
         let bundle_id = (!raw_project)
             .then(|| nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle));
         render_review_wizard(
@@ -91,7 +119,7 @@ pub(crate) fn render_new_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                title: " New session · 4/4 review ",
+                title: &title,
                 submit_label: if wizard.remote_preflight_error.is_some() {
                     "Retry"
                 } else {
@@ -212,11 +240,11 @@ pub(crate) fn render_new_wizard(
         let title_line = dismissible_modal_title(
             &mut form,
             popup,
-            if local {
-                "New session · 3/4 local project"
-            } else {
-                "New session · 3/4 remote project"
-            },
+            format!(
+                "New session · {} {} project",
+                step_counter(3, 4, target_hidden),
+                if local { "local" } else { "remote" }
+            ),
             theme::title(true),
             true,
         );
@@ -462,7 +490,10 @@ pub(crate) fn render_new_wizard(
     }
     let (title, choices, selected): (_, Vec<PickerChoice>, _) = match wizard.step {
         WizardStep::Profile => (
-            " New session · 1/4 profile ",
+            format!(
+                " New session · {} profile ",
+                step_counter(1, 4, target_hidden)
+            ),
             profile_table(
                 dashboard
                     .config
@@ -473,7 +504,10 @@ pub(crate) fn render_new_wizard(
             wizard.profile,
         ),
         WizardStep::Bundle => (
-            " New session · 3/4 project bundle ",
+            format!(
+                " New session · {} project bundle ",
+                step_counter(3, 4, target_hidden)
+            ),
             bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
                 .into_iter()
                 .map(|id| {
@@ -491,7 +525,10 @@ pub(crate) fn render_new_wizard(
             wizard.bundle,
         ),
         WizardStep::Target => (
-            " New session · 2/4 target ",
+            format!(
+                " New session · {} target ",
+                step_counter(2, 4, target_hidden)
+            ),
             dashboard
                 .config
                 .targets
@@ -535,7 +572,7 @@ pub(crate) fn render_new_wizard(
     render_picker(
         frame,
         area,
-        title,
+        &title,
         choices,
         help,
         PickerNavigation {
@@ -1417,7 +1454,12 @@ pub(crate) fn render_resume_wizard(
                 }
             }
         };
-        let review_title = resume_wizard_title(wizard, "3/3 review", "3/3 confirm");
+        let counter = step_counter(3, 3, target_step_hidden(dashboard, wizard));
+        let review_title = resume_wizard_title(
+            wizard,
+            &format!("{counter} review"),
+            &format!("{counter} confirm"),
+        );
         render_review_wizard(
             frame,
             area,
@@ -1532,6 +1574,7 @@ pub(crate) fn render_resume_wizard(
         form.end_frame(initial);
         return;
     }
+    let target_hidden = target_step_hidden(dashboard, wizard);
     let (title, choices, selected, mut help) = match wizard.step {
         WizardStep::Profile => {
             let profiles = dashboard.resume_wizard_profiles(wizard);
@@ -1575,19 +1618,22 @@ pub(crate) fn render_resume_wizard(
             {
                 help.push(guardian_footnote());
             }
+            let step = format!(
+                "{} profile (cross-harness supported)",
+                step_counter(1, 3, target_hidden)
+            );
             (
-                resume_wizard_title(
-                    wizard,
-                    "1/3 profile (cross-harness supported)",
-                    "1/3 profile (cross-harness supported)",
-                ),
+                resume_wizard_title(wizard, &step, &step),
                 profile_table(rows),
                 wizard.profile,
                 help,
             )
         }
         WizardStep::Target => (
-            resume_wizard_title(wizard, "2/3 new target", "2/3 new target"),
+            {
+                let step = format!("{} new target", step_counter(2, 3, target_hidden));
+                resume_wizard_title(wizard, &step, &step)
+            },
             dashboard
                 .config
                 .targets

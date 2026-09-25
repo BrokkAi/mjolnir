@@ -325,7 +325,9 @@ Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it,
 
 Press **Create**, `n`, `N`, or `prefix+c` to open the full session
 creation wizard. It asks for the profile, then the target, then the project,
-and ends on a review step with the launch options. It then provisions the session in the selected workspace. The new row appears
+and ends on a review step with the launch options. The target step is skipped
+when only one target is available and it has no size to set. The wizard then
+provisions the session in the selected workspace. The new row appears
 immediately with background launch progress; when it is ready, the normal Prompt
 receives focus. No separate fast path or task-entry dialog remains.
 

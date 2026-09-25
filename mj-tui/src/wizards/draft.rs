@@ -49,6 +49,8 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn set_profile(&mut self, index: usize);
     fn target(&self) -> usize;
     fn set_target(&mut self, index: usize);
+    fn target_step_skipped(&self) -> bool;
+    fn set_target_step_skipped(&mut self, skipped: bool);
     fn mounts(&self) -> &MountWizard;
     fn mounts_mut(&mut self) -> &mut MountWizard;
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
@@ -113,6 +115,9 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn profile_count(&self, dashboard: &DashboardState) -> usize;
     /// Why this draft cannot use `target_id`, or `None` when it can.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
+    /// Whether this draft could use `target_id` once the target is ready.
+    /// Unlike [`Self::target_rejection`], this leaves availability out.
+    fn target_compatible(&self, dashboard: &DashboardState, target_id: &str) -> bool;
     /// Declares the controls of a step only one wizard has.
     fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>);
     /// Declares the review controls only one wizard has and answers whether
@@ -182,6 +187,14 @@ impl WizardDraft for NewWizard {
 
     fn set_target(&mut self, index: usize) {
         self.target = index;
+    }
+
+    fn target_step_skipped(&self) -> bool {
+        self.target_step_skipped
+    }
+
+    fn set_target_step_skipped(&mut self, skipped: bool) {
+        self.target_step_skipped = skipped;
     }
 
     fn mounts(&self) -> &MountWizard {
@@ -412,6 +425,11 @@ impl WizardDraft for NewWizard {
         dashboard.target_readiness_rejection(target_id)
     }
 
+    /// A new session can start on any target.
+    fn target_compatible(&self, _dashboard: &DashboardState, _target_id: &str) -> bool {
+        true
+    }
+
     fn dismiss_unfocused_extra_completions(&mut self, focused: Option<WizardControl>) {
         if focused != Some(WizardControl::ProjectDirectory) {
             self.project_directory.dismiss_completion();
@@ -601,6 +619,14 @@ impl WizardDraft for ResumeWizard {
         self.target = index;
     }
 
+    fn target_step_skipped(&self) -> bool {
+        self.target_step_skipped
+    }
+
+    fn set_target_step_skipped(&mut self, skipped: bool) {
+        self.target_step_skipped = skipped;
+    }
+
     fn mounts(&self) -> &MountWizard {
         &self.mounts
     }
@@ -659,10 +685,14 @@ impl WizardDraft for ResumeWizard {
         dashboard.request_move_preparation_for_review(self, profile_id)
     }
 
-    /// Resume has no bundle or project step, so Back always returns to the
-    /// target picker.
+    /// Resume has no bundle or project step, so Back returns to the target
+    /// picker, or to the profile picker when the target step was skipped.
     fn review_back_step(&self, _dashboard: &DashboardState) -> WizardStep {
-        WizardStep::Target
+        if self.target_step_skipped {
+            WizardStep::Profile
+        } else {
+            WizardStep::Target
+        }
     }
 
     /// A move preparation describes one exact destination draft, so every
@@ -740,6 +770,12 @@ impl WizardDraft for ResumeWizard {
 
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
         dashboard.resume_target_rejection(&self.session_id, target_id)
+    }
+
+    fn target_compatible(&self, dashboard: &DashboardState, target_id: &str) -> bool {
+        dashboard
+            .resume_target_incompatibility(&self.session_id, target_id)
+            .is_none()
     }
 
     fn declare_extra_step(&self, _dashboard: &DashboardState, _form: &mut Dialog<WizardControl>) {
