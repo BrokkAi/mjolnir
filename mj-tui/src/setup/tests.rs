@@ -2595,9 +2595,24 @@ fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description()
     );
 
     dashboard.begin_settings_section("continuation", None);
-    let text = drawn(&mut dashboard, 100, 30)
-        .iter()
-        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let body = dashboard
+        .frame_surfaces()
+        .surface(mj_chat::selection::SurfaceId::ModalBody)
+        .expect("rendered Settings modal surface")
+        .rect;
+    let buffer = terminal.backend().buffer();
+    // Join only the modal's cells: backdrop text beside a wrapped help line
+    // must not become part of its description.
+    let text = (body.y..body.bottom())
+        .map(|y| {
+            (body.x..body.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join(" ");
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");

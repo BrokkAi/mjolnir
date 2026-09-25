@@ -255,7 +255,7 @@ fn reviewer_rows_adopt_the_new_theme_without_new_events() {
             pane.rows
                 .iter()
                 .flat_map(|line| &line.spans)
-                .any(|span| { span.style.fg == Some(theme::palette().secondary) })
+                .any(|span| { span.style.fg == Some(theme::palette().accent) })
         );
     });
 }

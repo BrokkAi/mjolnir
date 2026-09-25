@@ -285,8 +285,8 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "Mjolnir needs a little fuel.",
-                Style::default().add_modifier(Modifier::BOLD),
+                "Make room for your next idea.",
+                theme::title(true),
             )),
             Line::raw(""),
             Line::raw(format!("Settings can create {missing} from this machine.")),

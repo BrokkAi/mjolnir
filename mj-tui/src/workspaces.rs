@@ -1062,14 +1062,26 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
-    let mut block = theme::panel(focused).title(WORKSPACES_TITLE);
+    let brand = format!(" {} MJOLNIR", theme::glyphs().spark);
+    let branded_title = Line::from(vec![
+        Span::styled(brand, theme::title(true)),
+        Span::styled(" / ", theme::muted()),
+        Span::styled("Workspaces ", theme::title(focused)),
+    ]);
+    let version = format!(" {} ", dashboard.version_label);
+    let title = if branded_title.width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
+        <= usize::from(area.width)
+    {
+        branded_title
+    } else {
+        Line::raw(WORKSPACES_TITLE)
+    };
+    let title_width = title.width();
+    let mut block = theme::panel(focused).title(title);
     // The pane sits at the top of every dashboard, so its border is where the
     // build number costs nothing and is always in view. A sidebar too narrow
     // to hold both drops it rather than overlap the pane's own title.
-    let version = format!(" {} ", dashboard.version_label);
-    if usize::from(area.width)
-        >= Line::raw(WORKSPACES_TITLE).width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
-    {
+    if usize::from(area.width) >= title_width + Line::raw(&version).width() + BORDER_CORNER_CELLS {
         // The pane's own title style is bold; a build number is a stamp, not a
         // heading, so it drops back out of bold here.
         let style = theme::muted().remove_modifier(Modifier::BOLD);
@@ -1157,7 +1169,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         let tab_area = Rect::new(x, inner.y, width, 1);
         dashboard.register_workspace_tab_area(id.clone(), tab_area);
         let style = if index == selected {
-            theme::selection(true)
+            theme::active_control()
         } else {
             theme::muted()
         };

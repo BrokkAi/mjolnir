@@ -33,43 +33,44 @@ pub struct Palette {
 }
 
 const MIDNIGHT: Palette = Palette {
-    background: rgb(11, 18, 32),
-    surface_raised: rgb(27, 43, 64),
-    surface: rgb(17, 29, 45),
-    selection: rgb(39, 57, 79),
-    text: rgb(223, 235, 244),
-    muted: rgb(133, 150, 173),
-    border: rgb(52, 70, 94),
-    accent: rgb(99, 216, 229),
-    secondary: rgb(181, 164, 245),
-    success: rgb(135, 214, 176),
-    warning: rgb(240, 195, 123),
-    error: rgb(242, 143, 156),
-    session_error: rgb(242, 143, 156),
-    session_activity: rgb(240, 195, 123),
-    session_attention: rgb(255, 220, 96),
-    session_idle: rgb(111, 177, 255),
-    activity_dim: rgb(78, 37, 55),
+    // Neutral graphite leaves color to actions, authorship, and session state.
+    background: rgb(15, 18, 20),
+    surface_raised: rgb(32, 39, 43),
+    surface: rgb(22, 27, 30),
+    selection: rgb(42, 58, 57),
+    text: rgb(239, 237, 232),
+    muted: rgb(151, 163, 163),
+    border: rgb(62, 74, 78),
+    accent: rgb(157, 229, 202),
+    secondary: rgb(158, 194, 238),
+    success: rgb(157, 229, 202),
+    warning: rgb(232, 189, 123),
+    error: rgb(244, 154, 165),
+    session_error: rgb(244, 154, 165),
+    session_activity: rgb(232, 189, 123),
+    session_attention: rgb(240, 205, 145),
+    session_idle: rgb(158, 194, 238),
+    activity_dim: rgb(67, 44, 48),
 };
 
 const LIGHT: Palette = Palette {
-    background: rgb(242, 245, 250),
-    surface_raised: rgb(232, 237, 245),
-    surface: rgb(255, 255, 255),
-    selection: rgb(211, 228, 241),
-    text: rgb(30, 41, 59),
-    muted: rgb(83, 100, 121),
-    border: rgb(161, 174, 192),
-    accent: rgb(0, 103, 124),
-    secondary: rgb(105, 65, 166),
-    success: rgb(28, 112, 74),
-    warning: rgb(142, 83, 8),
-    error: rgb(179, 42, 65),
-    session_error: rgb(179, 42, 65),
-    session_activity: rgb(142, 83, 8),
-    session_attention: rgb(145, 96, 0),
-    session_idle: rgb(31, 98, 183),
-    activity_dim: rgb(220, 178, 186),
+    background: rgb(242, 241, 237),
+    surface_raised: rgb(233, 231, 226),
+    surface: rgb(251, 250, 247),
+    selection: rgb(214, 229, 220),
+    text: rgb(38, 51, 46),
+    muted: rgb(89, 101, 95),
+    border: rgb(179, 186, 180),
+    accent: rgb(35, 104, 77),
+    secondary: rgb(54, 95, 146),
+    success: rgb(40, 108, 77),
+    warning: rgb(133, 83, 19),
+    error: rgb(169, 61, 80),
+    session_error: rgb(169, 61, 80),
+    session_activity: rgb(133, 83, 19),
+    session_attention: rgb(133, 83, 19),
+    session_idle: rgb(54, 95, 146),
+    activity_dim: rgb(220, 183, 187),
 };
 
 const DARCULA: Palette = Palette {
@@ -77,11 +78,11 @@ const DARCULA: Palette = Palette {
     background: rgb(43, 43, 43),
     surface_raised: rgb(60, 63, 65),
     surface: rgb(49, 51, 53),
-    selection: rgb(33, 66, 131),
+    selection: rgb(39, 55, 78),
     text: rgb(169, 183, 198),
     muted: rgb(159, 170, 183),
     border: rgb(126, 135, 143),
-    // Brighter variants preserve contrast over the blue selection surface.
+    // Brighter variants preserve contrast over the blue-gray selection surface.
     accent: rgb(112, 183, 255),
     secondary: rgb(205, 169, 255),
     success: rgb(136, 231, 155),
@@ -98,7 +99,8 @@ const HIGH_CONTRAST: Palette = Palette {
     background: rgb(0, 0, 0),
     surface_raised: rgb(32, 32, 32),
     surface: rgb(0, 0, 0),
-    selection: rgb(51, 51, 255),
+    // Selected rows retain status colors, so their surface must support red too.
+    selection: rgb(38, 38, 38),
     text: rgb(255, 255, 255),
     muted: rgb(190, 190, 190),
     border: rgb(230, 230, 230),
@@ -444,12 +446,14 @@ pub fn muted() -> Style {
 }
 
 pub fn border(focused: bool) -> Style {
-    if focused {
-        Style::default()
+    match (focused, current()) {
+        (true, UiTheme::Mono) => Style::default().add_modifier(Modifier::BOLD),
+        (true, UiTheme::HighContrast) => Style::default()
             .fg(palette().accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette().border)
+            .add_modifier(Modifier::BOLD),
+        // Titles carry the accent. A neutral edge keeps large panes quiet.
+        (true, _) => Style::default().fg(palette().muted),
+        (false, _) => Style::default().fg(palette().border),
     }
 }
 
@@ -494,22 +498,52 @@ pub fn raised() -> Style {
 }
 
 /// The style of a control that is switched on, such as the active pane size
-/// chip: a raised surface in a colored theme, reverse video without colors.
+/// chip: a selection surface in a colored theme, reverse video without colors.
 pub fn active_control() -> Style {
     if is_mono() {
         Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
     } else {
         Style::default()
             .fg(palette().accent)
-            .bg(palette().surface_raised)
+            .bg(palette().selection)
             .add_modifier(Modifier::BOLD)
     }
+}
+
+/// A focused or armed action. Filled color is reserved for a direct action;
+/// selected content uses the quieter [`selection`] surface.
+pub fn focus_control() -> Style {
+    if is_mono() {
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette().background)
+            .bg(palette().accent)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+/// An inset text field, with an uninterrupted focus surface for legibility.
+/// Monochrome terminals use an underline so editable text remains distinct.
+pub fn field(focused: bool) -> Style {
+    if is_mono() {
+        return if focused {
+            Style::default().add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default()
+        };
+    }
+    Style::default().fg(palette().text).bg(if focused {
+        palette().selection
+    } else {
+        palette().background
+    })
 }
 
 /// Emphasize a key name without painting it as a selected control.
 pub fn key_hint() -> Style {
     Style::default()
-        .fg(palette().text)
+        .fg(palette().secondary)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -588,17 +622,9 @@ pub fn footer_group_separator() -> &'static str {
 /// completes a chord. `prefix` is the resolved prefix label and `help_key` the
 /// key that lists the bindings.
 pub fn prefix_banner(prefix: &str, help_key: &str) -> Line<'static> {
-    let badge = if is_mono() {
-        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(palette().background)
-            .bg(palette().accent)
-            .add_modifier(Modifier::BOLD)
-    };
     let separator = footer_separator();
     Line::from(vec![
-        Span::styled(" PREFIX ".to_owned(), badge),
+        Span::styled(" PREFIX ".to_owned(), focus_control()),
         Span::styled(
             format!(" esc cancel{separator}{prefix} send{separator}{help_key} keys"),
             muted(),
@@ -864,15 +890,17 @@ mod tests {
                 colors.session_attention,
                 colors.session_idle,
             ] {
-                for background in [colors.background, colors.surface, colors.surface_raised] {
+                for background in [
+                    colors.background,
+                    colors.surface,
+                    colors.surface_raised,
+                    colors.selection,
+                ] {
                     assert!(
                         contrast(foreground, background) >= 4.5,
                         "{theme:?}: {foreground:?} on {background:?} has insufficient contrast"
                     );
                 }
-            }
-            for foreground in [colors.text, colors.accent] {
-                assert!(contrast(foreground, colors.selection) >= 4.5);
             }
         }
     }
