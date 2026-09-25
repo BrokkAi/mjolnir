@@ -60,6 +60,7 @@ impl DashboardState {
             target_step_skipped: false,
             mounts: MountWizard::new(Vec::new()),
 
+            project_picker: Box::default(),
             new_bundle_selected: 0,
             new_bundle_repositories: Vec::new(),
             new_bundle_source: mj_chat::path_input::PathInput::new(),

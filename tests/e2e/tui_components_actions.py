@@ -224,10 +224,10 @@ def destroy_confirmation(lab, tmux, evidence):
 def create_through_dialog(lab, tmux, evidence):
     before = {row["id"] for row in lab.snapshot().get("sessions", [])}
     tmux.send_key("M-n")
-    tmux.wait_for("New session · 1/4 profile")
+    tmux.wait_for("New session · 1/4 account")
     tmux.send_key("Home")
     tmux.send_key("Enter")
-    tmux.wait_for("New session · 2/4 target")
+    tmux.wait_for("New session · 2/4 where to run")
     click(tmux, "  Next  ")
     tmux.wait_for("New session · 3/4 local project")
     # Invalid submission must preserve the form and its editable field.

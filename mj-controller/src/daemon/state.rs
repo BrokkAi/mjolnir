@@ -626,6 +626,25 @@ impl RuntimeState {
             })?
     }
 
+    /// Persist exactly the picker-selected repository set under the same
+    /// config-mutation coordinator as legacy quick-bundle creation.
+    pub async fn create_bundle_from_sources(
+        &self,
+        sources: Vec<String>,
+    ) -> std::result::Result<
+        crate::controller::QuickBundleCreation,
+        crate::controller::QuickBundleFailure,
+    > {
+        let _mutation = self.config_mutation.lock().await;
+        tokio::task::spawn_blocking(move || crate::controller::create_bundle_from_sources(&sources))
+            .await
+            .map_err(|error| {
+                crate::controller::QuickBundleFailure::Persistence(anyhow!(
+                    "bundle creation task panicked: {error}"
+                ))
+            })?
+    }
+
     /// Hand a changed workspace list to the terminal clients and the web
     /// viewer. The daemon's workspace actions call it, and so does the API's
     /// create route through `ExportRuntime::republish_workspaces`.

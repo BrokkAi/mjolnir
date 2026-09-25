@@ -4598,3 +4598,177 @@ if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown'
 "#;
     run_viewer_script("quota-recovery", &format!("{setup}\n{source}\n{checks}"));
 }
+
+#[tokio::test]
+async fn project_discovery_requires_authentication_and_validates_input_before_dispatch() {
+    for (body, signed_in, expected) in [
+        (
+            serde_json::json!({"kind": "directory", "path": ""}),
+            false,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            serde_json::json!({"kind": "github", "query": "x".repeat(4097)}),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"kind": "directory", "path": "/", "filter": "x".repeat(4097)}),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (app, _, _, mut preflights, _) = app();
+        let mut request =
+            Request::post("/api/projects/discover").header(CONTENT_TYPE, "application/json");
+        if signed_in {
+            request = request.header(COOKIE, cookie());
+        }
+        let response = app
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert!(preflights.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn project_discovery_forwards_the_shared_request_and_response() {
+    use crate::project_picker::{
+        ProjectDiscovery, ProjectDiscoveryRequest, ProjectEntry, ProjectEntryKind,
+    };
+    for input in [
+        ProjectDiscoveryRequest::Directory {
+            path: "/work spaces".into(),
+            filter: "App".into(),
+        },
+        ProjectDiscoveryRequest::Github {
+            query: "private org:team".into(),
+        },
+    ] {
+        let (app, _, _, mut preflights, _) = app();
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/projects/discover")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&input).unwrap()))
+                    .unwrap(),
+            ),
+        );
+        let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
+            panic!("expected project discovery");
+        };
+        assert_eq!(request.request, input);
+        let expected = ProjectDiscovery {
+            entries: vec![ProjectEntry {
+                name: "Use app".into(),
+                source: "/work spaces/app".into(),
+                description: "Git repository".into(),
+                kind: ProjectEntryKind::Repository,
+            }],
+            directory: Some("/work spaces/app".into()),
+            parent: Some("/work spaces".into()),
+            truncated: false,
+        };
+        request.reply.send(Ok(expected.clone())).unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<ProjectDiscovery>(&body).unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
+    let (app, _, _, mut preflights, _) = app();
+    let make_request = || {
+        Request::post("/api/projects/discover")
+            .header(COOKIE, cookie())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"kind":"github","query":""}"#))
+            .unwrap()
+    };
+    let response = tokio::spawn(app.clone().oneshot(make_request()));
+    let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
+        panic!("discovery");
+    };
+    let message = "GitHub login is unavailable or expired. Run gh auth login on the machine running discovery, then retry.";
+    request.reply.send(Err(message)).unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains(message));
+
+    let response = tokio::spawn(app.oneshot(make_request()));
+    let PreflightRequest::DiscoverProjects(mut request) = preflights.recv().await.unwrap() else {
+        panic!("discovery");
+    };
+    response.abort();
+    assert!(response.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(2), request.reply.closed())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bundle_endpoint_forwards_exact_sources_including_single_repository_selections() {
+    for sources in [vec!["example/app"], vec!["example/app", "example/library"]] {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/bundles")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"sources": sources}).to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = bundles.recv().await.unwrap();
+        assert_eq!(
+            request.exact_sources,
+            Some(sources.iter().map(|s| s.to_string()).collect())
+        );
+        assert!(request.source.is_empty());
+        request.reply.send(Ok("selected-project".into())).unwrap();
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"bundle_id": "selected-project"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn bundle_endpoint_rejects_conflicting_empty_or_oversized_source_sets() {
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"source": "example/app", "sources": ["example/app"]}),
+        serde_json::json!({"sources": []}),
+        serde_json::json!({"sources": ["  "]}),
+        serde_json::json!({"sources": ["x".repeat(MAX_BUNDLE_SOURCE_CHARS + 1)]}),
+        serde_json::json!({"sources": vec!["example/app"; 33]}),
+    ] {
+        let (app, mut bundles) = app_with_bundle_receiver();
+        let response = app
+            .oneshot(
+                Request::post("/api/bundles")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(bundles.try_recv().is_err());
+    }
+}

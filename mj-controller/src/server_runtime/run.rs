@@ -1,5 +1,7 @@
 use super::*;
 
+mod project_discovery;
+
 pub async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -958,7 +960,7 @@ pub async fn run_server(
                     }
                 }
                 bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, reply }) = bundle else {
+                    let Some(crate::server::BundleRequest { source, exact_sources, reply }) = bundle else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
                         break;
                     };
@@ -971,9 +973,10 @@ pub async fn run_server(
                     let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     bundle_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
-                        let result = daemon_runtime
-                            .create_quick_bundle(source)
-                            .await;
+                        let result = match exact_sources {
+                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources).await,
+                            None => daemon_runtime.create_quick_bundle(source).await,
+                        };
                         if let Err(error) = done.send(BundleCreated { result, reply }) {
                             tracing::debug!(%error, "bundle creation finished after the server stopped");
                         }
@@ -1075,6 +1078,10 @@ pub async fn run_server(
                                 request,
                                 &termination,
                             );
+                            continue;
+                        }
+                        crate::server::PreflightRequest::DiscoverProjects(request) => {
+                            project_discovery::spawn(&mut preflight_jobs, request, &termination);
                             continue;
                         }
                     };

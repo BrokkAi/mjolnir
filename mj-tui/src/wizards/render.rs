@@ -16,7 +16,7 @@ pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
         WizardStep::Target => WizardControl::TargetList,
         WizardStep::Bundle => WizardControl::BundleList,
         WizardStep::ProjectDirectory => WizardControl::ProjectDirectory,
-        WizardStep::NewBundle => WizardControl::NewBundleSource,
+        WizardStep::NewBundle => WizardControl::ProjectResults,
         WizardStep::Mounts => WizardControl::MountSource,
         WizardStep::Review => WizardControl::Submit,
     }
@@ -320,171 +320,7 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::NewBundle {
-        let popup_height = u16::try_from(wizard.new_bundle_repositories.len())
-            .unwrap_or(u16::MAX)
-            .saturating_add(8)
-            .clamp(10, 24);
-        let popup = centered_modal(frame, surfaces, 76, popup_height, area);
-        let content = popup.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        let title_line = dismissible_modal_title(
-            &mut form,
-            popup,
-            "New bundle",
-            theme::title(true),
-            !wizard.bundle_creation_in_flight,
-        );
-        frame.render_widget(theme::modal().title(title_line), popup);
-        frame.render_widget(
-            Paragraph::new("Repositories (first is primary):"),
-            Rect::new(content.x, content.y, content.width, 1.min(content.height)),
-        );
-        let list_y = content.y.saturating_add(1);
-        let list_height = if wizard.new_bundle_repositories.is_empty() {
-            1.min(content.height.saturating_sub(5))
-        } else {
-            u16::try_from(wizard.new_bundle_repositories.len())
-                .unwrap_or(u16::MAX)
-                .min(content.height.saturating_sub(6))
-        };
-        let list_area = Rect::new(content.x, list_y, content.width, list_height);
-        if wizard.new_bundle_repositories.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(
-                    "No repositories added yet.",
-                    Style::default().fg(theme::palette().muted),
-                )),
-                list_area,
-            );
-        } else {
-            let rows = wizard
-                .new_bundle_repositories
-                .iter()
-                .enumerate()
-                .map(|(index, source)| {
-                    if index == 0 {
-                        Line::raw(format!("primary  {source}"))
-                    } else {
-                        Line::raw(format!("         {source}"))
-                    }
-                })
-                .collect::<Vec<_>>();
-            ChoiceList::render(
-                frame,
-                list_area,
-                &rows,
-                wizard.new_bundle_selected,
-                &mut form,
-                WizardControl::NewBundleRepositories,
-            );
-            if wizard.bundle_creation_in_flight {
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRepositories,
-                    ControlKind::ChoiceList {
-                        len: wizard.new_bundle_repositories.len(),
-                        selected: wizard.new_bundle_selected,
-                    },
-                    false,
-                );
-            }
-        }
-        let source_label_y = list_y.saturating_add(list_height);
-        frame.render_widget(
-            Paragraph::new("GitHub source or local Git path with a network remote:"),
-            Rect::new(
-                content.x,
-                source_label_y,
-                content.width,
-                1.min(content.height),
-            ),
-        );
-        // Two button rows sit at the foot of this dialog; the popup keeps off
-        // both of them.
-        let buttons_y = content.bottom().saturating_sub(2);
-        PathField::render_within(
-            frame,
-            Rect::new(
-                content.x,
-                content.y,
-                content.width,
-                buttons_y.saturating_sub(content.y),
-            ),
-            Rect::new(
-                content.x,
-                source_label_y.saturating_add(1),
-                content.width,
-                1.min(content.height),
-            ),
-            &wizard.new_bundle_source,
-            &mut form,
-            WizardControl::NewBundleSource,
-        );
-        let help_y = content.bottom().saturating_sub(3);
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                if wizard.bundle_creation_in_flight {
-                    "Creating bundle…"
-                } else {
-                    "Enter adds · Delete removes · Tab moves focus · Esc cancels"
-                },
-                Style::default().fg(theme::palette().muted),
-            )),
-            Rect::new(content.x, help_y, content.width, 1.min(content.height)),
-        );
-        let action_enabled =
-            !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty();
-        Dialog::render_actions(
-            frame,
-            Rect::new(
-                content.x,
-                content.bottom().saturating_sub(2),
-                content.width,
-                1.min(content.height),
-            ),
-            &[
-                (WizardControl::Add, "Add repository", action_enabled),
-                (
-                    WizardControl::NewBundleRemove,
-                    "Remove selected repository",
-                    !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
-                ),
-            ],
-            &mut form,
-        );
-        Dialog::render_actions(
-            frame,
-            Rect::new(
-                content.x,
-                content.bottom().saturating_sub(1),
-                content.width,
-                1.min(content.height),
-            ),
-            &[
-                (
-                    WizardControl::Cancel,
-                    "Cancel",
-                    !wizard.bundle_creation_in_flight,
-                ),
-                (
-                    WizardControl::Back,
-                    "Back",
-                    !wizard.bundle_creation_in_flight,
-                ),
-                (
-                    WizardControl::Next,
-                    if wizard.bundle_creation_in_flight {
-                        "Creating…"
-                    } else {
-                        "Create bundle"
-                    },
-                    !wizard.bundle_creation_in_flight
-                        && !wizard.new_bundle_sources_for_submit().is_empty(),
-                ),
-            ],
-            &mut form,
-        );
+        projects::render_project_picker(frame, area, wizard, &mut form, surfaces);
         form.end_frame(initial);
         return;
     }
@@ -505,15 +341,29 @@ pub(crate) fn render_new_wizard(
         ),
         WizardStep::Bundle => (
             format!(
-                " New session · {} project bundle ",
+                " New session · {} choose a project ",
                 step_counter(3, 4, target_hidden)
             ),
             bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
                 .into_iter()
                 .map(|id| {
                     let bundle = &dashboard.config.bundles[id];
+                    let sources = bundle
+                        .repositories
+                        .iter()
+                        .map(|repository| {
+                            repository.github.clone().unwrap_or_else(|| {
+                                repository
+                                    .local
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| repository.id.clone())
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     PickerChoice::text(format!(
-                        "{id}  {}",
+                        "{id}  {} · {sources}",
                         crate::widgets::counted(
                             bundle.repositories.len(),
                             "repository",
@@ -559,7 +409,11 @@ pub(crate) fn render_new_wizard(
     let mut help = vec![if wizard.step == WizardStep::Target {
         picker_help(&resource_help(dashboard))
     } else {
-        picker_help("↑/↓ select · Tab moves focus · Enter activates")
+        picker_help(if wizard.step == WizardStep::Bundle {
+            "Choose saved project files, or browse GitHub and folders for another."
+        } else {
+            "↑/↓ select · Tab moves focus · Enter activates"
+        })
     }];
     if wizard.step == WizardStep::Profile
         && dashboard
@@ -608,11 +462,11 @@ pub(crate) fn render_new_wizard(
             },
             pinned_action: (wizard.step == WizardStep::Bundle).then_some((
                 WizardControl::Add,
-                "New bundle…",
+                "Add project…",
                 true,
             )),
             empty_hint: (wizard.step == WizardStep::Bundle && dashboard.config.bundles.is_empty())
-                .then_some("No bundles yet."),
+                .then_some("Choose a project to get started."),
         },
         &mut form,
         surfaces,
