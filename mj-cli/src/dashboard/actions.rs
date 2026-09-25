@@ -1599,12 +1599,14 @@ impl DashboardContext {
             self.dashboard.focus_prompt();
         }
         let cancelled = Arc::new(AtomicBool::new(false));
+        let notice_name = self.session_notice_name(session_id);
         self.lifecycle_operations.insert(
             session_id.to_owned(),
             crate::dashboard::io::ActiveLifecycleOperation {
                 cancelled: cancelled.clone(),
                 kind,
                 retry_launch: None,
+                notice_name,
             },
         );
         LifecycleOperationRequest {

@@ -332,6 +332,9 @@ pub(crate) struct ActiveLifecycleOperation {
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) kind: SessionOperationKind,
     pub(crate) retry_launch: Option<DashboardAction>,
+    /// How notices named the session when the operation began. The
+    /// completion notice falls back to it when the record is already gone.
+    pub(crate) notice_name: String,
 }
 
 pub(crate) struct WorkspaceManagementResult {
@@ -417,7 +420,7 @@ impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOut
 impl DashboardContext {
     /// How a notice names a session: the title the session list shows, or
     /// the short id when the session has no title or its record is gone
-    /// (launch finding B-3).
+    /// (launch findings B-3 and R5-5).
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
         session_notice_name(&self.controller.state, session_id)
     }
@@ -1444,16 +1447,16 @@ impl DashboardContext {
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.
                 self.dashboard.focus_prompt();
-                self.dashboard.set_notice(format!(
-                    "Launching {}…",
-                    self.session_notice_name(&session_id)
-                ));
+                let notice_name = self.session_notice_name(&session_id);
+                self.dashboard
+                    .set_notice(format!("Launching {notice_name}…"));
                 self.lifecycle_operations.insert(
                     session_id,
                     ActiveLifecycleOperation {
                         cancelled: registered.cancelled,
                         kind: SessionOperationKind::Launching,
                         retry_launch: Some(registered.retry_launch),
+                        notice_name,
                     },
                 );
             }
@@ -1470,8 +1473,15 @@ impl DashboardContext {
     fn apply_lifecycle_reloaded(&mut self, reloaded: LifecycleReloaded) {
         let LifecycleReload { update, operation } = reloaded.reload;
         let session_id = update.session_id;
-        // Taken before the reload: a destroy removes the record.
-        let name = self.session_notice_name(&session_id);
+        // Taken before the reload: a destroy removes the record, and the
+        // runtime snapshot may already have dropped it.
+        let name = lifecycle_notice_name(
+            &self.controller.state,
+            &session_id,
+            operation
+                .as_ref()
+                .map(|operation| operation.notice_name.as_str()),
+        );
         let loaded = match reloaded.result {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -1613,14 +1623,25 @@ impl DashboardContext {
     }
 }
 
-/// How a notice names a session: its display title, or its short id when it
-/// has no title or its record is gone (launch finding B-3).
+/// How a notice names a session: the title the session list shows
+/// (`listed_title`, which includes the title it was created with), or its
+/// short id when it has no title or its record is gone (launch findings B-3
+/// and R5-5).
 pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
     match state.sessions.get(session_id) {
-        Some(session) if session.display_title() != session.id => {
-            session.display_title().to_owned()
-        }
+        Some(session) if session.listed_title() != session.id => session.listed_title().to_owned(),
         _ => short_id(session_id).to_owned(),
+    }
+}
+
+/// How a lifecycle's completion notice names its session. The daemon's
+/// runtime snapshot can drop a destroyed session's record before the
+/// lifecycle reload lands, so when the record is gone the name taken when
+/// the operation began stands in (launch finding R5-4).
+fn lifecycle_notice_name(state: &State, session_id: &str, taken_at_start: Option<&str>) -> String {
+    match taken_at_start {
+        Some(name) if !state.sessions.contains_key(session_id) => name.to_owned(),
+        _ => session_notice_name(state, session_id),
     }
 }
 
@@ -1648,6 +1669,52 @@ mod tests {
         );
         assert_eq!(session_notice_name(&state, "a1a8109b-untitled"), "a1a8109b");
         assert_eq!(session_notice_name(&state, "0badc0de-gone"), "0badc0de");
+    }
+
+    /// A session the dashboard created has only the title it was created
+    /// with ("project via fake"), which the session list shows; "Launching"
+    /// and "is ready" named it by id (launch finding R5-5).
+    #[test]
+    fn notices_name_an_unnamed_session_by_the_title_it_was_created_with() {
+        let mut created = lifecycle_session("036b869b-created", "default", SessionState::Running);
+        created.title = "project via fake".into();
+        let state = State {
+            sessions: BTreeMap::from([(created.id.clone(), created)]),
+            ..State::default()
+        };
+        assert_eq!(
+            session_notice_name(&state, "036b869b-created"),
+            "project via fake"
+        );
+    }
+
+    /// The daemon's runtime snapshot drops a destroyed session before the
+    /// lifecycle reload lands, so the completion notice cannot find the
+    /// record ("Permanently destroyed suspended session 5590965c" for
+    /// "gamma", launch finding R5-4). It uses the name taken when the
+    /// operation began; a record that is still there wins, because it has
+    /// the newest name.
+    #[test]
+    fn a_lifecycle_notice_keeps_the_name_taken_when_the_operation_began() {
+        let empty = State::default();
+        assert_eq!(
+            lifecycle_notice_name(&empty, "5590965c-gamma", Some("gamma")),
+            "gamma"
+        );
+        assert_eq!(
+            lifecycle_notice_name(&empty, "5590965c-gamma", None),
+            "5590965c"
+        );
+        let mut renamed = lifecycle_session("5590965c-gamma", "default", SessionState::Stopped);
+        renamed.session_title_override = Some("gamma two".into());
+        let state = State {
+            sessions: BTreeMap::from([(renamed.id.clone(), renamed)]),
+            ..State::default()
+        };
+        assert_eq!(
+            lifecycle_notice_name(&state, "5590965c-gamma", Some("gamma")),
+            "gamma two"
+        );
     }
 
     #[test]
