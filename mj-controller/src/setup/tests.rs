@@ -1508,6 +1508,28 @@ fn dialog_configures_raw_localhost_without_a_container_runtime() {
     assert!(output.contains("raw localhost will still be configured"));
 }
 
+/// Every localhost session runs from a staged copy of its profile home
+/// (23af4f3f), so the summary must not say the target uses the configured
+/// homes directly (launch finding R14-2).
+#[test]
+fn the_summary_says_localhost_sessions_run_from_a_staged_home() {
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut output = Vec::new();
+    write_summary(&mut output, Path::new("/tmp/config.toml"), &config, &[]).unwrap();
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains(
+            "  localhost target; each session runs from a staged copy of its profile home\n"
+        ),
+        "{output}"
+    );
+    assert!(!output.contains("directly"), "{output}");
+}
+
 /// Setup looks for all five agents' homes, so the line that says it found
 /// none names all five (launch finding R13-12).
 #[test]

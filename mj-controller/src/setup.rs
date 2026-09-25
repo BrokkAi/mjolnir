@@ -1447,7 +1447,7 @@ fn write_summary(
     {
         writeln!(
             output,
-            "  raw localhost target using configured harness homes directly"
+            "  localhost target; each session runs from a staged copy of its profile home"
         )?;
     }
     for (runtime, image) in runtimes {
