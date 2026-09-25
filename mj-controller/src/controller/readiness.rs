@@ -37,7 +37,10 @@ const WORKER_STARTUP_CONNECT_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the worker itself is looked at while the wait runs. A probe is a
 /// command on the target, which on a container or SSH target is a round trip,
 /// so it does not run once per connection attempt. The first failed attempt is
-/// probed at once, so a worker that is already dead is reported immediately.
+/// probed at once, so a worker that is already dead is reported as soon as
+/// that attempt gives up. An attempt that finds no control socket retries for
+/// about a second and a half first (`WORKER_SOCKET_RETRY_DELAYS`), since a
+/// worker that is still starting binds it within that time.
 const WORKER_STARTUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How often a wait loop looks for cancellation while it is idle.

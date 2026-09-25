@@ -64,6 +64,19 @@ const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
 /// How many trailing stderr lines a failed connect reports back to its caller.
 const RELAY_PROXY_STDERR_TAIL: usize = 10;
 
+/// The waits between connection attempts while the worker has not bound its
+/// control socket yet, 1.55 s in all. The daemon connects about 34 ms after
+/// starting a worker, and the worker binds its socket within about a second:
+/// on launch-r9 the next attempt, half a second later, got in every time
+/// (R9-2).
+const WORKER_SOCKET_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
+
 /// The proxy's last [`RELAY_PROXY_STDERR_TAIL`] non-empty stderr lines, shared
 /// with whoever has to report them.
 ///

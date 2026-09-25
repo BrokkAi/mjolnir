@@ -113,21 +113,27 @@ pub(super) enum ExchangeKind {
     Call,
 }
 
-/// Why one relay proxy launch failed, and whether the SSH server refused the
-/// connection before authentication rather than the worker being unreachable.
+/// Why one relay proxy launch failed, and whether it may be tried again.
 pub(super) struct ConnectFailure {
     pub(super) error: anyhow::Error,
-    /// How the SSH server turned the proxy away, when it did, and what `ssh`
-    /// printed. The worker was never reached, so the launch may be retried.
-    pub(super) refusal: Option<(mj_core::targets::SshRefusal, String)>,
+    /// Why the launch may be tried again, when it may.
+    pub(super) retry: Option<ConnectRetry>,
+}
+
+/// A failed relay proxy launch that said nothing about the worker's health,
+/// so the connect tries again. Either way the worker was never reached.
+pub(super) enum ConnectRetry {
+    /// The SSH server turned the proxy away, and this is what `ssh` printed.
+    Refused(mj_core::targets::SshRefusal, String),
+    /// The worker has not bound its control socket yet. The daemon connects
+    /// moments after starting a worker, which binds it within about a second
+    /// (R9-2).
+    SocketMissing,
 }
 
 impl ConnectFailure {
     pub(super) fn plain(error: anyhow::Error) -> Self {
-        Self {
-            error,
-            refusal: None,
-        }
+        Self { error, retry: None }
     }
 }
 

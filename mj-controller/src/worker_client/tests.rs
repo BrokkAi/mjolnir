@@ -138,26 +138,66 @@ while IFS= read -r request; do :; done
         .purpose("refused relay fixture")
 }
 
-/// R7-1: a shared SSH connection at `MaxSessions` refuses one more session
-/// many times while sessions start, and the retry gets in. Neither the retry
-/// nor the proxy's own stderr is a warning then; the refusal is logged once,
-/// at debug level, by the shared refusal routine.
+/// Run the named test alone in a child process with a global subscriber, so
+/// the log also has what other threads say, such as the thread that reaps a
+/// dropped relay proxy. Returns the log in the child, and `None` in the
+/// parent once the child has passed.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
+fn global_log_in_isolated_child(test: &str) -> Option<CapturedLog> {
+    const CHILD: &str = "MJ_WORKER_CLIENT_GLOBAL_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().expect("temp dir");
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), test),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return None;
+    }
+    let log = CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    Some(log)
+}
+
+/// Connect on a runtime of this test's own, for a test that runs with a
+/// global subscriber, then give the threads that reap dropped proxies time
+/// to report.
+#[cfg(unix)]
+fn connect_and_let_reapers_report(spec: &CommandSpec) -> Result<RelayClient> {
+    let connected = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(RelayClient::connect_with_timeout(
+            spec,
+            SESSION_ID,
+            Duration::from_secs(10),
+        ));
+    std::thread::sleep(Duration::from_millis(300));
+    connected
+}
+
+/// R7-1: a shared SSH connection at `MaxSessions` refuses one more session
+/// many times while sessions start, and the retry gets in. Neither the retry,
+/// the proxy's own stderr, nor the reaping of the refused proxy is a warning
+/// then; the refusal is logged once, at debug level, by the shared refusal
+/// routine.
+#[cfg(unix)]
+#[test]
+fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
+    let Some(log) = global_log_in_isolated_child(
+        "a_relay_proxy_refused_by_max_sessions_retries_without_a_warning",
+    ) else {
+        return;
+    };
     mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
     let directory = tempfile::tempdir().expect("temp dir");
     let spec = relay_proxy_refused_once(
         directory.path(),
         r"mux_client_request_session: session request failed: Session open refused by peer\nConnection closed by UNKNOWN port 65535\n",
     );
-    let log = CapturedLog::default();
-    let connected = {
-        let _default = tracing::subscriber::set_default(log.clone());
-        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
-    };
-    mj_core::targets::set_ssh_retry_backoff_for_test(None);
-    connected.expect("the refused session is retried");
+    connect_and_let_reapers_report(&spec).expect("the refused session is retried");
 
     let warnings = log.at_or_above(tracing::Level::WARN);
     assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
@@ -258,6 +298,120 @@ exit 1
         "1"
     );
     mj_core::targets::set_ssh_retry_backoff_for_test(None);
+}
+
+/// What the worker's relay proxy prints, after its own log line, when the
+/// worker has not bound its control socket yet.
+#[cfg(unix)]
+const WORKER_SOCKET_MISSING: &str = r"Error: connect worker socket /w/control.sock\n\nCaused by:\n    0: connect unix socket /w/control.sock\n    1: No such file or directory (os error 2)\n";
+
+/// A local relay proxy for a worker that binds its control socket only after
+/// `misses` connection attempts, or never when `misses` is `None`.
+#[cfg(unix)]
+fn relay_proxy_before_the_worker_binds(
+    directory: &std::path::Path,
+    misses: Option<u32>,
+) -> CommandSpec {
+    let counter = directory.join("attempts");
+    let script = format!(
+        r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -lt {misses} ]; then
+  printf '{WORKER_SOCKET_MISSING}' >&2
+  exit 1
+fi
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
+while IFS= read -r request; do :; done
+"#,
+        counter = counter.display(),
+        misses = misses.unwrap_or(u32::MAX),
+        session = SESSION_ID
+    );
+    CommandSpec::new("sh", ["-c".to_owned(), script]).purpose("starting worker relay fixture")
+}
+
+#[cfg(unix)]
+fn relay_proxy_attempts(directory: &std::path::Path) -> u32 {
+    std::fs::read_to_string(directory.join("attempts"))
+        .expect("the fixture records its attempts")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// R9-2: the daemon connects to a local worker about 34 ms after starting
+/// it, before the worker has bound its control socket. Every start logged
+/// two warnings for that ("relay request failed ... No such file or
+/// directory" and "dropped relay proxy exited unsuccessfully") though every
+/// session started normally. A socket that appears within the retry budget
+/// is a routine retry, logged at debug level, and the exit of each proxy that
+/// found no socket is not reported again when that proxy is reaped.
+#[cfg(unix)]
+#[test]
+fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
+    let Some(log) = global_log_in_isolated_child(
+        "a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning",
+    ) else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+
+    let client = connect_and_let_reapers_report(&spec)
+        .expect("the connection is retried until the worker binds its socket");
+    assert_eq!(client.relay_version(), "retry-fixture");
+    assert_eq!(relay_proxy_attempts(directory.path()), 3);
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
+    let retries = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|text| text.contains("has not bound its control socket yet"))
+        .count();
+    assert_eq!(retries, 2, "{:#?}", log.events());
+}
+
+/// A socket still missing after the retry budget is a real failure: one
+/// warning that carries the proxy's complaint, and the same dead-transport
+/// error that worker recovery reads.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_before_the_worker_binds(directory.path(), None);
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+    };
+    let Err(error) = connected else {
+        panic!("a worker that never binds its socket cannot be reached");
+    };
+    assert!(
+        RelayTransportDead::marks_failed_handshake(&error),
+        "{error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("No such file or directory"),
+        "{error:#}"
+    );
+    assert!(
+        relay_proxy_attempts(directory.path()) > 1,
+        "a missing socket is retried before it is reported"
+    );
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("control socket is still missing")
+            && warnings[0].contains("No such file or directory"),
+        "{}",
+        warnings[0]
+    );
 }
 
 #[cfg(unix)]
