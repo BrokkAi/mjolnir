@@ -129,6 +129,16 @@ pub(super) fn database_writer_slot() -> &'static Mutex<Option<DatabaseWriter>> {
     WRITER.get_or_init(|| Mutex::new(None))
 }
 
+/// Whether this process holds the database writer. Only the daemon does, so
+/// work that merely keeps a daemon-owned record current, and that other
+/// processes also run, asks this instead of failing the write there.
+pub(crate) fn database_writer_installed() -> bool {
+    database_writer_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+}
+
 pub(super) fn clear_database_writer(id: u64) {
     let mut installed = database_writer_slot()
         .lock()

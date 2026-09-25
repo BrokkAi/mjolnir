@@ -390,16 +390,29 @@ async fn refresh_profile(
         error: Some(error.to_string()),
         refreshed_at_epoch_seconds,
     });
+    // The daemon reads the reset-time cache when a session runs out of quota,
+    // and the daemon's own refreshes keep it: the web server's quota poller,
+    // and the refresh quota recovery makes just before it reads the cache.
+    // The dashboard polls the same quota for its display, but it has no
+    // database writer and must not write the store, so it leaves the cache to
+    // the daemon (R9-1).
     if report.error.is_none() {
-        let cached = report.clone();
-        match tokio::task::spawn_blocking(move || {
-            crate::database::save_quota_cache(&cache_identity, &cached)
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "could not preserve quota reset times"),
-            Err(error) => tracing::warn!(%error, "quota cache task failed"),
+        if crate::database::database_writer_installed() {
+            let cached = report.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::database::save_quota_cache(&cache_identity, &cached)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "could not preserve quota reset times"),
+                Err(error) => tracing::warn!(%error, "quota cache task failed"),
+            }
+        } else {
+            tracing::debug!(
+                profile_id = %report.profile_id,
+                "this process has no database writer; leaving quota reset times to the daemon"
+            );
         }
     }
     let credential_after = credential_marker_fingerprint(&credential_path).await;
