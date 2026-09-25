@@ -32,6 +32,16 @@ impl RelayClient {
         RelayRequest::ProjectMemorySnapshot.supported_at(self.protocol_version)
     }
 
+    /// The skills archive format this session's worker reads. A worker from
+    /// before `RELAY_GZIP_SKILLS_PROTOCOL` reads only the uncompressed format.
+    pub fn skills_archive_format(&self) -> mj_core::skills::SkillsArchiveFormat {
+        if self.protocol_version >= mj_core::relay::RELAY_GZIP_SKILLS_PROTOCOL {
+            mj_core::skills::SkillsArchiveFormat::Gzip
+        } else {
+            mj_core::skills::SkillsArchiveFormat::Plain
+        }
+    }
+
     pub fn relay_version(&self) -> &str {
         &self.relay_version
     }

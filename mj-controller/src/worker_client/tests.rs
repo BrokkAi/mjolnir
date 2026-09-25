@@ -825,24 +825,122 @@ fn every_session_is_pushed_the_managed_skills_too() {
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
 
     let target = skills_sync_target(home.path());
-    let archive = canonical_session_skills(&target).unwrap();
-    assert_eq!(
-        archive,
-        mj_core::skills::session_skills(target.harness, home.path()).unwrap()
-    );
-    for managed in mj_core::skills::managed_skills(target.harness) {
+    for format in [
+        mj_core::skills::SkillsArchiveFormat::Plain,
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    ] {
+        let archive = canonical_session_skills(&target, format).unwrap();
+        assert_eq!(
+            archive,
+            mj_core::skills::session_skills(target.harness, home.path(), format).unwrap()
+        );
+        for managed in mj_core::skills::managed_skills(target.harness) {
+            assert!(
+                archive.entries().contains(&managed),
+                "{} is missing",
+                managed.path
+            );
+        }
         assert!(
-            archive.entries().contains(&managed),
-            "{} is missing",
-            managed.path
+            archive
+                .entries()
+                .iter()
+                .any(|entry| entry.path == "skills/review/SKILL.md")
         );
     }
-    assert!(
-        archive
-            .entries()
-            .iter()
-            .any(|entry| entry.path == "skills/review/SKILL.md")
-    );
+}
+
+/// Plays a worker for one skills push: it reports a stale tree, then installs
+/// whatever archive it is sent, keeps a copy at the path in its third
+/// argument, and reports the fingerprint of the archive's uncompressed
+/// content, as a worker does.
+#[cfg(unix)]
+const SKILLS_FORMAT_RELAY: &str = r#"
+import base64, gzip, hashlib, json, sys
+protocol, session, received = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "skills-format-fixture", "session_id": session}}
+    elif method == "skills_state":
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": "stale"}}
+    elif method == "install_skills":
+        archive = base64.b64decode(req["request"]["params"]["data"])
+        with open(received, "wb") as out:
+            out.write(archive)
+        body = archive[8:]
+        if archive[:8] == b"HELSKIL2":
+            body = gzip.decompress(body)
+        fingerprint = hashlib.sha256(b"HELSKIL1" + body).hexdigest()
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": fingerprint}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+/// A worker from before relay protocol 23 reads only the uncompressed
+/// `HELSKIL1` archive, whose limits count raw bytes. The controller sends it
+/// that format and leaves out the 2.3 MB page it could not take; a current
+/// worker gets a compressed archive with the page. Either way the push
+/// succeeds only if the worker's fingerprint of what it received matches the
+/// controller's.
+#[cfg(unix)]
+#[tokio::test]
+async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/viz/demos")).unwrap();
+    std::fs::write(home.path().join("skills/viz/SKILL.md"), "viz").unwrap();
+    std::fs::write(
+        home.path().join("skills/viz/demos/sunspot-pretty.html"),
+        "<tr><td>1749-01</td><td>96.7</td></tr>\n".repeat(60_000),
+    )
+    .unwrap();
+
+    for (protocol, magic, carries_page) in [
+        (22, b"HELSKIL1", false),
+        (RELAY_PROTOCOL_VERSION, b"HELSKIL2", true),
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let received = scratch.path().join("received");
+        let mut target = skills_sync_target(home.path());
+        target.authenticates_with_api_key = true;
+        target.spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                SKILLS_FORMAT_RELAY.to_owned(),
+                protocol.to_string(),
+                SESSION_ID.to_owned(),
+                received.to_string_lossy().into_owned(),
+            ],
+        )
+        .purpose("skills archive format fixture");
+
+        let actions = reconcile_session(&target, None).await.unwrap();
+
+        assert_eq!(
+            actions,
+            [CredentialSyncAction::SkillsPushed],
+            "protocol {protocol}"
+        );
+        let archive = std::fs::read(&received).unwrap();
+        assert!(archive.starts_with(magic), "protocol {protocol}");
+        let sent = mj_core::skills::SkillsArchive::decode(&archive).unwrap();
+        assert!(
+            sent.entries()
+                .iter()
+                .any(|entry| entry.path == "skills/viz/SKILL.md"),
+            "protocol {protocol}"
+        );
+        assert_eq!(
+            sent.entries()
+                .iter()
+                .any(|entry| entry.path == "skills/viz/demos/sunspot-pretty.html"),
+            carries_page,
+            "protocol {protocol}"
+        );
+    }
 }
 
 #[cfg(unix)]

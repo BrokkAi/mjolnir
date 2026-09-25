@@ -402,8 +402,14 @@ fn collect_files(
 /// always runs Mjolnir's copy of a managed skill. Launch staging and the
 /// credential-sync push both compute the tree this way; if they disagreed, the
 /// first reconciliation after launch would wipe whatever the other installed.
-pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
-    let format = SkillsArchiveFormat::Gzip;
+///
+/// The tree is collected for `format`, the format the session's worker reads,
+/// so a file too large for that format is left out on both sides.
+pub fn session_skills(
+    kind: HarnessKind,
+    home: &Path,
+    format: SkillsArchiveFormat,
+) -> Result<SkillsArchive> {
     let collected = collect_files(kind, home, Links::Follow, format)?;
     let mut entries = collected.entries;
     for entry in managed_skills(kind) {
@@ -898,7 +904,8 @@ mod tests {
     #[test]
     fn session_skills_of_an_empty_home_is_the_managed_set() {
         let home = tempfile::tempdir().unwrap();
-        let archive = session_skills(HarnessKind::Claude, home.path()).unwrap();
+        let archive =
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
         assert_eq!(archive.entries(), managed_skills(HarnessKind::Claude));
         assert!(archive.state().present);
         // Collection is unchanged: it still reports the user tree alone.
@@ -918,7 +925,8 @@ mod tests {
             "skills/provenance/SKILL.md",
             b"user provenance",
         );
-        let archive = session_skills(HarnessKind::Codex, home.path()).unwrap();
+        let archive =
+            session_skills(HarnessKind::Codex, home.path(), SkillsArchiveFormat::Gzip).unwrap();
         for name in ["recall", "provenance"] {
             let entry = archive
                 .entries()
@@ -939,7 +947,8 @@ mod tests {
         );
         write(home.path(), "skills/review/SKILL.md", b"review");
 
-        let archive = session_skills(HarnessKind::Codex, home.path()).unwrap();
+        let archive =
+            session_skills(HarnessKind::Codex, home.path(), SkillsArchiveFormat::Gzip).unwrap();
         let managed = managed_skills(HarnessKind::Codex);
         let mine = archive
             .entries()
@@ -1163,7 +1172,8 @@ mod tests {
                 "skills/viz/demos/sunspot-pretty.html"
             ]
         );
-        let session = session_skills(HarnessKind::Claude, home.path()).unwrap();
+        let session =
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
         assert!(session.entries().iter().any(|entry| entry.bytes == page));
         let wire = session.encode(SkillsArchiveFormat::Gzip);
         assert!(wire.len() <= MAX_SKILLS_ARCHIVE_BYTES);
@@ -1182,7 +1192,8 @@ mod tests {
             );
         }
 
-        let archive = session_skills(HarnessKind::Claude, home.path()).unwrap();
+        let archive =
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
 
         assert!(archive.encode(SkillsArchiveFormat::Plain).len() > 6_000_000);
         let wire = archive.encode(SkillsArchiveFormat::Gzip);
@@ -1194,6 +1205,52 @@ mod tests {
                 .entries()
                 .len(),
             6
+        );
+    }
+
+    /// A worker from before relay protocol 23 reads only `HELSKIL1`, whose
+    /// limits count raw bytes. The tree collected for it leaves out a file
+    /// above 1 MiB, and a tree above 4 MiB fails with the reason named.
+    #[test]
+    fn a_tree_collected_for_an_uncompressed_archive_keeps_the_raw_limits() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/viz/SKILL.md", b"viz");
+        write(
+            home.path(),
+            "skills/viz/demos/sunspot-pretty.html",
+            &html(2_208_818),
+        );
+        let has_page = |archive: &SkillsArchive| {
+            paths(archive).contains(&"skills/viz/demos/sunspot-pretty.html")
+        };
+
+        let plain =
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Plain).unwrap();
+        let compressed =
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+
+        assert!(!has_page(&plain));
+        assert!(has_page(&compressed));
+        assert_eq!(
+            SkillsArchive::decode(&plain.encode(SkillsArchiveFormat::Plain)).unwrap(),
+            plain
+        );
+
+        for index in 0..5 {
+            write(
+                home.path(),
+                &format!("skills/viz/demos/page-{index}.html"),
+                &html(1_000_000),
+            );
+        }
+        let error = session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Plain)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("byte limit of an uncompressed skills archive"),
+            "{error:#}"
+        );
+        assert!(
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).is_ok()
         );
     }
 
@@ -1212,7 +1269,8 @@ mod tests {
 
         for error in [
             collect_skills(HarnessKind::Claude, home.path()).unwrap_err(),
-            session_skills(HarnessKind::Claude, home.path()).unwrap_err(),
+            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip)
+                .unwrap_err(),
         ] {
             let message = format!("{error:#}");
             assert!(
@@ -1366,7 +1424,9 @@ mod tests {
             session.extend(managed_skills(kind));
             session.sort_by(|left, right| left.path.cmp(&right.path));
             assert_eq!(
-                session_skills(kind, home.path()).unwrap().entries(),
+                session_skills(kind, home.path(), SkillsArchiveFormat::Gzip)
+                    .unwrap()
+                    .entries(),
                 session,
                 "{kind:?}"
             );

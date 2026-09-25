@@ -2786,7 +2786,12 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     stage_profile(&profile, staged.path()).unwrap();
     stage_managed_skills(profile.kind, staged.path()).unwrap();
 
-    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let expected = mj_core::skills::session_skills(
+        profile.kind,
+        home.path(),
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    )
+    .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
     assert_eq!(installed.fingerprint(), expected.fingerprint());
     assert_eq!(installed, expected);
@@ -2862,7 +2867,12 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "{kind:?} {relative}"
             );
         }
-        let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+        let expected = mj_core::skills::session_skills(
+            profile.kind,
+            home.path(),
+            mj_core::skills::SkillsArchiveFormat::Gzip,
+        )
+        .unwrap();
         let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
         assert_eq!(installed, expected, "{kind:?}");
     }
@@ -2908,7 +2918,12 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     stage_profile(&profile, staged.path()).unwrap();
     stage_managed_skills(profile.kind, staged.path()).unwrap();
 
-    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let expected = mj_core::skills::session_skills(
+        profile.kind,
+        home.path(),
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    )
+    .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
     assert_eq!(installed, expected);
     assert!(

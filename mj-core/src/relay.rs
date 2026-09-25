@@ -50,8 +50,12 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// session and replace the worker with the current build once it is quiet.
 /// Until then, a request the older worker cannot decode is refused on the
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
-pub const RELAY_PROTOCOL_VERSION: u32 = 22;
+pub const RELAY_PROTOCOL_VERSION: u32 = 23;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
+/// The first protocol whose workers read a gzip-compressed skills archive
+/// (`HELSKIL2`). A controller sends an older worker the uncompressed
+/// `HELSKIL1` format, collected with that format's raw-size limits.
+pub const RELAY_GZIP_SKILLS_PROTOCOL: u32 = 23;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
 /// Domain separator for a v1 (chained) relay event digest. v1 records fold
