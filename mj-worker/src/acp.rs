@@ -80,6 +80,28 @@ use mj_core::elicitation::{
 use mj_core::relay::{AcpActivityClock, ClaimedSteeringPrompt};
 use mj_core::worker_launch::{ProjectMemoryLaunchConfig, ProjectMemoryMcpDelivery};
 
+/// Whether a session keeps the title Mjolnir took from the first prompt the
+/// user typed, rather than the title its harness reports.
+///
+/// Codex names a new thread by asking a model to title the text of its first
+/// prompt, every text block of it. Mjolnir's project memory travels in that
+/// prompt ahead of the user's words, so the name describes the memory
+/// ("Project memory instructions"), not the request (launch finding I2-1).
+fn keeps_mjolnir_title(harness: HarnessKind, receives_project_memory: bool) -> bool {
+    harness == HarnessKind::Codex && receives_project_memory
+}
+
+/// The update without the harness's title, or `None` when the title was all
+/// it carried.
+fn without_harness_title(update: SessionUpdate) -> Option<SessionUpdate> {
+    let SessionUpdate::SessionInfoUpdate(mut info) = update else {
+        return Some(update);
+    };
+    info.title = agent_client_protocol::schema::MaybeUndefined::Undefined;
+    (!info.updated_at.is_undefined() || info.meta.is_some())
+        .then_some(SessionUpdate::SessionInfoUpdate(info))
+}
+
 /// Private ACP metadata is provider-local and has no Hel projection. In
 /// particular, Codex can replay terminal-output metadata for old tool calls on
 /// every `session/load`; journaling those invisible deltas grows the relay and

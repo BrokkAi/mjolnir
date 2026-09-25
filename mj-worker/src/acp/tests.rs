@@ -83,6 +83,162 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     }
 }
 
+/// A fake Codex bridge that opens a session, reports the title Codex gave
+/// the thread, then says one more thing so the test knows the title has been
+/// handled.
+async fn titling_codex_bridge(stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let mut messages = match method {
+            "initialize" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}
+            })],
+            "session/new" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {"sessionId": "titled"}
+            })],
+            _ if !id.is_null() => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {}
+            })],
+            _ => continue,
+        };
+        if method == "session/new" {
+            for update in [
+                serde_json::json!({
+                    "sessionUpdate": "session_info_update",
+                    "title": "Project memory instructions",
+                }),
+                serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "after the title"},
+                }),
+            ] {
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"sessionId": "titled", "update": update},
+                }));
+            }
+        }
+        for message in messages {
+            if write
+                .write_all(format!("{message}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Launch finding I2-1: a new Codex session was titled "Project memory
+/// instructions" while its first prompt was "Reply with the single word
+/// pong.". Codex titles a thread from every text block of the first prompt,
+/// and Mjolnir's project memory block comes first. A Codex session given the
+/// memory keeps the title Mjolnir took from the user's prompt.
+#[tokio::test]
+async fn a_codex_title_drawn_from_project_memory_does_not_reach_the_relay() {
+    let temp = tempfile::tempdir().unwrap();
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(titling_codex_bridge(bridge_stream));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (_request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = reload_fallback_spec(HarnessKind::Codex);
+    spec.resume_session = None;
+    spec.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "abc".into(),
+        root: temp.path().join("memory"),
+        baseline_root: temp.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let mut updates = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("the runtime keeps reporting")
+            .expect("the event channel stays open");
+        if let RuntimeEvent::SessionUpdate { update } = event {
+            let done = update["sessionUpdate"] == "agent_message_chunk";
+            updates.push(update);
+            if done {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        updates
+            .iter()
+            .all(|update| update["sessionUpdate"] != "session_info_update"
+                || update.get("title").is_none()),
+        "{updates:?}"
+    );
+    driver.abort();
+    bridge.abort();
+}
+
+/// Other harnesses title from the prompt itself: Grok named the same prompt
+/// "Ping-pong single-word reply test". Their titles, and whatever else a
+/// Codex title update carries, still reach the relay.
+#[test]
+fn only_a_codex_session_given_project_memory_keeps_mjolnirs_title() {
+    assert!(keeps_mjolnir_title(HarnessKind::Codex, true));
+    assert!(!keeps_mjolnir_title(HarnessKind::Codex, false));
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Grok,
+        HarnessKind::Kimi,
+        HarnessKind::Muse,
+    ] {
+        assert!(!keeps_mjolnir_title(harness, true), "{harness:?}");
+    }
+
+    let meta = serde_json::Map::from_iter([("goal".to_owned(), serde_json::json!(null))]);
+    let with_meta = SessionUpdate::SessionInfoUpdate(
+        agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+            .title("Project memory instructions")
+            .meta(meta.clone()),
+    );
+    assert_eq!(
+        without_harness_title(with_meta),
+        Some(SessionUpdate::SessionInfoUpdate(
+            agent_client_protocol::schema::v1::SessionInfoUpdate::new().meta(meta)
+        ))
+    );
+    let other = SessionUpdate::ToolCall(agent_client_protocol::schema::v1::ToolCall::new(
+        "tool", "read",
+    ));
+    assert_eq!(without_harness_title(other.clone()), Some(other));
+}
+
 #[test]
 fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     let live_tool_calls = Mutex::new(BTreeSet::new());
