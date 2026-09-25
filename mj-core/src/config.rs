@@ -30,7 +30,7 @@ pub use machines::*;
 pub use targets::*;
 pub use ui::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 
@@ -251,10 +251,16 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 }
 
 /// Global policy for Mjolnir-managed child agents.
+///
+/// Whether sub-agents run at all is now a per-session choice
+/// (`SessionRecord.mjolnir_subagents`), not a global setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SubagentConfig {
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    /// Deprecated global switch retained for read compatibility with
+    /// configurations written before the per-session choice existed. It is
+    /// ignored and omitted from newly written configurations.
+    #[serde(default, skip_serializing)]
     pub enabled: bool,
     #[serde(
         default = "default_subagent_limit",
@@ -269,7 +275,7 @@ pub struct SubagentConfig {
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_concurrent: default_subagent_limit(),
             eligible_profiles: BTreeMap::new(),
         }
@@ -277,8 +283,10 @@ impl Default for SubagentConfig {
 }
 
 impl SubagentConfig {
+    /// The deprecated `enabled` key is never written, so a section holding
+    /// only that key is still a default section and stays out of the file.
     fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.max_concurrent == default_subagent_limit() && self.eligible_profiles.is_empty()
     }
 
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
@@ -308,13 +316,12 @@ impl SubagentConfig {
 
     #[must_use]
     pub fn profile_is_eligible(&self, parent: &str, candidate: &str) -> bool {
-        self.enabled
-            && (parent == candidate
-                || self
-                    .eligible_profiles
-                    .get(candidate)
-                    .copied()
-                    .unwrap_or(false))
+        parent == candidate
+            || self
+                .eligible_profiles
+                .get(candidate)
+                .copied()
+                .unwrap_or(false)
     }
 }
 
@@ -498,6 +505,41 @@ enum InterpretedTarget {
     Legacy(TargetTemplate),
 }
 
+/// Keys of a `[targets.<id>]` table that its runtime kind does not read,
+/// leaving out any already reported by this process.
+///
+/// Serde cannot refuse them: a container runtime's settings are flattened into
+/// the tagged `StoredTarget`, and flattening turns `deny_unknown_fields` off.
+/// A misspelled or invented setting is therefore ignored, and saying so once
+/// is what stops a person from believing it applies (R4-6). The configuration
+/// is read many times in one process, so each key is reported only the first
+/// time.
+fn newly_unknown_target_keys(
+    id: &str,
+    kind: &str,
+    table: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    static REPORTED: std::sync::Mutex<BTreeSet<(String, String)>> =
+        std::sync::Mutex::new(BTreeSet::new());
+    let known = |key: &str| {
+        matches!(key, "kind" | "machine")
+            || match kind {
+                "bare" => key == "permissions",
+                "podman" | "docker" | "apple-container" => {
+                    targets::CONTAINER_TEMPLATE_KEYS.contains(&key)
+                }
+                _ => true,
+            }
+    };
+    let mut reported = REPORTED.lock().unwrap_or_else(|error| error.into_inner());
+    table
+        .keys()
+        .filter(|key| !known(key))
+        .filter(|key| reported.insert((id.to_owned(), (*key).clone())))
+        .cloned()
+        .collect()
+}
+
 fn interpret_target(
     id: &str,
     value: &serde_json::Value,
@@ -527,6 +569,13 @@ fn interpret_target(
         // In an old file without a `machine` key it is the fused kind.
         let fused = kind == "apple-container" && !table.contains_key("machine") && version <= 11;
         if !fused {
+            for key in newly_unknown_target_keys(id, kind, table) {
+                tracing::warn!(
+                    target = id,
+                    key,
+                    "target {id:?} ({kind}) has a key Mjolnir does not use, {key:?}; it is ignored"
+                );
+            }
             return from_value().map(InterpretedTarget::Stored);
         }
     } else if legacy_kind_advice(kind).is_none() {
@@ -825,6 +874,17 @@ impl Config {
             .entry("apple-container".into())
             .or_insert_with(|| TargetTemplate::AppleContainer { container });
         self
+    }
+
+    /// Whether the user configured target `id`: the file names it and the
+    /// entry differs from the standard local target of the same name that
+    /// [`Self::with_local_targets`] supplies. An entry that repeats a
+    /// standard target word for word adds nothing the user chose, so callers
+    /// that treat built-in targets gently treat it as built-in too.
+    pub fn configures_target(&self, id: &str) -> bool {
+        self.targets.get(id).is_some_and(|target| {
+            Self::default().with_local_targets().targets.get(id) != Some(target)
+        })
     }
 
     /// Read the config from `path`, returning [`Config::default`] when the

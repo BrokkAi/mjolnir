@@ -145,7 +145,7 @@ pub struct StartSessionRequest {
     /// Branch to check out in a new isolated workspace.
     #[serde(default)]
     pub launch_branch: Option<String>,
-    /// None follows the global `[subagents] enabled` setting.
+    /// None means native sub-agents, the same as `Some(false)`.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
@@ -237,6 +237,27 @@ pub struct SpawnSubagentRequest {
     pub context: Option<String>,
     #[serde(default)]
     pub files: Vec<SubagentSourceRange>,
+}
+
+/// One profile a parent may start a sub-agent on, with what it offers and how
+/// much of its quota is left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentCandidate {
+    pub profile_id: String,
+    pub harness: mj_core::config::HarnessKind,
+    pub choices: mj_core::worker_launch::ProfileConfig,
+    /// The lower of the profile's quota windows (the 5-hour and weekly ones
+    /// for Codex and Claude), 100 for a pay-per-use profile, and `None` when
+    /// no usable report exists.
+    pub remaining_percent: Option<u8>,
+}
+
+/// The profiles a parent may delegate to, split into those whose choices are
+/// known and those whose discovery failed, with the reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubagentCandidates {
+    pub offered: Vec<SubagentCandidate>,
+    pub unavailable: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -485,6 +506,7 @@ pub struct StartFollowup {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub prompt: Option<String>,
+    pub fast_mode: bool,
 }
 
 /// How far a created session's follow-up has got. Served in M2.

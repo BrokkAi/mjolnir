@@ -1084,6 +1084,37 @@ async fn prefix_t_toggles_rendering_of_the_visible_chat_from_a_pane() {
     );
 }
 
+/// Launch finding R5-6: the dictation chord's reason went to the
+/// conversation's own status line, one line cut at the pane's edge, and never
+/// reached Recent messages. It now goes to the shared notices, like the other
+/// chords that cannot run.
+#[tokio::test]
+async fn the_dictation_chord_reports_why_it_cannot_run_in_the_shared_notices() {
+    let mut dashboard = populated_dashboard();
+    let notices = Notices::default();
+    dashboard.share_notices(notices.clone());
+    let mut chat = open_test_chat_with_notices("dictation-unavailable", notices.clone());
+
+    super::actions::apply_chat_toggle(
+        &mut dashboard,
+        Some(&mut chat),
+        super::actions::ChatToggle::Dictation,
+    );
+
+    let notice = dashboard.notice().expect("the chord explains itself");
+    assert!(notice.starts_with("Dictation is unavailable"), "{notice}");
+    assert!(
+        notices.history().iter().any(|record| record.text == notice),
+        "the reason is kept for Recent messages"
+    );
+    assert!(
+        !chat
+            .notice()
+            .is_some_and(|own| own.starts_with("Dictation")),
+        "not in the conversation's own line"
+    );
+}
+
 /// Resume is a chord like new session: the pane letter it used to answer
 /// is gone, so this is the only way in from the composer.
 #[test]
@@ -1338,6 +1369,83 @@ fn plain_x_no_longer_cancels_anything() {
         dashboard.handle_key(plain_x),
         DashboardAction::None
     ));
+}
+
+/// Launch finding R5-7: during a session's first turn the Sessions row showed
+/// the harness's title while the conversation header still said "project via
+/// fake", until the turn ended. The worker poll that gives the record its
+/// title now refreshes the open conversation too, so both read the record's
+/// listed title.
+#[tokio::test]
+async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row() {
+    let session_id = "title-lag";
+    let mut record = live_session(session_id, "2026-09-24T22:30:00Z");
+    record.title = "project via fake".into();
+    let mut controller = mj_controller::controller::Controller {
+        config: Config::default(),
+        state: State {
+            sessions: BTreeMap::from([(session_id.to_owned(), record.clone())]),
+            ..State::default()
+        },
+    };
+    let mut dashboard = populated_dashboard();
+    dashboard.set_state(controller.state.clone());
+    let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
+    let chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(mj_chat::chat::ChatSessionContext {
+            config: controller.config.clone(),
+            session: record.clone(),
+            reviewer_stager: mj_controller::controller::reviewer_stager(),
+        }),
+        fixture.control,
+        SessionHeaderIdentity {
+            title: record.listed_title().to_owned(),
+            ..SessionHeaderIdentity::default()
+        },
+        String::new(),
+        Notices::default(),
+    );
+    let mut chats = BTreeMap::from([(session_id.to_owned(), chat)]);
+    assert_eq!(chats[session_id].header_title(), "project via fake");
+
+    let mut materialized = mj_core::state::MaterializedSession::empty(session_id);
+    materialized.session_title = Some("r5 suspend probe".into());
+    let update = crate::pollers::WorkerPollUpdate {
+        session_id: session_id.to_owned(),
+        view: mj_controller::session_manager::ManagedSessionView {
+            snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+                window: mj_core::state::ProjectionWindow::of(&materialized),
+                materialized,
+                operational: mj_core::relay::RelaySnapshot::new(session_id.to_owned())
+                    .operational_state(),
+                latest_credential_sync_signal: None,
+                worker_build: None,
+                subagent_requests: Vec::new(),
+                subagent_results: Vec::new(),
+            }),
+            connected: true,
+            error: None,
+        },
+    };
+
+    let retitled = crate::pollers::apply_worker_poll_update(
+        &mut controller,
+        &mut dashboard,
+        &mut chats,
+        update,
+        None,
+    )
+    .unwrap();
+
+    assert!(retitled);
+    assert_eq!(
+        controller.state.sessions[session_id].listed_title(),
+        "r5 suspend probe",
+        "the Sessions row's title"
+    );
+    assert_eq!(chats[session_id].header_title(), "r5 suspend probe");
 }
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {

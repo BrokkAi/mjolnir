@@ -157,29 +157,86 @@ pub(super) async fn prepare(
             "prompts are queued; the review waits for them".to_owned(),
         ));
     }
-    let reviewer = environment
-        .resolve(handle.clone(), config, cancelled.clone())
+    let state = {
+        let session = session_id.to_owned();
+        let environment = environment.clone();
+        tokio::task::spawn_blocking(move || environment.load_state(&session))
+            .await
+            .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+            .map_err(StartRefusal)?
+    };
+    // The capture and the reviewer choice share one bound on waiting for
+    // background work.
+    let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
+    // Capture what the turn changed before choosing a reviewer. Choosing one
+    // can take minutes (an Auto choice asks each candidate profile), and a
+    // turn that changed nothing needs no reviewer at all (I2-10). The capture
+    // is a reviewer action, so it waits for the recovery copy the same way
+    // the choice does. A capture that fails for any other reason is left to
+    // the review, which captures again and reports the failure the way it
+    // always has.
+    let captured = {
+        let handle = &handle;
+        let baselines = &state.baselines;
+        after_background_work(
+            environment,
+            session_id,
+            deadline,
+            &cancelled,
+            move || async move {
+                handle
+                    .reviewer(ReviewerAction::CaptureDelta {
+                        baselines: baselines.clone(),
+                    })
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            },
+        )
         .await
-        .map_err(StartRefusal)?;
+    };
+    let captured = match captured {
+        Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
+        _ => None,
+    };
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(StartRefusal("review preparation cancelled".into()));
+    }
+    if captured
+        .as_deref()
+        .is_some_and(|deltas| !mj_review::delta::has_changes(deltas))
+    {
+        return Ok(Prepared {
+            state,
+            // No reviewer process starts for a turn with nothing to review.
+            reviewer: ReviewerIdentity::default(),
+            tier,
+            materialized: Box::new(snapshot.materialized),
+            resume_forward: None,
+            captured,
+        });
+    }
+    let reviewer = after_background_work(environment, session_id, deadline, &cancelled, || {
+        environment.resolve(handle.clone(), config.clone(), cancelled.clone())
+    })
+    .await
+    .map_err(StartRefusal)?;
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(StartRefusal("review preparation cancelled".into()));
     }
     let profile = reviewer.profile.clone();
     let session = session_id.to_owned();
     let environment = environment.clone();
-    let state = tokio::task::spawn_blocking(move || {
-        environment.check(&session, &profile)?;
-        environment.load_state(&session)
-    })
-    .await
-    .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
-    .map_err(StartRefusal)?;
+    tokio::task::spawn_blocking(move || environment.check(&session, &profile))
+        .await
+        .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+        .map_err(StartRefusal)?;
     Ok(Prepared {
         state,
         reviewer: reviewer.clone(),
         tier,
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
+        captured,
     })
 }
 
@@ -226,7 +283,69 @@ pub(super) async fn prepare_recovery(
         tier: ReviewTier::Quick,
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
+        captured: None,
     }))
+}
+
+/// How long a review waits for other work holding its session, such as the
+/// automatic recovery copy the same finished turn starts, before it gives up.
+pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Pause between attempts when the session's lease was taken by something the
+/// recovery gate does not coordinate, so a retry does not spin.
+const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a refusal only says another operation held the session: a lease
+/// refused the reviewer action, or a lease taken meanwhile cancelled it.
+pub(super) fn preempted_by_lifecycle(reason: &str) -> bool {
+    reason.contains("session is reserved for a lifecycle operation")
+        || reason.contains("cancelled for session lifecycle change")
+}
+
+/// Runs one step of review preparation once no background work holds the
+/// session.
+///
+/// A finished turn also starts the automatic recovery copy, and its lease
+/// refuses or cancels the reviewer actions preparation makes: the capture
+/// and the reviewer choice (R4-9). The step waits for that copy and tries
+/// again instead of giving up, until `deadline`. The copy is not held back
+/// for the review: it protects the work, and it takes seconds.
+async fn after_background_work<T, Step, Attempt>(
+    environment: &Arc<dyn ReviewEnvironment>,
+    session_id: &str,
+    deadline: tokio::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+    mut step: Step,
+) -> Result<T, String>
+where
+    Step: FnMut() -> Attempt,
+    Attempt: std::future::Future<Output = Result<T, String>>,
+{
+    let mut attempt = 0_u32;
+    loop {
+        if attempt > 0 {
+            tokio::time::sleep(LEASE_RETRY_PAUSE).await;
+        }
+        attempt += 1;
+        environment
+            .background_work_settled(session_id, deadline)
+            .await;
+        match step().await {
+            Err(reason)
+                if preempted_by_lifecycle(&reason)
+                    && tokio::time::Instant::now() < deadline
+                    && !cancelled.load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                tracing::info!(
+                    %session_id,
+                    attempt,
+                    %reason,
+                    "turn review waits for another operation on the session"
+                );
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 /// Why a sub-agent session is not reviewed on its own. An automatic review
@@ -241,9 +360,7 @@ pub(super) const SUBAGENT_REFUSAL: &str =
 pub fn start_refusal_notice(reason: &str) -> String {
     // Internal lifecycle refusals name the actor's mechanism, not anything a
     // person did (I1-14, I2-9).
-    let reason = if reason.contains("session is reserved for a lifecycle operation")
-        || reason.contains("cancelled for session lifecycle change")
-    {
+    let reason = if preempted_by_lifecycle(reason) {
         "another operation was using the session"
     } else {
         reason

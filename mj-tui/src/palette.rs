@@ -116,11 +116,25 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::MoveSession,
     CommandId::SuspendSession,
     CommandId::RestartSession,
+    CommandId::CopySessionId,
     CommandId::DestroySession,
 ];
 
+/// The menu of a harness-native child. Its parent's harness owns it, and
+/// Mjolnir keeps no record of its own for it to rename, pin, restart or
+/// destroy, so reading its conversation is what applies (R10-2).
+const NATIVE_AGENT_MENU_COMMANDS: &[CommandId] = &[CommandId::OpenSession];
+
 fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
-    SESSION_MENU_COMMANDS
+    let commands = if dashboard
+        .command_session_id()
+        .is_some_and(|id| dashboard.is_native_agent(id))
+    {
+        NATIVE_AGENT_MENU_COMMANDS
+    } else {
+        SESSION_MENU_COMMANDS
+    };
+    commands
         .iter()
         .filter_map(|id| {
             let availability = (spec(*id).available)(dashboard);
@@ -133,6 +147,21 @@ fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
         .collect()
 }
 
+/// What the palette says a command does, for the session it would act on.
+///
+/// Open shows a harness-native child's or a stopped sub-agent's conversation
+/// without a composer, so it must not promise that you can type in it (R11-4).
+fn command_description(dashboard: &DashboardState, id: CommandId) -> &'static str {
+    if id == CommandId::OpenSession
+        && dashboard.command_session_id().is_some_and(|session| {
+            dashboard.is_native_agent(session) || dashboard.is_stopped_subagent(session)
+        })
+    {
+        return "Show the selected agent's conversation (read-only).";
+    }
+    spec(id).description
+}
+
 fn first_ready(entries: &[PaletteEntry]) -> usize {
     entries
         .iter()
@@ -142,6 +171,7 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
 
 fn session_menu_label(id: CommandId) -> &'static str {
     match id {
+        CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
         CommandId::PinSession => "Pin…",
         CommandId::UnpinSession => "Unpin",
@@ -165,7 +195,7 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
         return if dashboard.go.is_some() {
             dashboard.go_conversation_title(&session.id)
         } else {
-            session.display_title().to_owned()
+            session.listed_title().to_owned()
         };
     }
     scope.heading().to_owned()
@@ -348,7 +378,7 @@ impl DashboardState {
             if self.go.is_some() {
                 self.go_conversation_title(&session.id)
             } else {
-                session.display_title().to_owned()
+                session.listed_title().to_owned()
             }
         });
         let entries = session_menu_entries(self);
@@ -557,21 +587,21 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         let mut section = None;
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
-                CommandId::ChangedFiles => 0,
+                CommandId::OpenSession | CommandId::ChangedFiles => 0,
                 CommandId::RenameSession | CommandId::PinSession | CommandId::UnpinSession => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
                 | CommandId::RestartSession => 2,
-                CommandId::DestroySession => 3,
+                CommandId::CopySessionId | CommandId::DestroySession => 3,
                 _ => continue,
             };
             if section != Some(next) {
                 match next {
+                    0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
                     2 => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
-                    3 => lines.push(PaletteLine::Separator),
-                    _ => {}
+                    _ => lines.push(PaletteLine::Separator),
                 }
                 section = Some(next);
             }
@@ -848,7 +878,7 @@ pub(crate) fn render_palette(
 
     let description = palette.entries.get(palette.selected).map_or(
         "Try a command name or a word from its description.",
-        |entry| spec(entry.id).description,
+        |entry| command_description(dashboard, entry.id),
     );
     frame.render_widget(
         Paragraph::new(description).style(theme::muted()),
@@ -862,8 +892,8 @@ mod tests {
     use crate::SessionOperationKind;
     use crate::render::render;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, drawn, key, mouse_at, open_palette, operation, point,
-        running_session, stopped_session,
+        buffer_lines, dashboard_with_finished_native_child, dashboard_with_session, drawn, key,
+        mouse_at, open_palette, operation, point, running_session, stopped_session,
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
@@ -989,15 +1019,134 @@ mod tests {
         assert!(!joined.contains(" Recent "), "{joined}");
         assert!(!joined.contains(" Run "), "{joined}");
 
+        let content = row_of(&lines, "Content").expect("Content");
         let changed = row_of(&lines, "Changed files").expect("Changed files");
         let organize = row_of(&lines, "Organize").expect("Organize");
         let rename = row_of(&lines, "Rename…").expect("Rename");
         let lifecycle = row_of(&lines, "Lifecycle").expect("Lifecycle");
         let suspend = row_of(&lines, "Suspend…").expect("Suspend");
         let destroy = row_of(&lines, "Destroy…").expect("Destroy");
-        assert!(changed < organize && organize < rename, "{lines:#?}");
-        assert!(rename < lifecycle && lifecycle < suspend, "{lines:#?}");
-        assert!(suspend < destroy, "{lines:#?}");
+        assert!(content < changed && changed < organize, "{lines:#?}");
+        assert!(organize < rename && rename < lifecycle, "{lines:#?}");
+        assert!(lifecycle < suspend && suspend < destroy, "{lines:#?}");
+        assert_eq!(
+            session_menu_layout(&dashboard),
+            [
+                "[Content]",
+                "Changed files",
+                "[Organize]",
+                "Rename…",
+                "Pin…",
+                "Unpin",
+                "[Lifecycle]",
+                "Container settings",
+                "Move…",
+                "Suspend…",
+                "Restart",
+                "---",
+                "Copy session ID",
+                "Destroy…",
+            ]
+        );
+    }
+
+    /// Copy session ID sits under the plain divider, directly above Destroy,
+    /// and hands the host the session's full ID to put on the clipboard.
+    #[test]
+    fn session_menu_copies_the_full_session_id_from_above_destroy() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
+        let destroy = row_of(&lines, "Destroy…").expect("Destroy");
+        assert_eq!(copy + 1, destroy, "{lines:#?}");
+
+        let copy = point(&lines, "Copy session ID");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
+        assert_eq!(
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy)),
+            DashboardAction::CopySessionId {
+                session_id: "session-1".into()
+            }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+    }
+
+    /// The open session menu as its lines: a named divider as `[name]`, the
+    /// unnamed divider as `---`, and each command by its menu label.
+    fn session_menu_layout(dashboard: &DashboardState) -> Vec<String> {
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the session menu is open");
+        };
+        palette_lines(dashboard, palette)
+            .into_iter()
+            .map(|line| match line {
+                PaletteLine::Heading(heading) => format!("[{heading}]"),
+                PaletteLine::Separator => "---".to_owned(),
+                PaletteLine::Command(index) => {
+                    session_menu_label(palette.entries[index].id).to_owned()
+                }
+            })
+            .collect()
+    }
+
+    /// R10-2: a native child's menu offered Rename, Pin, Restart and Destroy,
+    /// none of which a harness-owned child can take: its parent's harness
+    /// owns it, and Mjolnir has no record of its own to rename or destroy.
+    /// The menu offers what does apply, which is opening its conversation.
+    #[test]
+    fn a_native_childs_menu_offers_only_what_applies_to_it() {
+        let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+        dashboard.open_subagent_workspace(parent_id);
+        assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+        dashboard.focus_sessions();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert_eq!(session_menu_layout(&dashboard), ["[Content]", "Open"]);
+        let lines = drawn(&mut dashboard, 120, 40);
+        assert!(
+            row_of(&lines, "Review calc · completed").is_some(),
+            "the menu is titled with the child's name: {lines:#?}"
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Open { session_id: id }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+    }
+
+    /// Launch finding R11-4: a native child's Open said "Show the selected
+    /// session's conversation and type in it.", but its pane is read-only
+    /// ("controlled by parent"), and so is a stopped sub-agent's. Open says
+    /// so for both, and keeps its description for a session you can type in.
+    #[test]
+    fn open_describes_a_read_only_conversation_as_read_only() {
+        let read_only = "Show the selected agent's conversation (read-only).";
+        let (mut dashboard, parent_id, _) = dashboard_with_finished_native_child();
+        assert_eq!(
+            command_description(&dashboard, CommandId::OpenSession),
+            spec(CommandId::OpenSession).description,
+            "the parent itself is a session you can type in"
+        );
+        dashboard.open_subagent_workspace(parent_id);
+        dashboard.focus_sessions();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        let screen = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(screen.contains(read_only), "{screen}");
+        assert!(!screen.contains("type in it"), "{screen}");
+
+        let (mut dashboard, parent_id) = crate::test_support::dashboard_with_one_subagent();
+        let mut state = dashboard.state.clone();
+        state.sessions.get_mut("child-session").unwrap().state =
+            mj_core::state::SessionState::Stopped;
+        dashboard.set_state(state);
+        dashboard.open_subagent_workspace(parent_id);
+        dashboard.focus_sessions();
+        assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+        assert_eq!(
+            command_description(&dashboard, CommandId::OpenSession),
+            read_only
+        );
     }
 
     #[test]
@@ -1059,6 +1208,12 @@ mod tests {
         let global = row_of(&lines, "Web viewer").expect("Web viewer");
         assert!(heading < rename, "{lines:#?}");
         assert!(rename < settings, "{lines:#?}");
+        // The session group lists Copy session ID directly above Destroy,
+        // with the same label the session menu uses.
+        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
+        let destroy = row_of(&lines, "Destroy session…").expect("Destroy session");
+        assert!(heading < copy && copy + 1 == destroy, "{lines:#?}");
+        assert!(destroy < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < global, "{lines:#?}");
         // The palette never lists itself. Create and Sessions are listed even

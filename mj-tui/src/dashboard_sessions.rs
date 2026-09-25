@@ -585,7 +585,46 @@ impl DashboardState {
     }
 
     /// The attention level of one session, wherever it lives.
+    ///
+    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
+    /// waiting too. The child has no row outside the Sub-agents view, so
+    /// without this nothing a person normally looks at would show that the
+    /// child needs them (R11-1).
     pub fn attention_level(&self, session_id: &str) -> AttentionLevel {
+        let own = self.own_attention_level(session_id);
+        if own < AttentionLevel::Waiting && self.subagent_question(session_id).is_some() {
+            AttentionLevel::Waiting
+        } else {
+            own
+        }
+    }
+
+    /// The first of this parent's Mjolnir sub-agents that is waiting on a
+    /// question, with that question.
+    pub(crate) fn subagent_question(
+        &self,
+        parent_id: &str,
+    ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
+        self.state
+            .subagents
+            .values()
+            .filter(|record| record.parent_session_id == parent_id)
+            .filter(|record| {
+                self.own_attention_level(&record.child_session_id) == AttentionLevel::Waiting
+            })
+            .find_map(|record| {
+                let child = self.state.sessions.get(&record.child_session_id)?;
+                let question = self
+                    .session_details
+                    .get(&child.id)?
+                    .pending_elicitations
+                    .first()?;
+                Some((child, question))
+            })
+    }
+
+    /// The attention level from the session's own facts alone.
+    fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
         let Some(session) = self.state.sessions.get(session_id) else {
             return AttentionLevel::Inactive;
         };
@@ -1118,7 +1157,13 @@ impl DashboardState {
             .is_some_and(|id| visible.contains(id))
             && !self.selection_is_hidden_by_state()
         {
+            let displaced = self.selected_session_id.take();
             self.selected_session_id = visible.into_iter().next();
+            if let Some(displaced) = displaced
+                && self.selected_session_id.as_ref() != Some(&displaced)
+            {
+                self.displaced_selection = Some((displaced, self.selected_session_id.clone()));
+            }
         }
         let project_keys = self.project_keys();
         self.collapsed_project_keys

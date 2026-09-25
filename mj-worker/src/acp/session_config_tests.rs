@@ -1056,17 +1056,22 @@ for line in sys.stdin:
 /// A harness shaped like claude-agent-acp 0.81.0: it advertises short model
 /// values with display names, and resolves a full model id sent to
 /// `session/set_config_option` to the advertised value that runs it, the way
-/// the bridge's `resolveModelPreference` does. Anything else is refused with
-/// the bridge's own error text.
+/// the bridge's `resolveModelPreference` does. Its fuzzy last resort places
+/// text it cannot resolve on the catch-all `default` entry, as R4 saw for
+/// `not-a-model` (the title became "default · high"). Anything else is
+/// refused with the bridge's own error text. Every requested value is
+/// appended to `claude_alias.log`.
 fn claude_alias_harness(root: &std::path::Path) -> PathBuf {
     let script = root.join("claude_alias.py");
     std::fs::write(
         &script,
         r#"
-import json, sys
+import json, os, sys
+log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'claude_alias.log')
 model = 'default'
 choices = [('default','Default (recommended)'),('opus[1m]','Opus 5.5 (1M context)'),('sonnet','Sonnet 5')]
-resolved = {'claude-opus-5-5':'opus[1m]','claude-opus-5-5[1m]':'opus[1m]','claude-sonnet-5':'sonnet'}
+resolved = {'claude-opus-5-5':'opus[1m]','claude-opus-5-5[1m]':'opus[1m]','claude-sonnet-5':'sonnet',
+            'not-a-model':'default'}
 def options():
     return [{'id':'model','name':'Model','category':'model','type':'select',
        'currentValue':model,'options':[{'value':v,'name':n} for v,n in choices]}]
@@ -1083,6 +1088,8 @@ for line in sys.stdin:
                       {'id':'default','name':'Default'},{'id':'auto','name':'Auto'}]}}
     elif method == 'session/set_config_option':
         value = params['value']
+        with open(log, 'a') as output:
+            output.write(value + '\n')
         value = resolved.get(value, value)
         if value in [v for v,_ in choices]:
             model = value
@@ -1178,6 +1185,64 @@ async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_
         .unwrap();
 }
 
+/// R4-1: `/model not-a-model` answered "model set to not-a-model" and the
+/// session silently ran the default model, because the bridge places text it
+/// cannot resolve on `default`. The value is refused as before bc7495e4 and
+/// the model the session had stays selected; full ids still resolve.
+#[tokio::test]
+async fn a_claude_model_the_bridge_cannot_place_is_refused_and_the_model_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let mut spec = launch(
+        root.path(),
+        claude_alias_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    spec.harness = HarnessKind::Claude;
+    let accepted = spec.accepted_config.clone();
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    let (value, _) = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
+        .await
+        .expect("the bridge resolves a full model id");
+    assert_eq!(value, "opus[1m]");
+
+    let refusal = set_model_outcome(&commands, &mut events, "not-a-model")
+        .await
+        .expect_err("a value the bridge can only place on its default is refused");
+    assert!(
+        refusal.contains("\"not-a-model\" is not an available model value")
+            && refusal.contains("\"opus[1m]\""),
+        "{refusal}"
+    );
+    assert_eq!(
+        accepted.lock().unwrap().model.as_deref(),
+        Some("opus[1m]"),
+        "restarts keep replaying the model the session had"
+    );
+    let requested = std::fs::read_to_string(root.path().join("claude_alias.log")).unwrap();
+    assert_eq!(
+        requested.lines().collect::<Vec<_>>(),
+        ["claude-opus-5-5", "not-a-model", "opus[1m]"],
+        "the previous model is selected again on the bridge"
+    );
+
+    // Asking for the default by name is still a model change.
+    let (value, _) = set_model_outcome(&commands, &mut events, "default")
+        .await
+        .expect("the default is a listed value");
+    assert_eq!(value, "default");
+
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn an_unlisted_value_is_refused_with_the_accepted_values() {
     let root = tempfile::tempdir().unwrap();
@@ -1203,4 +1268,191 @@ async fn an_unlisted_value_is_refused_with_the_accepted_values() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+/// A harness shaped like claude-agent-acp 0.81.0 around Auto mode, for a
+/// session whose recorded native session is gone. `session/load` reports the
+/// session missing, so the worker opens a new one (R7-5). On `session/new`
+/// Claude Code starts on the model the request names, but the adapter reports
+/// its default model until one is selected (`getAvailableModels` reads only the
+/// environment, settings and a resumed transcript). A request for Auto is then
+/// judged against the reported model: the adapter maps it to Accept edits with
+/// its notice when that model has no Auto mode (`SessionModeManager.selectMode`),
+/// and otherwise passes it to Claude Code, which refuses it for haiku. A model
+/// change away from Auto mode does the same mapping (`reconcileForModel`).
+/// With `refuse_auto` set, every request for Auto is refused.
+fn claude_auto_mode_harness(root: &std::path::Path, refuse_auto: bool) -> PathBuf {
+    let script = root.join("claude_auto_mode.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+REFUSE_AUTO = __REFUSE_AUTO__
+NO_AUTO = ['haiku']
+session, running, model, mode = 'replacement', 'default', 'default', 'default'
+NOTICE = '**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.'
+def options():
+    return [
+      {'id':'mode','name':'Mode','category':'mode','type':'select','currentValue':mode,
+       'options':[{'value':x,'name':x} for x in ['default','acceptEdits','plan','auto']]},
+      {'id':'model','name':'Model','category':'model','type':'select','currentValue':model,
+       'options':[{'value':x,'name':x} for x in ['default','sonnet','haiku']]}]
+def modes():
+    return {'currentModeId':mode,'availableModes':[
+        {'id':x,'name':x} for x in ['default','acceptEdits','plan','auto']]}
+def notify(update):
+    print(json.dumps({'jsonrpc':'2.0','method':'session/update',
+                      'params':{'sessionId':session,'update':update}}), flush=True)
+def fall_back_from_auto():
+    global mode
+    mode = 'acceptEdits'
+    notify({'sessionUpdate':'current_mode_update','currentModeId':mode})
+    notify({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':NOTICE}})
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params, error, result = request.get('params', {}), None, {}
+    if method == 'initialize':
+        result = {'protocolVersion':1,'agentCapabilities':{'loadSession':True}}
+    elif method == 'session/load':
+        error = {'code':-32002,'message':'Resource not found: ' + params['sessionId'],
+                 'data':{'uri':params['sessionId']}}
+    elif method == 'session/new':
+        running = params.get('_meta',{}).get('claudeCode',{}).get('options',{}).get('model') or 'default'
+        model, mode = 'default', 'default'
+        result = {'sessionId':session,'configOptions':options(),'modes':modes()}
+    elif method == 'session/set_config_option':
+        key, value = params['configId'], params['value']
+        if key == 'mode' and value == 'auto' and REFUSE_AUTO:
+            error = {'code':-32603,'message':'Internal error',
+                     'data':{'details':'Cannot set permission mode to auto: this bridge refuses it'}}
+        elif key == 'mode' and value == 'auto' and model in NO_AUTO:
+            fall_back_from_auto()
+        elif key == 'mode' and value == 'auto' and running in NO_AUTO:
+            error = {'code':-32603,'message':'Internal error',
+                     'data':{'details':'Cannot set permission mode to auto: auto mode unavailable for this model'}}
+        elif key == 'mode':
+            mode = value
+        elif key == 'model':
+            model = running = value
+            if mode == 'auto' and value in NO_AUTO:
+                fall_back_from_auto()
+        else: raise AssertionError(key)
+        if error is None:
+            result = {'configOptions':options()}
+    elif method == 'session/prompt':
+        notify({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}})
+        result = {'stopReason':'end_turn'}
+    reply = {'jsonrpc':'2.0','id':ident}
+    reply['error' if error else 'result'] = error or result
+    print(json.dumps(reply), flush=True)
+"#
+        .replace(
+            "__REFUSE_AUTO__",
+            if refuse_auto { "True" } else { "False" },
+        ),
+    )
+    .unwrap();
+    script
+}
+
+/// What a Claude session whose native session is gone reports while it
+/// resumes on haiku: every warning, the mode it settled in, and whether the
+/// queued prompt was answered.
+struct HaikuFallbackResume {
+    warnings: Vec<String>,
+    mode: Option<String>,
+    answered: bool,
+}
+
+async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResume {
+    let root = tempfile::tempdir().unwrap();
+    let mut spec = launch(
+        root.path(),
+        claude_auto_mode_harness(root.path(), refuse_auto),
+        AcceptedSessionConfig {
+            model: Some("haiku".into()),
+            effort: None,
+        },
+    );
+    spec.harness = HarnessKind::Claude;
+    spec.resume_session = Some("missing-session".into());
+    spec.native_session_may_have_history = false;
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    prompt(&commands, "queued-before-startup").await;
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let mut resumed = HaikuFallbackResume {
+        warnings: Vec::new(),
+        mode: None,
+        answered: false,
+    };
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::Warning { message } => resumed.warnings.push(message),
+            RuntimeEvent::SessionModesConfigured { modes } => {
+                resumed.mode = modes.map(|modes| modes.current_mode_id.to_string());
+            }
+            RuntimeEvent::PromptFinished { stop_reason, .. } => {
+                resumed.answered = stop_reason == "EndTurn";
+                break;
+            }
+            RuntimeEvent::Stopped => break,
+            _ => {}
+        }
+    }
+    drop(commands);
+    let _ = tokio::time::timeout(Duration::from_secs(10), runtime).await;
+    resumed
+}
+
+/// R8-2: a never-prompted Claude session on haiku could not be resumed. Its
+/// new native session was asked for Auto while the adapter still described
+/// its default model, so the adapter passed Auto on and Claude Code refused it
+/// for haiku; the worker exited on every retry. Selecting the model first lets
+/// the adapter apply its own Accept edits fallback, as it does on load.
+#[tokio::test]
+async fn a_new_haiku_session_takes_the_adapters_auto_fallback_instead_of_failing() {
+    let resumed = resume_a_missing_haiku_session(false).await;
+    assert!(
+        resumed.answered,
+        "the resumed session must take its queued prompt: {:?}",
+        resumed.warnings
+    );
+    assert_eq!(resumed.mode.as_deref(), Some("acceptEdits"));
+    assert!(
+        !resumed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("refused")),
+        "{:?}",
+        resumed.warnings
+    );
+}
+
+/// R8-2: when the harness refuses the policy's mode for a new session, the
+/// session keeps the harness's own mode and says so once, rather than the
+/// worker exiting and the session staying suspended.
+#[tokio::test]
+async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_and_one_warning() {
+    let resumed = resume_a_missing_haiku_session(true).await;
+    assert!(
+        resumed.answered,
+        "the session must keep serving: {:?}",
+        resumed.warnings
+    );
+    assert_eq!(resumed.mode.as_deref(), Some("default"));
+    let refusals = resumed
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("auto"))
+        .collect::<Vec<_>>();
+    assert_eq!(refusals.len(), 1, "{:?}", resumed.warnings);
+    assert!(
+        refusals[0].contains("Cannot set permission mode to auto: this bridge refuses it")
+            && refusals[0].contains("default"),
+        "{}",
+        refusals[0]
+    );
 }

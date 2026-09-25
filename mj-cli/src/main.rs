@@ -561,6 +561,10 @@ async fn run_command(
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);
             };
+            // A running daemon's list, or the store's when none runs, as for
+            // `mj new`: an unknown name is refused before anything is served
+            // and without starting a daemon (launch finding R6-2).
+            refuse_unknown_workspace(&workspace).await?;
             let workspace = Some(workspace);
             acp::serve(args, workspace)
                 .await
@@ -1139,7 +1143,21 @@ async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
 /// not exist yet has none. A list that cannot be read is left out rather than
 /// hiding the reason.
 pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
-    let workspaces = match daemon::connect_existing().await {
+    let workspaces = listed_workspaces_without_starting().await;
+    let workspaces = workspaces.map(|workspaces| {
+        workspaces
+            .into_iter()
+            .map(|workspace| (workspace.name, workspace.session_count))
+            .collect::<Vec<_>>()
+    });
+    anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
+}
+
+/// The workspaces as a running daemon lists them or, when no daemon runs, as
+/// the store holds them. Never starts a daemon. `None` when no list could be
+/// read.
+async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
+    match daemon::connect_existing().await {
         Ok(mut daemon) => daemon
             .list_workspaces()
             .await
@@ -1163,14 +1181,26 @@ pub(crate) async fn workspace_required(command: &str) -> anyhow::Error {
             tracing::warn!(%error, "could not reach the daemon to list workspaces");
             None
         }
+    }
+}
+
+/// Refuse a `--workspace` name that no workspace carries, before anything
+/// starts a daemon (launch findings R5-9 and R6-2). The list comes from a
+/// running daemon or, when none runs, from the store, as in
+/// [`workspace_required`]. A name that cannot be checked is let through; the
+/// daemon refuses it later if it is unknown.
+pub(crate) async fn refuse_unknown_workspace(name: &str) -> Result<()> {
+    let Some(workspaces) = listed_workspaces_without_starting().await else {
+        return Ok(());
     };
-    let workspaces = workspaces.map(|workspaces| {
-        workspaces
-            .into_iter()
-            .map(|workspace| (workspace.name, workspace.session_count))
-            .collect::<Vec<_>>()
-    });
-    anyhow::anyhow!(workspace_required_message(command, workspaces.as_deref()))
+    let wanted = name.trim().to_lowercase();
+    if workspaces
+        .iter()
+        .any(|workspace| workspace.name.to_lowercase() == wanted)
+    {
+        return Ok(());
+    }
+    Err(unknown_workspace(name, &workspaces))
 }
 
 /// The workspaces in the store, read without a daemon. A store that does not
@@ -1391,7 +1421,7 @@ async fn login(args: LoginArgs) -> Result<()> {
         profile.home.display()
     );
     let mut environment = profile.environment.clone();
-    profile.kind.configure_home_environment(
+    profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),
         &mut environment,
@@ -1477,7 +1507,7 @@ async fn store_claude_setup_token(
         profile.home.display()
     );
     let mut environment = profile.environment.clone();
-    profile.kind.configure_home_environment(
+    profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),
         &mut environment,
@@ -1656,8 +1686,8 @@ async fn recover(args: RecoverArgs) -> Result<()> {
                 }
                 if scan.hidden_other_instances > 0 {
                     eprintln!(
-                        "note: {} worker(s) created by other or unknown instances were not listed; pass --all-instances to include them",
-                        scan.hidden_other_instances
+                        "note: {} created by other or unknown instances were not listed; pass --all-instances to include them",
+                        mj_core::text::counted(scan.hidden_other_instances, "worker", "workers")
                     );
                 }
                 for warning in &scan.warnings {

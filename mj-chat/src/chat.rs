@@ -1747,7 +1747,17 @@ fn turn_started_at_epoch_seconds(execution: MaterializedExecutionState) -> Optio
 mod tests;
 
 impl ChatState {
+    /// Where the reader is, for a host that reopens this conversation later.
+    ///
+    /// A view still resting on its opening reveal is saved as following the
+    /// tail. The reveal is not the reader's scroll: restored as a position,
+    /// the reopened view would treat it as one and never follow new rows
+    /// again (D-14). Following the tail lets the reopened view make its own
+    /// reveal instead.
     pub fn transcript_position(&self) -> TranscriptPosition {
+        if self.rests_on_opening_reveal() {
+            return TranscriptPosition(TranscriptAnchor::Bottom);
+        }
         TranscriptPosition(self.anchor)
     }
     pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {

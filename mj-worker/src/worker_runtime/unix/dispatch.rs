@@ -61,6 +61,9 @@ async fn run_relay_coordinator_with_verdict(
     // A monotonic deadline keeps unrelated events and wall-clock changes from
     // restarting the wait. Only the persisted wall deadline crosses restarts.
     let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
+    // A stop applied to a turn Claude Code started on its own, keyed by that
+    // turn's first ordinal, and when to end the turn if nothing answers it.
+    let mut stop_timer: Option<(u64, tokio::time::Instant)> = None;
     loop {
         let invalidated_generation = verdict_generation.filter(|generation| {
             !relay
@@ -124,6 +127,19 @@ async fn run_relay_coordinator_with_verdict(
             });
         }
         let wake_at = capacity_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
+        let unanswered_stop = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .unanswered_harness_turn_stop();
+        if stop_timer.map(|(turn, _)| turn) != unanswered_stop {
+            stop_timer = unanswered_stop.map(|turn| {
+                (
+                    turn,
+                    tokio::time::Instant::now() + crate::relay::HARNESS_TURN_STOP_GRACE,
+                )
+            });
+        }
+        let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         tokio::select! {
             biased;
             wake = dispatch_wakes.recv(), if wakes_open => {
@@ -195,6 +211,15 @@ async fn run_relay_coordinator_with_verdict(
                     capacity_timer = capacity_deadline.map(|deadline| (deadline,
                         tokio::time::Instant::now() + std::time::Duration::from_secs(1)));
                 }
+                dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+            }
+            _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() => {
+                let (turn, _) = stop_timer.take().expect("guarded stop timer");
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .end_unanswered_harness_turn_stop(turn)?;
+                // A checkpoint barrier may have been waiting for this turn.
                 dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
             }
             _ = kimi_poll.tick(), if kimi_tasks.is_some() => {
@@ -446,6 +471,7 @@ pub(crate) fn record_runtime_event(
             native_session_id,
             resumed,
             native_continuity_lost,
+            replaced_unused_native_session_id,
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
@@ -453,6 +479,7 @@ pub(crate) fn record_runtime_event(
                 native_session_id,
                 resumed,
                 native_continuity_lost,
+                replaced_unused_native_session_id,
             })?;
         }
         RuntimeEvent::SessionConfigured { config_options } => {
@@ -968,12 +995,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
                 .expect("prompt command")
                 .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {
-                prompt.insert(
-                    0,
-                    agent_client_protocol::schema::v1::ContentBlock::Text(
-                        agent_client_protocol::schema::v1::TextContent::new(context.clone()),
-                    ),
-                );
+                prompt.insert(0, crate::acp::hidden_context_block(context.clone()));
             }
             Some(CommandRequest::Prompt { request_id, prompt })
         }
@@ -1047,12 +1069,18 @@ pub(crate) fn select_resume_session(
 /// A native identity that arrived with the launch configuration was created
 /// somewhere other than this journal, which therefore cannot show what the
 /// thread contains. Record that durably before the thread is used again, so a
-/// later resume failure can never be answered by replacing it.
+/// later resume failure can never be answered by replacing it. The one
+/// exception is a relay restored from a checkpoint whose conversation shows
+/// the session never received a prompt (I2-7): the harness wrote nothing for
+/// it, so there is nothing a replacement could lose.
 pub(crate) fn record_imported_native_identity(
     config: &WorkerLaunchConfig,
     relay: &mut DurableRelay,
 ) -> Result<()> {
-    if config.native_session_id.is_some() && relay.operational_state().native_session_id.is_none() {
+    if config.native_session_id.is_some()
+        && relay.operational_state().native_session_id.is_none()
+        && !relay.restored_native_session_unused()
+    {
         relay.mark_native_session_used()?;
     }
     Ok(())

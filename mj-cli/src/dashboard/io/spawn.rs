@@ -581,18 +581,28 @@ pub(crate) fn save_setup_at(
         // Compare in the stored shape the editor works in, where a runtime
         // names its machine, rather than in the fused in-memory shape.
         let stored_defaults = serde_json::to_value(&defaults)?;
+        let mut implicit = Vec::new();
         for (id, target) in defaults.targets {
             if !config.targets.contains_key(&id)
                 && original["targets"][&id] == stored_defaults["targets"][&id]
             {
+                implicit.push((id.clone(), target.clone()));
                 config.targets.insert(id, target);
             }
         }
         let current = serde_json::to_value(&*config)?;
         let merged = merge_setup_edit(Some(&original), Some(&updated), Some(&current), "Setup")?
             .context("setup cannot remove the configuration")?;
-        let next = serde_json::from_value(merged)?;
+        let mut next: Config = serde_json::from_value(merged)?;
         state.validate_setup_update(config, &next)?;
+        // The defaults were only the merge base. A built-in target the edit
+        // left as it was stays out of the file, as `Config::update` does, so
+        // an unrelated save does not turn it into one the user configured.
+        for (id, target) in implicit {
+            if next.targets.get(&id) == Some(&target) {
+                next.targets.remove(&id);
+            }
+        }
         *config = next;
         Ok(())
     })

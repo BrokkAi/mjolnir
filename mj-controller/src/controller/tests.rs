@@ -919,6 +919,95 @@ const MOUNT_HISTORY_FAILURE_CHILD: &str = "MJ_TEST_MOUNT_HISTORY_FAILURE_CHILD";
 
 const CONTAINER_SIZE_HISTORY_CHILD: &str = "MJ_TEST_CONTAINER_SIZE_HISTORY_CHILD";
 
+const CONTAINER_MOUNT_SOURCE_CHILD: &str = "MJ_TEST_CONTAINER_MOUNT_SOURCE_CHILD";
+
+/// Launch finding J-24: Container settings accepted a mount whose host
+/// directory did not exist, and Docker then created it, owned by root, when
+/// the container was recreated. A new attached directory is checked where the
+/// container will read it when the settings are saved, and the refusal names
+/// the path.
+#[test]
+fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
+    if std::env::var_os(CONTAINER_MOUNT_SOURCE_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            CONTAINER_MOUNT_SOURCE_CHILD,
+            "container_settings_refuse_a_new_mount_whose_source_does_not_exist",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "mounts",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let mount = |source: &Path| targets::AdditionalMount {
+        source: source.to_path_buf(),
+        destination: "/mnt/extra".into(),
+        access: targets::MountAccess::Ro,
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let missing = scratch.path().join("nonexistent-r3");
+
+    let error = controller
+        .update_session_container_settings(
+            &id,
+            None,
+            None,
+            vec![mount(&missing)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&missing.display().to_string()),
+        "{error:#}"
+    );
+    assert!(controller.state.sessions[&id].additional_mounts.is_empty());
+    assert!(
+        crate::database::load_state().unwrap().sessions[&id]
+            .additional_mounts
+            .is_empty()
+    );
+    assert!(!missing.exists(), "the check must not create the directory");
+
+    let present = scratch.path().join("present");
+    std::fs::create_dir(&present).unwrap();
+    controller
+        .update_session_container_settings(
+            &id,
+            None,
+            None,
+            vec![mount(&present)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap();
+    // A directory already attached is not checked again, so a size change
+    // still saves after it has gone away; the check is for what is added.
+    std::fs::remove_dir(&present).unwrap();
+    controller
+        .update_session_container_settings(
+            &id,
+            Some("2".into()),
+            None,
+            vec![mount(&present)],
+            Vec::new(),
+            &ProcessExecutor,
+        )
+        .unwrap();
+}
+
 #[test]
 fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() {
     if std::env::var_os(CONTAINER_SIZE_HISTORY_CHILD).is_none() {
@@ -962,6 +1051,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
             Some("4g".into()),
             Vec::new(),
             Vec::new(),
+            &ProcessExecutor,
         )
         .unwrap();
     assert_eq!(
@@ -1158,6 +1248,111 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     assert!(relaunch.subagent_tools);
 }
 
+/// R10-4: the Mjolnir sub-agents of an isolated session were given a project
+/// memory keyed by their parent's clone (`<project>/.mj/clones/<parent>`),
+/// not by the project, so their first prompt carried an empty memory index
+/// while the parent had the project's memory. A child must read the memory
+/// its parent reads, and its writes must reconcile into the same canonical
+/// store.
+#[test]
+fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
+    const MARKER: &str = "MJ_TEST_SUBAGENT_PROJECT_MEMORY_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_subagent_of_an_isolated_session_shares_its_parents_project_memory",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let clone = project.path().join(".mj/clones").join(parent_id);
+    std::fs::create_dir_all(&clone).unwrap();
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(clone.clone());
+    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: project.path().to_path_buf(),
+        source_repository: project.path().to_path_buf(),
+        worktree_root: clone.clone(),
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    parent.mjolnir_subagents = Some(true);
+    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    controller
+        .state
+        .sessions
+        .insert(parent_id.to_owned(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+
+    let child = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            parent_session_id: parent_id.to_owned(),
+            task_name: "Review calc.py".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Review calc.py".into(),
+            request_key: "review-calc".into(),
+        })
+        .unwrap();
+    let child_id = child.child_session_id;
+    assert_eq!(
+        controller.state.sessions[&child_id].project_directory,
+        Some(clone),
+        "the child works in its parent's clone"
+    );
+
+    // Writes reconcile into the parent's canonical store.
+    assert_eq!(
+        controller
+            .project_memory_sync_target(&child_id)
+            .unwrap()
+            .canonical_root,
+        controller
+            .project_memory_sync_target(parent_id)
+            .unwrap()
+            .canonical_root,
+    );
+    // The child's worker is handed the parent's memory identity.
+    let memory_key = |controller: &Controller, id: &str, root: PathBuf| {
+        controller
+            .current_worker_launch_config(
+                id,
+                &targets::TargetLocator::LocalBare {
+                    worker_root: root.to_string_lossy().into_owned(),
+                },
+            )
+            .unwrap()
+            .project_memory
+            .expect("Codex receives project memory")
+            .project_key
+    };
+    let child_root = mj_core::config::data_dir().join("workers").join(&child_id);
+    assert_eq!(
+        memory_key(&controller, &child_id, child_root),
+        memory_key(&controller, parent_id, parent_root),
+    );
+}
+
 /// Auto captures a baseline even with automation off, so manual review can
 /// measure the first turn in a single-profile installation.
 #[test]
@@ -1241,6 +1436,82 @@ impl CommandExecutor for DurableTargetExecutor {
     }
 }
 
+/// Launch finding R3-7 (a leftover of J-21): after a machine's `extra_args`
+/// changed and `mj daemon restart`, running SSH-bare sessions reconnected
+/// their relays with the ssh options recorded when they were provisioned,
+/// until each was resumed. The relay the daemon starts on recovery follows the
+/// machine's current options; only where the worker lives stays as recorded.
+#[test]
+fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
+    let ssh_bare = |host: &str, extra_args: &[&str]| -> TargetTemplate {
+        serde_json::from_value(serde_json::json!({
+            "kind": "ssh-bare", "host": host, "user": "ubuntu", "extra_args": extra_args,
+            "permissions": "guardian",
+        }))
+        .unwrap()
+    };
+    let mut session =
+        super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
+    session.target_template_id = "ec2".into();
+    session.target_runtime = Some((&ssh_bare("ec2.test", &["-o", "ServerAliveCountMax=3"])).into());
+    session.target = Some(TargetLocator::SshBare {
+        host: "ec2.test".into(),
+        workspace: ".local/share/hel/workspaces/0123456789abcdef0123456789abcdef".into(),
+        worker_id: None,
+    });
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    let relay_with = |controller: &mut Controller, template: TargetTemplate| {
+        controller.config.targets.insert("ec2".into(), template);
+        controller.reconnect_command(&session.id).unwrap()
+    };
+
+    let relay = relay_with(
+        &mut controller,
+        ssh_bare("ec2.test", &["-o", "ServerAliveInterval=15"]),
+    );
+    assert!(
+        relay.args.contains(&"ServerAliveInterval=15".to_owned()),
+        "{relay:?}"
+    );
+    assert!(
+        !relay.args.contains(&"ServerAliveCountMax=3".to_owned()),
+        "{relay:?}"
+    );
+    // It still runs as one counted session on the machine's shared
+    // connection, so the daemon places it on a ControlPath shard.
+    let shared = relay
+        .ssh_session
+        .as_ref()
+        .expect("a shared-connection session");
+    assert!(
+        shared
+            .ssh_args
+            .contains(&"ServerAliveInterval=15".to_owned())
+    );
+
+    // A machine that now names another host is not where this worker lives;
+    // the relay keeps the recorded access.
+    let relay = relay_with(
+        &mut controller,
+        ssh_bare("elsewhere.test", &["-o", "ServerAliveInterval=15"]),
+    );
+    assert!(
+        relay.args.contains(&"ServerAliveCountMax=3".to_owned()),
+        "{relay:?}"
+    );
+    assert!(
+        relay.args.iter().any(|arg| arg.contains("ec2.test")),
+        "{relay:?}"
+    );
+}
+
 #[test]
 fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     const MARKER: &str = "MJ_TEST_DURABLE_TARGET_CHILD";
@@ -1268,7 +1539,14 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             "project",
             "podman",
             "durable target",
-            launch_options(Vec::new()),
+            SessionLaunchOptions {
+                // Set at creation, since a lifecycle transition does not own
+                // this column (see `update_lifecycle_fields`); this test
+                // reloads the controller before registering a child, and the
+                // child registration below needs the parent's own choice.
+                mjolnir_subagents: Some(true),
+                ..launch_options(Vec::new())
+            },
         )
         .unwrap();
     let runtime = crate::database::load_state().unwrap().sessions[&id]
@@ -1282,7 +1560,6 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     );
     let record = controller.state.sessions.get_mut(&id).unwrap();
     record.state = SessionState::Running;
-    record.mjolnir_subagents = Some(true);
     record.target = Some(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: targets::resource_name(&id).unwrap(),

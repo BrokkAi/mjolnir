@@ -602,6 +602,7 @@ fn a_locally_created_empty_native_session_has_no_history() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -625,6 +626,7 @@ fn a_dispatched_prompt_gives_the_native_session_history() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit_relay(
@@ -647,6 +649,7 @@ fn a_released_recovery_floor_gives_the_native_session_history() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -681,6 +684,7 @@ fn a_native_session_opened_after_a_restore_floor_has_no_history() {
             native_session_id: "fresh".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.native_session_may_have_history());
@@ -710,6 +714,7 @@ fn a_resumed_native_session_has_history_after_reopening() {
             native_session_id: "imported".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(relay.native_session_may_have_history());
@@ -727,6 +732,7 @@ fn a_used_native_session_stays_used_across_persist_and_replay() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay.mark_native_session_used().unwrap();
@@ -760,6 +766,7 @@ fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
             native_session_id: "fresh".into(),
             resumed: false,
             native_continuity_lost: true,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(relay.operational_state().native_continuity_lost);
@@ -774,6 +781,7 @@ fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
             native_session_id: "later".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.operational_state().native_continuity_lost);
@@ -792,6 +800,7 @@ fn journals_without_lost_native_continuity_default_to_intact() {
             native_session_id: "native".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         }
     );
 
@@ -825,6 +834,49 @@ fn hidden_prompt_context_is_removed_from_harness_visible_text() {
         strip_hidden_prompt_context("<user-request>keep me</user-request>"),
         "<user-request>keep me</user-request>"
     );
+}
+
+/// Codex receives hidden context as an embedded resource, and codex-acp gives
+/// the model that block as `{uri}\n<context ref="{uri}">\n{text}\n</context>`.
+/// Codex keeps that text in its history of the prompt, where the Codex import
+/// reads it (content items joined by line breaks) and where codex-acp takes a
+/// fallback title from it after a load (joined by spaces, runs of white space
+/// collapsed).
+#[test]
+fn codex_wrapping_of_hidden_context_is_removed_from_harness_visible_text() {
+    use mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI as URI;
+
+    let wrapped = |context: &str| format!("{URI}\n<context ref=\"{URI}\">\n{context}\n</context>");
+    let memory = "<mj-project-memory>\nprivate memory\n</mj-project-memory>";
+    let shell = "<user_shell_command>private output</user_shell_command>";
+    let handoff = "Archived session restored from SessionWiki. The work so far.";
+
+    for context in [
+        memory.to_owned(),
+        format!("{memory}\n\n{shell}"),
+        handoff.to_owned(),
+    ] {
+        let history = format!("{}\nfirst prompt", wrapped(&context));
+        assert_eq!(strip_hidden_prompt_context(&history), "first prompt");
+        let title = history.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(strip_hidden_prompt_context(&title), "first prompt");
+        assert_eq!(
+            mj_core::state::normalize_session_title(&title).as_deref(),
+            Some("first prompt")
+        );
+    }
+    // A cut-off wrapping is hidden, wherever it was cut.
+    let whole = wrapped(memory);
+    for cut in [URI.len(), URI.len() + 12, whole.len() - 3] {
+        assert_eq!(strip_hidden_prompt_context(&whole[..cut]), "", "{cut}");
+    }
+    // The user's own words about the URI or a context tag stay visible.
+    for text in [
+        format!("{URI} is where Mjolnir keeps it"),
+        format!("explain <context ref=\"{URI}\"> to me"),
+    ] {
+        assert_eq!(strip_hidden_prompt_context(&text), text);
+    }
 }
 
 #[test]
@@ -893,6 +945,7 @@ fn restored_native_identity_waits_for_current_acp_configuration() {
             native_session_id: "native-session".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     assert!(!relay.operational_state().native_session_is_ready());
@@ -2269,6 +2322,7 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
             native_session_id: "native".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay
@@ -2498,6 +2552,139 @@ fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_en
         refused(&mut codex, "cancel-codex"),
         "the agent is working on its own after a background task; there is no prompt to cancel"
     );
+}
+
+/// What the Claude adapter (claude-agent-acp 0.81.0, `dist/session-mode.js`,
+/// `publishFallbackWarning`) sends as agent text while it answers a switch to
+/// a model without Auto mode. Recorded in launch re-verification R4 (session
+/// 7214842e…, transcript item 30) after `/model haiku` on a session with no
+/// prompt yet.
+const CLAUDE_AUTO_MODE_FALLBACK_TEXT: &str = "**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.";
+
+/// R4-2: the adapter's answer to a model change is not a model cycle, so no
+/// result ever follows it. A turn opened for that text stayed Running for
+/// minutes and nothing could stop it.
+#[test]
+fn text_that_answers_a_model_change_opens_no_harness_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    submit_relay(&mut relay, "model-haiku", set_config("model", "haiku"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "model-haiku");
+
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(
+        state.harness_turn.is_none(),
+        "the answer to a configuration request is not a turn"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    // As a notice row of its own since R8-5.
+    assert!(
+        observations(&relay).iter().any(|observation| matches!(
+            observation,
+            RelayObservation::Notice { message }
+                if *message == CLAUDE_AUTO_MODE_FALLBACK_TEXT.replace("**", "")
+        )),
+        "the notice still reaches the conversation"
+    );
+
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "haiku".into(),
+        })
+        .unwrap();
+    relay
+        .record_command_completed("model-haiku", RelayCommandOutcome::Configured)
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // Text with no request in flight is still Claude Code working on its own.
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+}
+
+/// R4-2: a stop of a turn Claude Code never ran is answered by nothing, so
+/// the relay ends that turn itself once the stop has had time to be answered.
+/// A real cycle's result still ends the turn first.
+#[test]
+fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
+    for command in [RelayCommand::Cancel, RelayCommand::CancelTurn] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        relay
+            .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+            .unwrap();
+        let turn = relay
+            .operational_state()
+            .harness_turn
+            .expect("text at idle opens a turn");
+        assert!(relay.unanswered_harness_turn_stop().is_none());
+
+        submit_relay(&mut relay, "stop-phantom", command.clone());
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        relay
+            .record_command_completed("stop-phantom", RelayCommandOutcome::Cancelled)
+            .unwrap();
+        let first_ordinal = relay
+            .unanswered_harness_turn_stop()
+            .expect("the applied stop waits for the harness to answer it");
+        assert_eq!(
+            relay.operational_state().harness_turn,
+            Some(turn),
+            "the turn stays open while the harness may still answer"
+        );
+
+        assert!(
+            relay
+                .end_unanswered_harness_turn_stop(first_ordinal)
+                .unwrap(),
+            "{command:?}"
+        );
+        let state = relay.operational_state();
+        assert!(state.harness_turn.is_none());
+        assert_eq!(state.execution, RelayExecutionState::Idle);
+        assert!(matches!(
+            observations(&relay).last(),
+            Some(RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            })
+        ));
+        assert!(relay.unanswered_harness_turn_stop().is_none());
+    }
+
+    // The interrupted cycle's result arrives in time: nothing is left to end.
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-real", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed("stop-real", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    let first_ordinal = relay.unanswered_harness_turn_stop().unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(relay.unanswered_harness_turn_stop().is_none());
+    let before = relay.operational_state().latest_ordinal;
+    assert!(
+        !relay
+            .end_unanswered_harness_turn_stop(first_ordinal)
+            .unwrap()
+    );
+    assert_eq!(relay.operational_state().latest_ordinal, before);
 }
 
 #[test]
@@ -4580,6 +4767,7 @@ fn clearable_relay(root: &Path) -> DurableRelay {
             native_session_id: "original".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     relay.mark_native_session_used().unwrap();
@@ -4895,4 +5083,168 @@ fn clear_is_refused_while_a_turn_is_running() {
         .submit_command("clear-request", RelayCommand::ClearContext)
         .unwrap();
     assert!(refused.is_err());
+}
+
+/// The transcript a relay's events project to.
+fn projected_transcript(relay: &DurableRelay) -> Vec<mj_core::state::TranscriptItem> {
+    let mut session = mj_core::state::MaterializedSession::empty(SESSION);
+    for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
+        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(
+            &mut session,
+            &event,
+            projected.mutation,
+        )
+        .unwrap();
+    }
+    session
+        .transcript
+        .into_iter()
+        .map(|item| (*item).clone())
+        .collect()
+}
+
+/// R8-4: resuming a prompted Claude session on haiku opened a phantom turn.
+/// The adapter sends its "Auto mode unavailable" notice while the resumed
+/// session is set up (journal: `harness_turn_started` at 77, the notice
+/// chunk at 78, both before `session_opened` at 79), so the transcript said
+/// "Agent continued on its own" and the row stayed Working until Esc. Output
+/// before the session is open and configured is a notice row, never a turn.
+#[test]
+fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    // The recorded order: a restarted session, a new bridge, the notice,
+    // then the opened and configured session.
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::AgentInitialized {
+            protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
+            capabilities: Box::default(),
+            agent_info: None,
+        })
+        .unwrap();
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "native".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none(), "setup output is not a turn");
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    let recorded = observations(&relay);
+    assert!(
+        !recorded
+            .iter()
+            .any(|observation| matches!(observation, RelayObservation::HarnessTurnStarted { .. })),
+        "{recorded:#?}"
+    );
+    let notice = "Auto mode unavailable: the selected model does not support Auto mode; using \
+                  Accept edits instead.";
+    assert!(
+        recorded.iter().any(|observation| matches!(
+            observation,
+            RelayObservation::Notice { message } if message == notice
+        )),
+        "{recorded:#?}"
+    );
+    let transcript = projected_transcript(&relay);
+    assert!(
+        transcript.iter().any(|item| matches!(
+            &item.body,
+            mj_core::state::TranscriptBody::System { text } if text == notice
+        )),
+        "{transcript:#?}"
+    );
+    assert!(
+        !transcript.iter().any(|item| item.is_turn_start()
+            || matches!(item.body, mj_core::state::TranscriptBody::Agent { .. })),
+        "{transcript:#?}"
+    );
+
+    // Once the session is configured, text with nothing in flight is Claude
+    // Code working on its own again.
+    relay
+        .record_session_update(agent_text_chunk("The build finished."))
+        .unwrap();
+    assert!(relay.operational_state().harness_turn.is_some());
+}
+
+/// R8-5: a live `/model haiku` on a session that already had a reply added
+/// the adapter's notice to that reply: item `agent:msg_011Cf…` went from
+/// "one two" to "one two**Auto mode unavailable:** …" (cli/038 vs 046). The
+/// notice carries no message id, and the projection joins an id-less chunk
+/// that arrives while idle to the last agent message. Text that answers a
+/// configuration request is a notice row of its own.
+#[test]
+fn text_that_answers_a_model_change_is_its_own_notice_and_leaves_the_reply_alone() {
+    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    submit_relay(&mut relay, "prompt-reply", prompt("Reply with one two."));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("one two")))
+                .message_id(Some("msg_011Cf".into())),
+        ))
+        .unwrap();
+    finish_prompt(&mut relay, "prompt-reply");
+
+    submit_relay(&mut relay, "model-haiku", set_config("model", "haiku"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_session_update(agent_text_chunk(CLAUDE_AUTO_MODE_FALLBACK_TEXT))
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "haiku".into(),
+        })
+        .unwrap();
+    relay
+        .record_command_completed("model-haiku", RelayCommandOutcome::Configured)
+        .unwrap();
+
+    let state = relay.operational_state();
+    assert!(state.harness_turn.is_none());
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+    let transcript = projected_transcript(&relay);
+    let reply = transcript
+        .iter()
+        .find(|item| item.stable_id == "agent:msg_011Cf")
+        .expect("the reply is in the transcript");
+    let mj_core::state::TranscriptBody::Agent { chunks, .. } = &reply.body else {
+        panic!("the reply is an agent message: {reply:#?}");
+    };
+    let text = chunks
+        .iter()
+        .filter_map(|chunk| chunk.pointer("/content/text")?.as_str())
+        .collect::<String>();
+    assert_eq!(text, "one two");
+    assert!(
+        transcript.iter().any(|item| matches!(
+            &item.body,
+            mj_core::state::TranscriptBody::System { text }
+                if text == "Auto mode unavailable: the selected model does not support Auto \
+                            mode; using Accept edits instead."
+        )),
+        "{transcript:#?}"
+    );
 }

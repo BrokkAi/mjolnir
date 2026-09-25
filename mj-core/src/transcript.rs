@@ -419,6 +419,11 @@ pub struct ChatEntry {
     /// switches render mode without rebuilding entries.
     #[serde(default, skip_serializing_if = "is_false")]
     pub raw_only: bool,
+    /// A completed tool call whose turn was interrupted while it ran. The
+    /// harness kept the command going and it ended later on its own, so its
+    /// completion is not the agent's finished work.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ended_after_interrupt: bool,
     /// The materialized transcript item this entry was derived from, when it
     /// came from the controller's projection. Provenance only, so it is
     /// neither serialized nor part of the entry's value.
@@ -483,6 +488,7 @@ impl ChatEntry {
             plan,
             leading_omitted: false,
             raw_only: false,
+            ended_after_interrupt: false,
             source: TranscriptSource::default(),
         }
     }
@@ -560,6 +566,7 @@ impl ChatEntry {
             plan: Vec::new(),
             leading_omitted: false,
             raw_only: false,
+            ended_after_interrupt: false,
             source: TranscriptSource::default(),
         }
     }
@@ -588,6 +595,7 @@ impl ChatEntry {
             plan: Vec::new(),
             leading_omitted: false,
             raw_only: false,
+            ended_after_interrupt: false,
             source: TranscriptSource::default(),
         }
     }

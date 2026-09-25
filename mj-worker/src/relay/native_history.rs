@@ -190,6 +190,7 @@ mod tests {
                 native_session_id: "legacy-thread".into(),
                 resumed,
                 native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
             })
             .unwrap();
     }

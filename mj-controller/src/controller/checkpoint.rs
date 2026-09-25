@@ -22,7 +22,8 @@ use mj_checkpoint::archive::{
 use mj_checkpoint::checkpoint::{
     CHECKPOINT_EXPORT_PROTOCOL_VERSION, CHECKPOINT_STAGING_PROTOCOL_VERSION, CapturedCheckpoint,
     CheckpointCaptureSpec, CheckpointExportSpec, CheckpointPackSpec, CheckpointRepositoryCapture,
-    CheckpointRepositorySpec, canonical_session_contains_prompt, checkpoint_sha256,
+    CheckpointRepositorySpec, NO_SESSION_ARTIFACTS, checkpoint_sha256,
+    current_native_session_received_prompt,
 };
 use mj_core::config::{HarnessKind, sessions_dir};
 use mj_core::state::{
@@ -77,6 +78,21 @@ const CHECKPOINT_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a wedged ACP forces a worker restart, wait as long as native-session
 /// startup: session/load of a long kimi transcript can outlast 30s.
 const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(300);
+
+/// Whether a checkpoint whose worker restart failed should start the worker
+/// once more without its harness. That restart only fails this way when the
+/// worker was stopped and none came back, often because the harness itself
+/// cannot start (R4-3). A checkpoint needs only the relay journal and the
+/// files on the target, so a suspend or move, which holds the latch through
+/// close and is ending the session anyway, can still save it. A routine
+/// recovery copy does not: the session would be left unable to run.
+pub(super) fn restart_falls_back_to_checkpoint_only(
+    exclusivity: LatchExclusivity,
+    error: &anyhow::Error,
+) -> bool {
+    exclusivity == LatchExclusivity::HoldThroughClose
+        && super::worker_restart::WorkerRestartLeftNoWorker::marks(error)
+}
 
 mod archives;
 pub use archives::*;

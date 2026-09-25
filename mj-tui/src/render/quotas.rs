@@ -67,7 +67,7 @@ pub(crate) fn minimized_targets_line(
     summary_row("Targets", &readings, width, focused)
 }
 
-/// One row summarising every profile's quota, for the minimized Quota pane.
+/// One row summarising every profile's quota, for the minimized Profiles pane.
 ///
 /// The figures are percentages *remaining*, which is the number the full
 /// pane's bar prints beside itself: an exhausted profile reads 0% in both. A
@@ -132,7 +132,7 @@ pub(crate) fn minimized_quota_line(
             })
         })
         .collect::<Vec<_>>();
-    summary_row("Quota", &readings, width, focused)
+    summary_row("Profiles", &readings, width, focused)
 }
 
 /// A minimized pane's single row, drawn as the pane's own title so it keeps
@@ -146,7 +146,7 @@ pub(crate) fn summary_row(
 ) -> Line<'static> {
     // A minimized pane is still a pane, so its one row opens the way a
     // bordered one does and the rule carries on between the label and the
-    // readings: `─ Quota ── claude-1 63% ────`.
+    // readings: `─ Profiles ── claude-1 63% ────`.
     let (opening, divider) = ("─ ", " ── ");
     let mut spans = vec![Span::raw(format!("{opening}{label}{divider}"))];
     let mut used = opening.chars().count() + label.chars().count() + divider.chars().count();
@@ -392,12 +392,12 @@ pub(crate) struct QuotaTableRow {
 impl QuotaTableRow {
     pub(crate) fn into_row(self) -> Row<'static> {
         Row::new([
-            Cell::from(self.profile),
-            Cell::from(self.harness),
+            Cell::from(self.profile).style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from(self.harness).style(theme::muted()),
             Cell::from(self.weekly),
-            Cell::from(self.weekly_reset),
+            Cell::from(self.weekly_reset).style(theme::muted()),
             Cell::from(self.five_hour),
-            Cell::from(self.five_hour_reset),
+            Cell::from(self.five_hour_reset).style(theme::muted()),
         ])
     }
 }
@@ -504,6 +504,8 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
 
 pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
     [
+        // The heading is no longer drawn (see `render_quotas`), but the
+        // column keeps the width it gave, so the table does not shift.
         quota_column_width(
             "Profile",
             rows.iter()
@@ -537,7 +539,7 @@ pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
     ]
 }
 
-/// Width needed to draw the complete Quota table, including its
+/// Width needed to draw the complete Profiles table, including its
 /// inter-column spacing, border, and always-present selection marker.
 pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
     let now = SystemTime::now()
@@ -574,7 +576,10 @@ pub(crate) fn render_quotas(
             .map(|refreshed| format!("refreshed {}", refresh_age(now, refreshed)))
             .unwrap_or_else(|| "not refreshed".to_string())
     };
-    let label = " Quota ";
+    // On the combined surface (`size` is set) the title opens the pane's
+    // menu, and says so with a dropdown mark.
+    let label = crate::surface_controls::pane_title_label("Profiles", size.is_some());
+    let label_width = Line::raw(label.as_str()).width();
     let title_budget = size.map_or_else(
         || area.width.saturating_sub(2),
         |_| {
@@ -584,14 +589,31 @@ pub(crate) fn render_quotas(
             )
         },
     );
-    let status_budget = usize::from(title_budget).saturating_sub(label.chars().count());
+    let status_budget = usize::from(title_budget).saturating_sub(label_width);
     let status = truncate_to_cells(
         &format!("({refresh_status}) "),
         status_budget,
         Truncate::SUMMARY,
     );
+    let pressed = size.is_some()
+        && crate::surface_controls::register_pane_title_menu(
+            dashboard,
+            SupportPane::Quota,
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                u16::try_from(label_width)
+                    .unwrap_or(u16::MAX)
+                    .min(title_budget),
+                area.height.min(1),
+            ),
+        );
     let title = Line::from(vec![
-        Span::raw(label),
+        if pressed {
+            Span::styled(label, theme::selection(true))
+        } else {
+            Span::raw(label)
+        },
         Span::styled(status, Style::default().fg(theme::palette().muted)),
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
@@ -608,16 +630,22 @@ pub(crate) fn render_quotas(
     });
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
         .column_spacing(0)
+        // The pane's own title already says these rows are profiles, so the
+        // first column has no heading; it keeps the width the heading gave it.
         .header(
-            Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
-                .style(theme::muted().add_modifier(Modifier::BOLD)),
+            Row::new(["", "Harness", "Weekly", "Resets", "5H", "Resets"])
+                .style(theme::muted().patch(theme::raised())),
         )
         .row_highlight_style(if quotas_focused {
             theme::selection(true)
         } else {
             Style::default()
         })
-        .highlight_symbol(if quotas_focused { "› " } else { "  " })
+        .highlight_symbol(if quotas_focused {
+            theme::glyphs().selected
+        } else {
+            "  "
+        })
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
     let mut offset = dashboard.quota_scroll.get();
@@ -640,6 +668,19 @@ pub(crate) fn render_quotas(
             .then_some(dashboard.quota_index),
     );
     frame.render_stateful_widget(table, area, &mut state);
+    if dashboard.config.enabled_profiles().next().is_none() {
+        frame.render_widget(
+            Paragraph::new("Add an agent profile in Settings.")
+                .style(theme::muted())
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x.saturating_add(3),
+                area.y.saturating_add(2),
+                area.width.saturating_sub(4),
+                area.height.saturating_sub(3),
+            ),
+        );
+    }
     dashboard.quota_scroll.set(state.offset());
     render_session_scrollbar(
         frame,

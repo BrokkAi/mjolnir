@@ -192,7 +192,7 @@ pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
                 theme::glyphs().scroll_track
             })
             .set_style(Style::default().fg(if is_thumb {
-                theme::palette().accent
+                theme::palette().muted
             } else {
                 theme::palette().border
             }));

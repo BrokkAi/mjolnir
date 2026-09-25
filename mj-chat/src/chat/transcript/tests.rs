@@ -490,9 +490,9 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let title_start = header[..header.find("update the title").unwrap()]
         .chars()
         .count() as u16;
-    assert_eq!(buffer[(2, 0)].fg, theme::palette().text);
+    assert_eq!(buffer[(2, 0)].fg, theme::palette().muted);
     for x in title_start..title_start + "update the title".len() as u16 {
-        assert_eq!(buffer[(x, 0)].fg, theme::palette().secondary);
+        assert_eq!(buffer[(x, 0)].fg, theme::palette().text);
     }
 }
 
@@ -513,8 +513,8 @@ fn the_transcript_border_follows_the_hosts_pane_focus() {
         terminal.backend().buffer()[(0, 0)].fg
     };
 
-    assert_eq!(border(true), theme::palette().accent);
-    assert_eq!(border(false), theme::palette().border);
+    assert_eq!(Some(border(true)), theme::border(true).fg);
+    assert_eq!(Some(border(false)), theme::border(false).fg);
 }
 
 /// A host that draws its own chips at the right of the title row tells the
@@ -2102,7 +2102,7 @@ fn changing_theme_recolors_cached_conversation_without_changing_text() {
 #[test]
 fn blank_rows_inside_messages_keep_the_role_gutter() {
     for (role, color) in [
-        (ChatRole::User, theme::palette().accent),
+        (ChatRole::User, theme::palette().secondary),
         (ChatRole::Agent, theme::palette().border),
     ] {
         let entry = ChatEntry::plain(1, role, "1. first\n\n2. second");
@@ -2467,6 +2467,63 @@ fn new_content_does_not_move_a_reader_who_scrolled_up() {
         shows(&rows, "End to follow"),
         "a reader's scroll position is kept"
     );
+    assert!(!shows(&rows, "late reply"));
+}
+
+/// D-14: a narrow pinned pane opened on the reveal of an earlier reply, the
+/// dashboard switched away and back (a relaunch did this through the
+/// workspace it opened first), and the pane came back parked on that reply
+/// while the new reply landed below it. The saved position was the reveal's
+/// anchor, which the reopened view took for a reader's own scroll.
+#[test]
+fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::Agent, "earlier reply"));
+    chat.entries.push(ChatEntry::plain(
+        2,
+        ChatRole::User,
+        format!("detach probe\n{}", "wrapped line\n".repeat(30)),
+    ));
+    let opened = drawn_transcript(&mut chat, 31, 12);
+    assert!(
+        shows(&opened, "earlier reply"),
+        "the reveal parks on the earlier reply: {opened:?}"
+    );
+    let position = chat.transcript_position();
+
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.entries = chat.entries.clone();
+    reopened
+        .entries
+        .push(ChatEntry::plain(3, ChatRole::Agent, "reply to the probe"));
+    reopened.restore_transcript_position(position);
+    let rows = drawn_transcript(&mut reopened, 31, 12);
+
+    assert!(shows(&rows, "reply to the probe"), "{rows:?}");
+}
+
+/// A reader who scrolled up keeps that place across the same reopening.
+#[test]
+fn a_view_reopened_after_a_reader_scrolled_up_keeps_its_place() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend(
+        (0..40).map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("line {index}"))),
+    );
+    drawn_transcript(&mut chat, 60, 24);
+    chat.handle_key(key(KeyCode::PageUp));
+    drawn_transcript(&mut chat, 60, 24);
+    let position = chat.transcript_position();
+
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.entries = chat.entries.clone();
+    reopened
+        .entries
+        .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
+    reopened.restore_transcript_position(position);
+    let rows = drawn_transcript(&mut reopened, 60, 24);
+
+    assert!(shows(&rows, "End to follow"), "{rows:?}");
     assert!(!shows(&rows, "late reply"));
 }
 
@@ -3805,4 +3862,113 @@ fn the_ascii_symbol_set_reaches_the_transcript_role_marks_and_timestamps() {
             "{expected:?} in {ascii:#?}"
         );
     }
+}
+
+/// One item of R10's session D, as its store held it.
+fn session_d_item(value: serde_json::Value) -> Arc<TranscriptItem> {
+    Arc::new(serde_json::from_value(value).unwrap())
+}
+
+/// Session D's `sleep 60` tool call with `status`, last changed at
+/// `last_changed_at_ms`.
+fn session_d_sleep(status: &str, last_changed_at_ms: i64) -> Arc<TranscriptItem> {
+    session_d_item(serde_json::json!({
+        "stable_id": "tool:exec-7ee05740-cd4d-46f7-acda-c5154d550799",
+        "position": 27,
+        "created_at_ms": 1_790_343_723_040_i64,
+        "last_changed_at_ms": last_changed_at_ms,
+        "body": {"kind": "tool", "call": {
+            "toolCallId": "exec-7ee05740-cd4d-46f7-acda-c5154d550799",
+            "title": "sleep 60", "kind": "execute", "status": status,
+            "rawInput": {"command": "sleep 60"}
+        }}
+    }))
+}
+
+/// R10-1, replayed in the order session D's journal recorded it. Esc ended
+/// the turn (the "Interrupted" marker, ordinal 35) while the `sleep 60`
+/// Codex had started kept running, because Codex owns that process; 48 s
+/// later the command's completion arrived (ordinal 45) and the row turned
+/// from "running" into "✓ Tool · done", as if the interrupted turn had
+/// finished the work.
+#[test]
+fn a_tool_that_ends_after_its_turn_was_interrupted_is_not_shown_as_done() {
+    let prompt = session_d_item(serde_json::json!({
+        "stable_id": "user:prompt-7b3aba1e44a67b21c81f588fb67efd01",
+        "position": 9,
+        "created_at_ms": 1_790_343_719_503_i64,
+        "last_changed_at_ms": 1_790_343_719_503_i64,
+        "body": {"kind": "user", "content": [
+            {"type": "text", "text": "Run the shell command sleep 60 and then say done."}
+        ]}
+    }));
+    let listing = session_d_item(serde_json::json!({
+        "stable_id": "tool:exec-listing",
+        "position": 20,
+        "created_at_ms": 1_790_343_721_000_i64,
+        "last_changed_at_ms": 1_790_343_721_500_i64,
+        "body": {"kind": "tool", "call": {
+            "toolCallId": "exec-listing", "title": "ls", "kind": "execute",
+            "status": "completed", "rawInput": {"command": "ls"}
+        }}
+    }));
+    let interrupted = session_d_item(serde_json::json!({
+        "stable_id": "system:turn-interrupted:prompt-7b3aba1e44a67b21c81f588fb67efd01",
+        "position": 35,
+        "created_at_ms": 1_790_343_735_122_i64,
+        "last_changed_at_ms": 1_790_343_735_122_i64,
+        "body": {"kind": "system", "text": "Interrupted"}
+    }));
+    let tool_rows = |chat: &mut ChatState| {
+        transcript_text(chat, 80)
+            .into_iter()
+            .filter(|line| line.contains("Tool"))
+            .collect::<Vec<_>>()
+    };
+
+    // Ordinal 44: the turn has ended and the command is still running.
+    let mut session = MaterializedSession::empty("session-d");
+    session.applied_event_ordinal = 44;
+    session.transcript = vec![
+        prompt,
+        listing,
+        session_d_sleep("in_progress", 1_790_343_723_040),
+        interrupted,
+    ];
+    let mut chat = ChatState::from_materialized(&session, &[], &[]);
+    let rows = tool_rows(&mut chat);
+    assert!(
+        rows.iter().any(|row| row.contains("Tool · running")),
+        "{rows:#?}"
+    );
+
+    // Ordinal 45: the command ends on its own.
+    session.applied_event_ordinal = 45;
+    session.transcript[2] = session_d_sleep("completed", 1_790_343_782_961);
+    chat.apply_materialized(&session, &[], &[]);
+    let rows = tool_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Tool · ended after interrupt")),
+        "{rows:#?}"
+    );
+    // The command that finished before the interruption is still done.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("Tool · done"))
+            .count(),
+        1,
+        "{rows:#?}"
+    );
+    // The web viewer's rows come from the same entries.
+    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
+    let labels = browser
+        .entries
+        .iter()
+        .map(|entry| entry.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"Tool · ended after interrupt") && labels.contains(&"Tool · done"),
+        "{labels:#?}"
+    );
 }

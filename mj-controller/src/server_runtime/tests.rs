@@ -437,6 +437,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         recovery_floor_digest: String::new(),
         native_session_id: None,
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: None,
         agent_capabilities: None,
@@ -768,6 +769,156 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
     sources.complete(late);
     assert!(!sources.entries.contains_key("first-checkout"));
     assert_eq!(snapshot.sessions[0].project_label, "project");
+}
+
+/// Launch finding R11-2: a Mjolnir sub-agent's project directory is its
+/// parent's clone, which the parent's suspend removes, so resolving the
+/// child's own directory failed and logged a WARN every 30 seconds. A child's
+/// source is its parent's, as every other listing already reads it, and the
+/// parent resolves from its durable source repository.
+#[tokio::test]
+async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["remote", "add", "origin", "git@github.com:BrokkAi/hel.git"],
+    ] {
+        let command = crate::targets::CommandSpec::new(
+            "git",
+            ["-C".to_owned(), project.to_string_lossy().into_owned()]
+                .into_iter()
+                .chain(args.into_iter().map(str::to_owned)),
+        );
+        assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
+    }
+    // The parent is suspended, so its clone is gone.
+    let clone = project.join(".mj/clones/parent");
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller
+        .config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut parent = phone_session("parent", 0);
+    parent.state = SessionState::Stopped;
+    parent.target_template_id = "local".into();
+    parent.project_directory = Some(clone.clone());
+    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: project.clone(),
+        source_repository: project.clone(),
+        worktree_root: clone.clone(),
+        branch: "mj/parent".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    let mut child = phone_session("child", 0);
+    child.state = SessionState::Stopped;
+    child.target_template_id = "local".into();
+    child.project_directory = Some(clone);
+    controller.state.subagents.insert(
+        child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Answer project codename".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "What is the project codename?".into(),
+            request_key: "request".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            handback_tool: true,
+        },
+    );
+    controller.state.sessions.insert(parent.id.clone(), parent);
+    controller.state.sessions.insert(child.id.clone(), child);
+
+    let mut sources = PhoneProjectSources::default();
+    sources.synchronize(&controller);
+    assert_eq!(sources.jobs.len(), 1, "the child shares its parent's probe");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(result) = sources.jobs.join_next().await {
+            sources.complete(result.unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        sources
+            .entries
+            .values()
+            .all(|entry| entry.source.is_some() && entry.retry_at.is_none()),
+        "nothing failed, so nothing is retried"
+    );
+    let snapshot = snapshot_with_project_sources(&controller, &sources);
+    let child = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "child")
+        .unwrap();
+    let parent = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == "parent")
+        .unwrap();
+    assert_eq!(child.project_label, "hel");
+    assert_eq!(child.project_key, parent.project_key);
+    sources.synchronize(&controller);
+    assert!(sources.jobs.is_empty(), "the resolved source is reused");
+}
+
+/// R11-2: a source that cannot be resolved is retried every 30 seconds, and
+/// each retry logged the same WARN again. The failure is reported once; a
+/// retry that fails the same way is logged at debug level.
+#[tokio::test(flavor = "current_thread")]
+async fn phone_projects_warn_once_for_a_repeated_failure() {
+    let log = crate::test_log::CapturedLog::default();
+    let _log = tracing::subscriber::set_default(log.clone());
+    let root = tempfile::tempdir().unwrap();
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller
+        .config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut record = phone_session("gone", 0);
+    record.project_directory = Some(root.path().join("removed"));
+    record.target_template_id = "local".into();
+    controller.state.sessions.insert(record.id.clone(), record);
+
+    let mut sources = PhoneProjectSources::default();
+    for _ in 0..3 {
+        sources.synchronize(&controller);
+        assert_eq!(sources.jobs.len(), 1);
+        let resolved = tokio::time::timeout(Duration::from_secs(10), sources.jobs.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(resolved.result.is_err());
+        sources.complete(resolved);
+        // Retry at once rather than after 30 seconds.
+        sources.entries.get_mut("gone").unwrap().retry_at = Some(Instant::now());
+    }
+    let warnings = log
+        .at_or_above(tracing::Level::WARN)
+        .into_iter()
+        .filter(|event| event.contains("could not resolve web project source"))
+        .count();
+    assert_eq!(warnings, 1, "{:?}", log.events());
+    assert_eq!(
+        log.events()
+            .iter()
+            .filter(|(level, event)| *level == tracing::Level::DEBUG
+                && event.contains("could not resolve web project source"))
+            .count(),
+        2,
+        "{:?}",
+        log.events()
+    );
 }
 
 #[test]

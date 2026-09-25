@@ -806,7 +806,7 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
         notices: RefCell::new(vec![]),
     };
 
-    let error = preflight_target(&template, &executor)
+    let error = preflight_target(&template, &executor, TargetCheck::Launch)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Retry launch"));
@@ -846,7 +846,9 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
         notices: RefCell::new(vec![]),
     };
 
-    let error = verify_target(&template, &executor).unwrap_err().to_string();
+    let error = verify_target(&template, &executor, TargetCheck::Launch)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("Retry launch"));
     assert!(error.contains("dev@example.test"));
     assert!(error.contains("Podman 4.3.0"));
@@ -884,7 +886,7 @@ fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {
         notices: RefCell::new(vec![]),
     };
 
-    verify_target(&template, &executor).unwrap();
+    verify_target(&template, &executor, TargetCheck::Launch).unwrap();
 
     let notices = executor.notices.borrow();
     assert_eq!(notices.len(), 1);
@@ -929,7 +931,7 @@ fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
     ] {
         let executor = Recording(RefCell::default());
 
-        preflight_target(&template, &executor).unwrap();
+        preflight_target(&template, &executor, TargetCheck::Launch).unwrap();
 
         let commands = executor.0.borrow();
         assert_eq!(commands.len(), 1, "{template:?}");
@@ -975,7 +977,7 @@ fn apple_container_preflight_failures_recommend_doctor() {
             notices: RefCell::new(vec![]),
         };
 
-        let error = preflight_target(&template, &executor)
+        let error = preflight_target(&template, &executor, TargetCheck::Launch)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Retry launch"));
@@ -1023,5 +1025,55 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
     assert_eq!(
         local_engine_readiness("ssh-docker", &NoDockerExecutor),
         None
+    );
+}
+
+/// Launch finding R5-3: the session wizard said "local Docker is not ready.
+/// Start Docker or fix the proble…" for an engine that is not installed. Its
+/// check now leads with the words the launch options use.
+///
+/// Launch finding R6-3: the wizard's row then ended "…then Retry launch."
+/// before anything was launched. The wizard's check now says what to do
+/// without it; a launch that fails the same check still says it, next to the
+/// failure dialog's Retry launch button.
+#[test]
+fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
+    let template = TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "example.invalid/dev:latest".into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let controller = Controller {
+        config: Config {
+            targets: BTreeMap::from([("docker".to_owned(), template.clone())]),
+            ..Config::default()
+        },
+        state: State::default(),
+    };
+    let before_launch = controller
+        .check_target_readiness("docker", &NoDockerExecutor)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        before_launch,
+        "Docker is not installed on this host. Install Docker or choose another target."
+    );
+    let launch = preflight_target(&template, &NoDockerExecutor, TargetCheck::Launch)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        launch,
+        "Docker is not installed on this host. Install Docker or choose another target, then Retry launch."
+    );
+    assert_eq!(
+        local_engine_readiness("local-docker", &NoDockerExecutor),
+        Some(LocalEngineReadiness::NotInstalled)
     );
 }

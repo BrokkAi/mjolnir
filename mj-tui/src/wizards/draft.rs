@@ -49,6 +49,8 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn set_profile(&mut self, index: usize);
     fn target(&self) -> usize;
     fn set_target(&mut self, index: usize);
+    fn target_step_skipped(&self) -> bool;
+    fn set_target_step_skipped(&mut self, skipped: bool);
     fn mounts(&self) -> &MountWizard;
     fn mounts_mut(&mut self) -> &mut MountWizard;
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
@@ -113,6 +115,9 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn profile_count(&self, dashboard: &DashboardState) -> usize;
     /// Why this draft cannot use `target_id`, or `None` when it can.
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
+    /// Whether this draft could use `target_id` once the target is ready.
+    /// Unlike [`Self::target_rejection`], this leaves availability out.
+    fn target_compatible(&self, dashboard: &DashboardState, target_id: &str) -> bool;
     /// Declares the controls of a step only one wizard has.
     fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>);
     /// Declares the review controls only one wizard has and answers whether
@@ -182,6 +187,14 @@ impl WizardDraft for NewWizard {
 
     fn set_target(&mut self, index: usize) {
         self.target = index;
+    }
+
+    fn target_step_skipped(&self) -> bool {
+        self.target_step_skipped
+    }
+
+    fn set_target_step_skipped(&mut self, skipped: bool) {
+        self.target_step_skipped = skipped;
     }
 
     fn mounts(&self) -> &MountWizard {
@@ -279,9 +292,7 @@ impl WizardDraft for NewWizard {
         }
         if self.step == WizardStep::Bundle && id == WizardControl::Add {
             dashboard.invalidate_new_remote_preflight(&mut self);
-            self.step = WizardStep::NewBundle;
-            self.form.get_mut().focus(step_initial(self.step));
-            self.form.get_mut().focus(WizardControl::NewBundleSource);
+            self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
         if id == WizardControl::Back {
@@ -341,11 +352,24 @@ impl WizardDraft for NewWizard {
                 }
                 Ok(())
             }
+            WizardControl::ProjectQuery => {
+                let input = if self.project_picker.tab == ProjectTab::Folders {
+                    &mut self.project_picker.folder_filter
+                } else {
+                    &mut self.project_picker.query
+                };
+                if PathField::apply(input, edit) == EditOutcome::Changed {
+                    self.project_picker.focus_results = false;
+                    dashboard.record_event_handled();
+                }
+                Ok(())
+            }
             WizardControl::NewBundleSource => {
                 if self.bundle_creation_in_flight {
                     return Ok(());
                 }
                 if PathField::apply(&mut self.new_bundle_source, edit) == EditOutcome::Changed {
+                    self.project_picker.creation_error = None;
                     dashboard.record_event_handled();
                 }
                 Ok(())
@@ -371,6 +395,25 @@ impl WizardDraft for NewWizard {
                     self.note_draft_change(dashboard, DraftChange::BundleSelected);
                 }
                 self.bundle = *selected;
+            }
+            Interaction::Select(WizardControl::ProjectResults, selected) => {
+                self.project_picker.selected = *selected;
+            }
+            Interaction::Toggle(WizardControl::ProjectMultiple) => {
+                self.project_picker.multiple = !self.project_picker.multiple;
+                if !self.project_picker.multiple {
+                    if let Some(source) = self
+                        .new_bundle_repositories
+                        .get(self.new_bundle_selected)
+                        .cloned()
+                    {
+                        self.new_bundle_source.set_value(&source);
+                        self.choose_project_tab(dashboard, ProjectTab::Url);
+                        self.form.get_mut().focus(WizardControl::NewBundleSource);
+                    }
+                    self.new_bundle_repositories.clear();
+                }
+                dashboard.record_event_handled();
             }
             Interaction::Select(WizardControl::NewBundleRepositories, selected) => {
                 let next = (*selected).min(self.new_bundle_repositories.len().saturating_sub(1));
@@ -410,6 +453,11 @@ impl WizardDraft for NewWizard {
 
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
         dashboard.target_readiness_rejection(target_id)
+    }
+
+    /// A new session can start on any target.
+    fn target_compatible(&self, _dashboard: &DashboardState, _target_id: &str) -> bool {
+        true
     }
 
     fn dismiss_unfocused_extra_completions(&mut self, focused: Option<WizardControl>) {
@@ -482,47 +530,7 @@ impl WizardDraft for NewWizard {
                 }
                 declare_wizard_buttons(form, true, true);
             }
-            WizardStep::NewBundle => {
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRepositories,
-                    ControlKind::ChoiceList {
-                        len: self.new_bundle_repositories.len(),
-                        selected: self.new_bundle_selected,
-                    },
-                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::NewBundleSource,
-                    self.new_bundle_source.control_kind(),
-                    true,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Add,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight && !self.new_bundle_source.trim().is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRemove,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::Cancel,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Back,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight,
-                );
-                form.declare_with_enabled(
-                    WizardControl::Next,
-                    ControlKind::Button,
-                    !self.bundle_creation_in_flight
-                        && !self.new_bundle_sources_for_submit().is_empty(),
-                );
-            }
+            WizardStep::NewBundle => self.declare_project_controls(form),
             step => unreachable!("{step:?} is declared by declare_wizard_controls"),
         }
     }
@@ -601,6 +609,14 @@ impl WizardDraft for ResumeWizard {
         self.target = index;
     }
 
+    fn target_step_skipped(&self) -> bool {
+        self.target_step_skipped
+    }
+
+    fn set_target_step_skipped(&mut self, skipped: bool) {
+        self.target_step_skipped = skipped;
+    }
+
     fn mounts(&self) -> &MountWizard {
         &self.mounts
     }
@@ -659,10 +675,14 @@ impl WizardDraft for ResumeWizard {
         dashboard.request_move_preparation_for_review(self, profile_id)
     }
 
-    /// Resume has no bundle or project step, so Back always returns to the
-    /// target picker.
+    /// Resume has no bundle or project step, so Back returns to the target
+    /// picker, or to the profile picker when the target step was skipped.
     fn review_back_step(&self, _dashboard: &DashboardState) -> WizardStep {
-        WizardStep::Target
+        if self.target_step_skipped {
+            WizardStep::Profile
+        } else {
+            WizardStep::Target
+        }
     }
 
     /// A move preparation describes one exact destination draft, so every
@@ -740,6 +760,12 @@ impl WizardDraft for ResumeWizard {
 
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
         dashboard.resume_target_rejection(&self.session_id, target_id)
+    }
+
+    fn target_compatible(&self, dashboard: &DashboardState, target_id: &str) -> bool {
+        dashboard
+            .resume_target_incompatibility(&self.session_id, target_id)
+            .is_none()
     }
 
     fn declare_extra_step(&self, _dashboard: &DashboardState, _form: &mut Dialog<WizardControl>) {

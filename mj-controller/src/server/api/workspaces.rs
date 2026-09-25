@@ -48,9 +48,9 @@ pub(super) async fn create_workspace(
     }))
 }
 
-/// Why the name `default` cannot be used for a new workspace.
-const RESERVED_WORKSPACE_NAME: &str =
-    "the workspace name \"default\" is reserved; choose another name";
+/// Why the name `default` cannot be used for a new workspace: the store
+/// keeps it for the workspace that holds sessions from before workspaces.
+const RESERVED_WORKSPACE_NAME: &str = "the workspace name \"default\" is reserved: it holds sessions made before Mjolnir had workspaces; choose another name";
 
 /// The workspace a new session belongs to.
 ///

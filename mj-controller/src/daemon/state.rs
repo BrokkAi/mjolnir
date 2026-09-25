@@ -49,6 +49,7 @@ impl RuntimeState {
                 })
             },
             revisions.notifier(),
+            Some(recovery_observer.gate.clone()),
         );
         Self {
             attachments: Mutex::new(BTreeMap::new()),
@@ -618,6 +619,25 @@ impl RuntimeState {
     > {
         let _mutation = self.config_mutation.lock().await;
         tokio::task::spawn_blocking(move || crate::controller::create_quick_bundle(&source))
+            .await
+            .map_err(|error| {
+                crate::controller::QuickBundleFailure::Persistence(anyhow!(
+                    "bundle creation task panicked: {error}"
+                ))
+            })?
+    }
+
+    /// Persist exactly the picker-selected repository set under the same
+    /// config-mutation coordinator as legacy quick-bundle creation.
+    pub async fn create_bundle_from_sources(
+        &self,
+        sources: Vec<String>,
+    ) -> std::result::Result<
+        crate::controller::QuickBundleCreation,
+        crate::controller::QuickBundleFailure,
+    > {
+        let _mutation = self.config_mutation.lock().await;
+        tokio::task::spawn_blocking(move || crate::controller::create_bundle_from_sources(&sources))
             .await
             .map_err(|error| {
                 crate::controller::QuickBundleFailure::Persistence(anyhow!(

@@ -29,6 +29,24 @@ fn unconfirmed_status(error: &str) -> String {
     }
 }
 
+/// Whether a transcript item is the projection's record of submission `id`:
+/// the user message of a prompt, the row of a shell command, or the divider
+/// of an accepted `/clear`, which has no user message of its own (R4-4).
+fn represents_submission(stable_id: &str, id: &str) -> bool {
+    stable_id.strip_suffix(id).is_some_and(|prefix| {
+        matches!(prefix, "user:" | "shell:") || prefix == mj_core::archive::CONTEXT_BOUNDARY_PREFIX
+    })
+}
+
+impl PendingSubmission {
+    /// A `/clear` the relay runs as a context reset, not as a prompt.
+    fn is_context_clear(&self) -> bool {
+        self.kind == UnsentKind::Prompt
+            && self.payload.images.is_empty()
+            && self.payload.text.trim() == "/clear"
+    }
+}
+
 impl ChatState {
     pub(super) fn restore_submissions(&mut self, pending: Vec<PendingSubmission>) {
         self.pending_submissions = pending;
@@ -40,10 +58,11 @@ impl ChatState {
                 .iter()
                 .any(|queued| queued.id == pending.id)
                 || self.entries.iter().any(|entry| {
-                    entry.source.0.as_ref().is_some_and(|item| {
-                        item.stable_id == format!("user:{}", pending.id)
-                            || item.stable_id == format!("shell:{}", pending.id)
-                    })
+                    entry
+                        .source
+                        .0
+                        .as_ref()
+                        .is_some_and(|item| represents_submission(&item.stable_id, &pending.id))
                 });
         }
         self.pending_submissions
@@ -77,10 +96,10 @@ impl ChatState {
                 .queued_prompts
                 .iter()
                 .any(|queued| queued.command_id == pending.id)
-                || session.transcript.iter().any(|item| {
-                    item.stable_id == format!("user:{}", pending.id)
-                        || item.stable_id == format!("shell:{}", pending.id)
-                })
+                || session
+                    .transcript
+                    .iter()
+                    .any(|item| represents_submission(&item.stable_id, &pending.id))
             {
                 if let Some(started) = pending.started_at.take() {
                     self.submission_renders.push((pending.id.clone(), started));
@@ -105,7 +124,11 @@ impl ChatState {
         let represented = pending.represented;
         pending.finished = true;
         pending.status = "Queued".into();
-        if represented || !accepted {
+        // Once the relay has accepted a `/clear`, its "Clearing context…"
+        // line, then its divider or its failure, record it in the
+        // conversation. A row of our own would wait for a user message that
+        // never comes.
+        if represented || !accepted || pending.is_context_clear() {
             self.pending_submissions.remove(index);
         }
         self.invalidate_render_cache();
@@ -284,6 +307,69 @@ mod tests {
             chat.pending_submissions[0].status,
             "Delivery unconfirmed: channel closed"
         );
+    }
+
+    /// The divider the projection draws when the relay clears the context
+    /// for command `id`, followed by one later turn.
+    fn cleared_then_answered(id: &str) -> MaterializedSession {
+        let mut session = MaterializedSession::empty("test");
+        session.transcript.push(std::sync::Arc::new(TranscriptItem {
+            stable_id: format!("{}{id}", mj_core::archive::CONTEXT_BOUNDARY_PREFIX),
+            position: 2,
+            latest_content_event_ordinal: None,
+            created_at_ms: 2,
+            last_changed_at_ms: 2,
+            body: TranscriptBody::System {
+                text: "Context cleared — a new conversation starts here.".into(),
+            },
+        }));
+        session
+            .transcript
+            .push(crate::chat::test_support::agent_message_item(
+                "agent:3", 3, "NONE",
+            ));
+        session
+    }
+
+    /// R4-4: an accepted `/clear` left "You · /clear · Queued" pinned below
+    /// every later turn, and after resume the saved row read "Delivery
+    /// unconfirmed". A clear has no user message to reconcile with; the
+    /// relay's own "Clearing context…" line and divider are its record.
+    #[test]
+    fn an_accepted_clear_leaves_no_pending_row_or_saved_submission() {
+        // The relay's acceptance arrives before the divider.
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        submit(&mut chat, "clear", "/clear");
+        result(&mut chat, "clear", Ok(7));
+        chat.apply_materialized(&cleared_then_answered("clear"), &[], &[]);
+        let screen = transcript_text(&mut chat, 100).join("\n");
+        assert!(!screen.contains("Queued"), "{screen}");
+        assert!(chat.pending_submissions.is_empty());
+        assert!(
+            !chat.encoded_draft().contains("/clear"),
+            "{}",
+            chat.encoded_draft()
+        );
+
+        // The divider arrives before the acceptance.
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        submit(&mut chat, "clear", "/clear");
+        chat.apply_materialized(&cleared_then_answered("clear"), &[], &[]);
+        result(&mut chat, "clear", Ok(7));
+        assert!(chat.pending_submissions.is_empty());
+
+        // A draft an older build saved with the row still pending is not
+        // replayed once the divider shows the clear ran.
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        submit(&mut chat, "clear", "/clear");
+        chat.unconfirm_submission("clear", "connection lost");
+        let saved = chat.encoded_draft();
+        let mut reopened = ChatState::new(&snapshot(), &[]);
+        reopened.restore_draft(saved);
+        reopened.apply_materialized(&cleared_then_answered("clear"), &[], &[]);
+        let screen = transcript_text(&mut reopened, 100).join("\n");
+        assert!(!screen.contains("Delivery unconfirmed"), "{screen}");
+        assert!(reopened.pending_submissions.is_empty());
     }
 
     /// I1-12: a refused `/clear` becomes a dated notice, leaves nothing pinned

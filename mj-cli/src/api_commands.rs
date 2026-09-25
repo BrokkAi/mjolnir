@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::server::api::{
-    ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest, WaitOutcome,
-    WaitRequest, WaitResponse,
+    ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
+    WaitOutcome, WaitRequest, WaitResponse,
 };
 
 use mj_client::daemon::WikiSessionStatus;
@@ -115,6 +115,15 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
+    /// Use Mjolnir's own sub-agent tools instead of the harness's native
+    /// ones. Applies only to Claude and Codex sessions; other harnesses
+    /// always use their own. When both this and `--native-subagents` are
+    /// given, the last one wins.
+    #[arg(long, overrides_with = "native_subagents")]
+    mj_subagents: bool,
+    /// Use the harness's own native sub-agent tools (the default).
+    #[arg(long, overrides_with = "mj_subagents")]
+    native_subagents: bool,
     /// The first prompt. `-` reads it from standard input.
     prompt: Option<String>,
     /// Read the first prompt from this file instead.
@@ -387,7 +396,7 @@ pub(crate) struct ExportArgs {
     #[arg(long, value_enum, default_value_t = ExportKindArg::Patch)]
     kind: ExportKindArg,
     /// Branch to push, required by `--kind branch`.
-    #[arg(long)]
+    #[arg(long, required_if_eq("kind", "branch"))]
     branch: Option<String>,
     /// File to read, relative to the directory the agent runs in, required by
     /// `--kind file`.
@@ -589,11 +598,16 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     // so the command names one (launch finding H-3).
     let workspace_id = match (&args.workspace_id, requested_workspace.as_deref()) {
         (Some(workspace_id), _) => Some(workspace_id.clone()),
-        (None, Some(name)) => Some(crate::resolve_store_workspace(Some(name)).await?),
+        (None, Some(name)) => {
+            // An unknown name is refused without starting a stopped daemon,
+            // as a missing one is (launch findings R2-14 and R5-9).
+            crate::refuse_unknown_workspace(name).await?;
+            Some(crate::resolve_store_workspace(Some(name)).await?)
+        }
         (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
-        mjolnir_subagents: None,
+        mjolnir_subagents: Some(args.mj_subagents),
         create_managed_worktree: None,
         launch_base: args.base.clone(),
         launch_branch: args.branch.clone(),
@@ -745,12 +759,17 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
     }
     lines.push(summary);
+    // The wait's message, the diagnostic and the agent's last message are
+    // often one sentence (a Codex quota error was printed three times,
+    // J-25), so each is printed only when it says something new.
+    let said = |lines: &[String], text: &str| lines.iter().any(|line| line.trim() == text.trim());
     if let Some(message) = &response.message {
         lines.push(message.clone());
     }
     // Why the turn ended, when the worker recorded a reason.
     if let Some(diagnostic) = &response.diagnostic
         && response.outcome != WaitOutcome::Finished
+        && !said(&lines, &diagnostic.message)
     {
         lines.push(diagnostic.message.clone());
     }
@@ -778,9 +797,36 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         }
         lines.push(line);
     }
-    if let Some(final_message) = &response.final_message {
+    if let Some(final_message) = &response.final_message
+        && !said(&lines, final_message)
+    {
         lines.push(String::new());
         lines.push(final_message.clone());
+    }
+    lines
+}
+
+/// What `mj sessions --session` prints for one session, one line per entry.
+fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {}  {}",
+        session.id, session.state, session.title
+    )];
+    // Silence is reported, never acted on. A turn waiting on a long build
+    // is quiet and healthy, so this says what is true and leaves the
+    // decision — keep waiting, or `mj interrupt-turn` — to the reader.
+    if let Some(note) = session
+        .activity_state
+        .as_ref()
+        .and_then(|state| mj_core::activity::silence_note(state, now_ms))
+    {
+        lines.push(format!("running, {note}"));
+    }
+    if let Some(error) = &session.error {
+        lines.push(format!("error: {error}"));
+    }
+    if let Some(outcome) = &session.last_turn_outcome {
+        lines.push(format!("last turn {}", outcome.outcome));
     }
     lines
 }
@@ -906,20 +952,8 @@ pub(crate) async fn sessions(
         if args.json {
             return print_json(&session);
         }
-        println!("{}  {}  {}", session.id, session.state, session.title);
-        // Silence is reported, never acted on. A turn waiting on a long build
-        // is quiet and healthy, so this says what is true and leaves the
-        // decision — keep waiting, or `mj interrupt-turn` — to the reader.
-        if let Some(note) = session.activity_state.as_ref().and_then(|state| {
-            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
-        }) {
-            println!("running, {note}");
-        }
-        if let Some(error) = &session.error {
-            println!("error: {error}");
-        }
-        if let Some(outcome) = &session.last_turn_outcome {
-            println!("last turn {:?}", outcome.outcome);
+        for line in session_report_lines(&session, mj_core::clock::epoch_millis()) {
+            println!("{line}");
         }
         return Ok(());
     }
@@ -1477,9 +1511,67 @@ mod tests {
         assert_eq!(args.base, None);
     }
 
+    /// Native sub-agents are the default; `--mj-subagents` opts in, and when
+    /// both flags are given the last one wins.
+    #[test]
+    fn new_subagent_flags_default_to_native_and_the_last_flag_wins() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "mj",
+                "new",
+                "--profile",
+                "codex",
+                "--target",
+                "raw",
+                "--project-directory",
+                "/srv/project",
+            ];
+            argv.extend_from_slice(extra);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Some(Command::New(args)) = cli.command else {
+                panic!("expected the new command");
+            };
+            args.mj_subagents
+        };
+
+        assert!(!parse(&[]), "no flag means native sub-agents");
+        assert!(parse(&["--mj-subagents"]));
+        assert!(!parse(&["--native-subagents"]));
+        assert!(!parse(&["--mj-subagents", "--native-subagents"]));
+        assert!(parse(&["--native-subagents", "--mj-subagents"]));
+    }
+
     /// A turn the worker failed for going quiet has to say why, where a script
     /// waiting on it can see it. Before this the reason lived only in the
     /// transcript and `mj wait` printed the bare word "error" (#1020).
+    /// Launch finding J-25: `mj prompt --wait` printed the Codex quota
+    /// sentence three times, as the wait's message, the diagnostic, and the
+    /// agent's final message. Each distinct line is printed once.
+    #[test]
+    fn a_reason_repeated_in_the_final_message_is_printed_once() {
+        let sentence = "You’ve hit your usage limit. Try again at Sep 29th, 2026 10:20 PM.";
+        let response = wait_response(
+            "quota_limit",
+            serde_json::json!({
+                "stop_reason": "QuotaLimit",
+                "turn_id": 8,
+                "message": sentence,
+                "diagnostic": {"message": sentence, "code": "usageLimitExceeded"},
+                "final_message": format!("{sentence}\n"),
+            }),
+        );
+        let lines = wait_report_lines(&response);
+        assert_eq!(lines[0], "quota_limit (QuotaLimit) turn 8");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("usage limit"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+    }
+
     #[test]
     fn a_failed_turn_reports_the_reason_the_worker_recorded() {
         let response = wait_response(
@@ -1487,7 +1579,7 @@ mod tests {
             serde_json::json!({
                 "stop_reason": "harness_inactive",
                 "diagnostic": {
-                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minute(s).",
+                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minutes.",
                     "code": "harness_inactive"
                 }
             }),
@@ -1521,6 +1613,61 @@ mod tests {
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
         );
+    }
+
+    /// Launch finding R11-3: `mj sessions --session` printed `last turn
+    /// Completed { stop_reason: "EndTurn" }`, Rust's debug form. It says how
+    /// the turn ended in words.
+    #[test]
+    fn one_session_names_how_its_last_turn_ended_in_words() {
+        let with_outcome = |outcome: serde_json::Value| {
+            let mut session = wait_response("finished", serde_json::json!({})).session;
+            session.last_turn_outcome = Some(
+                serde_json::from_value(serde_json::json!({
+                    "command_id": "prompt-1",
+                    "accepted_ordinal": 16,
+                    "completed_ordinal": 46,
+                    "completed_at_ms": 0,
+                    "outcome": outcome,
+                }))
+                .unwrap(),
+            );
+            session_report_lines(&session, 0)
+        };
+        let finished =
+            with_outcome(serde_json::json!({"kind": "completed", "stop_reason": "EndTurn"}));
+        assert_eq!(
+            finished,
+            ["s1  running  t", "last turn completed, end of turn"]
+        );
+        for (outcome, words) in [
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "end_turn"}),
+                "completed, end of turn",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "Cancelled"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "interrupted", "message": "Interrupted by the user"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "MaxTokens"}),
+                "failed: max tokens",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "max_turn_requests"}),
+                "failed: max turn requests",
+            ),
+            (
+                serde_json::json!({"kind": "rejected", "message": "the session is closing\nmore detail"}),
+                "failed: the session is closing",
+            ),
+        ] {
+            assert_eq!(with_outcome(outcome)[1], format!("last turn {words}"),);
+        }
     }
 
     /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with
@@ -1806,6 +1953,16 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::File);
         assert_eq!(args.path.as_deref(), Some("src/main.rs"));
+
+        // Launch finding R3-11: without a branch name the API answered "a
+        // branch export needs a branch name", which named no flag. The
+        // command line refuses it first and names `--branch`.
+        let Err(error) =
+            Cli::try_parse_from(["mj", "export", "--session", "s1", "--kind", "branch"])
+        else {
+            panic!("a branch export without --branch is refused");
+        };
+        assert!(error.to_string().contains("--branch"), "{error}");
 
         // An export defaults to the patch, which is what a caller reviewing
         // the work asks for most.

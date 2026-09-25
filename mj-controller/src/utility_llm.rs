@@ -480,9 +480,7 @@ impl UtilityFamily {
     fn matches(self, id: &str) -> bool {
         let id = id.to_ascii_lowercase();
         match self {
-            Self::Codex => {
-                id.starts_with("gpt-") && id.split(['-', '_', '.']).any(|part| part == "luna")
-            }
+            Self::Codex => id.starts_with("gpt-") && mj_core::codex_catalog::is_luna_model(&id),
             Self::Grok => id.starts_with("grok-"),
             Self::Kimi => {
                 id.starts_with("kimi-")

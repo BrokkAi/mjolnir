@@ -5,7 +5,7 @@ pub(super) fn dashboard_resource_targets(controller: &Controller) -> Vec<Resourc
         .state
         .sessions
         .values()
-        .filter(|session| session_target_is_pollable(session))
+        .filter(|session| session_resources_are_sampled(session))
         .filter_map(|session| {
             match controller.resource_probe(&session.id) {
                 Ok(probe) => Some(ResourcePollTarget {
@@ -42,6 +42,22 @@ pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bo
             SessionState::Error | SessionState::Provisioning | SessionState::Destroying
         )
         && session.target.is_some()
+}
+
+/// Whether the resource poller samples this session: its target is live
+/// (see [`session_target_is_pollable`]) and has something to measure. A bare
+/// target runs the worker straight on its host, with no container or
+/// instance of its own, and `targets::resource_probe` refuses it. It is
+/// skipped here, silently: asking would fail and warn on every poll (R7-3).
+fn session_resources_are_sampled(session: &mj_core::state::SessionRecord) -> bool {
+    session_target_is_pollable(session)
+        && !matches!(
+            session.target,
+            Some(
+                mj_core::state::TargetLocator::LocalBare { .. }
+                    | mj_core::state::TargetLocator::SshBare { .. }
+            )
+        )
 }
 
 pub fn refresh_dashboard_poll_targets(

@@ -104,16 +104,23 @@ pub(super) fn configure_kimi_project_memory_mcp(
     })
 }
 
-/// Claude reads MCP servers from its private profile rather than ACP. Parent
-/// sessions always use an isolated staged profile, including on local bare
+/// Claude reads MCP servers from its private profile rather than ACP. Every
+/// session runs from an isolated staged profile, including on local bare
 /// targets, so this never modifies the user's source profile. A child gets the
-/// same server in its `child` role, which serves only `handback`; registration
-/// gives a Claude child the tool only when it owns its home.
+/// same server in its `child` role, which serves only `handback`.
+///
+/// The staged settings also allow every tool the role's server lists. In any
+/// mode but Auto (Accept edits is what Claude runs in on a model without Auto
+/// mode), Claude would otherwise ask a person before a child's mandatory
+/// `handback` or a parent's `spawn` and `wait`, and a sub-agent could not
+/// finish without one (R11-1).
 pub(super) fn configure_claude_subagent_mcp(
     profile_stage: &Path,
     worker_root: &str,
     role: mj_core::subagent::SubagentMcpRole,
 ) -> Result<()> {
+    use mj_core::subagent::SUBAGENT_MCP_SERVER;
+
     let path = profile_stage.join(".claude.json");
     edit_staged_json_object(&path, "staged Claude configuration", |root| {
         let servers = root
@@ -127,7 +134,7 @@ pub(super) fn configure_claude_subagent_mcp(
                 )
             })?;
         servers.insert(
-            "mj-agents".into(),
+            SUBAGENT_MCP_SERVER.into(),
             serde_json::json!({
                 "type":"stdio",
                 "command":Path::new(worker_root).join("hel"),
@@ -147,6 +154,36 @@ pub(super) fn configure_claude_subagent_mcp(
                 ]
             }),
         );
+        Ok(())
+    })?;
+
+    let path = profile_stage.join("settings.json");
+    edit_staged_json_object(&path, "staged Claude settings", |root| {
+        let allow = root
+            .entry("permissions")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "permissions in staged Claude settings {} must be a JSON object",
+                    path.display()
+                )
+            })?
+            .entry("allow")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "permissions.allow in staged Claude settings {} must be a JSON array",
+                    path.display()
+                )
+            })?;
+        for tool in role.tool_names() {
+            let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
+            if !allow.contains(&rule) {
+                allow.push(rule);
+            }
+        }
         Ok(())
     })
 }
@@ -225,20 +262,4 @@ pub(super) fn edit_staged_json_object(
 
 pub(super) fn mj_worker_socket_name() -> &'static str {
     "subagents.sock"
-}
-
-pub(super) fn directory_has_files(path: &Path) -> Result<bool> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_file() || (metadata.is_dir() && directory_has_files(&entry.path())?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

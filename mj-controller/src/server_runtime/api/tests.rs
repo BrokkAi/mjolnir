@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
+use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
@@ -24,55 +25,338 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
     }
 }
 
-#[test]
-fn subagent_profiles_choose_the_most_remaining_quota_per_harness() {
-    let candidates = vec![
-        ("codex-low".into(), HarnessKind::Codex),
-        ("claude-only".into(), HarnessKind::Claude),
-        ("codex-high".into(), HarnessKind::Codex),
-    ];
-    let reports = BTreeMap::from([
-        (
-            "codex-low".into(),
-            quota("codex-low", HarnessKind::Codex, &[80, 15]),
-        ),
-        (
-            "codex-high".into(),
-            quota("codex-high", HarnessKind::Codex, &[60, 55]),
-        ),
-    ]);
-
-    assert_eq!(
-        select_profile_per_harness(candidates, &reports),
-        vec![
-            ("codex-high".into(), HarnessKind::Codex),
-            ("claude-only".into(), HarnessKind::Claude),
-        ]
-    );
+/// A pay-per-use profile's report: no windows, the API label instead.
+fn usage_priced(profile_id: &str) -> ProfileQuota {
+    ProfileQuota {
+        profile_id: profile_id.into(),
+        harness: HarnessKind::Codex,
+        windows: Vec::new(),
+        extra: Some(crate::quota::API_LABEL.to_owned()),
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+    }
 }
 
-#[test]
-fn subagent_profile_selection_puts_unknown_quota_last_and_breaks_ties_by_id() {
-    let candidates = vec![
-        ("codex-unknown".into(), HarnessKind::Codex),
-        ("codex-b".into(), HarnessKind::Codex),
-        ("codex-a".into(), HarnessKind::Codex),
-    ];
-    let reports = BTreeMap::from([
-        (
-            "codex-a".into(),
-            quota("codex-a", HarnessKind::Codex, &[50]),
-        ),
-        (
-            "codex-b".into(),
-            quota("codex-b", HarnessKind::Codex, &[50]),
-        ),
-    ]);
+/// A probe that answers each profile with the models given for it and the
+/// efforts `low` and `high`, and fails for a profile it has no models for.
+fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profile_catalog::Probe> {
+    let offers = offers
+        .iter()
+        .map(|(profile, models)| {
+            (
+                (*profile).to_owned(),
+                models.iter().map(|model| (*model).to_owned()).collect(),
+            )
+        })
+        .collect::<BTreeMap<String, Vec<String>>>();
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.to_owned(),
+        name: value.to_owned(),
+        description: None,
+    };
+    Arc::new(move |profile: String| {
+        let models = offers.get(&profile).cloned();
+        Box::pin(async move {
+            let models = models.with_context(|| format!("{profile} cannot be discovered"))?;
+            Ok(mj_core::worker_launch::ProfileConfig {
+                model: models.first().cloned(),
+                models: models.iter().map(|model| choice(model)).collect(),
+                efforts: vec![choice("low"), choice("high")],
+                observed_at: 1,
+            })
+        })
+    })
+}
 
-    assert_eq!(
-        select_profile_per_harness(candidates, &reports),
-        vec![("codex-a".into(), HarnessKind::Codex)]
+/// The parent's durable record, and the registration a spawn asks for, which
+/// it keeps and then refuses so a test can read what the spawn chose.
+struct RecordingExports {
+    parent: SessionRecord,
+    registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
+}
+
+impl ExportRuntime for RecordingExports {
+    fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+        (session_id == self.parent.id).then(|| self.parent.clone())
+    }
+    fn checkpoint_now(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
+    }
+    fn spawn_subagent(
+        self: Arc<Self>,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move {
+            *self.registered.lock().unwrap() = Some(request);
+            bail!("registration recorded")
+        })
+    }
+}
+
+impl RecordingExports {
+    fn registered(&self) -> crate::controller::RegisterSubagentRequest {
+        self.registered
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the spawn reached registration")
+    }
+}
+
+/// The situation from the report that prompted profile selection: the parent
+/// runs on `parent`, nearly out of its 5-hour window; `codex-high` offers the
+/// same models with plenty left; `deepseek` is pay-per-use, so it ranks as
+/// full, but offers a different model.
+async fn selection_backend(
+    offers: &[(&str, &[&str])],
+    parent_view: Option<ManagedSessionView>,
+) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
+    let catalog = ProfileCatalog::with_probe(models_probe(offers));
+    catalog
+        .sync_now(&test_config(
+            &[
+                ("parent", HarnessKind::Codex),
+                ("codex-high", HarnessKind::Codex),
+                ("deepseek", HarnessKind::Codex),
+            ],
+            &["codex-high", "deepseek"],
+        ))
+        .await;
+    let quotas = BTreeMap::from([
+        (
+            "parent".to_owned(),
+            quota("parent", HarnessKind::Codex, &[80, 3]),
+        ),
+        (
+            "codex-high".to_owned(),
+            quota("codex-high", HarnessKind::Codex, &[60, 55]),
+        ),
+        ("deepseek".to_owned(), usage_priced("deepseek")),
+    ]);
+    let exports = Arc::new(RecordingExports {
+        parent: parent_record("parent-1", "parent"),
+        registered: std::sync::Mutex::new(None),
+    });
+    let backend = Arc::new(
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: parent_view,
+            })),
+            running_states(),
+            exports.clone(),
+        )
+        .with_profile_catalog(catalog)
+        .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas))),
     );
+    (backend, exports)
+}
+
+const SAME_MODELS: &[(&str, &[&str])] = &[
+    ("parent", &["luna", "nova"]),
+    ("codex-high", &["luna", "nova"]),
+    ("deepseek", &["flash"]),
+];
+
+/// A parent whose live harness runs `model` at `effort`.
+fn parent_running(model: &str, effort: &str) -> ManagedSessionView {
+    let mut view = ready_view(model);
+    let config = &mut view
+        .snapshot
+        .as_mut()
+        .expect("a ready view has a snapshot")
+        .operational
+        .config;
+    config.insert("model".into(), model.into());
+    config.insert("effort".into(), effort.into());
+    view
+}
+
+fn spawn_with(
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> mj_core::subagent::SubagentToolRequest {
+    mj_core::subagent::SubagentToolRequest {
+        request_id: "request-1".into(),
+        created_at_ms: 0,
+        action: mj_core::subagent::SubagentToolAction::Spawn {
+            task_name: "audit deps".into(),
+            instructions: "check the lockfile".into(),
+            profile_id: profile_id.map(str::to_owned),
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            working_directory: Default::default(),
+            context: None,
+            files: Vec::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(None, Some("luna"), Some("low")),
+        )
+        .await;
+
+    assert!(
+        result.message.contains("registration recorded"),
+        "{}",
+        result.message
+    );
+    let registered = exports.registered();
+    assert_eq!(
+        registered.profile_id, "codex-high",
+        "the parent's own profile has 3% left and the pay-per-use one lacks the model"
+    );
+    assert_eq!(registered.model.as_deref(), Some("luna"));
+    assert_eq!(registered.effort.as_deref(), Some("low"));
+}
+
+#[tokio::test]
+async fn a_pinned_profile_is_honored_even_with_less_quota() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+
+    backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(Some("parent"), Some("luna"), Some("low")),
+        )
+        .await;
+
+    assert_eq!(exports.registered().profile_id, "parent");
+}
+
+#[tokio::test]
+async fn a_spawn_without_a_model_is_refused() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+
+    let result = backend
+        .execute_subagent_tool("parent-1".into(), spawn_with(None, None, Some("low")))
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.message.contains("spawn needs a model"),
+        "{}",
+        result.message
+    );
+    assert!(exports.registered.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn current_names_the_parents_live_model_and_its_effort_follows_when_offered() {
+    let (backend, exports) =
+        selection_backend(SAME_MODELS, Some(parent_running("nova", "high"))).await;
+
+    backend
+        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
+        .await;
+
+    let registered = exports.registered();
+    assert_eq!(registered.profile_id, "codex-high");
+    assert_eq!(registered.model.as_deref(), Some("nova"));
+    assert_eq!(registered.effort.as_deref(), Some("high"));
+}
+
+#[tokio::test]
+async fn an_inherited_effort_the_chosen_profile_lacks_is_left_to_the_harness() {
+    let (backend, exports) =
+        selection_backend(SAME_MODELS, Some(parent_running("nova", "xhigh"))).await;
+
+    backend
+        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
+        .await;
+
+    assert_eq!(exports.registered().effort, None);
+}
+
+#[tokio::test]
+async fn current_without_a_live_parent_model_is_refused() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+
+    let result = backend
+        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.message.contains("current model is unknown"),
+        "{}",
+        result.message
+    );
+    assert!(exports.registered.lock().unwrap().is_none());
+}
+
+/// Profiles offering the same models are one choice for the parent, shown as
+/// the one with the most quota left; a profile offering other models is never
+/// hidden behind a same-harness profile with more quota.
+#[tokio::test]
+async fn list_profiles_merges_profiles_offering_the_same_models() {
+    let (backend, _) = selection_backend(SAME_MODELS, None).await;
+
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "request-1".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListProfiles,
+            },
+        )
+        .await;
+
+    assert!(!result.is_error, "{}", result.message);
+    let answer: serde_json::Value = serde_json::from_str(&result.message).unwrap();
+    let listed = answer["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|profile| profile["profile_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(listed, vec!["deepseek", "codex-high"]);
+    assert!(answer.get("unavailable").is_none(), "{answer}");
+}
+
+/// One login that cannot be discovered drops out on its own; it neither fails
+/// the answer nor stops a spawn from using the others.
+#[tokio::test]
+async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
+    let offers: &[(&str, &[&str])] = &[("parent", &["luna"]), ("deepseek", &["flash"])];
+    let (backend, exports) = selection_backend(offers, None).await;
+
+    let listed = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "request-1".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListProfiles,
+            },
+        )
+        .await;
+    assert!(!listed.is_error, "{}", listed.message);
+    let answer: serde_json::Value = serde_json::from_str(&listed.message).unwrap();
+    assert_eq!(answer["unavailable"][0]["profile_id"], "codex-high");
+    assert_eq!(answer["profiles"].as_array().unwrap().len(), 2);
+
+    backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(None, Some("luna"), Some("low")),
+        )
+        .await;
+    assert_eq!(exports.registered().profile_id, "parent");
 }
 
 #[test]
@@ -378,6 +662,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         native_session_id: Some("native-1".into()),
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: Some(true),
         agent_capabilities: None,
@@ -416,6 +701,28 @@ fn ready_view(model: &str) -> ManagedSessionView {
         connected: true,
         error: None,
     }
+}
+
+/// The same ready view, but also offering the `fast-mode` selector Codex
+/// exposes, so a follow-up can turn it on.
+fn ready_view_offering_fast_mode(model: &str) -> ManagedSessionView {
+    let mut view = ready_view(model);
+    let option: agent_client_protocol::schema::v1::SessionConfigOption =
+        serde_json::from_value(serde_json::json!({
+            "id": "fast-mode",
+            "name": "Fast mode",
+            "type": "select",
+            "currentValue": "off",
+            "options": [{"value": "off", "name": "Off"}, {"value": "on", "name": "On"}],
+        }))
+        .expect("the fixture describes a select the schema accepts");
+    view.snapshot
+        .as_mut()
+        .expect("ready_view has a snapshot")
+        .operational
+        .config_options
+        .push(option);
+    view
 }
 
 struct FakeControl(FakeSession);
@@ -546,7 +853,7 @@ async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
             ("parent".to_owned(), "codex".to_owned()),
             ("helper".to_owned(), "claude".to_owned()),
         ],
-        "the parent's own profile and the eligible one are offered, once per harness"
+        "the parent's own profile and the eligible one are offered"
     );
     for profile in &profiles {
         let id = profile["profile_id"].as_str().unwrap();
@@ -581,25 +888,8 @@ fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
     )
 }
 
-fn spawn_request(model: &str) -> mj_core::subagent::SubagentToolRequest {
-    mj_core::subagent::SubagentToolRequest {
-        request_id: "request-1".into(),
-        created_at_ms: 0,
-        action: mj_core::subagent::SubagentToolAction::Spawn {
-            task_name: "audit deps".into(),
-            instructions: "check the lockfile".into(),
-            profile_id: None,
-            model: Some(model.into()),
-            effort: None,
-            working_directory: Default::default(),
-            context: None,
-            files: Vec::new(),
-        },
-    }
-}
-
 #[tokio::test]
-async fn spawn_rejects_a_model_the_warm_catalogue_says_is_not_offered() {
+async fn spawn_refuses_a_model_no_eligible_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
     catalog
@@ -608,49 +898,57 @@ async fn spawn_rejects_a_model_the_warm_catalogue_says_is_not_offered() {
     let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
 
     let result = spawn_backend(catalog)
-        .execute_subagent_tool("parent-1".into(), spawn_request("no-such-model"))
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(None, Some("no-such-model"), None),
+        )
         .await;
 
     assert!(result.is_error, "the spawn should have been refused");
     assert!(
-        result.message.contains("does not offer \"no-such-model\""),
+        result
+            .message
+            .contains("no eligible profile offers model \"no-such-model\""),
         "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("parent (parent-model)"),
+        "the refusal names what is offered: {}",
         result.message
     );
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
         warmed,
-        "the check must not launch a discovery harness"
+        "a warm catalogue answers without launching a discovery harness"
     );
 }
 
-/// With nothing published, spawn does not discover and does not refuse the
-/// selector: the child's start follow-up checks it against the live
-/// harness. Here the spawn gets past validation and fails on this fake's
-/// missing sub-agent runtime instead.
+/// A spawn that arrives before the background pass has finished waits for
+/// that pass's discovery instead of choosing blind, and starts none of its
+/// own: the one harness launch is shared.
 #[tokio::test]
-async fn spawn_over_a_cold_catalogue_does_not_discover_or_refuse_the_model() {
+async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+    catalog.sync(&test_config(&[("parent", HarnessKind::Codex)], &[]));
 
     let result = spawn_backend(catalog)
-        .execute_subagent_tool("parent-1".into(), spawn_request("no-such-model"))
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(None, Some("no-such-model"), None),
+        )
         .await;
 
+    assert!(
+        result.message.contains("no eligible profile offers"),
+        "the spawn should have checked the model once discovered: {}",
+        result.message
+    );
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a cold catalogue must not be warmed by a spawn"
-    );
-    assert!(
-        !result.message.contains("does not offer"),
-        "an unchecked selector must not be refused here: {}",
-        result.message
-    );
-    assert!(
-        result.message.contains("sub-agent creation is unavailable"),
-        "the spawn should have reached the start: {}",
-        result.message
+        1,
+        "the spawn shares the background pass's discovery"
     );
 }
 
@@ -703,13 +1001,28 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
         Arc::new(NoExports),
     );
 
+    // Launch finding R11-3: the notice read `finished turn 46 (completed {
+    // stop_reason: "endturn" })`, Rust's debug form of the outcome and the
+    // turn's completion ordinal, where the child's own `mj wait` said turn
+    // 16. It names the turn as `mj wait` does, and the outcome in words.
+    let outcome = mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(16),
+        turn_start_position: Some(17),
+        completed_ordinal: 46,
+        completed_at_ms: 0,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+    };
     backend
         .record_subagent_completion_notice(
             "parent-1".into(),
             "child-abcdef012345",
-            "audit deps",
-            3,
-            "completed",
+            "Answer project codename",
+            &outcome,
         )
         .await
         .unwrap();
@@ -722,9 +1035,9 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
     let RelayCommand::RecordNotice { text } = command else {
         panic!("a finished sub-agent must be a notice, not {command:?}");
     };
-    assert!(
-        text.contains("audit deps") && text.contains("finished turn 3"),
-        "unexpected notice text: {text}"
+    assert_eq!(
+        text,
+        "Subagent \"Answer project codename\" (child-ab) finished turn 16 (completed, end of turn)."
     );
     assert!(
         !text.contains("full child output"),
@@ -753,6 +1066,7 @@ async fn the_start_follow_up_configures_the_model_before_it_prompts() {
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 prompt: Some("add a README line".into()),
+                ..Default::default()
             },
         )
         .await
@@ -782,6 +1096,99 @@ async fn the_start_follow_up_configures_the_model_before_it_prompts() {
 }
 
 #[tokio::test]
+async fn the_start_follow_up_turns_on_fast_mode_after_model_when_offered() {
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "session-1".into(),
+            accepted_ordinal: 12,
+            submitted: submitted_tx,
+            view: Some(ready_view_offering_fast_mode("gpt-5.10-luna")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+
+    backend
+        .start_followup(
+            "session-1".into(),
+            StartFollowup {
+                model: Some("gpt-5.10-luna".into()),
+                effort: None,
+                prompt: Some("add a README line".into()),
+                fast_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, first) = submitted.recv().await.unwrap();
+    assert_eq!(
+        first,
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "gpt-5.10-luna".into(),
+        }
+    );
+    let (_, second) = submitted.recv().await.unwrap();
+    assert_eq!(
+        second,
+        RelayCommand::SetConfig {
+            key: "fast-mode".into(),
+            value: "on".into(),
+        },
+        "fast mode must be turned on after the model, before the prompt"
+    );
+    let (_, third) = submitted.recv().await.unwrap();
+    assert!(matches!(third, RelayCommand::Prompt { .. }));
+}
+
+#[tokio::test]
+async fn the_start_follow_up_skips_fast_mode_silently_when_not_offered() {
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "session-1".into(),
+            accepted_ordinal: 12,
+            submitted: submitted_tx,
+            // This agent offers a model but not fast mode.
+            view: Some(ready_view("gpt-5.10-luna")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+
+    backend
+        .start_followup(
+            "session-1".into(),
+            StartFollowup {
+                model: Some("gpt-5.10-luna".into()),
+                effort: None,
+                prompt: Some("add a README line".into()),
+                fast_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, first) = submitted.recv().await.unwrap();
+    assert_eq!(
+        first,
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "gpt-5.10-luna".into(),
+        }
+    );
+    // No fast-mode SetConfig: the option is not offered, so it is skipped
+    // silently and the prompt still goes out.
+    let (_, second) = submitted.recv().await.unwrap();
+    assert!(
+        matches!(second, RelayCommand::Prompt { .. }),
+        "a spawn must not fail or stall just because fast mode is unavailable"
+    );
+}
+
+#[tokio::test]
 async fn the_start_follow_up_refuses_a_model_the_agent_does_not_offer() {
     let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
     let backend = ApiBackend::new(
@@ -802,6 +1209,7 @@ async fn the_start_follow_up_refuses_a_model_the_agent_does_not_offer() {
                 model: Some("no-such-model".into()),
                 effort: None,
                 prompt: Some("add a README line".into()),
+                ..Default::default()
             },
         )
         .await

@@ -46,13 +46,19 @@ where
     let notification_resume_required = resume_required.clone();
     // Evidence about the thread itself, as opposed to `resume_required`'s
     // policy about reloading it: false until this thread holds something only
-    // it can replay.
+    // it can replay. Codex writes a thread's rollout, and Claude Code a
+    // session's transcript, only when a model turn runs, so the evidence is a
+    // prompt sent (`session.rs`) or a Claude Code result. Agent output alone
+    // is not: the Claude adapter publishes notices as agent text while it
+    // answers a configuration request, and no turn runs for them (R4-3).
     let native_session_used = Arc::new(AtomicBool::new(false));
-    let notification_native_session_used = native_session_used.clone();
+    let claude_sdk_native_session_used = native_session_used.clone();
     // A provider may replay the native transcript as `session/update`
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
     // every old turn on every restart. New sessions have no old history.
+    // `session::accept_live_session_updates` turns them on however the
+    // session opens, including a resume that falls back to `session/new`.
     let session_updates_enabled = Arc::new(AtomicBool::new(spec.resume_session.is_none()));
     let notification_session_updates_enabled = session_updates_enabled.clone();
     // Codex can finish dispatching old tool updates after `session/load` has
@@ -62,6 +68,11 @@ where
     // updates on the same ACP connection.
     let live_tool_calls = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let notification_live_tool_calls = live_tool_calls.clone();
+    // What an open tool call spelled out as its content, for the permission
+    // form of a harness that sends no `rawInput` (R4-10).
+    let tool_content = ToolCallContentInput::default();
+    let notification_tool_content = tool_content.clone();
+    let permission_tool_content = tool_content;
     let notification_goal = spec.goal_recovery.clone();
     let notification_harness = spec.harness;
     let claude_sdk_events = events.clone();
@@ -225,15 +236,8 @@ where
                 }
                 if session_update_has_native_history(&update) {
                     notification_resume_required.store(true, Ordering::Release);
-                    // Report the transition once, so the worker can persist
-                    // that this thread must never be replaced.
-                    if !notification_native_session_used.swap(true, Ordering::AcqRel) {
-                        notification_events
-                            .send(RuntimeEvent::NativeSessionUsed)
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                    }
                 }
+                notification_tool_content.observe(&update);
                 if !session_update_is_relay_visible(
                     &update,
                     &notification_live_tool_calls,
@@ -271,6 +275,16 @@ where
                 match ClaudeTurnResult::from_sdk_message(&notification.message) {
                     Ok(Some(mut result)) => {
                         result.received = claude_sdk_result_count.stamp();
+                        // A result ends a model cycle, and Claude Code has
+                        // written that cycle to the session's transcript.
+                        // Report the transition once, so the worker can
+                        // persist that this session must never be replaced.
+                        if !claude_sdk_native_session_used.swap(true, Ordering::AcqRel) {
+                            claude_sdk_events
+                                .send(RuntimeEvent::NativeSessionUsed)
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                        }
                         claude_sdk_events
                             .send(RuntimeEvent::ClaudeTurnResult(result))
                             .await
@@ -518,7 +532,8 @@ where
                 {
                     Some(title) => permission_title_with_command(
                         title,
-                        request.tool_call.fields.raw_input.as_ref(),
+                        permission_tool_input(&request.tool_call, &permission_tool_content)
+                            .as_ref(),
                     ),
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
@@ -991,6 +1006,99 @@ where
         .take())
 }
 
+/// The input a tool call carried as text content, by tool call id, while the
+/// call is open. Kimi sends no `rawInput` for a shell call: the input exists
+/// only as a text block it streams as the call's content, growing to
+/// `{"command": "..."}` (R4-10). The latest text replaces the earlier one,
+/// and a finished call is forgotten.
+#[derive(Clone, Default)]
+pub(super) struct ToolCallContentInput(Arc<Mutex<BTreeMap<String, String>>>);
+
+impl ToolCallContentInput {
+    /// Open calls remembered at once; the oldest id is dropped past this.
+    const OPEN_CALLS: usize = 64;
+
+    pub(super) fn observe(&self, update: &SessionUpdate) {
+        let (id, content, status) = match update {
+            SessionUpdate::ToolCall(call) => {
+                (&call.tool_call_id, Some(&call.content), Some(call.status))
+            }
+            SessionUpdate::ToolCallUpdate(call) => (
+                &call.tool_call_id,
+                call.fields.content.as_ref(),
+                call.fields.status,
+            ),
+            _ => return,
+        };
+        let id = id.to_string();
+        let mut texts = self.0.lock().expect("tool call input lock poisoned");
+        if matches!(
+            status,
+            Some(
+                agent_client_protocol::schema::v1::ToolCallStatus::Completed
+                    | agent_client_protocol::schema::v1::ToolCallStatus::Failed
+            )
+        ) {
+            texts.remove(&id);
+            return;
+        }
+        if let Some(text) = content.and_then(|content| single_text_content(content)) {
+            if !texts.contains_key(&id) && texts.len() >= Self::OPEN_CALLS {
+                texts.pop_first();
+            }
+            texts.insert(id, text.to_owned());
+        }
+    }
+
+    /// The JSON object the call's content spelled out, if it did.
+    pub(super) fn input(&self, tool_call_id: &str) -> Option<serde_json::Value> {
+        let texts = self.0.lock().expect("tool call input lock poisoned");
+        json_object_text(texts.get(tool_call_id)?)
+    }
+}
+
+fn single_text_content(
+    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+) -> Option<&str> {
+    match content {
+        [agent_client_protocol::schema::v1::ToolCallContent::Content(block)] => {
+            match &block.content {
+                ContentBlock::Text(text) => Some(&text.text),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_object_text(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .filter(serde_json::Value::is_object)
+}
+
+/// What a permission request's tool call would run with: its `rawInput`, or
+/// else the JSON its content spells out, in the request itself or streamed
+/// for the same call before it.
+pub(super) fn permission_tool_input(
+    tool_call: &agent_client_protocol::schema::v1::ToolCallUpdate,
+    streamed: &ToolCallContentInput,
+) -> Option<serde_json::Value> {
+    tool_call
+        .fields
+        .raw_input
+        .clone()
+        .or_else(|| {
+            tool_call
+                .fields
+                .content
+                .as_deref()
+                .and_then(single_text_content)
+                .and_then(json_object_text)
+        })
+        .or_else(|| streamed.input(&tool_call.tool_call_id.to_string()))
+}
+
 /// A permission form's text: the tool call's title, and the command it would
 /// run when the title does not already show it. Kimi titles a shell request
 /// just "Bash", which left the person approving a command they could not
@@ -1246,12 +1354,73 @@ fn turn_stall_transcript_message(harness: HarnessKind, reason: &str) -> String {
     )
 }
 
-pub(super) fn prompt_failure_warning(error: &agent_client_protocol::Error) -> String {
-    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
-        format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}")
+/// The stop reason and the conversation warning for a prompt the harness
+/// failed with a JSON-RPC error.
+///
+/// An exhausted usage limit ends the turn as `QuotaLimit`, the stop reason
+/// that puts the session in the quota-blocked state with its notice, for Kimi
+/// and for Codex, whose bridge reports it as an internal error naming
+/// `usageLimitExceeded` (launch finding J-25).
+pub(super) fn prompt_error_outcome(
+    harness: HarnessKind,
+    error: &agent_client_protocol::Error,
+    diagnostic: &mj_core::diagnostic::TurnDiagnostic,
+) -> (String, String) {
+    let stop_reason = if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex)
+        && diagnostic.is_usage_limit()
+    {
+        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
     } else {
-        format!("prompt failed: {error}")
+        PROMPT_ERROR_STOP_REASON.to_owned()
+    };
+    (stop_reason, prompt_failure_warning(harness, error))
+}
+
+/// The warning a failed prompt leaves in the conversation.
+///
+/// A bridge that puts its own sentence in the error's data (Codex does, with
+/// `message` and `codexErrorInfo`) gets that sentence on one line rather than
+/// "Internal error: " and the pretty-printed JSON; the caller logs the raw
+/// error. An error whose text carries an authentication code keeps that
+/// text, because credential sync reads the code from this warning.
+pub(super) fn prompt_failure_warning(
+    harness: HarnessKind,
+    error: &agent_client_protocol::Error,
+) -> String {
+    // A usage limit is named as one before anything else: Kimi sends its
+    // weekly limit as ACP `auth_required` with a 403 message (R4-7), and the
+    // credential marker would both mislabel it and ask for a credential sync.
+    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+        if mj_core::diagnostic::TurnDiagnostic::from_acp(error).is_usage_limit() {
+            return format!("prompt failed (usage limit reached): {error}");
+        }
+        return format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}");
     }
+    let raw = error.to_string();
+    if mj_core::credentials::auth_failure_signature(harness, &raw) {
+        return format!("prompt failed: {raw}");
+    }
+    match readable_prompt_error(error) {
+        Some(line) => format!("prompt failed: {line}"),
+        None => format!("prompt failed: {raw}"),
+    }
+}
+
+/// One line for an error whose data says what went wrong: its `message`, or
+/// the error's own message with the Codex error kind. `None` when the data
+/// says nothing readable.
+fn readable_prompt_error(error: &agent_client_protocol::Error) -> Option<String> {
+    let data = error.data.as_ref()?;
+    let line = match data.get("message").and_then(serde_json::Value::as_str) {
+        Some(message) => message.to_owned(),
+        None => format!(
+            "{} ({})",
+            error.message,
+            mj_core::diagnostic::codex_error_kind(data)?
+        ),
+    };
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// How much the agent has produced by working, over one ACP connection.

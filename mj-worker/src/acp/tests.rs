@@ -83,6 +83,257 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     }
 }
 
+/// A fake Codex bridge that titles a thread the way codex-acp 1.13.2 does:
+/// from the text blocks of the prompt, joined with spaces
+/// (`params.prompt.filter((b) => b.type === "text")` in its prompt handler,
+/// which feeds both the fallback title and the title model). Any other block
+/// is left out. It reports each prompt it receives, then the title, then one
+/// agent message so the test knows the title has been handled.
+async fn titling_codex_bridge(
+    stream: tokio::io::DuplexStream,
+    prompts: mpsc::UnboundedSender<serde_json::Value>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let messages = match method {
+            "initialize" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}
+            })],
+            "session/new" => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {
+                    "sessionId": "titled",
+                    "modes": {
+                        "currentModeId": "agent",
+                        "availableModes": [{"id": "agent", "name": "Agent"}],
+                    },
+                }
+            })],
+            "session/prompt" => {
+                let prompt = request["params"]["prompt"].clone();
+                let title = prompt
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = prompts.send(prompt);
+                let mut messages = [
+                    serde_json::json!({
+                        "sessionUpdate": "session_info_update",
+                        "title": title.trim(),
+                    }),
+                    serde_json::json!({
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "pong"},
+                    }),
+                ]
+                .into_iter()
+                .map(|update| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {"sessionId": "titled", "update": update},
+                    })
+                })
+                .collect::<Vec<_>>();
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}
+                }));
+                messages
+            }
+            _ if !id.is_null() => vec![serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {}
+            })],
+            _ => continue,
+        };
+        for message in messages {
+            if write
+                .write_all(format!("{message}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Drive a new Codex session through one prompt against
+/// [`titling_codex_bridge`]. Returns the prompt the bridge received and the
+/// titles the worker relayed.
+async fn codex_session_titles(
+    project_memory: Option<&Path>,
+    prompt: Vec<ContentBlock>,
+) -> (serde_json::Value, Vec<String>) {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (prompts_tx, mut prompts_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(titling_codex_bridge(bridge_stream, prompts_tx));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = reload_fallback_spec(HarnessKind::Codex);
+    spec.resume_session = None;
+    spec.project_memory = project_memory.map(|root| ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "abc".into(),
+        root: root.join("memory"),
+        baseline_root: root.join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "first".into(),
+            prompt,
+        })
+        .await
+        .unwrap();
+
+    let mut titles = Vec::new();
+    loop {
+        let Some(event) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("the runtime keeps reporting")
+        else {
+            panic!("the runtime stopped: {:?}", driver.await);
+        };
+        let RuntimeEvent::SessionUpdate { update } = event else {
+            continue;
+        };
+        if update["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+        if update["sessionUpdate"] == "session_info_update"
+            && let Some(title) = update["title"].as_str()
+        {
+            titles.push(title.to_owned());
+        }
+    }
+    let received = prompts_rx
+        .recv()
+        .await
+        .expect("the bridge received the prompt");
+    driver.abort();
+    bridge.abort();
+    (received, titles)
+}
+
+/// Launch finding I2-1: a new Codex session prompted "Reply with the single
+/// word pong." was titled "Project memory instructions". codex-acp titles a
+/// thread from the text blocks of its first prompt, and Mjolnir sent the
+/// project memory as the first of them. The memory now travels as an embedded
+/// resource: the model still reads all of it, and the title comes from the
+/// user's words.
+#[tokio::test]
+async fn a_codex_session_given_project_memory_is_titled_from_the_users_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let memory = mj_core::project_memory::startup_prompt_context(
+        &mj_core::project_memory::ProjectMemoryStore::new(temp.path().join("memory")),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let request = "Reply with the single word pong.";
+
+    let (received, titles) = codex_session_titles(
+        Some(temp.path()),
+        vec![
+            hidden_context_block(memory.clone()),
+            ContentBlock::Text(TextContent::new(request)),
+        ],
+    )
+    .await;
+
+    assert_eq!(titles, [request]);
+    assert_eq!(
+        received,
+        serde_json::json!([
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI,
+                    "text": memory,
+                },
+            },
+            {"type": "text", "text": request},
+        ])
+    );
+}
+
+/// A Codex session without project memory sends the user's blocks alone, as
+/// it always did, and Codex's title stands.
+#[tokio::test]
+async fn a_codex_session_without_project_memory_is_titled_as_before() {
+    let request = "Reply with the single word pong.";
+
+    let (received, titles) =
+        codex_session_titles(None, vec![ContentBlock::Text(TextContent::new(request))]).await;
+
+    assert_eq!(titles, [request]);
+    assert_eq!(
+        received,
+        serde_json::json!([{"type": "text", "text": request}])
+    );
+}
+
+/// Only Codex receives the hidden context as a resource. Every other harness
+/// gets the same text block as before; its bridge may not accept embedded
+/// resources at all.
+#[test]
+fn only_codex_receives_hidden_context_as_a_resource() {
+    let context = "<mj-project-memory>notes</mj-project-memory>";
+    let user = ContentBlock::Text(TextContent::new("ship it"));
+    let prompt = vec![hidden_context_block(context.into()), user.clone()];
+
+    let codex = prompt_for_harness(HarnessKind::Codex, prompt.clone());
+    assert!(matches!(&codex[0], ContentBlock::Resource(_)), "{codex:?}");
+    assert_eq!(codex[1], user);
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Grok,
+        HarnessKind::Kimi,
+        HarnessKind::Muse,
+    ] {
+        assert_eq!(
+            prompt_for_harness(harness, prompt.clone()),
+            vec![ContentBlock::Text(TextContent::new(context)), user.clone()],
+            "{harness:?}"
+        );
+    }
+    for harness in HarnessKind::ALL {
+        assert_eq!(
+            prompt_for_harness(harness, vec![user.clone()]),
+            vec![user.clone()],
+            "{harness:?}"
+        );
+    }
+}
+
 #[test]
 fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     let live_tool_calls = Mutex::new(BTreeSet::new());
@@ -1092,21 +1343,98 @@ fn adapter_chatter_never_becomes_error_context() {
     assert_eq!(actionable_stderr_tail("   "), None);
 }
 
+/// Launch finding J-25: a Codex quota error showed in the system row as
+/// `warning: prompt failed: Internal error: { "message": ..., "codexErrorInfo":
+/// "usageLimitExceeded" }`. The warning is the provider's sentence on one
+/// line, and the turn ends as a quota stop, as Kimi's limit already does.
+#[test]
+fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
+    let error = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits\nor try again at Sep 29th, 2026 10:20 PM.",
+        "codexErrorInfo": "usageLimitExceeded"
+    }));
+    let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
+    let (stop_reason, warning) = prompt_error_outcome(HarnessKind::Codex, &error, &diagnostic);
+    assert_eq!(stop_reason, mj_core::diagnostic::QUOTA_STOP_REASON);
+    assert_eq!(
+        warning,
+        "prompt failed: You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:20 PM."
+    );
+
+    // Another Codex error names its kind when it has no sentence of its own.
+    let bare = agent_client_protocol::Error::internal_error()
+        .data(serde_json::json!({"codexErrorInfo": "responseStreamDisconnected"}));
+    let (stop_reason, warning) = prompt_error_outcome(
+        HarnessKind::Codex,
+        &bare,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&bare),
+    );
+    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
+    assert_eq!(
+        warning,
+        "prompt failed: Internal error (responseStreamDisconnected)"
+    );
+
+    // An error whose data carries an authentication code keeps its text:
+    // credential sync reads that code from the warning.
+    let auth = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+        "message": "Request failed", "type": "authentication_error"
+    }));
+    let (_, warning) = prompt_error_outcome(
+        HarnessKind::Claude,
+        &auth,
+        &mj_core::diagnostic::TurnDiagnostic::from_acp(&auth),
+    );
+    assert!(
+        mj_core::credentials::auth_failure_signature(HarnessKind::Claude, &warning),
+        "{warning}"
+    );
+}
+
 #[test]
 fn an_auth_required_prompt_failure_carries_the_credential_marker() {
-    let auth = prompt_failure_warning(&agent_client_protocol::Error::auth_required());
+    let auth = prompt_failure_warning(
+        HarnessKind::Claude,
+        &agent_client_protocol::Error::auth_required(),
+    );
     assert!(auth.contains("prompt failed"), "{auth}");
     assert!(mj_core::credentials::auth_failure_signature(
         HarnessKind::Claude,
         &auth
     ));
 
-    let other = prompt_failure_warning(&agent_client_protocol::Error::internal_error());
+    let other = prompt_failure_warning(
+        HarnessKind::Claude,
+        &agent_client_protocol::Error::internal_error(),
+    );
     assert!(other.contains("prompt failed"), "{other}");
     assert!(!mj_core::credentials::auth_failure_signature(
         HarnessKind::Claude,
         &other
     ));
+}
+
+/// R4-7: Kimi fails a prompt past its weekly limit with ACP `auth_required`
+/// and a 403 usage-limit message (`cli/1136-11-prompt.txt`). The turn ended
+/// as QuotaLimit, but the conversation said "prompt failed (ACP
+/// auth_required)", which also reads as a sign-in failure.
+#[test]
+fn a_usage_limit_sent_as_auth_required_is_labelled_a_usage_limit() {
+    let mut error = agent_client_protocol::Error::auth_required();
+    error.message = "Authentication required: 403 You've reached your weekly (7-day) usage \
+        limit. Your quota will reset when the current 7-day window ends. To continue now, \
+        purchase extra usage or upgrade your plan: \
+        https://www.kimi.com/membership/subscription?tab=quota"
+        .into();
+    let label = prompt_failure_warning(HarnessKind::Kimi, &error);
+    assert!(
+        label.starts_with("prompt failed (usage limit reached): Authentication required: 403"),
+        "{label}"
+    );
+    assert!(
+        !mj_core::credentials::auth_failure_signature(HarnessKind::Kimi, &label),
+        "a usage limit is not a sign-in failure: {label}"
+    );
 }
 
 #[test]
@@ -5870,6 +6198,7 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
             native_session_id: "missing-thread".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     drop(relay);
@@ -6632,6 +6961,143 @@ fn a_permission_form_shows_the_command_it_approves() {
     );
 }
 
+/// R4-10: Kimi's Bash call carries no `rawInput`. The command exists only as
+/// the call's streamed text content, `{"command": ...}`, so the form read
+/// "Kimi Code requests permission: Bash" and nothing else. The recorded
+/// updates are replayed from the reviewer journal R4 saved
+/// (`reviewer-B-kimi-bash-permission.jsonl`), followed by a permission request
+/// that names the call and carries no input, as Kimi's did.
+#[tokio::test]
+async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client, agent) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client);
+    let (agent_read, mut agent_write) = tokio::io::split(agent);
+    let (commands, mut requests) = mpsc::channel(16);
+    let (event_tx, mut events) = mpsc::channel(256);
+    let spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "kimi-probe".into(),
+        args: vec![],
+        environment: BTreeMap::new(),
+        cwd: "/workspace".into(),
+        additional_directories: vec![],
+        extra_mcp_servers: vec![],
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Kimi,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            ByteStreams::new(client_write.compat_write(), client_read.compat()),
+            spec,
+            &mut requests,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    let mut input = BufReader::new(agent_read).lines();
+    let mut next_message = async || -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(5), input.next_line())
+            .await
+            .expect("ACP message timed out")
+            .unwrap()
+            .expect("ACP closed unexpectedly");
+        serde_json::from_str(&line).unwrap()
+    };
+    let mut send = async |message: Value| {
+        agent_write
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    };
+
+    // Answer the session setup, whatever it asks for, until the prompt.
+    commands
+        .send(CommandRequest::Prompt {
+            request_id: "review-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("review the change"))],
+        })
+        .await
+        .unwrap();
+    loop {
+        let message = next_message().await;
+        let result = match message["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion": 1}),
+            Some("session/new") => json!({"sessionId": "kimi-session"}),
+            Some("session/prompt") => break,
+            _ => json!({}),
+        };
+        if !message["id"].is_null() {
+            send(json!({"jsonrpc": "2.0", "id": message["id"], "result": result})).await;
+        }
+    }
+
+    let journal = include_str!("testdata/kimi_bash_permission.jsonl");
+    let mut tool_call_id = None;
+    for line in journal.lines() {
+        let event: Value = serde_json::from_str(line).unwrap();
+        let observation = &event["observation"];
+        if observation["type"] != "session_update" {
+            continue;
+        }
+        let update = observation["data"]["update"].clone();
+        tool_call_id = update["toolCallId"].as_str().map(str::to_owned);
+        send(json!({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "kimi-session", "update": update},
+        }))
+        .await;
+    }
+    send(json!({
+        "jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission",
+        "params": {
+            "sessionId": "kimi-session",
+            "toolCall": {"toolCallId": tool_call_id.unwrap(), "title": "Bash", "kind": "execute"},
+            "options": [
+                {"optionId": "approve_once", "name": "Approve once", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+            ],
+        },
+    }))
+    .await;
+
+    let message = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the permission form must be requested")
+            .expect("runtime stopped");
+        if let RuntimeEvent::ElicitationRequested { request } = event {
+            break request.message;
+        }
+    };
+    assert_eq!(
+        message,
+        "Kimi Code requests permission:\nBash\n$ git status --short && git ls-files && ls -a"
+    );
+    driver.abort();
+}
+
 #[test]
 fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
@@ -6787,5 +7253,40 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
             .iter()
             .all(|message| message.get("error").is_none()),
         "the client answered launcher output with an error: {received:?}"
+    );
+}
+
+/// R8-2: the exit record's first line names why the worker stopped. The
+/// bridge's stderr tail used to come first, so a resume that failed on a
+/// refused mode showed "ACP bridge stderr:" and the bridge's log lines.
+#[test]
+fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
+    let error = anyhow::anyhow!(
+        "Internal error: {{\n  \"details\": \"Cannot set permission mode to auto: auto mode \
+         unavailable for this model\"\n}}"
+    )
+    .context("select required ACP execution mode auto")
+    .context(format!(
+        "{BRIDGE_STDERR_CONTEXT}\n[session/create] phase=models durationMs=1\n\
+         [session/create] phase=register durationMs=1"
+    ));
+
+    let reason = worker_exit_reason(&error);
+    let mut lines = reason.lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "select required ACP execution mode auto: Internal error: { \"details\": \"Cannot \
+             set permission mode to auto: auto mode unavailable for this model\" }"
+        )
+    );
+    assert_eq!(lines.next(), Some(BRIDGE_STDERR_CONTEXT));
+    assert!(reason.ends_with("[session/create] phase=register durationMs=1"));
+
+    // A failure with no stderr is the chain on one line.
+    let error = anyhow::anyhow!("durable relay open failed").context("start worker");
+    assert_eq!(
+        worker_exit_reason(&error),
+        "start worker: durable relay open failed"
     );
 }

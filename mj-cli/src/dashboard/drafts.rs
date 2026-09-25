@@ -165,15 +165,10 @@ impl DashboardContext {
             return;
         }
         // A suspended session has no worker to attach to; an attach would
-        // wait out its timeout on every start. A pinned pane lets go of it;
-        // Browse keeps following the selection as before.
-        if pane != self.dashboard.browse_pane()
-            && self.dashboard.pane_session_is_suspended(session_id)
-        {
-            self.cancel_chat_open_in(pane);
-            self.dashboard.release_suspended_pane(pane, session_id);
-            self.retire_chats_outside_the_layout();
-            self.save_active_workspace_layout();
+        // wait out its timeout and report that opening did not respond
+        // (R4-11), whichever pane asked.
+        if self.dashboard.pane_session_is_suspended(session_id) {
+            self.release_suspended_pane(pane, session_id);
             return;
         }
         if self
@@ -206,7 +201,7 @@ impl DashboardContext {
             title: if self.dashboard.go_mode().is_some() {
                 self.dashboard.go_conversation_title(session_id)
             } else {
-                session_record.display_title().to_owned()
+                session_record.listed_title().to_owned()
             },
             harness_kind: Some(session_record.harness_kind),
             subagent_count: self.dashboard.subagent_count_for(&session_record.id),

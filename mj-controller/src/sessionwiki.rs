@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -870,6 +870,436 @@ pub fn index_state() -> WikiIndexState {
         WikiIndexState::Ready
     } else {
         WikiIndexState::Indexing
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Indexing a session before it is destroyed
+// ---------------------------------------------------------------------------
+
+/// How long a destroy waits for a sync pass before it indexes the session on
+/// its own. A first build can run for many minutes, and a destroy must not
+/// wait for it.
+pub const DESTROY_SYNC_WAIT: Duration = Duration::from_secs(20);
+
+/// How often rows the index was too busy to take are offered again, and for
+/// how long. A first build holds the index while it parses one tool's
+/// sessions and frees it between tools.
+const DEFERRED_WRITE_RETRY: Duration = Duration::from_secs(5);
+const DEFERRED_WRITE_LIMIT: Duration = Duration::from_secs(60 * 60);
+
+/// How a session about to be destroyed, with its sub-agents, reached the
+/// index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexedBeforeDestroy {
+    /// The index already held every one of them as they are now, or none of
+    /// them had a conversation to index.
+    Current,
+    /// A sync pass that began after the request finished in time.
+    Synced,
+    /// The sync pass did not finish in time, so their rows were written on
+    /// their own.
+    WrittenDirectly,
+    /// The index was busy. Their rows were read before the destroy and are
+    /// written in the background once the index is free.
+    Deferred,
+    /// This process may not write the index, and why.
+    Unavailable(&'static str),
+    /// Indexing failed, and why. The destroy goes ahead.
+    Failed(String),
+}
+
+impl WikiIndexer {
+    /// Put a session and its sub-agents into the index while their records
+    /// and stored conversations still exist.
+    ///
+    /// Sessions enter the index only on a sync pass, and destroy deletes the
+    /// record and the conversation, so a session created and destroyed
+    /// between two passes was never findable (R2-11). This asks for an
+    /// incremental pass and waits `wait` for it. A pass that does not finish
+    /// in time, such as a first build, is left running, and the sessions are
+    /// indexed on their own from the same rows the pass would write.
+    pub async fn index_before_destroy(
+        &self,
+        session_id: &str,
+        wait: Duration,
+    ) -> IndexedBeforeDestroy {
+        if let Some(reason) = unwritable_reason() {
+            return IndexedBeforeDestroy::Unavailable(reason);
+        }
+        let root = session_id.to_owned();
+        let pending = match tokio::task::spawn_blocking(move || unindexed_session_tree(&root)).await
+        {
+            Ok(Ok(pending)) => pending,
+            Ok(Err(error)) => {
+                return IndexedBeforeDestroy::Failed(format!(
+                    "could not tell whether the index holds the session: {error:#}"
+                ));
+            }
+            Err(error) => {
+                return IndexedBeforeDestroy::Failed(format!(
+                    "checking the index for the session stopped: {error}"
+                ));
+            }
+        };
+        if pending.is_empty() {
+            return IndexedBeforeDestroy::Current;
+        }
+        let inner = Arc::clone(&self.inner);
+        index_before_destroy_with(
+            async move { inner.sync(false).await },
+            wait,
+            move || capture_sessions(&pending),
+            DEFERRED_WRITE_RETRY,
+        )
+        .await
+    }
+}
+
+/// Why this process may not write the index, if it may not.
+fn unwritable_reason() -> Option<&'static str> {
+    if !index_is_isolated() {
+        return Some("this process did not resolve a SessionWiki index of its own");
+    }
+    if index_version_mismatch() {
+        return Some("the SessionWiki index was written by another SessionWiki version");
+    }
+    None
+}
+
+/// The bounded wait and its fallback, with the sync pass and the reading of
+/// the sessions passed in so a test can stand in for either.
+async fn index_before_destroy_with<S, C>(
+    sync: S,
+    wait: Duration,
+    capture: C,
+    retry: Duration,
+) -> IndexedBeforeDestroy
+where
+    S: std::future::Future<Output = Result<()>> + Send + 'static,
+    C: FnOnce() -> Result<Vec<CapturedSession>> + Send + 'static,
+{
+    // Spawned rather than awaited here, so a wait that runs out drops only
+    // the handle and the pass still finishes. Dropping `Indexer::sync`
+    // part-way would release the single-flight lock while its blocking half
+    // was still writing.
+    match tokio::time::timeout(wait, tokio::spawn(sync)).await {
+        Ok(Ok(Ok(()))) => return IndexedBeforeDestroy::Synced,
+        Ok(Ok(Err(error))) => tracing::warn!(
+            error = %format!("{error:#}"),
+            "the SessionWiki sync before a destroy failed; indexing the session on its own"
+        ),
+        Ok(Err(error)) => tracing::warn!(
+            %error,
+            "the SessionWiki sync before a destroy stopped; indexing the session on its own"
+        ),
+        Err(_) => tracing::info!(
+            wait_seconds = wait.as_secs_f64(),
+            "the SessionWiki sync did not finish in time; indexing the session on its own"
+        ),
+    }
+    let captured = match tokio::task::spawn_blocking(capture).await {
+        Ok(Ok(captured)) => Arc::new(captured),
+        Ok(Err(error)) => {
+            return IndexedBeforeDestroy::Failed(format!(
+                "could not read the session to index it: {error:#}"
+            ));
+        }
+        Err(error) => {
+            return IndexedBeforeDestroy::Failed(format!(
+                "reading the session to index it stopped: {error}"
+            ));
+        }
+    };
+    if captured.is_empty() {
+        return IndexedBeforeDestroy::Current;
+    }
+    let attempt = Arc::clone(&captured);
+    match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
+        Ok(Ok(())) => IndexedBeforeDestroy::WrittenDirectly,
+        Ok(Err(error)) if crate::database::is_busy_error(&error) => {
+            write_captured_later(captured, retry);
+            IndexedBeforeDestroy::Deferred
+        }
+        Ok(Err(error)) => IndexedBeforeDestroy::Failed(format!(
+            "could not write the session into the index: {error:#}"
+        )),
+        Err(error) => IndexedBeforeDestroy::Failed(format!(
+            "writing the session into the index stopped: {error}"
+        )),
+    }
+}
+
+/// A session and every sub-agent below it that has a conversation the index
+/// does not hold as it is now. Empty when the session has no record.
+fn unindexed_session_tree(root: &str) -> Result<Vec<String>> {
+    let controller =
+        Controller::load().context("load controller state to index a destroyed session")?;
+    unindexed(
+        &MjolnirAdapter::from_state(&controller.state),
+        &session_tree(&controller.state, root),
+    )
+}
+
+/// Those of `session_ids` that have a conversation the index does not hold
+/// as it is now: no row, an archived row, or a row with an older change
+/// token than the adapter lists.
+fn unindexed(adapter: &MjolnirAdapter, session_ids: &[String]) -> Result<Vec<String>> {
+    let tokens: BTreeMap<String, i64> = adapter
+        .store()
+        .map(|store| store.keys.into_iter().collect())
+        .unwrap_or_default();
+    // No index yet holds nothing.
+    let connection = open_readonly().ok();
+    let mut pending = Vec::new();
+    for session_id in session_ids {
+        let key = adapter.key_for(session_id);
+        // Only a session with a stored or checkpointed conversation is listed.
+        let Some(&token) = tokens.get(&key) else {
+            continue;
+        };
+        let current = match &connection {
+            Some(connection) => indexed_token(connection, &key)? == Some(token),
+            None => false,
+        };
+        if !current {
+            pending.push(session_id.clone());
+        }
+    }
+    Ok(pending)
+}
+
+/// A session and every sub-agent below it, parents first.
+fn session_tree(state: &State, root: &str) -> Vec<String> {
+    if !state.sessions.contains_key(root) {
+        return Vec::new();
+    }
+    let mut tree = vec![root.to_owned()];
+    let mut seen = BTreeSet::from([root.to_owned()]);
+    let mut next = 0;
+    while let Some(parent) = tree.get(next).cloned() {
+        next += 1;
+        for child in state.subagents.values() {
+            if child.parent_session_id == parent
+                && state.sessions.contains_key(&child.child_session_id)
+                && seen.insert(child.child_session_id.clone())
+            {
+                tree.push(child.child_session_id.clone());
+            }
+        }
+    }
+    tree
+}
+
+/// The change token the index holds for a live row. SessionWiki stores a
+/// shared-store token in the `mtime` column.
+fn indexed_token(connection: &rusqlite::Connection, key: &str) -> Result<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    connection
+        .query_row(
+            "SELECT mtime FROM files WHERE path = ?1 AND archived_at IS NULL",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("read a session's change token from the SessionWiki index")
+}
+
+/// One session's index row and metadata, read while its record and
+/// conversation still exist, so they can be written after both are gone.
+struct CapturedSession {
+    key: String,
+    token: i64,
+    session: Session,
+    tags: tags::MjTags,
+}
+
+fn capture_sessions(session_ids: &[String]) -> Result<Vec<CapturedSession>> {
+    let controller =
+        Controller::load().context("load controller state to index a destroyed session")?;
+    capture_sessions_from(&MjolnirAdapter::from_state(&controller.state), session_ids)
+}
+
+/// The rows a sync pass would write for these sessions, built by the same
+/// adapter. A session with no conversation to index is left out.
+fn capture_sessions_from(
+    adapter: &MjolnirAdapter,
+    session_ids: &[String],
+) -> Result<Vec<CapturedSession>> {
+    let tokens: BTreeMap<String, i64> = adapter
+        .store()
+        .map(|store| store.keys.into_iter().collect())
+        .unwrap_or_default();
+    let mut session_tags = adapter.indexed_tags();
+    let mut captured = Vec::new();
+    for session_id in session_ids {
+        let key = adapter.key_for(session_id);
+        let Some(&token) = tokens.get(&key) else {
+            continue;
+        };
+        captured.push(CapturedSession {
+            session: adapter.parse_key(&key)?,
+            tags: session_tags.remove(session_id).unwrap_or_default(),
+            key,
+            token,
+        });
+    }
+    Ok(captured)
+}
+
+/// Write captured rows through SessionWiki's own indexing, one session at a
+/// time, and their metadata beside them.
+fn write_captured(captured: &Arc<Vec<CapturedSession>>) -> Result<()> {
+    anyhow::ensure!(
+        index_is_writable(),
+        "this process may not write the SessionWiki index"
+    );
+    let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
+    for index in 0..captured.len() {
+        let adapter: Box<dyn Adapter> = Box::new(CapturedAdapter {
+            captured: Arc::clone(captured),
+            index,
+        });
+        sessionwiki::index::sync_with(&mut connection, &[adapter], None)
+            .context("index a session before it is destroyed")?;
+    }
+    let session_tags = captured
+        .iter()
+        .map(|captured| (captured.session.id.clone(), captured.tags.clone()))
+        .collect();
+    write_session_tags(&mut connection, &session_tags)
+        .context("store Mjolnir's session metadata in the SessionWiki index")
+}
+
+/// Offer rows the index was too busy to take until it takes them, or until
+/// [`DEFERRED_WRITE_LIMIT`] passes. The rows live only in this task: a
+/// daemon that stops before the index is free loses them, and the sessions
+/// logged here are then not found by id.
+fn write_captured_later(captured: Arc<Vec<CapturedSession>>, retry: Duration) {
+    let sessions = captured
+        .iter()
+        .map(|captured| captured.session.id.clone())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        ?sessions,
+        "the SessionWiki index is busy; indexing the destroyed sessions once it is free"
+    );
+    tokio::spawn(async move {
+        let started = Instant::now();
+        loop {
+            tokio::time::sleep(retry).await;
+            let attempt = Arc::clone(&captured);
+            let error = match tokio::task::spawn_blocking(move || write_captured(&attempt)).await {
+                Ok(Ok(())) => {
+                    tracing::info!(?sessions, "indexed the destroyed sessions");
+                    return;
+                }
+                Ok(Err(error)) => error,
+                Err(error) => anyhow::Error::new(error),
+            };
+            if !crate::database::is_busy_error(&error) || started.elapsed() >= DEFERRED_WRITE_LIMIT
+            {
+                tracing::warn!(
+                    ?sessions,
+                    error = %format!("{error:#}"),
+                    "gave up indexing destroyed sessions in SessionWiki"
+                );
+                return;
+            }
+        }
+    });
+}
+
+/// One captured session, offered to SessionWiki as a shared store that
+/// lists only it.
+struct CapturedAdapter {
+    captured: Arc<Vec<CapturedSession>>,
+    index: usize,
+}
+
+impl CapturedAdapter {
+    fn captured(&self) -> &CapturedSession {
+        &self.captured[self.index]
+    }
+}
+
+impl Adapter for CapturedAdapter {
+    fn name(&self) -> &'static str {
+        TOOL
+    }
+
+    fn root(&self) -> Option<PathBuf> {
+        Path::new(&self.captured().key)
+            .parent()
+            .map(Path::to_path_buf)
+    }
+
+    fn discover(&self) -> Discovered {
+        Discovered {
+            files: Vec::new(),
+            had_error: false,
+        }
+    }
+
+    fn parse(&self, _path: &Path) -> Result<Session> {
+        anyhow::bail!("Mjolnir sessions are parsed by key, not by file")
+    }
+
+    fn store(&self) -> Option<Store> {
+        let captured = self.captured();
+        Some(Store {
+            keys: vec![(captured.key.clone(), captured.token)],
+            files: Vec::new(),
+            had_error: false,
+        })
+    }
+
+    fn parse_key(&self, key: &str) -> Result<Session> {
+        let captured = self.captured();
+        anyhow::ensure!(key == captured.key, "no captured session for key {key:?}");
+        Ok(copy_session(&captured.session))
+    }
+
+    /// A prefix no key starts with, since keys hold no NUL. This store lists
+    /// one session, not every session of this instance, so reconciliation
+    /// must not archive the rows it does not list.
+    fn reconcile_scope(&self) -> Option<String> {
+        Some(format!("{}\0", self.captured().key))
+    }
+}
+
+/// A copy of an indexed session, for a write that may be retried.
+/// SessionWiki's model does not implement `Clone`.
+fn copy_session(session: &Session) -> Session {
+    Session {
+        id: session.id.clone(),
+        tool: session.tool,
+        path: session.path.clone(),
+        project: session.project.clone(),
+        started: session.started,
+        ended: session.ended,
+        title: session.title.clone(),
+        subagent: session.subagent,
+        messages: session
+            .messages
+            .iter()
+            .map(|message| Message {
+                role: message.role,
+                text: message.text.clone(),
+                ts: message.ts,
+            })
+            .collect(),
+        touched: session.touched.clone(),
+        edits: session
+            .edits
+            .iter()
+            .map(|edit| sessionwiki::model::EditEvent {
+                path: edit.path.clone(),
+                kind: edit.kind,
+                snippet: edit.snippet.clone(),
+                ts: edit.ts,
+            })
+            .collect(),
     }
 }
 
@@ -2960,5 +3390,186 @@ mod tests {
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["main"]
         );
+    }
+
+    /// A runtime of the test's own, so a test can hold the index lock without
+    /// holding it across an await.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// R2-11's fallback. A destroy that outwaits a running sync pass, such as
+    /// a first build, indexes the session on its own from the rows the pass
+    /// would write, and does not wait for the pass. The session is then found
+    /// by its id with no record left, as after the destroy.
+    #[test]
+    fn a_destroy_indexes_the_session_itself_when_the_sync_outlasts_the_wait() {
+        let _held = tags::testing::lock();
+        let (_index_dir, _connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let source = adapter(directory.path(), session_id);
+
+        let started = Instant::now();
+        let outcome = block_on(index_before_destroy_with(
+            std::future::pending::<Result<()>>(),
+            Duration::from_millis(200),
+            move || capture_sessions_from(&source, &[session_id.to_owned()]),
+            Duration::from_millis(50),
+        ));
+
+        assert_eq!(outcome, IndexedBeforeDestroy::WrittenDirectly);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the destroy must not wait for the pass: {:?}",
+            started.elapsed()
+        );
+        let found = wiki_session(session_id, &BTreeSet::new())
+            .unwrap()
+            .expect("the session is found by its id");
+        assert_eq!(found.status, WikiSessionStatus::Archived);
+        assert_eq!(found.tool, TOOL);
+        assert_eq!(
+            found.path,
+            PathBuf::from(format!("{}/{session_id}", directory.path().display()))
+        );
+        assert_eq!(found.title, "the harness title");
+        assert_eq!(
+            found.harness,
+            Some(HarnessKind::Codex),
+            "the session's metadata is written beside its row"
+        );
+        assert!(!found.nothing_to_restore);
+    }
+
+    /// A sync pass that finishes within the wait has indexed the session, so
+    /// nothing is read or written on its own.
+    #[test]
+    fn a_sync_that_finishes_in_time_is_all_a_destroy_waits_for() {
+        let outcome = block_on(index_before_destroy_with(
+            async { Ok(()) },
+            DESTROY_SYNC_WAIT,
+            || -> Result<Vec<CapturedSession>> {
+                panic!("a finished pass leaves nothing to index on its own")
+            },
+            Duration::from_millis(50),
+        ));
+        assert_eq!(outcome, IndexedBeforeDestroy::Synced);
+    }
+
+    /// While another writer holds the index, as a first build does while it
+    /// parses one tool's sessions, the destroy goes ahead and the rows it read
+    /// are written once the index is free.
+    #[test]
+    fn a_busy_index_takes_the_destroyed_session_once_it_is_free() {
+        let _held = tags::testing::lock();
+        let (_index_dir, writer) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let source = adapter(directory.path(), session_id);
+
+        block_on(async {
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let outcome = index_before_destroy_with(
+                std::future::pending::<Result<()>>(),
+                Duration::from_millis(50),
+                move || capture_sessions_from(&source, &[session_id.to_owned()]),
+                Duration::from_millis(50),
+            )
+            .await;
+            assert_eq!(outcome, IndexedBeforeDestroy::Deferred);
+            assert!(
+                wiki_session(session_id, &BTreeSet::new())
+                    .unwrap()
+                    .is_none(),
+                "nothing is written while the other writer holds the index"
+            );
+
+            writer.execute_batch("COMMIT").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while wiki_session(session_id, &BTreeSet::new())
+                .unwrap()
+                .is_none()
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the deferred row never reached the index"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+    }
+
+    /// A destroy of a session the index already holds as it is now runs no
+    /// sync pass, so destroying a workspace or a parent with sub-agents costs
+    /// one pass at most. The token compared is the one SessionWiki stored.
+    #[test]
+    fn a_session_the_index_holds_as_it_is_now_needs_no_indexing() {
+        let _held = tags::testing::lock();
+        let (_index_dir, _connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let never_prompted = "fedcba9876543210fedcba9876543210";
+        write_archive(directory.path(), session_id, 1);
+        let source = adapter(directory.path(), session_id);
+        let ids = [session_id.to_owned(), never_prompted.to_owned()];
+
+        assert_eq!(
+            unindexed(&source, &ids).unwrap(),
+            [session_id],
+            "a session with no conversation has nothing to index"
+        );
+        let captured = Arc::new(capture_sessions_from(&source, &ids).unwrap());
+        write_captured(&captured).unwrap();
+        assert!(unindexed(&source, &ids).unwrap().is_empty());
+
+        // A rename moves the change token, so the row is stale again.
+        source
+            .sessions
+            .lock()
+            .unwrap()
+            .records
+            .get_mut(session_id)
+            .unwrap()
+            .updated_at = "2099-01-01T00:00:00Z".into();
+        assert_eq!(unindexed(&source, &ids).unwrap(), [session_id]);
+    }
+
+    #[test]
+    fn a_session_tree_holds_the_sub_agents_below_it_and_nothing_else() {
+        let record = |id: &str| {
+            (
+                id.to_owned(),
+                SessionRecord {
+                    id: id.into(),
+                    ..record_template()
+                },
+            )
+        };
+        let state = State {
+            sessions: BTreeMap::from([
+                record("parent"),
+                record("child"),
+                record("grandchild"),
+                record("sibling"),
+            ]),
+            subagents: BTreeMap::from([
+                ("child".to_owned(), child("child", "parent")),
+                ("grandchild".to_owned(), child("grandchild", "child")),
+                ("sibling".to_owned(), child("sibling", "other-parent")),
+            ]),
+            ..State::default()
+        };
+        assert_eq!(
+            session_tree(&state, "parent"),
+            ["parent", "child", "grandchild"]
+        );
+        assert!(session_tree(&state, "unknown").is_empty());
     }
 }

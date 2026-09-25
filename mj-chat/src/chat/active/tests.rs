@@ -305,6 +305,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
                 native_session_id: None,
                 native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
                 checkpoint_only: false,
                 acp_ready: None,
                 agent_capabilities: None,
@@ -820,6 +821,42 @@ async fn dictation_completion_preserves_edits_and_recovers_after_errors() {
     assert!(chat.state.notice().unwrap().contains("capture failed"));
     chat.apply_voice_update(VoiceUpdate::Finished(Ok(String::new())));
     assert_eq!(chat.draft(), "edited while recording spoken words");
+}
+
+/// Launch findings A-4 and E-9: with no voice helper or no dictation sign-in,
+/// the dictation chord changed nothing on screen and wrote no log line, so the
+/// key looked broken. It now says why nothing started.
+#[tokio::test]
+async fn the_dictation_chord_says_why_dictation_is_unavailable() {
+    let fixture =
+        mj_client::session::replacement_session_test_fixture("session-dictation-unavailable", 72);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+
+    let notice = chat.toggle_dictation().expect("the chord explains itself");
+
+    assert!(!chat.state.voice_active);
+    assert!(notice.starts_with("Dictation is unavailable"), "{notice}");
+    assert_eq!(chat.draft(), "");
+
+    // Once the probe has answered, the chord gives its reason.
+    chat.apply_voice_update(VoiceUpdate::Availability(
+        Vec::new(),
+        Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
+    ));
+    chat.state.clear_notice();
+    assert_eq!(
+        chat.toggle_dictation().as_deref(),
+        Some(io::DICTATION_NEEDS_A_CODEX_PROFILE)
+    );
+    assert!(!chat.state.voice_active);
 }
 
 #[tokio::test]
@@ -1355,6 +1392,47 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
     assert!(!rendered.contains("Harness session title"));
 }
 
+/// Launch finding R3-11: before the harness named a new session, the
+/// conversation header showed its 32-hex id while the Sessions row showed the
+/// title it was created with ("project via fake"). The header uses the
+/// listed title too.
+#[tokio::test]
+async fn an_unnamed_session_s_header_uses_its_listed_title_not_its_id() {
+    use mj_core::config::HarnessKind;
+
+    let session_id = "a225e234d043d75737319553cd926f50";
+    let fixture = mj_client::session::replacement_session_test_fixture(session_id, 91);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(chat_context(session_id, &[("codex-1", HarnessKind::Codex)])),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let reloaded = config_with_profiles(&[("codex-1", HarnessKind::Codex)]);
+    let mut unnamed = context_session_record(session_id, "workspace-1");
+    unnamed.title = "project via fake".into();
+    unnamed.acp_session_title = None;
+    unnamed.session_title_override = None;
+    chat.refresh_context(&reloaded, Some(&unnamed), Some(&unnamed));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    terminal
+        .draw(|frame| render_full_frame(frame, &mut chat.state, false))
+        .expect("draw refreshed chat");
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("project via fake"), "{rendered:?}");
+    assert!(!rendered.contains("a225e234d043"), "{rendered:?}");
+}
+
 #[tokio::test]
 async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-resumed", 74);
@@ -1517,8 +1595,8 @@ fn a_notice_set_through_a_shared_handle_shows_in_the_chat_footer_in_yellow() {
         .collect::<String>();
     assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
     assert_eq!(
-        buffer[(buffer.area.x, footer_row)].fg,
-        theme::palette().text
+        Some(buffer[(buffer.area.x, footer_row)].fg),
+        theme::key_hint().fg
     );
 }
 

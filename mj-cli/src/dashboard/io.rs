@@ -170,6 +170,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         target_id: String,
         result: std::result::Result<(), String>,
+        /// The configuration checked, when the check found its local
+        /// engine's command not installed.
+        absent_engine: Option<mj_core::config::TargetTemplate>,
     },
     MountHistory(
         std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
@@ -279,6 +282,10 @@ pub(crate) enum DashboardIoUpdate {
         episode_id: u64,
         result: std::result::Result<Option<String>, String>,
     },
+    ProjectDiscovery {
+        context: String,
+        result: std::result::Result<mj_controller::project_picker::ProjectDiscovery, String>,
+    },
     PathCompletions {
         context: String,
         prefix: String,
@@ -332,6 +339,9 @@ pub(crate) struct ActiveLifecycleOperation {
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) kind: SessionOperationKind,
     pub(crate) retry_launch: Option<DashboardAction>,
+    /// How notices named the session when the operation began. The
+    /// completion notice falls back to it when the record is already gone.
+    pub(crate) notice_name: String,
 }
 
 pub(crate) struct WorkspaceManagementResult {
@@ -417,7 +427,7 @@ impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOut
 impl DashboardContext {
     /// How a notice names a session: the title the session list shows, or
     /// the short id when the session has no title or its record is gone
-    /// (launch finding B-3).
+    /// (launch findings B-3 and R5-5).
     pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
         session_notice_name(&self.controller.state, session_id)
     }
@@ -937,7 +947,20 @@ impl DashboardContext {
                 generation,
                 target_id,
                 result,
+                absent_engine,
             } => {
+                if let (Some(template), Err(message)) = (&absent_engine, &result)
+                    && self
+                        .absent_engines
+                        .record(&target_id, template, message.clone())
+                {
+                    tracing::info!(
+                        target_id,
+                        reason = %message,
+                        "the target's container engine is not installed; the dashboard checks it \
+                         again only when its configuration changes or the engine is installed"
+                    );
+                }
                 self.dashboard
                     .apply_target_readiness(generation, target_id, result);
             }
@@ -1243,6 +1266,9 @@ impl DashboardContext {
                 episode_id,
                 result,
             } => self.apply_worker_diagnosis(session_id, episode_id, result),
+            DashboardIoUpdate::ProjectDiscovery { context, result } => {
+                self.dashboard.apply_project_discovery(&context, result);
+            }
             DashboardIoUpdate::PathCompletions {
                 context,
                 prefix,
@@ -1444,16 +1470,16 @@ impl DashboardContext {
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.
                 self.dashboard.focus_prompt();
-                self.dashboard.set_notice(format!(
-                    "Launching {}…",
-                    self.session_notice_name(&session_id)
-                ));
+                let notice_name = self.session_notice_name(&session_id);
+                self.dashboard
+                    .set_notice(format!("Launching {notice_name}…"));
                 self.lifecycle_operations.insert(
                     session_id,
                     ActiveLifecycleOperation {
                         cancelled: registered.cancelled,
                         kind: SessionOperationKind::Launching,
                         retry_launch: Some(registered.retry_launch),
+                        notice_name,
                     },
                 );
             }
@@ -1470,8 +1496,15 @@ impl DashboardContext {
     fn apply_lifecycle_reloaded(&mut self, reloaded: LifecycleReloaded) {
         let LifecycleReload { update, operation } = reloaded.reload;
         let session_id = update.session_id;
-        // Taken before the reload: a destroy removes the record.
-        let name = self.session_notice_name(&session_id);
+        // Taken before the reload: a destroy removes the record, and the
+        // runtime snapshot may already have dropped it.
+        let name = lifecycle_notice_name(
+            &self.controller.state,
+            &session_id,
+            operation
+                .as_ref()
+                .map(|operation| operation.notice_name.as_str()),
+        );
         let loaded = match reloaded.result {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -1613,14 +1646,19 @@ impl DashboardContext {
     }
 }
 
-/// How a notice names a session: its display title, or its short id when it
-/// has no title or its record is gone (launch finding B-3).
+/// How a notice names a session; see [`State::session_notice_name`].
 pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
-    match state.sessions.get(session_id) {
-        Some(session) if session.display_title() != session.id => {
-            session.display_title().to_owned()
-        }
-        _ => short_id(session_id).to_owned(),
+    state.session_notice_name(session_id)
+}
+
+/// How a lifecycle's completion notice names its session. The daemon's
+/// runtime snapshot can drop a destroyed session's record before the
+/// lifecycle reload lands, so when the record is gone the name taken when
+/// the operation began stands in (launch finding R5-4).
+fn lifecycle_notice_name(state: &State, session_id: &str, taken_at_start: Option<&str>) -> String {
+    match taken_at_start {
+        Some(name) if !state.sessions.contains_key(session_id) => name.to_owned(),
+        _ => session_notice_name(state, session_id),
     }
 }
 
@@ -1648,6 +1686,52 @@ mod tests {
         );
         assert_eq!(session_notice_name(&state, "a1a8109b-untitled"), "a1a8109b");
         assert_eq!(session_notice_name(&state, "0badc0de-gone"), "0badc0de");
+    }
+
+    /// A session the dashboard created has only the title it was created
+    /// with ("project via fake"), which the session list shows; "Launching"
+    /// and "is ready" named it by id (launch finding R5-5).
+    #[test]
+    fn notices_name_an_unnamed_session_by_the_title_it_was_created_with() {
+        let mut created = lifecycle_session("036b869b-created", "default", SessionState::Running);
+        created.title = "project via fake".into();
+        let state = State {
+            sessions: BTreeMap::from([(created.id.clone(), created)]),
+            ..State::default()
+        };
+        assert_eq!(
+            session_notice_name(&state, "036b869b-created"),
+            "project via fake"
+        );
+    }
+
+    /// The daemon's runtime snapshot drops a destroyed session before the
+    /// lifecycle reload lands, so the completion notice cannot find the
+    /// record ("Permanently destroyed suspended session 5590965c" for
+    /// "gamma", launch finding R5-4). It uses the name taken when the
+    /// operation began; a record that is still there wins, because it has
+    /// the newest name.
+    #[test]
+    fn a_lifecycle_notice_keeps_the_name_taken_when_the_operation_began() {
+        let empty = State::default();
+        assert_eq!(
+            lifecycle_notice_name(&empty, "5590965c-gamma", Some("gamma")),
+            "gamma"
+        );
+        assert_eq!(
+            lifecycle_notice_name(&empty, "5590965c-gamma", None),
+            "5590965c"
+        );
+        let mut renamed = lifecycle_session("5590965c-gamma", "default", SessionState::Stopped);
+        renamed.session_title_override = Some("gamma two".into());
+        let state = State {
+            sessions: BTreeMap::from([(renamed.id.clone(), renamed)]),
+            ..State::default()
+        };
+        assert_eq!(
+            lifecycle_notice_name(&state, "5590965c-gamma", Some("gamma")),
+            "gamma two"
+        );
     }
 
     #[test]
@@ -1692,6 +1776,32 @@ mod tests {
                 .advanced
                 .show_stopped_sessions
         );
+    }
+
+    /// Launch finding R3-3: saving only the Jev checkbox wrote the built-in
+    /// `[targets.docker]` and `[targets.podman]` blocks into config.toml. The
+    /// dialog edits the effective config, which includes them; the file must
+    /// keep only what the user set.
+    #[test]
+    fn setup_save_does_not_write_built_in_targets_the_user_never_configured() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        Config::default().save_to(&path).unwrap();
+        let original = Config::default().with_local_targets();
+        let mut edited = original.clone();
+        edited.jev.enabled = false;
+        let saved = save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&edited).unwrap(),
+            &State::default(),
+        )
+        .unwrap();
+        assert!(!saved.jev.enabled);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[jev]"), "{text}");
+        assert!(!text.contains("[targets."), "{text}");
+        assert!(Config::load_from(&path).unwrap().targets.is_empty());
     }
 
     #[test]

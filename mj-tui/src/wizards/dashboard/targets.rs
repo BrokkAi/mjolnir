@@ -140,11 +140,70 @@ impl DashboardState {
         session_id: &str,
         target_id: &str,
     ) -> Option<String> {
-        if let Some(reason) = self.target_readiness_rejection(target_id) {
-            return Some(reason);
-        }
+        self.target_readiness_rejection(target_id)
+            .or_else(|| self.resume_target_incompatibility(session_id, target_id))
+    }
+
+    /// Why this session could not resume on `target_id` even once the target
+    /// is ready. An archived session has no record here, so nothing rules a
+    /// target out for it.
+    pub(in crate::wizards) fn resume_target_incompatibility(
+        &self,
+        session_id: &str,
+        target_id: &str,
+    ) -> Option<String> {
         let session = self.state.sessions.get(session_id)?;
         mj_client::target::resume_compatibility(session, &self.config, target_id).err()
+    }
+
+    /// The index of the only target the target step would offer `wizard`,
+    /// when that step has nothing else to decide.
+    ///
+    /// The step lists every configured and built-in target. A target counts
+    /// as offered unless its last availability check failed, such as the
+    /// built-in docker on a host without Docker, or the draft cannot use it,
+    /// such as a bundle session on a local bare target. A target whose check
+    /// has not answered yet still counts, so the step is shown while it
+    /// might gain a choice. The one target must also be usable now and have
+    /// no size to set: a container or EC2 target is sized on that step, so
+    /// its step is kept.
+    pub(in crate::wizards) fn lone_target<W: WizardDraft>(&self, wizard: &W) -> Option<usize> {
+        let mut offered = self
+            .config
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, _))| {
+                !self.target_known_unavailable(id) && wizard.target_compatible(self, id)
+            });
+        let (index, (id, template)) = offered.next()?;
+        if offered.next().is_some() {
+            return None;
+        }
+        let no_size = matches!(
+            template,
+            TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
+        );
+        (no_size && wizard.target_rejection(self, id).is_none()).then_some(index)
+    }
+
+    /// Selects the target step's only target when [`Self::lone_target`]
+    /// finds one, and records whether it did. The caller then advances from
+    /// the target step, as Next there would; on false it shows the step.
+    pub(in crate::wizards) fn skip_target_step<W: WizardDraft>(&mut self, wizard: &mut W) -> bool {
+        let Some(index) = self.lone_target(wizard) else {
+            wizard.set_target_step_skipped(false);
+            return false;
+        };
+        if wizard.target() != index {
+            wizard.note_draft_change(self, DraftChange::TargetSelected);
+            wizard.set_target(index);
+        }
+        // A bare target has no size, so this only clears a size left from the
+        // target selected before, and never asks for EC2 sizes.
+        let _ = self.prepare_wizard_target(wizard);
+        wizard.set_target_step_skipped(true);
+        true
     }
 
     pub(super) fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {

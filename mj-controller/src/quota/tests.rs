@@ -1057,3 +1057,69 @@ fn claude_comma_separated_reset_is_normalized() {
         Some("04:00 Aug 14")
     );
 }
+
+/// R9-1: only the daemon holds the database writer, and its own quota
+/// refreshes keep the reset-time cache. The dashboard refreshes quota for its
+/// own display and used to try the write anyway, logging "could not preserve
+/// quota reset times" at warning level on every refresh.
+///
+/// This runs alone in a child process. The writer is process-wide, and a
+/// thread's own subscriber can miss an event from a callsite that a parallel
+/// test reaches first.
+#[test]
+fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
+    const CHILD: &str = "MJ_QUOTA_RESET_CACHE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "only_the_process_with_the_database_writer_keeps_quota_reset_times",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    // A provider without a quota endpoint gives a successful report without
+    // any network, and a successful report is what the cache keeps.
+    let request = QuotaRefreshRequest::for_profile(
+        "other",
+        &zai_profile(home.path(), "https://example.invalid/v1"),
+        home.path().to_path_buf(),
+    );
+    let identity = request.cache_identity();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // The dashboard: no writer.
+    let log = crate::test_log::CapturedLog::default();
+    let outcome = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        runtime.block_on(refresh_profile(request.clone(), None)).0
+    };
+    assert_eq!(outcome.report.error, None);
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
+    assert!(
+        log.events().iter().any(|(level, text)| {
+            *level == tracing::Level::DEBUG && text.contains("leaving quota reset times")
+        }),
+        "the skipped write is still visible at debug level: {:#?}",
+        log.events()
+    );
+
+    // The daemon: it holds the writer, and its refresh keeps the reset times.
+    let _writer = crate::database::install_isolated_test_writer();
+    assert_eq!(crate::database::load_quota_cache(&identity).unwrap(), None);
+    let outcome = runtime.block_on(refresh_profile(request, None)).0;
+    assert_eq!(outcome.report.error, None);
+    assert_eq!(
+        crate::database::load_quota_cache(&identity).unwrap(),
+        Some(outcome.report)
+    );
+}

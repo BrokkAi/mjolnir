@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "brokk-mj-core",
  "serde",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.20.0"
+version = "2.21.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -899,6 +899,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "vte",
 ]
 
 [[package]]

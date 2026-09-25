@@ -85,6 +85,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             native_session_id,
             native_continuity_lost,
             resumed,
+            replaced_unused_native_session_id,
         } => {
             snapshot.continuation.suppressed = true;
             if *native_continuity_lost {
@@ -93,8 +94,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
+            snapshot.restored_native_session_unused = false;
             // A normal open clears the flag; only the fallback sets it.
             snapshot.native_continuity_lost = *native_continuity_lost;
+            snapshot
+                .replaced_unused_native_session_id
+                .clone_from(replaced_unused_native_session_id);
             // A resumed thread was not created here, so this journal cannot
             // show everything the thread contains. Once true this never
             // clears: replacing such a thread would discard native history.
@@ -629,6 +634,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.native_session_opened_ordinal = Some(event.ordinal);
                     snapshot.native_session_used = false;
                     snapshot.native_continuity_lost = false;
+                    snapshot.replaced_unused_native_session_id = None;
                     snapshot.pending_prompt_context = memory
                         .as_ref()
                         .filter(|text| !text.trim().is_empty())

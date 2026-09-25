@@ -414,10 +414,10 @@ fn harness_is_authenticated_with(
     if kind != HarnessKind::Claude {
         return false;
     }
-    // Where `CLAUDE_CONFIG_DIR` does not scope the home, every Claude profile
-    // shares the one Keychain item, so asking the CLI about a scoped home
-    // would only report the default profile's state again.
-    if is_default_home || !kind.scopes_home_with_environment(HarnessHost::current()) {
+    // Where the login does not live in the home, every Claude profile shares
+    // the one Keychain item, so asking the CLI about a scoped home would only
+    // report the default profile's state again.
+    if is_default_home || !kind.keeps_login_in_home(HarnessHost::current()) {
         return claude_keychain_reports_authenticated(executor);
     }
     claude_cli_reports_authenticated(home, executor)
@@ -1377,8 +1377,17 @@ fn write_summary(
     runtimes: &[(RuntimeKind, String)],
 ) -> Result<()> {
     writeln!(output, "Mjolnir will add to {}:", config_path.display())?;
-    writeln!(output, "  {} profile(s)", config.profiles.len())?;
-    writeln!(output, "  {} bundle(s)", config.bundles.len())?;
+    let counted = mj_core::text::counted;
+    writeln!(
+        output,
+        "  {}",
+        counted(config.profiles.len(), "profile", "profiles")
+    )?;
+    writeln!(
+        output,
+        "  {}",
+        counted(config.bundles.len(), "bundle", "bundles")
+    )?;
     if config
         .targets
         .values()
@@ -1472,7 +1481,21 @@ fn run_smoke_test(
     if let Some(announcement) = smoke_download_announcement(target) {
         writeln!(output, "{announcement}")?;
     }
-    run_setup_smoke_test(target, &smoke_id, executor)
+    // Nothing is printed while the test runs, so close the wait with its
+    // outcome and how long it took (launch finding R3-10).
+    let started = std::time::Instant::now();
+    let result = run_setup_smoke_test(target, &smoke_id, executor);
+    let took = mj_core::activity::describe_duration(
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
+    match &result {
+        Ok(()) => writeln!(output, "Smoke test passed in {took}.")?,
+        Err(_) => writeln!(
+            output,
+            "Smoke test failed after {took}; the checks below say what to fix."
+        )?,
+    }
+    result
 }
 
 /// Download size of [`mj_core::config::DEFAULT_CONTAINER_IMAGE`], as the

@@ -54,6 +54,7 @@ pub enum CommandId {
     ChangedFiles,
     ContainerSettings,
     MoveSession,
+    CopySessionId,
     DestroySession,
     MarkAllRead,
     FilterSessions,
@@ -72,6 +73,8 @@ pub enum CommandId {
     CycleFocusReverse,
     CycleFocusedPaneSize,
     TogglePanePreset,
+    TargetsMenu,
+    ProfilesMenu,
     Workspaces,
     FocusWorkspaces,
     SelectWorkspacePrevious,
@@ -119,7 +122,7 @@ impl Scope {
             Self::Sessions => "Sessions pane",
             Self::Session => "Selected session",
             Self::Targets => "Targets pane",
-            Self::Quota => "Quota pane",
+            Self::Quota => "Profiles pane",
             Self::Setup => "First-run settings",
         }
     }
@@ -401,7 +404,7 @@ fn support_pane_focused(dashboard: &DashboardState) -> Availability {
     if dashboard.focus().support_pane().is_some() {
         Availability::Ready
     } else {
-        Availability::Blocked("select Sessions, Targets, or Quota first")
+        Availability::Blocked("select Sessions, Targets, or Profiles first")
     }
 }
 
@@ -975,6 +978,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: move_session_available,
     },
     CommandSpec {
+        id: CommandId::CopySessionId,
+        label: "Copy session ID",
+        description: "Copy the selected session's full ID to the clipboard.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
         id: CommandId::DestroySession,
         label: "Destroy session…",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
@@ -1106,6 +1121,32 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Chord,
         footer_rank: 3,
         available: support_pane_focused,
+    },
+    // The Targets and Profiles titles are buttons that open these menus; `.`
+    // is the same menu from the keyboard, as `.` is the row menu on Sessions.
+    CommandSpec {
+        id: CommandId::TargetsMenu,
+        label: "Targets pane menu",
+        description: "Open the menu under the Targets title: refresh targets and quotas, or open the runtime or machine settings. Clicking the title opens it too.",
+        scope: Scope::Targets,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
+        action: None,
+        footer: footer_word!("menu"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::ProfilesMenu,
+        label: "Profiles pane menu",
+        description: "Open the menu under the Profiles title: refresh targets and quotas, or open the profile settings. Clicking the title opens it too.",
+        scope: Scope::Quota,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
+        action: None,
+        footer: footer_word!("menu"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
     },
     CommandSpec {
         id: CommandId::TogglePanePreset,
@@ -1315,6 +1356,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 const PALETTE_HIDDEN: &[CommandId] = &[
     CommandId::Palette,         // already open when the list is drawn
     CommandId::SwitchWorkspace, // the numbered keys act on the visible tab strip
+    CommandId::TargetsMenu,     // the Targets title opens it, and it lists three palette commands
+    CommandId::ProfilesMenu,    // the Profiles title opens it, and it lists two palette commands
 ];
 
 /// How many commands the palette remembers under its Recent heading.
@@ -1582,7 +1625,7 @@ impl DashboardState {
                             interrupting,
                             unverified_clone,
                         })
-                        .naming_session(session.display_title()),
+                        .naming_session(session.listed_title()),
                     );
                 }
                 DashboardAction::None
@@ -1596,7 +1639,7 @@ impl DashboardState {
             CommandId::RestartSession => {
                 let Some((session_id, name)) = self
                     .selected_session()
-                    .map(|s| (s.id.clone(), s.display_title().to_owned()))
+                    .map(|s| (s.id.clone(), s.listed_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
@@ -1670,10 +1713,16 @@ impl DashboardState {
                 Availability::Hidden => DashboardAction::None,
             },
             CommandId::MoveSession => self.begin_move(),
+            CommandId::CopySessionId => self
+                .command_session()
+                .map(|session| session.id.clone())
+                .map_or(DashboardAction::None, |session_id| {
+                    DashboardAction::CopySessionId { session_id }
+                }),
             CommandId::DestroySession => {
                 let Some((session_id, name)) = self
                     .selected_session()
-                    .map(|session| (session.id.clone(), session.display_title().to_owned()))
+                    .map(|session| (session.id.clone(), session.listed_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
@@ -1772,6 +1821,14 @@ impl DashboardState {
             }
             CommandId::CycleFocusedPaneSize => {
                 self.cycle_focused_pane_size();
+                DashboardAction::None
+            }
+            CommandId::TargetsMenu => {
+                self.begin_support_pane_menu(crate::SupportPane::Targets);
+                DashboardAction::None
+            }
+            CommandId::ProfilesMenu => {
+                self.begin_support_pane_menu(crate::SupportPane::Quota);
                 DashboardAction::None
             }
             CommandId::TogglePanePreset => {

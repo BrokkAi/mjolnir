@@ -496,7 +496,7 @@ pub(super) fn viewer_snapshot(
     for session in &mut snapshot.sessions {
         session.move_recovery = move_recoveries.get(&session.id).cloned();
         if let Some(record) = controller.state.sessions.get(&session.id)
-            && let Some(source) = project_sources.source(record, &controller.config)
+            && let Some(source) = project_sources.source(record, controller)
         {
             session.set_project_source(source);
         }

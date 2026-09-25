@@ -139,13 +139,33 @@ and `api/generated` cannot coexist because one would contain the other.
 See the [Configuration reference](/configuration/) for every accepted source
 form and validation rule.
 
-### Create a bundle from the wizard
+### Choose project files in the wizard
 
-The terminal new-session wizard can quick-add a simple bundle from an existing
-local repository path or a GitHub `owner/repository`/URL. Edit `config.toml`
-when you need a stable multi-repository layout or a different primary
-repository. Isolated sessions always begin at the resolved fetch remote's
-default branch; `git_ref` is obsolete and is rejected with migration guidance.
+In a new terminal or web session, choose a saved project or browse for a repository.
+In the terminal, **Add project** opens the browser for a project that is not saved.
+You do not need to create or name a bundle first. The project picker offers:
+
+- **Recent**: pick a project you have worked on before.
+- **GitHub**: browse repositories available to the GitHub account already signed
+  in on the computer running Mjolnir, or search by name. If needed, the picker
+  explains how to install or sign in to GitHub CLI on that computer.
+- **Folders**: open folders, go up a level, and choose a Git repository without
+  typing its path. These folders belong to the computer running Mjolnir, not
+  the phone or browser device.
+- **Paste URL**: enter a GitHub URL, `owner/repository`, or an existing local
+  repository path.
+
+Choose a repository to continue directly to the session review. Mjolnir saves
+it for next time. In the terminal, **Use several repositories together** lets you
+select several projects. In the browser, choose **Select multiple repositories**,
+add repositories from GitHub, folders, or a pasted URL, then choose **Use project**.
+The first repository is primary, where the agent starts; removing it makes the
+next repository primary. Existing multi-repository configurations remain available
+as saved projects. Edit `config.toml` for a custom repository layout.
+
+Isolated sessions begin at the fetch remote's default branch. Local unpublished
+commits and working-tree changes are excluded; the review shows the source before
+launch. `git_ref` is obsolete and is rejected with migration guidance.
 
 Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a

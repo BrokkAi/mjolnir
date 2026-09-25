@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -63,6 +64,19 @@ const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
 /// How many trailing stderr lines a failed connect reports back to its caller.
 const RELAY_PROXY_STDERR_TAIL: usize = 10;
 
+/// The waits between connection attempts while the worker has not bound its
+/// control socket yet, 1.55 s in all. The daemon connects about 34 ms after
+/// starting a worker, and the worker binds its socket within about a second:
+/// on launch-r9 the next attempt, half a second later, got in every time
+/// (R9-2).
+const WORKER_SOCKET_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
+
 /// The proxy's last [`RELAY_PROXY_STDERR_TAIL`] non-empty stderr lines, shared
 /// with whoever has to report them.
 ///
@@ -79,18 +93,28 @@ type ProxyStderrTail = Arc<std::sync::Mutex<VecDeque<String>>>;
 /// keeps connect failures diagnosable now that the controller no longer shares
 /// its terminal, and lets a failed connect put the proxy's own complaint in
 /// the error the caller sees rather than only in the log.
+///
+/// Until hello completes, lines go to debug level: a failed connect reports
+/// its tail once, at the level the SSH refusal classifier gives it, so a
+/// routine MaxSessions refusal is not a warning (R7-1). Once the connection
+/// is up, anything the proxy says is a warning.
 async fn drain_proxy_stderr(
     errors: tokio::process::ChildStderr,
     purpose: String,
     session_id: String,
     tail: ProxyStderrTail,
+    handshake_done: Arc<AtomicBool>,
 ) {
     let mut lines = BufReader::new(errors).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => {
-                tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr");
+                if handshake_done.load(Ordering::Acquire) {
+                    tracing::warn!(%session_id, %purpose, %line, "relay proxy stderr");
+                } else {
+                    tracing::debug!(%session_id, %purpose, %line, "relay proxy stderr");
+                }
                 let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
                 if tail.len() == RELAY_PROXY_STDERR_TAIL {
                     tail.pop_front();

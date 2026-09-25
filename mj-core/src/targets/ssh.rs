@@ -183,7 +183,7 @@ fn sharing_override() -> Option<SshSharingForTest> {
 /// The directory holding this instance's control sockets, or `None` when
 /// sharing is off.
 ///
-/// `$XDG_RUNTIME_DIR/mjolnir/<instance>` is preferred because it is short,
+/// `$XDG_RUNTIME_DIR/mjolnir/<identity>` is preferred because it is short,
 /// per-user, and on tmpfs; the instance's data directory is the fallback.
 /// Each instance gets its own directory because each daemon counts only its
 /// own sessions: two daemons sharing masters would together exceed the
@@ -202,9 +202,14 @@ fn control_socket_dir() -> Option<PathBuf> {
         if sharing_disabled(std::env::var_os(CONTROL_MASTER_ENV).as_deref()) {
             return None;
         }
+        let data_dir_override = crate::config::env_override_os("DATA_DIR").map(PathBuf::from);
+        let identity = control_dir_identity(
+            crate::config::instance_name().as_deref(),
+            data_dir_override.as_deref(),
+        );
         prepare_control_dir(default_control_dir(
             std::env::var_os("XDG_RUNTIME_DIR"),
-            crate::config::instance_name(),
+            &identity,
         ))
     })
     .clone()
@@ -212,14 +217,30 @@ fn control_socket_dir() -> Option<PathBuf> {
 
 /// Where an instance keeps its sockets when no test pins the directory.
 #[cfg(unix)]
-fn default_control_dir(runtime: Option<std::ffi::OsString>, instance: Option<String>) -> PathBuf {
+fn default_control_dir(runtime: Option<std::ffi::OsString>, identity: &str) -> PathBuf {
     match runtime {
-        Some(runtime) if !runtime.is_empty() => PathBuf::from(runtime)
-            .join("mjolnir")
-            .join(instance.as_deref().unwrap_or("default")),
+        Some(runtime) if !runtime.is_empty() => {
+            PathBuf::from(runtime).join("mjolnir").join(identity)
+        }
         // The data directory is already specific to the instance.
         _ => crate::config::data_dir().join("ssh"),
     }
+}
+
+/// The name of this instance's directory under `$XDG_RUNTIME_DIR/mjolnir`:
+/// the identity [`crate::config::instance_identity`] stamps on the
+/// instance's workers. A named instance uses its name, and a data-directory
+/// override (`MJ_DATA_DIR`, as every end-to-end lab sets) uses the
+/// fingerprint of that directory, so neither shares the default instance's
+/// masters or sweeps its lock files. The default instance keeps `default`,
+/// where its sockets have always been.
+#[cfg(unix)]
+fn control_dir_identity(instance: Option<&str>, data_dir_override: Option<&Path>) -> String {
+    if instance.is_none() && data_dir_override.is_none() {
+        return "default".to_owned();
+    }
+    let data_dir = data_dir_override.map_or_else(crate::config::data_dir, Path::to_path_buf);
+    crate::config::instance_identity_for(instance, &data_dir)
 }
 
 /// Create the socket directory 0700 and reject one whose sockets would not fit
@@ -363,11 +384,129 @@ pub fn ssh_directory_exists(
     match output.status {
         0 => Ok(true),
         1 => Ok(false),
-        status => bail!(
-            "remote directory check failed with status {status}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
+        status => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let error = anyhow::anyhow!(
+                "remote directory check failed with status {status}: {}",
+                stderr.trim()
+            );
+            Err(match host_key_refusal(&stderr, &ssh.ssh_args) {
+                Some(refusal) => error.context(refusal),
+                None => error,
+            })
+        }
     }
+}
+
+/// What the caller is told when `ssh` refused the host's key, so it does not
+/// get only a daemon log reference (launch finding R3-6).
+///
+/// OpenSSH's wording is the only signal: "Host key verification failed." ends
+/// both an unknown key under strict checking and a key that changed. The
+/// sentence quotes that line and names no host, so it may reach any client;
+/// the full ssh text stays on the error chain for the daemon log. It names
+/// the known_hosts file the machine's ssh options name (launch finding R6-5).
+fn host_key_refusal(stderr: &str, ssh_args: &[String]) -> Option<crate::refusal::Refusal> {
+    if !stderr.contains("Host key verification failed") {
+        return None;
+    }
+    let known_hosts = KnownHostsFile::from_ssh_args(ssh_args);
+    let file = known_hosts.phrase();
+    Some(crate::refusal::Refusal::precondition(
+        if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            let keygen = match known_hosts.first_named() {
+                Some(path) => format!("`ssh-keygen -f {path} -R`"),
+                None => "`ssh-keygen -R`".to_owned(),
+            };
+            format!(
+                "ssh reported \"Host key verification failed\": the machine's host key is not the one saved in {file}. If you expected the change, remove the old entry with {keygen} and the host name, add the new key, and try again."
+            )
+        } else {
+            format!(
+                "ssh reported \"Host key verification failed\": the machine's host key is not in {file}, and its ssh options require a known key. Add the host key (for example with `ssh-keyscan`, after checking the fingerprint), or put `-o StrictHostKeyChecking=accept-new` in the machine's extra_args, and try again."
+            )
+        },
+    ))
+}
+
+/// The known_hosts file ssh checks a host key against, as far as the options
+/// on its command line tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KnownHostsFile {
+    /// No option names one, so ssh uses its default.
+    Default,
+    /// `-o UserKnownHostsFile=` names this file, or these files separated
+    /// by spaces.
+    Named(String),
+    /// A config file given with `-F` may name any file, or the option names
+    /// no usable file.
+    Unknown,
+}
+
+impl KnownHostsFile {
+    /// Read `ssh`'s arguments the way OpenSSH does: the first
+    /// `UserKnownHostsFile` given with `-o` wins, the keyword is matched
+    /// without regard to case, and its value follows `=` or a space.
+    fn from_ssh_args(args: &[String]) -> Self {
+        let mut config_file = false;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let option = match arg.as_str() {
+                "-o" => args.next().map(String::as_str),
+                other => other.strip_prefix("-o"),
+            };
+            if arg.starts_with("-F") {
+                config_file = true;
+            }
+            let Some(value) = option.and_then(|option| option_value(option, "UserKnownHostsFile"))
+            else {
+                continue;
+            };
+            let value = value.trim_matches('"').trim();
+            return if value.is_empty() || value.eq_ignore_ascii_case("none") {
+                Self::Unknown
+            } else {
+                Self::Named(value.to_owned())
+            };
+        }
+        if config_file {
+            Self::Unknown
+        } else {
+            Self::Default
+        }
+    }
+
+    /// The file as a refusal names it.
+    fn phrase(&self) -> String {
+        match self {
+            Self::Default => "~/.ssh/known_hosts".to_owned(),
+            Self::Named(paths) => paths.split_whitespace().collect::<Vec<_>>().join(" or "),
+            Self::Unknown => "the known_hosts file ssh uses".to_owned(),
+        }
+    }
+
+    /// The first file an option names, which is the one ssh adds keys to.
+    fn first_named(&self) -> Option<&str> {
+        match self {
+            Self::Named(paths) => paths.split_whitespace().next(),
+            Self::Default | Self::Unknown => None,
+        }
+    }
+}
+
+/// The value of `keyword` in one ssh option (`Keyword=value`,
+/// `Keyword value`, or `Keyword = value`), or `None` for another keyword.
+fn option_value<'a>(option: &'a str, keyword: &str) -> Option<&'a str> {
+    let option = option.trim_start();
+    let end = option
+        .find(|character: char| character == '=' || character.is_whitespace())
+        .unwrap_or(option.len());
+    let (name, rest) = option.split_at(end);
+    if !name.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    Some(rest.strip_prefix('=').unwrap_or(rest).trim())
 }
 
 /// Verify that a bare-SSH project path exists and has a committed Git HEAD.
@@ -721,6 +860,64 @@ impl SshRefusal {
                 "the SSH server refused another session on a shared connection (MaxSessions); retrying"
             }
         }
+    }
+
+    /// Log one retry of a command this refusal turned away.
+    ///
+    /// A refused session on a live shared connection is routine while many
+    /// sessions start at once, and the retry nearly always gets in (launch
+    /// finding R3-5 counted 98 in one dashboard log, all answered), so it is
+    /// logged at debug level. A connection closed before authentication can
+    /// mean a master died, so it stays a warning. A command still refused
+    /// after its last attempt is logged by [`Self::log_exhausted`].
+    pub fn log_retry(
+        self,
+        destination: &str,
+        purpose: &str,
+        attempt: usize,
+        delay: Duration,
+        stderr: &str,
+    ) {
+        let delay_ms = delay.as_millis() as u64;
+        match self {
+            Self::SessionLimit => tracing::debug!(
+                destination,
+                purpose,
+                attempt,
+                attempts = SSH_RETRY_ATTEMPTS,
+                delay_ms,
+                stderr,
+                "{}",
+                self.retry_message()
+            ),
+            Self::BeforeAuthentication => tracing::warn!(
+                destination,
+                purpose,
+                attempt,
+                attempts = SSH_RETRY_ATTEMPTS,
+                delay_ms,
+                stderr,
+                "{}",
+                self.retry_message()
+            ),
+        }
+    }
+
+    /// Log a command the server still refused on its last attempt.
+    pub fn log_exhausted(self, destination: &str, purpose: &str, stderr: &str) {
+        tracing::warn!(
+            destination,
+            purpose,
+            attempts = SSH_RETRY_ATTEMPTS,
+            stderr,
+            "{}",
+            match self {
+                Self::BeforeAuthentication =>
+                    "the SSH server closed the connection before authentication on every attempt",
+                Self::SessionLimit =>
+                    "the SSH server refused another session on a shared connection (MaxSessions) on every attempt",
+            }
+        );
     }
 }
 
@@ -1076,15 +1273,81 @@ fn lock_master_opening(socket: &Path) -> Result<fs::File> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open SSH master lock {}", path.display()))?;
-    file.lock()
-        .with_context(|| format!("lock SSH master lock {}", path.display()))?;
-    Ok(file)
+    loop {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open SSH master lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock SSH master lock {}", path.display()))?;
+        // The daemon removes stale locks when it starts. A lock taken on a
+        // file removed meanwhile serializes nothing, so take the one at the
+        // path now.
+        if is_file_at(&file, &path) {
+            return Ok(file);
+        }
+    }
+}
+
+/// Remove the master lock files in `dir` whose master is gone.
+///
+/// A lock outlives the master it guarded: ssh removes its socket when the
+/// master exits, but nothing removed `<socket>.lock` (launch finding R3-11).
+/// A lock is removed only while its socket is absent and no other process
+/// holds it, and only if the file locked is still the one at its path.
+/// [`lock_master_opening`] checks the same after it locks, so an opener that
+/// opened the file just before it was removed takes a fresh one instead.
+#[cfg(unix)]
+fn remove_stale_master_locks_in(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(directory = %dir.display(), %error, "cannot list SSH master locks");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let lock = entry.path();
+        let Some(socket) = lock
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(|name| name.strip_suffix(".lock"))
+            .map(|name| dir.join(name))
+        else {
+            continue;
+        };
+        if fs::symlink_metadata(&socket).is_ok() {
+            continue;
+        }
+        let Ok(file) = fs::OpenOptions::new().write(true).open(&lock) else {
+            continue;
+        };
+        // Held: another process is checking or opening this master now.
+        if file.try_lock().is_err() {
+            continue;
+        }
+        if fs::symlink_metadata(&socket).is_ok() || !is_file_at(&file, &lock) {
+            continue;
+        }
+        match fs::remove_file(&lock) {
+            Ok(()) => tracing::debug!(lock = %lock.display(), "removed a stale SSH master lock"),
+            Err(error) => {
+                tracing::debug!(lock = %lock.display(), %error, "cannot remove a stale SSH master lock")
+            }
+        }
+    }
+}
+
+/// Whether `file` is the file now at `path`, rather than one removed from it.
+#[cfg(unix)]
+fn is_file_at(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), fs::metadata(path)) {
+        (Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -1268,6 +1531,15 @@ impl SshSessions {
         }
     }
 
+    /// Remove this instance's master lock files whose master has exited.
+    /// The daemon calls this when it starts; failures are only logged.
+    pub fn remove_stale_master_locks() {
+        #[cfg(unix)]
+        if let Some(dir) = control_socket_dir() {
+            remove_stale_master_locks_in(&dir);
+        }
+    }
+
     /// Count a fail-fast probe, such as a target validation or the
     /// connectivity check, on a shard of `ssh`'s connection without opening
     /// a master. See [`CommandSpec::ssh_probe_session`].
@@ -1412,6 +1684,42 @@ pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Launch finding R3-11: `*.lock` files stayed in the instance's socket
+    /// directory after their masters exited. The daemon clears, when it
+    /// starts, each lock whose master's socket is gone, and leaves a lock that
+    /// guards a live socket or that another process holds.
+    #[cfg(unix)]
+    #[test]
+    fn stale_master_locks_are_removed_but_live_or_held_ones_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("aaaaaaaaaaaaaaaa-0.lock");
+        fs::write(&stale, b"").unwrap();
+        fs::write(dir.path().join("bbbbbbbbbbbbbbbb-0"), b"").unwrap();
+        let live = dir.path().join("bbbbbbbbbbbbbbbb-0.lock");
+        fs::write(&live, b"").unwrap();
+        let held = dir.path().join("cccccccccccccccc-0.lock");
+        let holder = lock_master_opening(&dir.path().join("cccccccccccccccc-0")).unwrap();
+
+        remove_stale_master_locks_in(dir.path());
+        assert!(!stale.exists(), "a lock whose master is gone is removed");
+        assert!(live.exists(), "a lock beside a live socket stays");
+        assert!(held.exists(), "a lock another opener holds stays");
+
+        drop(holder);
+        // A process another test forks while the holder is open shares its
+        // lock until that child execs, so the sweep may find the lock still
+        // held for a few milliseconds; the daemon would try again at its next
+        // start.
+        for _ in 0..200 {
+            remove_stale_master_locks_in(dir.path());
+            if !held.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!held.exists(), "a lock nobody holds any more is removed");
+    }
 
     const BORROW_PARENT: &str = "0123456789abcdef0123456789abcdef";
     const BORROW_CHILD: &str = "fedcba9876543210fedcba9876543210";
@@ -1712,12 +2020,44 @@ mod tests {
     fn control_sockets_live_in_a_directory_per_instance() {
         let runtime = Some(std::ffi::OsString::from("/run/user/1000"));
         assert_eq!(
-            default_control_dir(runtime.clone(), Some("hel2".to_owned())),
+            default_control_dir(runtime.clone(), &control_dir_identity(Some("hel2"), None)),
             PathBuf::from("/run/user/1000/mjolnir/hel2")
         );
         assert_eq!(
-            default_control_dir(runtime, None),
+            default_control_dir(runtime, &control_dir_identity(None, None)),
             PathBuf::from("/run/user/1000/mjolnir/default")
+        );
+    }
+
+    /// A daemon isolated only by `MJ_DATA_DIR` (every luna lab) is another
+    /// instance, so it must not share the default instance's masters or
+    /// sweep its lock files (launch finding R5-1). Its directory is named by
+    /// the same fingerprint `instance_identity` stamps on its workers.
+    #[test]
+    #[cfg(unix)]
+    fn a_data_directory_override_gets_its_own_socket_directory() {
+        let runtime = Some(std::ffi::OsString::from("/run/user/1000"));
+        let lab = Path::new("/tmp/lab-a/data");
+        let other_lab = Path::new("/tmp/lab-b/data");
+        let lab_dir = default_control_dir(runtime.clone(), &control_dir_identity(None, Some(lab)));
+        assert_ne!(lab_dir, PathBuf::from("/run/user/1000/mjolnir/default"));
+        assert_eq!(
+            lab_dir,
+            PathBuf::from("/run/user/1000/mjolnir")
+                .join(crate::config::instance_identity_for(None, lab))
+        );
+        assert_ne!(
+            lab_dir,
+            default_control_dir(
+                runtime.clone(),
+                &control_dir_identity(None, Some(other_lab))
+            )
+        );
+        // A named instance keeps its name whatever its data directory, as
+        // `instance_identity` does.
+        assert_eq!(
+            default_control_dir(runtime, &control_dir_identity(Some("hel2"), Some(lab))),
+            PathBuf::from("/run/user/1000/mjolnir/hel2")
         );
     }
 

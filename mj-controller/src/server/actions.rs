@@ -20,7 +20,7 @@ pub enum ControllerAction {
         launch_base: Option<String>,
         #[serde(default)]
         launch_branch: Option<String>,
-        /// None follows the global `[subagents] enabled` setting.
+        /// None means native sub-agents.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,
         /// Which workspace the session belongs to. Optional on the wire so a
@@ -278,7 +278,10 @@ pub struct ControllerRequest {
 /// intentionally carries only action admission outcomes.
 #[derive(Debug)]
 pub struct BundleRequest {
+    /// Legacy primary-repository matching. Empty when `exact_sources` is set.
     pub source: String,
+    /// The requested full repository set, with its primary repository first.
+    pub exact_sources: Option<Vec<String>>,
     pub reply: tokio::sync::oneshot::Sender<Result<String, BundleFailure>>,
 }
 
@@ -315,6 +318,15 @@ pub enum PreflightRequest {
     New(NewPreflightRequest),
     Resume(ResumePreflightRequest),
     CompletePath(PathCompletionRequest),
+    DiscoverProjects(ProjectDiscoveryPreflight),
+}
+
+/// A project picker lookup sharing the preflight supervision and concurrency cap.
+#[derive(Debug)]
+pub struct ProjectDiscoveryPreflight {
+    pub request: crate::project_picker::ProjectDiscoveryRequest,
+    pub reply:
+        tokio::sync::oneshot::Sender<Result<crate::project_picker::ProjectDiscovery, &'static str>>,
 }
 
 /// A browser asking what a half-typed path could be. It shares the preflight

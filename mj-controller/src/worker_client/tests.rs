@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::test_log::CapturedLog;
 use mj_core::relay::RelayObservation;
 use mj_worker::relay::DurableRelay;
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
@@ -110,6 +112,137 @@ while IFS= read -r request; do :; done
     mj_core::targets::set_ssh_retry_backoff_for_test(None);
 }
 
+/// A relay proxy that the SSH server turns away once, in the way `ssh`
+/// reports it, and then answers hello.
+#[cfg(unix)]
+fn relay_proxy_refused_once(directory: &std::path::Path, refusal: &str) -> CommandSpec {
+    let counter = directory.join("attempts");
+    let script = format!(
+        r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -eq 0 ]; then
+  printf '{refusal}' >&2
+  exit 255
+fi
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
+while IFS= read -r request; do :; done
+"#,
+        counter = counter.display(),
+        session = SESSION_ID
+    );
+    CommandSpec::new("sh", ["-c".to_owned(), script])
+        .ssh_destination("build@10.0.0.1")
+        .purpose("refused relay fixture")
+}
+
+/// Run the named test alone in a child process with a global subscriber, so
+/// the log also has what other threads say, such as the thread that reaps a
+/// dropped relay proxy. Returns the log in the child, and `None` in the
+/// parent once the child has passed.
+#[cfg(unix)]
+fn global_log_in_isolated_child(test: &str) -> Option<CapturedLog> {
+    const CHILD: &str = "MJ_WORKER_CLIENT_GLOBAL_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().expect("temp dir");
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), test),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return None;
+    }
+    let log = CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    Some(log)
+}
+
+/// Connect on a runtime of this test's own, for a test that runs with a
+/// global subscriber, then give the threads that reap dropped proxies time
+/// to report.
+#[cfg(unix)]
+fn connect_and_let_reapers_report(spec: &CommandSpec) -> Result<RelayClient> {
+    let connected = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(RelayClient::connect_with_timeout(
+            spec,
+            SESSION_ID,
+            Duration::from_secs(10),
+        ));
+    std::thread::sleep(Duration::from_millis(300));
+    connected
+}
+
+/// R7-1: a shared SSH connection at `MaxSessions` refuses one more session
+/// many times while sessions start, and the retry gets in. Neither the retry,
+/// the proxy's own stderr, nor the reaping of the refused proxy is a warning
+/// then; the refusal is logged once, at debug level, by the shared refusal
+/// routine.
+#[cfg(unix)]
+#[test]
+fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
+    let Some(log) = global_log_in_isolated_child(
+        "a_relay_proxy_refused_by_max_sessions_retries_without_a_warning",
+    ) else {
+        return;
+    };
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_refused_once(
+        directory.path(),
+        r"mux_client_request_session: session request failed: Session open refused by peer\nConnection closed by UNKNOWN port 65535\n",
+    );
+    connect_and_let_reapers_report(&spec).expect("the refused session is retried");
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
+    let retries = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|text| text.contains("(MaxSessions); retrying"))
+        .collect::<Vec<_>>();
+    assert_eq!(retries.len(), 1, "{:#?}", log.events());
+    assert!(
+        retries[0].contains("Session open refused by peer"),
+        "the retry keeps what ssh said: {}",
+        retries[0]
+    );
+}
+
+/// A connection dropped before authentication can mean a master died, so its
+/// retry stays a warning, and it still names what ssh said.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relay_proxy_dropped_before_authentication_still_warns() {
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_refused_once(
+        directory.path(),
+        r"kex_exchange_identification: read: Connection reset by peer\n",
+    );
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+    };
+    mj_core::targets::set_ssh_retry_backoff_for_test(None);
+    connected.expect("the dropped connection is retried");
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("before authentication; retrying")
+            && warnings[0].contains("kex_exchange_identification"),
+        "{}",
+        warnings[0]
+    );
+}
+
 /// A proxy that fails for its own reasons is reported on the first
 /// attempt, keeping the existing hello error and its stderr tail.
 #[cfg(unix)]
@@ -131,11 +264,23 @@ exit 1
         .ssh_destination("build@10.0.0.1")
         .purpose("broken relay fixture");
 
-    let Err(error) =
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
         RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
-    else {
+    };
+    let Err(error) = connected else {
         panic!("a proxy that exits 1 is a real failure");
     };
+    // Not a refusal, so it is a warning, and the proxy's own complaint is in it.
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("worker socket path is too long")
+            && warnings[0].contains("relay proxy disconnected during hello"),
+        "{}",
+        warnings[0]
+    );
 
     let reported = format!("{error:#}");
     assert!(
@@ -153,6 +298,120 @@ exit 1
         "1"
     );
     mj_core::targets::set_ssh_retry_backoff_for_test(None);
+}
+
+/// What the worker's relay proxy prints, after its own log line, when the
+/// worker has not bound its control socket yet.
+#[cfg(unix)]
+const WORKER_SOCKET_MISSING: &str = r"Error: connect worker socket /w/control.sock\n\nCaused by:\n    0: connect unix socket /w/control.sock\n    1: No such file or directory (os error 2)\n";
+
+/// A local relay proxy for a worker that binds its control socket only after
+/// `misses` connection attempts, or never when `misses` is `None`.
+#[cfg(unix)]
+fn relay_proxy_before_the_worker_binds(
+    directory: &std::path::Path,
+    misses: Option<u32>,
+) -> CommandSpec {
+    let counter = directory.join("attempts");
+    let script = format!(
+        r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -lt {misses} ]; then
+  printf '{WORKER_SOCKET_MISSING}' >&2
+  exit 1
+fi
+IFS= read -r hello
+id=$(printf '%s' "$hello" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{{"request_id":"%s","protocol_version":1,"result":"ok","payload":{{"type":"hello","data":{{"negotiated":1,"relay_version":"retry-fixture","session_id":"{session}"}}}}}}\n' "$id"
+while IFS= read -r request; do :; done
+"#,
+        counter = counter.display(),
+        misses = misses.unwrap_or(u32::MAX),
+        session = SESSION_ID
+    );
+    CommandSpec::new("sh", ["-c".to_owned(), script]).purpose("starting worker relay fixture")
+}
+
+#[cfg(unix)]
+fn relay_proxy_attempts(directory: &std::path::Path) -> u32 {
+    std::fs::read_to_string(directory.join("attempts"))
+        .expect("the fixture records its attempts")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// R9-2: the daemon connects to a local worker about 34 ms after starting
+/// it, before the worker has bound its control socket. Every start logged
+/// two warnings for that ("relay request failed ... No such file or
+/// directory" and "dropped relay proxy exited unsuccessfully") though every
+/// session started normally. A socket that appears within the retry budget
+/// is a routine retry, logged at debug level, and the exit of each proxy that
+/// found no socket is not reported again when that proxy is reaped.
+#[cfg(unix)]
+#[test]
+fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
+    let Some(log) = global_log_in_isolated_child(
+        "a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning",
+    ) else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_before_the_worker_binds(directory.path(), Some(2));
+
+    let client = connect_and_let_reapers_report(&spec)
+        .expect("the connection is retried until the worker binds its socket");
+    assert_eq!(client.relay_version(), "retry-fixture");
+    assert_eq!(relay_proxy_attempts(directory.path()), 3);
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "no warning expected: {warnings:#?}");
+    let retries = log
+        .at(tracing::Level::DEBUG)
+        .into_iter()
+        .filter(|text| text.contains("has not bound its control socket yet"))
+        .count();
+    assert_eq!(retries, 2, "{:#?}", log.events());
+}
+
+/// A socket still missing after the retry budget is a real failure: one
+/// warning that carries the proxy's complaint, and the same dead-transport
+/// error that worker recovery reads.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let spec = relay_proxy_before_the_worker_binds(directory.path(), None);
+    let log = CapturedLog::default();
+    let connected = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10)).await
+    };
+    let Err(error) = connected else {
+        panic!("a worker that never binds its socket cannot be reached");
+    };
+    assert!(
+        RelayTransportDead::marks_failed_handshake(&error),
+        "{error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("No such file or directory"),
+        "{error:#}"
+    );
+    assert!(
+        relay_proxy_attempts(directory.path()) > 1,
+        "a missing socket is retried before it is reported"
+    );
+
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(
+        warnings[0].contains("control socket is still missing")
+            && warnings[0].contains("No such file or directory"),
+        "{}",
+        warnings[0]
+    );
 }
 
 #[cfg(unix)]
@@ -466,7 +725,6 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
-        owns_profile_home: true,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
 
@@ -546,10 +804,7 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
     assert_eq!(clipped.events.last().unwrap().ordinal, 2);
 }
 
-fn skills_sync_target(
-    profile_home: &std::path::Path,
-    owns_profile_home: bool,
-) -> CredentialSyncTarget {
+fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
     CredentialSyncTarget {
         session_id: SESSION_ID.into(),
         profile_id: "work".into(),
@@ -557,35 +812,19 @@ fn skills_sync_target(
         profile_home: profile_home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
-        owns_profile_home,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
 }
 
+/// Every session runs from a staged home of its own, so every session is
+/// pushed the managed skills along with the profile's own.
 #[test]
-fn a_session_that_does_not_own_its_profile_home_is_pushed_only_the_user_tree() {
-    // The profile home here is the user's own harness home. Installing
-    // Mjolnir's managed skills into it would leave them there for good.
+fn every_session_is_pushed_the_managed_skills_too() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
 
-    let archive = canonical_session_skills(&skills_sync_target(home.path(), false)).unwrap();
-    let paths = archive
-        .entries()
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(paths, vec!["skills/review/SKILL.md"]);
-}
-
-#[test]
-fn a_session_that_owns_its_profile_home_is_pushed_the_managed_skills_too() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
-    std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
-
-    let target = skills_sync_target(home.path(), true);
+    let target = skills_sync_target(home.path());
     let archive = canonical_session_skills(&target).unwrap();
     assert_eq!(
         archive,

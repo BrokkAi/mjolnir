@@ -1,5 +1,64 @@
 use super::*;
 
+/// R4-6: `[targets.x] kind = "podman"` without `image` stopped the daemon
+/// from starting ("missing field `image`"), and `extra_run_args`, which is not
+/// a target setting, was accepted without a word.
+#[test]
+fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys() {
+    for kind in ["podman", "docker"] {
+        let config: Config = toml::from_str(&format!(
+            "version = {CONFIG_VERSION}\n[targets.r4-{kind}]\nkind = \"{kind}\"\n\
+             extra_run_args = [\"--network=host\"]\n"
+        ))
+        .unwrap_or_else(|error| panic!("{kind}: {error:#}"));
+        let (TargetTemplate::LocalPodman { container } | TargetTemplate::LocalDocker { container }) =
+            &config.targets[&format!("r4-{kind}")]
+        else {
+            panic!("{kind} changed kind")
+        };
+        assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+    }
+
+    let table = serde_json::json!({
+        "kind": "podman", "image": "a:1", "machine": "local", "pull_policy": "never",
+        "platform": "linux/amd64", "cpus": "2", "memory": "4g", "environment": {},
+        "workspace_storage": {"kind": "container-layer"}, "extra_run_args": ["--network=host"],
+    });
+    let table = table.as_object().unwrap();
+    assert_eq!(
+        newly_unknown_target_keys("r4-unknown-keys", "podman", table),
+        ["extra_run_args"]
+    );
+    assert!(
+        newly_unknown_target_keys("r4-unknown-keys", "podman", table).is_empty(),
+        "each unknown key is reported once"
+    );
+    let bare = serde_json::json!({"kind": "bare", "machine": "box", "permissions": "guardian"});
+    assert!(newly_unknown_target_keys("r4-bare", "bare", bare.as_object().unwrap()).is_empty());
+
+    // The list of known keys is every setting a container table can carry.
+    let every_setting = ContainerTemplate {
+        image: "a:1".into(),
+        pull_policy: ImagePullPolicy::Never,
+        platform: Some("linux/amd64".into()),
+        cpus: Some("2".into()),
+        memory: Some("4g".into()),
+        environment: BTreeMap::from([("A".into(), "1".into())]),
+        workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
+        build_cache: Some(TargetBuildCache {
+            enabled: Some(true),
+            directory: None,
+            max_size: None,
+        }),
+    };
+    let serialized = serde_json::to_value(&every_setting).unwrap();
+    let mut keys: Vec<_> = serialized.as_object().unwrap().keys().cloned().collect();
+    let mut known: Vec<_> = targets::CONTAINER_TEMPLATE_KEYS.map(str::to_owned).to_vec();
+    keys.sort();
+    known.sort();
+    assert_eq!(keys, known);
+}
+
 /// A machine whose file never named a workspace directory keeps using the
 /// directory its workspaces are already in, under the former product name;
 /// new machines get Mjolnir's own. Launch campaign finding C-17.
@@ -277,7 +336,7 @@ fn stopped_session_visibility_defaults_off_and_uses_the_advanced_section() {
 fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
     let home = Path::new("/private/session/muse");
     let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
-    HarnessKind::Muse.configure_home_environment(home, HarnessHost::Other, &mut environment);
+    HarnessKind::Muse.configure_home_environment(home, &mut environment);
     assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
     assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
     assert_eq!(
@@ -494,28 +553,45 @@ fn harness_profiles_reject_the_removed_executable_override() {
     assert!(error.to_string().contains("unknown field `executable`"));
 }
 
+/// A session or probe runs from a home Mjolnir staged for it, so every harness
+/// is pointed at that home, macOS included.
 #[test]
-fn claude_takes_no_home_variable_on_macos_and_keeps_one_elsewhere() {
-    let home = Path::new("/private/session/profile");
-
-    let mut mac = BTreeMap::new();
-    HarnessKind::Claude.configure_home_environment(home, HarnessHost::MacOs, &mut mac);
-    assert!(
-        mac.is_empty(),
-        "CLAUDE_CONFIG_DIR scopes nothing on macOS, so nothing may be set: {mac:?}"
-    );
-
-    let mut linux = BTreeMap::new();
-    HarnessKind::Claude.configure_home_environment(home, HarnessHost::Other, &mut linux);
-    assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
-}
-
-#[test]
-fn every_harness_but_claude_scopes_its_home_on_macos() {
+fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
         let home = Path::new("/private/session/muse");
-        kind.configure_home_environment(home, HarnessHost::MacOs, &mut environment);
+        kind.configure_home_environment(home, &mut environment);
+        assert!(environment.contains_key(kind.home_env()), "{kind:?}");
+        assert_eq!(
+            kind.home_from_environment(&environment[kind.home_env()]),
+            home,
+            "{kind:?}"
+        );
+    }
+}
+
+/// Commands that act on the person's own profile home leave Claude's variable
+/// unset on macOS, where the login lives in the Keychain, and set it
+/// everywhere else.
+#[test]
+fn only_claude_on_macos_keeps_its_own_home_for_profile_commands() {
+    let home = Path::new("/home/me/.claude-work");
+
+    let mut mac = BTreeMap::new();
+    HarnessKind::Claude.configure_profile_home_environment(home, HarnessHost::MacOs, &mut mac);
+    assert!(mac.is_empty(), "{mac:?}");
+
+    let mut linux = BTreeMap::new();
+    HarnessKind::Claude.configure_profile_home_environment(home, HarnessHost::Other, &mut linux);
+    assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
+
+    for kind in HarnessKind::ALL {
+        let mut environment = BTreeMap::new();
+        kind.configure_profile_home_environment(
+            Path::new("/home/me/muse"),
+            HarnessHost::MacOs,
+            &mut environment,
+        );
         assert_eq!(
             environment.contains_key(kind.home_env()),
             kind != HarnessKind::Claude,
@@ -1411,11 +1487,48 @@ fn version_eight_enables_parent_only_subagents_by_default() {
     let config = Config::load_from(&path).unwrap();
 
     assert_eq!(config.version, CONFIG_VERSION);
-    assert!(config.subagents.enabled);
     assert_eq!(config.subagents.max_concurrent, 6);
     assert!(config.subagents.eligible_profiles.is_empty());
     assert!(config.subagents.profile_is_eligible("work", "work"));
     assert!(!config.subagents.profile_is_eligible("work", "other"));
+}
+
+/// The global `[subagents] enabled` switch was removed; whether a session
+/// uses Mjolnir sub-agents is now stored per session. A config file left
+/// over from before the removal must still load, and a save must drop the
+/// key.
+#[test]
+fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[subagents]\nenabled = true\n"),
+    )
+    .unwrap();
+
+    let mut config = Config::load_from(&path).unwrap();
+    assert_eq!(config.subagents.max_concurrent, 6);
+    assert!(config.subagents.eligible_profiles.is_empty());
+    // profile_is_eligible no longer consults the deprecated flag at all.
+    assert!(config.subagents.profile_is_eligible("work", "work"));
+
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("enabled"), "{saved}");
+    assert!(!saved.contains("[subagents]"), "{saved}");
+    assert_eq!(
+        Config::load_from(&path).unwrap().subagents.max_concurrent,
+        6
+    );
+
+    // Other settings in the same section survive the same round trip.
+    config.subagents.max_concurrent = 4;
+    config.save_to(&path).unwrap();
+    assert_eq!(
+        Config::load_from(&path).unwrap().subagents.max_concurrent,
+        4
+    );
 }
 
 #[test]

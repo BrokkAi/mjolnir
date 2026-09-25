@@ -473,6 +473,9 @@ pub struct ActiveChat {
     voice_probe_at: Option<std::time::Instant>,
     voice_probe_pending: bool,
     voice_probe_paths: Vec<std::path::PathBuf>,
+    /// Why the last availability probe found dictation unavailable, as the
+    /// sentence the dictation key shows. `None` until a probe says.
+    voice_unavailable: Option<String>,
     voice_finishing: bool,
     /// A closed feed reports `None` for ever, which would leave its arm
     /// permanently ready. Each flag retires its own arm instead.
@@ -828,6 +831,7 @@ impl ActiveChat {
             voice_probe_at: None,
             voice_probe_pending: false,
             voice_probe_paths: Vec::new(),
+            voice_unavailable: None,
             voice_finishing: false,
             remote_open: true,
             session_open: true,
@@ -997,7 +1001,9 @@ impl ActiveChat {
             .unwrap_or(&context.session)
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
-        let title = context.session.display_title().to_owned();
+        // The name the Sessions row shows: until the harness names the
+        // session, its creation title rather than its id (R3-11).
+        let title = context.session.listed_title().to_owned();
         let harness_kind = context.session.harness_kind;
         self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);
@@ -1054,9 +1060,11 @@ impl Drop for ActiveChat {
 }
 
 enum VoiceUpdate {
+    /// The probed auth paths, and either the auth file dictation would use or
+    /// the sentence saying why it cannot start.
     Availability(
         Vec<std::path::PathBuf>,
-        anyhow::Result<Option<std::path::PathBuf>>,
+        anyhow::Result<Result<std::path::PathBuf, String>>,
     ),
     Status(String),
     Finished(anyhow::Result<String>),

@@ -50,15 +50,17 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
-            mjolnir_subagents: self.config.subagents.enabled,
+            mjolnir_subagents: false,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 
             profile,
             bundle,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::new(Vec::new()),
 
+            project_picker: Box::default(),
             new_bundle_selected: 0,
             new_bundle_repositories: Vec::new(),
             new_bundle_source: mj_chat::path_input::PathInput::new(),
@@ -127,6 +129,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
@@ -183,6 +186,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
@@ -242,6 +246,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
@@ -311,6 +316,7 @@ impl DashboardState {
 
             profile,
             target,
+            target_step_skipped: false,
             mounts: MountWizard::with_mounts(
                 Vec::new(),
                 operation

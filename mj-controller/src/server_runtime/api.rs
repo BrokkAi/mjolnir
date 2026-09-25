@@ -16,7 +16,6 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
-use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedExecutionState, SessionState};
 use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState};
 
@@ -255,12 +254,13 @@ pub struct ApiBackend {
     /// How far each created session's follow-up configuration and first prompt
     /// have got.
     starts: Arc<Mutex<BTreeMap<String, Start>>>,
-    /// Latest background-refreshed quota reports, used to choose one profile
-    /// per harness without making the parent reason about credential aliases.
+    /// Latest background-refreshed quota reports, used to rank the profiles a
+    /// sub-agent may run on so a child lands on the login with the most quota
+    /// left, without making the parent reason about credential aliases.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
-    /// The capabilities `list_profiles` answers with. The catalogue discovers
-    /// them in the background, so the call only filters and ranks what it
-    /// holds, waiting for a profile the pass has not published yet.
+    /// The capabilities `list_profiles` answers with and `spawn` chooses
+    /// from. The catalogue discovers them in the background, so a call only
+    /// ranks what it holds, waiting for a profile the pass has not published.
     profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
 }
 
@@ -338,30 +338,34 @@ impl ApiBackend {
                     .exports
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
-                // The catalogue discovers profile capabilities in the
-                // background, so this call only filters and ranks: it takes
-                // the candidates the catalogue's configuration offers, ranks
-                // them with the quota reports, and waits on the background
-                // pass for the capabilities of the profiles it will quote.
-                let candidates = self.profile_catalog.candidates(&parent.last_profile)?;
-                let ids = {
-                    let quota_reports = self
-                        .quota_reports
-                        .lock()
-                        .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
-                    select_profile_per_harness(candidates, &quota_reports)
-                };
-                let wanted = ids.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-                let choices = self.profile_catalog.capabilities(&wanted).await?;
-                let mut profiles = Vec::with_capacity(ids.len());
-                for ((id, harness), choices) in ids.into_iter().zip(choices) {
-                    profiles.push(serde_json::json!({
-                        "profile_id":id,
-                        "harness":harness.id(),
-                        "default_model":choices.model,
-                        "models":choices.models,
-                        "efforts":choices.efforts,
-                    }));
+                // The catalogue discovers every enabled profile in the
+                // background, so this normally only ranks and merges what it
+                // holds; a discovery still running is waited for.
+                let candidates = self
+                    .subagent_candidates(parent.last_profile.clone())
+                    .await?;
+                let profiles =
+                    crate::server::api::merge_same_models(candidates.offered, &parent.last_profile)
+                        .into_iter()
+                        .map(|candidate| {
+                            serde_json::json!({
+                                "profile_id":candidate.profile_id,
+                                "harness":candidate.harness.id(),
+                                "default_model":candidate.choices.model,
+                                "models":candidate.choices.models,
+                                "efforts":candidate.choices.efforts,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                if !candidates.unavailable.is_empty() {
+                    let unavailable = candidates
+                        .unavailable
+                        .into_iter()
+                        .map(|(profile_id, reason)| {
+                            serde_json::json!({"profile_id":profile_id,"reason":reason})
+                        })
+                        .collect::<Vec<_>>();
+                    return Ok(serde_json::json!({"profiles":profiles,"unavailable":unavailable}));
                 }
                 Ok(serde_json::json!({"profiles":profiles}))
             }
@@ -379,36 +383,17 @@ impl ApiBackend {
                     .exports
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
-                let profile_id = profile_id.clone().unwrap_or(parent.last_profile.clone());
-                let mut selected_model = model.clone();
-                let mut selected_effort = effort.clone();
-                if profile_id == parent.last_profile
-                    && (selected_model.is_none() || selected_effort.is_none())
-                    && let Some(handle) = self.session_handle(parent_session_id.to_owned()).await?
-                    && let Some(snapshot) = handle.view().snapshot
-                {
-                    selected_model = selected_model
-                        .or_else(|| snapshot.operational.config.get("model").cloned());
-                    selected_effort = selected_effort
-                        .or_else(|| snapshot.operational.config.get("effort").cloned());
-                }
-                // Checked against the warm catalogue only. Discovering a
-                // profile launches a harness, which takes tens of seconds, and
-                // the caller is a model waiting on its tool call. A selector
-                // the catalogue could not check is validated by the start
-                // follow-up against the child's live harness; an unsupported
-                // one fails the child's start and is reported to the parent as
-                // that child's error through `wait` and `list_agents`.
-                if (selected_model.is_some() || selected_effort.is_some())
-                    && let Some(choices) = self.profile_catalog.published(&profile_id)
-                {
-                    crate::server::api::validate_selectors(
-                        &choices,
-                        selected_model.as_deref(),
-                        selected_effort.as_deref(),
-                    )
-                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
-                }
+                let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
+                let selection = crate::server::api::resolve_subagent_selection(
+                    &backend,
+                    parent_session_id,
+                    &parent.last_profile,
+                    profile_id.as_deref(),
+                    model.as_deref(),
+                    effort.as_deref(),
+                )
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?;
                 let ranges = files
                     .iter()
                     .flat_map(|entry| {
@@ -422,7 +407,6 @@ impl ApiBackend {
                         })
                     })
                     .collect::<Vec<_>>();
-                let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                 let prompt = crate::server::api::build_subagent_prompt(
                     &backend,
                     parent_session_id,
@@ -436,9 +420,9 @@ impl ApiBackend {
                     .start_subagent(crate::controller::RegisterSubagentRequest {
                         parent_session_id: parent_session_id.to_owned(),
                         task_name: task_name.clone(),
-                        profile_id,
-                        model: selected_model.clone(),
-                        effort: selected_effort.clone(),
+                        profile_id: selection.profile_id,
+                        model: Some(selection.model.clone()),
+                        effort: selection.effort.clone(),
                         working_directory: working_directory.clone(),
                         initial_prompt: prompt,
                         request_key: request.request_id.clone(),
@@ -449,9 +433,10 @@ impl ApiBackend {
                 self.start_followup(
                     relation.child_session_id.clone(),
                     crate::server::api::StartFollowup {
-                        model: selected_model,
-                        effort: selected_effort,
+                        model: Some(selection.model),
+                        effort: selection.effort,
                         prompt: Some(relation.initial_prompt.clone()),
+                        fast_mode: selection.fast_mode,
                     },
                 )
                 .await?;
@@ -459,6 +444,7 @@ impl ApiBackend {
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
                     "profile_id":relation.profile_id,
+                    "model":relation.model,
                 }))
             }
             SubagentToolAction::ListAgents => {
@@ -785,13 +771,16 @@ impl ApiBackend {
     /// or start one. The child's output is not included — it is collected
     /// with `wait` and read in the child transcript; the notice only says
     /// what happened.
+    ///
+    /// `child_title` is the child's listed title. The turn is named by the
+    /// number the child's own `mj wait` and `mj prompt` print (its accepted
+    /// ordinal), and the outcome in words (R11-3).
     pub async fn record_subagent_completion_notice(
         &self,
         parent_session_id: String,
         child_session_id: &str,
-        task_name: &str,
-        turn: u64,
-        outcome: &str,
+        child_title: &str,
+        outcome: &mj_core::state::MaterializedTurnOutcome,
     ) -> Result<()> {
         ensure!(
             !matches!(
@@ -805,11 +794,16 @@ impl ApiBackend {
             .session(parent_session_id.clone())
             .await
             .with_context(|| format!("session {parent_session_id} is not running"))?;
+        let turn = match outcome.accepted_ordinal {
+            Some(turn) => format!("turn {turn}"),
+            None => "a turn".to_owned(),
+        };
         submit_notice(
             &handle,
             format!(
-                "Subagent {task_name:?} ({}) finished turn {turn} ({outcome}).",
-                mj_core::state::short_id(child_session_id)
+                "Subagent \"{child_title}\" ({}) finished {turn} ({}).",
+                mj_core::state::short_id(child_session_id),
+                outcome.outcome
             ),
         )
         .await?;
@@ -956,21 +950,6 @@ impl ApiBackend {
         }
         Ok(())
     }
-}
-
-fn select_profile_per_harness(
-    mut candidates: Vec<(String, HarnessKind)>,
-    quota_reports: &BTreeMap<String, ProfileQuota>,
-) -> Vec<(String, HarnessKind)> {
-    candidates.sort_by(|(left_id, left_harness), (right_id, right_harness)| {
-        left_harness.cmp(right_harness).then_with(|| {
-            profile_remaining_percent(quota_reports.get(right_id))
-                .cmp(&profile_remaining_percent(quota_reports.get(left_id)))
-                .then_with(|| left_id.cmp(right_id))
-        })
-    });
-    candidates.dedup_by(|left, right| left.1 == right.1);
-    candidates
 }
 
 fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
@@ -1228,7 +1207,7 @@ async fn apply_followup(
 
     // Setting a configuration option needs the harness's own session, not just
     // a connected worker: the options it accepts arrive with it.
-    let needs_config = followup.model.is_some() || followup.effort.is_some();
+    let needs_config = followup.model.is_some() || followup.effort.is_some() || followup.fast_mode;
     loop {
         let view = handle.view();
         if let Some(ViewError::TargetMissing(detail)) = &view.error {
@@ -1268,6 +1247,28 @@ async fn apply_followup(
             "this agent does not offer {value} as a {key}"
         );
         handle.set_config(key.to_owned(), value).await?;
+    }
+
+    // Fast mode is best effort: a Luna sub-agent should start fast, but a
+    // spawn must not fail just because the agent does not offer the option
+    // or the set_config call itself fails.
+    if followup.fast_mode {
+        let offers_on = handle.view().snapshot.is_some_and(|snapshot| {
+            mj_core::acp::session_config_choices(&snapshot.operational.config_options, "fast-mode")
+                .iter()
+                .any(|choice| choice.value == "on")
+        });
+        if offers_on
+            && let Err(error) = handle
+                .set_config("fast-mode".to_owned(), "on".to_owned())
+                .await
+        {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "could not turn on Codex fast mode for a Luna sub-agent"
+            );
+        }
     }
 
     still_starting(&states, &exports, &session_id)?;
@@ -1675,11 +1676,62 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn published_profile_config(
+    fn subagent_candidates(
         &self,
-        profile: &str,
-    ) -> Option<mj_core::worker_launch::ProfileConfig> {
-        self.profile_catalog.published(profile)
+        parent_profile: String,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            // One discovery per profile, so a profile whose harness cannot be
+            // discovered drops out on its own instead of failing the answer.
+            let discoveries = futures::future::join_all(
+                ids.iter()
+                    .map(|(id, _)| self.profile_catalog.capabilities(std::slice::from_ref(id))),
+            )
+            .await;
+            let quota_reports = self
+                .quota_reports
+                .lock()
+                .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
+                match discovery.map(|mut choices| choices.pop()) {
+                    Ok(Some(choices)) => {
+                        let remaining_percent =
+                            profile_remaining_percent(quota_reports.get(&profile_id));
+                        candidates
+                            .offered
+                            .push(crate::server::api::SubagentCandidate {
+                                profile_id,
+                                harness,
+                                choices,
+                                remaining_percent,
+                            });
+                    }
+                    Ok(None) => candidates
+                        .unavailable
+                        .push((profile_id, "its discovery returned nothing".to_owned())),
+                    Err(error) => {
+                        tracing::warn!(profile_id, %error, "sub-agent profile left out");
+                        candidates
+                            .unavailable
+                            .push((profile_id, format!("{error:#}")));
+                    }
+                }
+            }
+            if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
+                bail!(
+                    "no sub-agent profile could be discovered: {}",
+                    candidates
+                        .unavailable
+                        .iter()
+                        .map(|(id, reason)| format!("{id} ({reason})"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
+            Ok(candidates)
+        })
     }
 
     fn wiki_sync_is_stale(&self) -> bool {

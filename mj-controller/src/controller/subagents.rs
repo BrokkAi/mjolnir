@@ -62,7 +62,7 @@ impl Controller {
             ),
             "only Claude and Codex sessions can spawn sub-agents"
         );
-        ensure_parent_may_delegate(&parent, self.config.subagents.enabled)?;
+        ensure_parent_may_delegate(&parent)?;
         ensure!(parent.state.is_active(), "parent session is not active");
         ensure!(parent.target.is_some(), "parent session has no live target");
         ensure!(
@@ -158,15 +158,7 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
-        let handback_tool = child_gets_handback_tool(
-            profile,
-            &child_id,
-            &super::backend::backend_locator(
-                session.target.as_ref().expect("child target set above"),
-                &session,
-                &self.config,
-            )?,
-        );
+        let handback_tool = child_gets_handback_tool(profile.kind);
         // The first prompt names the tool only when the child will have it.
         let initial_prompt = if handback_tool {
             format!(
@@ -319,32 +311,20 @@ fn borrowed_locator(
 }
 
 /// Whether a child can be given the `handback` tool. Codex takes Mjolnir's MCP
-/// servers over ACP; Claude reads them from a staged profile, so a Claude child
-/// needs a harness home of its own. Other harnesses keep reporting through
-/// their last message.
-fn child_gets_handback_tool(
-    profile: &mj_core::config::HarnessProfile,
-    child_id: &str,
-    locator: &crate::targets::TargetLocator,
-) -> bool {
-    match profile.kind {
-        HarnessKind::Codex => true,
-        HarnessKind::Claude => {
-            crate::controller::session_owns_profile_home(locator, child_id, profile)
-        }
-        _ => false,
-    }
+/// servers over ACP; Claude reads them from its staged profile, which every
+/// session has. Other harnesses keep reporting through their last message.
+fn child_gets_handback_tool(harness: HarnessKind) -> bool {
+    matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
 }
 
 /// A parent may delegate to Mjolnir children only if its own stored choice
-/// says so; `None` follows the global `[subagents] enabled` setting. A parent
+/// says so; `None` means native sub-agents, same as `Some(false)`. A parent
 /// using its harness's native delegation never received the Mjolnir tools, so
 /// a request from it is stale.
-fn ensure_parent_may_delegate(parent: &SessionRecord, global_enabled: bool) -> Result<()> {
+fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
     match parent.mjolnir_subagents {
-        Some(false) => bail!("this session uses native sub-agents"),
-        None if !global_enabled => bail!("sub-agents are disabled"),
-        _ => Ok(()),
+        Some(true) => Ok(()),
+        _ => bail!("this session uses native sub-agents"),
     }
 }
 
@@ -414,20 +394,18 @@ mod tests {
         };
 
         assert_eq!(
-            ensure_parent_may_delegate(&parent(Some(false)), true)
+            ensure_parent_may_delegate(&parent(Some(false)))
                 .unwrap_err()
                 .to_string(),
             "this session uses native sub-agents"
         );
         assert_eq!(
-            ensure_parent_may_delegate(&parent(None), false)
+            ensure_parent_may_delegate(&parent(None))
                 .unwrap_err()
                 .to_string(),
-            "sub-agents are disabled"
+            "this session uses native sub-agents"
         );
-        // An explicit opt-in outlives the global setting being turned off.
-        assert!(ensure_parent_may_delegate(&parent(Some(true)), false).is_ok());
-        assert!(ensure_parent_may_delegate(&parent(None), true).is_ok());
+        assert!(ensure_parent_may_delegate(&parent(Some(true))).is_ok());
     }
 
     #[test]

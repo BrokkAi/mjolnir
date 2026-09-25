@@ -270,30 +270,6 @@ impl Controller {
             .context("reconnect plan is empty")
     }
 
-    /// Whether this session's harness home belongs to the session rather than
-    /// to the user, resolved from the session record.
-    ///
-    /// The stored locator is not the backend locator the decision is made
-    /// against, and only this module can build one, so callers elsewhere ask
-    /// here instead of restating the conversion.
-    pub(crate) fn session_owns_profile_home(&self, session_id: &str) -> Result<bool> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let profile = self
-            .config
-            .profiles
-            .get(&session.last_profile)
-            .with_context(|| format!("unknown profile {}", session.last_profile))?;
-        let locator = session.target.as_ref().context("session has no target")?;
-        let backend = backend_locator(locator, session, &self.config)?;
-        Ok(crate::controller::session_owns_profile_home(
-            &backend, session_id, profile,
-        ))
-    }
-
     pub fn resource_probe(&self, session_id: &str) -> Result<targets::SessionResourceProbe> {
         let session = self
             .state
@@ -390,17 +366,25 @@ impl Controller {
 
     /// The full check behind the Targets pane's Test action.
     pub fn test_target(&self, target_id: &str, executor: &impl CommandExecutor) -> Result<()> {
-        verify_target(self.configured_target(target_id)?, executor)
+        verify_target(
+            self.configured_target(target_id)?,
+            executor,
+            TargetCheck::BeforeLaunch,
+        )
     }
 
     /// The check a session wizard runs before it offers a target: the same
-    /// one a launch runs.
+    /// one a launch runs, worded for a launch that has not happened yet.
     pub fn check_target_readiness(
         &self,
         target_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        preflight_target(self.configured_target(target_id)?, executor)
+        preflight_target(
+            self.configured_target(target_id)?,
+            executor,
+            TargetCheck::BeforeLaunch,
+        )
     }
 
     fn configured_target(&self, target_id: &str) -> Result<&TargetTemplate> {
@@ -408,6 +392,28 @@ impl Controller {
             .targets
             .get(target_id)
             .with_context(|| format!("unknown target template {target_id:?}"))
+    }
+}
+
+/// When a target is checked, which decides how its refusal ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TargetCheck {
+    /// Before anything is launched: the session wizard's target row, the
+    /// Targets pane.
+    BeforeLaunch,
+    /// Inside a launch, resume, or move, whose failure the launch-failure
+    /// dialog reports with its Retry launch button.
+    Launch,
+}
+
+impl TargetCheck {
+    /// The clause that points at the failure dialog's Retry launch. Before a
+    /// launch there is no such dialog to point at (launch finding R6-3).
+    const fn then_retry(self) -> &'static str {
+        match self {
+            Self::BeforeLaunch => "",
+            Self::Launch => ", then Retry launch",
+        }
     }
 }
 
@@ -420,6 +426,7 @@ impl Controller {
 pub(super) fn preflight_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
+    check: TargetCheck,
 ) -> Result<()> {
     match template {
         TargetTemplate::SshBare { ssh, .. }
@@ -427,7 +434,7 @@ pub(super) fn preflight_target(
         | TargetTemplate::SshDocker { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
-        _ => verify_target(template, executor),
+        _ => verify_target(template, executor, check),
     }
 }
 
@@ -487,22 +494,36 @@ fn is_missing_command(error: &anyhow::Error) -> bool {
 pub(super) fn verify_target(
     template: &TargetTemplate,
     executor: &impl CommandExecutor,
+    check: TargetCheck,
 ) -> Result<()> {
+    let then_retry = check.then_retry();
     match template {
         TargetTemplate::LocalPodman { .. } => targets::verify_local_podman(executor)
             .map(|_| ())
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "local Podman is not ready. Fix the problem below, then Retry launch: {error:#}"
+                    "local Podman is not ready. Fix the problem below{then_retry}: {error:#}"
                 )
             }),
         TargetTemplate::LocalDocker { .. } => targets::verify_local_docker(executor)
             .map(|_| ())
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "local Docker is not ready. Start Docker or fix the problem below, then Retry launch: {error:#}"
-                )
-            }),
+            .map_err(
+                |error| match error.downcast_ref::<targets::DockerUnavailable>() {
+                    // Leads with the sentence the launch options use, so a
+                    // missing Docker reads "not installed" in the wizard's
+                    // row too (launch finding R5-3).
+                    Some(problem) => anyhow::anyhow!(
+                        "{problem} {}",
+                        match check {
+                            TargetCheck::BeforeLaunch => problem.remedy(),
+                            TargetCheck::Launch => problem.launch_remedy(),
+                        }
+                    ),
+                    None => anyhow::anyhow!(
+                        "local Docker is not ready. Start Docker or fix the problem below{then_retry}: {error:#}"
+                    ),
+                },
+            ),
         TargetTemplate::SshPodman { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_podman(&ssh, executor)
@@ -513,7 +534,7 @@ pub(super) fn verify_target(
                 })
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "remote Podman is not ready on {}. Fix the problem below, then Retry launch: {error:#}",
+                        "remote Podman is not ready on {}. Fix the problem below{then_retry}: {error:#}",
                         ssh.destination
                     )
                 })
@@ -524,7 +545,7 @@ pub(super) fn verify_target(
                 .map(|_| ())
                 .map_err(|error| {
                     anyhow::anyhow!(
-                        "remote Docker preflight failed for {}. Fix the problem below, then Retry launch: {error:#}",
+                        "remote Docker preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
                         ssh.destination
                     )
                 })
@@ -535,12 +556,12 @@ pub(super) fn verify_target(
                 .stage(ProvisionStage::Provisioning);
             let output = executor.execute(&command).map_err(|error| {
                 anyhow::anyhow!(
-                    "Apple container is not ready. Fix the problem below, then Retry launch: {error}"
+                    "Apple container is not ready. Fix the problem below{then_retry}: {error}"
                 )
             })?;
             if output.status != 0 {
                 bail!(
-                    "Apple container is not ready. Start the runtime with `container system start`, then Retry launch: container system status exited {}: {}",
+                    "Apple container is not ready. Start the runtime with `container system start`{then_retry}: container system status exited {}: {}",
                     output.status,
                     [
                         String::from_utf8_lossy(&output.stdout).trim(),

@@ -9,6 +9,9 @@ use ratatui::layout::Position;
 
 use mj_core::config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
 use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
+use mj_core::project_picker::{
+    ProjectDiscovery, ProjectDiscoveryRequest, ProjectEntry, ProjectEntryKind,
+};
 use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation, State};
 
 use mj_core::targets::{AdditionalMount, MountAccess};
@@ -45,7 +48,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -383,45 +386,37 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
     );
 }
 
-#[test]
-fn new_session_can_request_a_repository_when_no_bundle_exists() {
-    let mut config = config();
-    config.bundles.clear();
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+fn dashboard_at_project_picker() -> DashboardState {
+    let mut configuration = config();
+    configuration.bundles.clear();
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    for character in "example/new-repo".chars() {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    for _ in 0..4 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["example/new-repo".into()],
-        }
-    );
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::NewBundle);
+    dashboard
 }
 
-fn dashboard_at_new_bundle_editor() -> DashboardState {
-    let mut config = config();
-    config.bundles.clear();
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        dashboard.mode,
-        Mode::New(NewWizard {
-            step: WizardStep::NewBundle,
-            ..
-        })
-    ));
-    dashboard
+fn project_wizard(dashboard: &DashboardState) -> &NewWizard {
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard
+}
+
+fn focus_project_control(dashboard: &mut DashboardState, control: WizardControl) {
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard.form.get_mut().focus(control);
+}
+
+fn activate_project_control(
+    dashboard: &mut DashboardState,
+    control: WizardControl,
+) -> DashboardAction {
+    focus_project_control(dashboard, control);
+    ready_key(dashboard, key(KeyCode::Enter))
 }
 
 fn type_source(dashboard: &mut DashboardState, source: &str) {
@@ -430,202 +425,162 @@ fn type_source(dashboard: &mut DashboardState, source: &str) {
     }
 }
 
-/// The bundle list holds real bundles only; the creator is a button pinned to
-/// the action row's right side, the way Workspaces pins its actions.
-#[test]
-fn bundle_step_pins_the_new_bundle_action_beside_the_list() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::Bundle
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let list = lines.join("\n");
-    assert!(list.contains("hel  1 repository"), "{list}");
-    let action_row = lines
-        .iter()
-        .find(|line| line.contains("New bundle…"))
-        .unwrap_or_else(|| panic!("the creator is pinned in the dialog: {list}"));
-    assert!(
-        action_row.contains("Cancel") && action_row.contains("Next"),
-        "the creator belongs to the action row, not the list: {list}"
-    );
-    let after_next = action_row
-        .split("Next")
-        .nth(1)
-        .unwrap_or_default()
-        .contains("New bundle…");
-    assert!(
-        after_next,
-        "the creator sits right of the navigation buttons: {action_row}"
-    );
-
-    // Activating the pinned action opens the bundle editor.
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("new wizard")
+fn take_project_request(dashboard: &mut DashboardState) -> (String, ProjectDiscoveryRequest) {
+    let Some(DashboardAction::DiscoverProjects { context, request }) =
+        dashboard.take_project_discovery()
+    else {
+        panic!("expected a pending project discovery request");
     };
-    wizard.form.get_mut().focus(WizardControl::Add);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::NewBundle
-    ));
+    assert_eq!(dashboard.take_project_discovery(), None);
+    (context, request)
 }
 
-/// Without bundles there is nothing to select, so the creator is the only way
-/// forward: the list is a hint, Next is disabled, and Enter opens the editor.
-#[test]
-fn bundle_step_without_bundles_routes_everything_to_the_creator() {
-    let mut configuration = config();
-    configuration.bundles.clear();
-    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::Bundle
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("No bundles yet."), "{text}");
-    assert!(text.contains("New bundle…"), "{text}");
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None,
-        "Enter falls through the empty list to the creator"
-    );
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::NewBundle
-    ));
-}
-
-fn focus_create_bundle(dashboard: &mut DashboardState, tabs: usize) {
-    for _ in 0..tabs {
-        ready_key(dashboard, key(KeyCode::Tab));
+fn discovered_repository(source: &str) -> ProjectEntry {
+    ProjectEntry {
+        name: source.rsplit('/').next().unwrap().into(),
+        source: source.into(),
+        description: source.into(),
+        kind: ProjectEntryKind::Repository,
     }
 }
 
+fn discovered_projects(entries: Vec<ProjectEntry>) -> ProjectDiscovery {
+    ProjectDiscovery {
+        entries,
+        directory: None,
+        parent: None,
+        truncated: false,
+    }
+}
+
+fn draw_project_picker(
+    dashboard: &mut DashboardState,
+    terminal: &mut Terminal<TestBackend>,
+) -> Vec<String> {
+    dashboard.reset_component_geometry();
+    terminal.draw(|frame| render(frame, dashboard)).unwrap();
+    buffer_lines(terminal.backend().buffer())
+}
+
+fn click_project_text(
+    dashboard: &mut DashboardState,
+    terminal: &mut Terminal<TestBackend>,
+    label: &str,
+) -> DashboardAction {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let lines = draw_project_picker(dashboard, terminal);
+    let (row, column) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find(label)
+                .map(|column| (row as u16, line[..column].chars().count() as u16))
+        })
+        .unwrap_or_else(|| panic!("missing clickable {label:?}:\n{}", lines.join("\n")));
+    let mut action = DashboardAction::None;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let next = dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        if next != DashboardAction::None {
+            assert_eq!(action, DashboardAction::None, "one click submits only once");
+            action = next;
+        }
+        draw_project_picker(dashboard, terminal);
+    }
+    action
+}
+
 #[test]
-fn new_bundle_editor_adds_multiple_repositories_and_removes_selected() {
-    let mut dashboard = dashboard_at_new_bundle_editor();
-    type_source(&mut dashboard, "owner/primary");
+fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
+    let mut dashboard = dashboard_at_project_picker();
+    let wizard = project_wizard(&dashboard);
+    assert_eq!(wizard.project_picker.tab, ProjectTab::Recent);
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::ProjectGithub)
+    );
+    assert!(!wizard.project_picker.multiple);
+    assert_eq!(dashboard.take_project_discovery(), None);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(text.contains("Choose a project"), "{text}");
+    assert!(text.contains("No recent projects yet"), "{text}");
+    assert!(!text.contains("No bundles yet"), "{text}");
+    assert!(!text.contains("Add repository"), "{text}");
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
-    type_source(&mut dashboard, "owner/secondary");
     assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        take_project_request(&mut dashboard).1,
+        ProjectDiscoveryRequest::Github {
+            query: String::new()
+        }
+    );
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::Back),
         DashboardAction::None
     );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-bundle editor");
-    };
-    assert_eq!(
-        wizard.new_bundle_repositories,
-        vec!["owner/primary", "owner/secondary"]
-    );
-    assert!(wizard.new_bundle_source.is_empty());
-
-    // Back-tab from the source selects the list; Delete removes its selected
-    // (newest) row and leaves the primary row intact.
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-    ready_key(&mut dashboard, key(KeyCode::Delete));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-bundle editor");
-    };
-    assert_eq!(wizard.new_bundle_repositories, vec!["owner/primary"]);
-    assert_eq!(wizard.new_bundle_selected, 0);
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::Target);
 }
 
 #[test]
-fn new_bundle_editor_creates_from_current_source_without_add() {
-    let mut dashboard = dashboard_at_new_bundle_editor();
-    type_source(&mut dashboard, "owner/only");
-    // Source → Add → Cancel → Back → Create. Remove is disabled while the
-    // draft is empty, so the form skips it during focus navigation.
-    focus_create_bundle(&mut dashboard, 4);
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["owner/only".into()]
-        }
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected pending new-bundle editor");
-    };
-    assert!(wizard.bundle_creation_in_flight);
-    assert_eq!(wizard.new_bundle_source, "owner/only");
-}
-
-#[test]
-fn new_bundle_editor_preserves_draft_after_failure_for_retry() {
-    let mut dashboard = dashboard_at_new_bundle_editor();
-    type_source(&mut dashboard, "owner/only");
-    focus_create_bundle(&mut dashboard, 4);
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["owner/only".into()]
-        }
-    );
-    dashboard.fail_bundle_creation("repository not found");
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("failure should leave the editor open");
-    };
-    assert!(!wizard.bundle_creation_in_flight);
-    assert_eq!(wizard.new_bundle_source, "owner/only");
-    assert_eq!(
-        dashboard.notice().as_deref(),
-        Some("Could not create bundle: repository not found")
-    );
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateBundle {
-            sources: vec!["owner/only".into()]
-        }
-    );
-}
-
-#[test]
-fn new_bundle_editor_submits_all_sources_once_and_advances_after_success() {
-    let mut dashboard = dashboard_at_new_bundle_editor();
-    type_source(&mut dashboard, "owner/primary");
+fn project_picker_saved_projects_keep_add_project_beside_navigation() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    type_source(&mut dashboard, "owner/secondary");
-    // Add, Remove, Cancel, Back, Create.
-    focus_create_bundle(&mut dashboard, 5);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let lines = draw_project_picker(&mut dashboard, &mut terminal);
+    let text = lines.join("\n");
+    assert!(text.contains("hel  1 repository"), "{text}");
+    assert!(text.contains("choose a project"), "{text}");
+    let action_row = lines
+        .iter()
+        .find(|line| line.contains("Add project"))
+        .unwrap();
+    assert!(
+        action_row.contains("Cancel") && action_row.contains("Next"),
+        "{text}"
+    );
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Add project"),
+        DashboardAction::None
+    );
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::NewBundle);
+    activate_project_control(&mut dashboard, WizardControl::Back);
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+}
+
+#[test]
+fn project_picker_url_enter_creates_one_repository_and_advances_to_review() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    type_source(&mut dashboard, "owner/only");
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateBundle {
-            sources: vec!["owner/primary".into(), "owner/secondary".into()]
+            sources: vec!["owner/only".into()]
         }
     );
+    assert!(project_wizard(&dashboard).bundle_creation_in_flight);
     for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Backspace] {
         assert_eq!(ready_key(&mut dashboard, key(code)), DashboardAction::None);
     }
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("creation must remain pending");
-    };
-    assert!(wizard.bundle_creation_in_flight);
+    assert_eq!(project_wizard(&dashboard).new_bundle_source, "owner/only");
     let created = config();
     let id = created.bundles.keys().next().unwrap().clone();
     dashboard.apply_created_bundle(created, &id);
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected session review");
-    };
+    let wizard = project_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Review);
     assert!(!wizard.bundle_creation_in_flight);
     assert_eq!(
@@ -635,58 +590,761 @@ fn new_bundle_editor_submits_all_sources_once_and_advances_after_success() {
 }
 
 #[test]
-fn new_bundle_editor_renders_separate_input_and_help_and_accepts_mouse_add() {
-    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    let mut dashboard = dashboard_at_new_bundle_editor();
-    type_source(&mut dashboard, "owner/visible");
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    dashboard.reset_component_geometry();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let source_row = lines
-        .iter()
-        .position(|line| line.contains("owner/visible"))
-        .unwrap();
-    let help_row = lines
-        .iter()
-        .position(|line| line.contains("Enter adds"))
-        .unwrap();
-    assert_ne!(source_row, help_row);
-    let rendered = lines.join("\n");
-    assert!(rendered.contains("New bundle"));
-    assert!(rendered.contains("Create bundle"));
-    assert!(rendered.contains("GitHub source or local Git path with a network remote"));
-    assert!(!rendered.contains("Create repository"));
-    let (row, column) = lines
-        .iter()
-        .enumerate()
-        .find_map(|(row, line)| {
-            line.find("Add repository")
-                .map(|column| (row as u16, column as u16))
-        })
-        .unwrap();
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-    ] {
-        dashboard.handle_mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
-        dashboard.reset_component_geometry();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-    }
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected editor");
+fn project_picker_creation_failure_preserves_source_for_retry() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    type_source(&mut dashboard, "owner/only");
+    let expected = DashboardAction::CreateBundle {
+        sources: vec!["owner/only".into()],
     };
-    assert_eq!(wizard.new_bundle_repositories, ["owner/visible"]);
-    assert!(wizard.new_bundle_source.is_empty());
+    assert_eq!(ready_key(&mut dashboard, key(KeyCode::Enter)), expected);
+    dashboard.fail_bundle_creation("repository not found");
+    let wizard = project_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::NewBundle);
+    assert_eq!(wizard.project_picker.tab, ProjectTab::Url);
+    assert!(!wizard.bundle_creation_in_flight);
+    assert_eq!(wizard.new_bundle_source, "owner/only");
+    assert!(dashboard.notice().unwrap().contains("repository not found"));
+    assert_eq!(ready_key(&mut dashboard, key(KeyCode::Enter)), expected);
+}
+
+#[test]
+fn project_picker_creation_retry_resubmits_selected_repository_without_rediscovery() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (context, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(
+        &context,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/app",
+        )])),
+    );
+    let expected = DashboardAction::CreateBundle {
+        sources: vec!["owner/app".into()],
+    };
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::ProjectResults),
+        expected
+    );
+    dashboard.fail_bundle_creation("Could not save the selected project");
+    let wizard = project_wizard(&dashboard);
+    assert!(wizard.project_picker.error.is_none());
+    assert!(!wizard.bundle_creation_in_flight);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(
+        text.contains("Could not save the selected project"),
+        "{text}"
+    );
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Retry"),
+        expected
+    );
+    assert!(project_wizard(&dashboard).bundle_creation_in_flight);
+    assert_eq!(dashboard.take_project_discovery(), None);
+}
+
+#[test]
+fn project_picker_turning_multiple_off_keeps_chosen_member_and_rejects_pending_results() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    focus_project_control(&mut dashboard, WizardControl::NewBundleSource);
+    for source in ["owner/keep", "owner/other"] {
+        type_source(&mut dashboard, source);
+        ready_key(&mut dashboard, key(KeyCode::Enter));
+    }
+    focus_project_control(&mut dashboard, WizardControl::NewBundleRepositories);
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (context, _) = take_project_request(&mut dashboard);
+    focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    let wizard = project_wizard(&dashboard);
+    assert!(!wizard.project_picker.multiple);
+    assert_eq!(wizard.project_picker.tab, ProjectTab::Url);
+    assert_eq!(wizard.new_bundle_source, "owner/keep");
+    assert!(wizard.new_bundle_repositories.is_empty());
+    dashboard.apply_project_discovery(&context, Err("obsolete GitHub failure".into()));
+    assert!(project_wizard(&dashboard).project_picker.error.is_none());
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/keep".into()],
+        }
+    );
+}
+
+#[test]
+fn project_picker_multiple_sources_wait_for_submit_and_remove_selected() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    assert!(project_wizard(&dashboard).project_picker.multiple);
+    focus_project_control(&mut dashboard, WizardControl::NewBundleSource);
+    for source in ["owner/main", "owner/remove", "owner/shared"] {
+        type_source(&mut dashboard, source);
+        assert_eq!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+    }
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/main", "owner/remove", "owner/shared"]
+    );
+    assert!(project_wizard(&dashboard).new_bundle_source.is_empty());
+    focus_project_control(&mut dashboard, WizardControl::NewBundleRepositories);
+    ready_key(&mut dashboard, key(KeyCode::Up));
+    ready_key(&mut dashboard, key(KeyCode::Delete));
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/main", "owner/shared"]
+    );
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::Next),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/main".into(), "owner/shared".into()]
+        }
+    );
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+}
+
+#[test]
+fn project_picker_recent_deduplicates_launch_directory_and_uses_only_local_history() {
+    let mut configuration = config();
+    configuration.bundles.clear();
+    let mut state = State::default();
+    state.remember_project_directory("local", std::path::Path::new("/work/older"));
+    state.remember_project_directory("local", std::path::Path::new("/work/current"));
+    state.remember_project_directory("builder", std::path::Path::new("/remote/other"));
+    let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
+    dashboard.set_launch_project_directory(Some(PathBuf::from("/work/current")));
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let wizard = project_wizard(&dashboard);
+    assert_eq!(
+        wizard
+            .project_picker
+            .entries
+            .iter()
+            .map(|entry| entry.source.as_str())
+            .collect::<Vec<_>>(),
+        ["/work/current", "/work/older"]
+    );
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::ProjectResults)
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(text.contains("Current project"), "{text}");
+    assert!(text.contains("/work/older"), "{text}");
+    assert!(!text.contains("/remote/other"), "{text}");
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/older".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_github_search_chooses_the_keyboard_selected_result() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (initial, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Github {
+            query: String::new()
+        }
+    );
+    type_source(&mut dashboard, "owner/app");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let (search, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Github {
+            query: "owner/app".into()
+        }
+    );
+    dashboard.apply_project_discovery(
+        &initial,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/stale",
+        )])),
+    );
+    assert!(project_wizard(&dashboard).project_picker.entries.is_empty());
+    assert!(project_wizard(&dashboard).project_picker.loading);
+    dashboard.apply_project_discovery(
+        &search,
+        Ok(discovered_projects(vec![
+            discovered_repository("owner/apple"),
+            discovered_repository("owner/app"),
+        ])),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(text.contains("owner/apple"), "{text}");
+    assert!(text.contains("owner/app"), "{text}");
+    assert!(!text.contains("owner/stale"), "{text}");
+    focus_project_control(&mut dashboard, WizardControl::ProjectResults);
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/app".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_github_result_does_not_overwrite_query_or_steal_edit_focus() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (context, _) = take_project_request(&mut dashboard);
+    type_source(&mut dashboard, "still typing");
+    dashboard.apply_project_discovery(
+        &context,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/app",
+        )])),
+    );
+    let wizard = project_wizard(&dashboard);
+    assert_eq!(wizard.project_picker.query, "still typing");
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::ProjectQuery)
+    );
+    type_source(&mut dashboard, " now");
+    assert_eq!(
+        project_wizard(&dashboard).project_picker.query,
+        "still typing now"
+    );
+}
+
+#[test]
+fn project_picker_folders_navigate_up_home_and_choose_current_repository() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
+    let (home, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: String::new(),
+            filter: String::new(),
+        }
+    );
+    let home_result = ProjectDiscovery {
+        entries: vec![ProjectEntry {
+            name: "src".into(),
+            source: "/home/user/src".into(),
+            description: "Folder".into(),
+            kind: ProjectEntryKind::Directory,
+        }],
+        directory: Some("/home/user".into()),
+        parent: Some("/home".into()),
+        truncated: false,
+    };
+    dashboard.apply_project_discovery(&home, Ok(home_result.clone()));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    let (child, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: "/home/user/src".into(),
+            filter: String::new(),
+        }
+    );
+    let repo_result = ProjectDiscovery {
+        entries: vec![ProjectEntry {
+            name: "Use src".into(),
+            source: "/home/user/src".into(),
+            description: "Use this repository".into(),
+            kind: ProjectEntryKind::Repository,
+        }],
+        directory: Some("/home/user/src".into()),
+        parent: Some("/home/user".into()),
+        truncated: false,
+    };
+    dashboard.apply_project_discovery(&child, Ok(repo_result.clone()));
+    activate_project_control(&mut dashboard, WizardControl::ProjectUp);
+    let (up, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: "/home/user".into(),
+            filter: String::new(),
+        }
+    );
+    dashboard.apply_project_discovery(&up, Ok(home_result.clone()));
+    activate_project_control(&mut dashboard, WizardControl::ProjectHome);
+    let (home, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: String::new(),
+            filter: String::new(),
+        }
+    );
+    dashboard.apply_project_discovery(&home, Ok(home_result));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let (child, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(&child, Ok(repo_result));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(text.contains("/home/user/src"), "{text}");
+    assert!(text.contains("Use this repository"), "{text}");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/home/user/src".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_folder_filter_retry_and_open_repository_preserve_navigation() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
+    let (initial, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(
+        &initial,
+        Ok(ProjectDiscovery {
+            entries: vec![
+                discovered_repository("/work/app"),
+                discovered_repository("/work/shared"),
+            ],
+            directory: Some("/work".into()),
+            parent: Some("/".into()),
+            truncated: false,
+        }),
+    );
+    focus_project_control(&mut dashboard, WizardControl::ProjectQuery);
+    type_source(&mut dashboard, "app");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let (filtered, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: "/work".into(),
+            filter: "app".into()
+        }
+    );
+    dashboard.apply_project_discovery(&filtered, Err("Cannot read this folder".into()));
+    activate_project_control(&mut dashboard, WizardControl::ProjectRetry);
+    let (retry, retried_request) = take_project_request(&mut dashboard);
+    assert_eq!(retried_request, request);
+    assert_eq!(
+        project_wizard(&dashboard).project_picker.folder_filter,
+        "app"
+    );
+    dashboard.apply_project_discovery(
+        &retry,
+        Ok(ProjectDiscovery {
+            entries: vec![discovered_repository("/work/app")],
+            directory: Some("/work".into()),
+            parent: Some("/".into()),
+            truncated: false,
+        }),
+    );
+    // A repository can be browsed for nested projects without selecting it.
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::ProjectOpenFolder),
+        DashboardAction::None
+    );
+    let (opened, request) = take_project_request(&mut dashboard);
+    assert_eq!(
+        request,
+        ProjectDiscoveryRequest::Directory {
+            path: "/work/app".into(),
+            filter: String::new()
+        }
+    );
+    assert!(
+        project_wizard(&dashboard)
+            .project_picker
+            .folder_filter
+            .is_empty()
+    );
+    assert!(!project_wizard(&dashboard).bundle_creation_in_flight);
+    dashboard.apply_project_discovery(
+        &opened,
+        Ok(ProjectDiscovery {
+            entries: vec![
+                discovered_repository("/work/app"),
+                discovered_repository("/work/app/nested"),
+            ],
+            directory: Some("/work/app".into()),
+            parent: Some("/work".into()),
+            truncated: false,
+        }),
+    );
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateBundle {
+            sources: vec!["/work/app/nested".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary() {
+    let mut dashboard = dashboard_at_project_picker();
+    focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (context, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(
+        &context,
+        Ok(discovered_projects(vec![
+            discovered_repository("owner/app"),
+            discovered_repository("owner/shared"),
+        ])),
+    );
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::ProjectResults),
+        DashboardAction::None
+    );
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/app", "owner/shared"]
+    );
+    // Choosing an already-selected result removes it, without launching.
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/app"]
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    activate_project_control(&mut dashboard, WizardControl::ProjectMakePrimary);
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::Next),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/shared".into(), "owner/app".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_rejects_late_success_and_failure_after_switching_tabs() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (github, _) = take_project_request(&mut dashboard);
+    activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
+    let (folders, _) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(
+        &github,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/stale",
+        )])),
+    );
+    dashboard.apply_project_discovery(&github, Err("old GitHub error".into()));
+    let picker = &project_wizard(&dashboard).project_picker;
+    assert_eq!(picker.tab, ProjectTab::Folders);
+    assert!(picker.loading);
+    assert!(picker.entries.is_empty());
+    assert!(picker.error.is_none());
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    type_source(&mut dashboard, "owner/draft");
+    dashboard.apply_project_discovery(
+        &folders,
+        Ok(discovered_projects(vec![discovered_repository(
+            "/stale/repo",
+        )])),
+    );
+    let wizard = project_wizard(&dashboard);
+    assert_eq!(wizard.project_picker.tab, ProjectTab::Url);
+    assert!(wizard.project_picker.entries.is_empty());
+    assert_eq!(wizard.new_bundle_source, "owner/draft");
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::NewBundleSource)
+    );
+}
+
+#[test]
+fn project_picker_reopened_wizard_rejects_previous_discovery_context() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (old_context, _) = take_project_request(&mut dashboard);
+    activate_project_control(&mut dashboard, WizardControl::Cancel);
+    assert!(!matches!(dashboard.mode, Mode::New(_)));
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    let (context, _) = take_project_request(&mut dashboard);
+    assert_ne!(context, old_context);
+    dashboard.apply_project_discovery(
+        &old_context,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/stale",
+        )])),
+    );
+    dashboard.apply_project_discovery(&old_context, Err("stale failure".into()));
+    assert!(project_wizard(&dashboard).project_picker.loading);
+    assert!(project_wizard(&dashboard).project_picker.entries.is_empty());
+    assert!(project_wizard(&dashboard).project_picker.error.is_none());
+    dashboard.apply_project_discovery(
+        &context,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/current",
+        )])),
+    );
+    assert_eq!(
+        project_wizard(&dashboard).project_picker.entries[0].source,
+        "owner/current"
+    );
+}
+
+#[test]
+fn project_picker_retry_preserves_query_and_multiple_repository_selection() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
+    focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+    ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+    focus_project_control(&mut dashboard, WizardControl::NewBundleSource);
+    type_source(&mut dashboard, "owner/main");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+    take_project_request(&mut dashboard);
+    type_source(&mut dashboard, "owner/shared");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let (failed, request) = take_project_request(&mut dashboard);
+    dashboard.apply_project_discovery(&failed, Err("GitHub unavailable.".into()));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(text.contains("GitHub unavailable"), "{text}");
+    assert!(text.contains("owner/main"), "{text}");
+    assert_eq!(
+        click_project_text(&mut dashboard, &mut terminal, "Retry"),
+        DashboardAction::None
+    );
+    let (retry, retried_request) = take_project_request(&mut dashboard);
+    assert_eq!(retried_request, request);
+    assert_ne!(retry, failed);
+    assert_eq!(
+        project_wizard(&dashboard).project_picker.query,
+        "owner/shared"
+    );
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/main"]
+    );
+    dashboard.apply_project_discovery(
+        &retry,
+        Ok(discovered_projects(vec![discovered_repository(
+            "owner/shared",
+        )])),
+    );
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::ProjectResults),
+        DashboardAction::None
+    );
+    assert_eq!(
+        project_wizard(&dashboard).new_bundle_repositories,
+        ["owner/main", "owner/shared"]
+    );
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::Next),
+        DashboardAction::CreateBundle {
+            sources: vec!["owner/main".into(), "owner/shared".into()]
+        }
+    );
+}
+
+#[test]
+fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals() {
+    for (width, height) in [(80, 24), (60, 20)] {
+        let mut dashboard = dashboard_at_project_picker();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        assert_eq!(
+            click_project_text(&mut dashboard, &mut terminal, "GitHub"),
+            DashboardAction::None
+        );
+        let (context, _) = take_project_request(&mut dashboard);
+        dashboard.apply_project_discovery(
+            &context,
+            Ok(discovered_projects(vec![discovered_repository(
+                "owner/visible",
+            )])),
+        );
+        let lines = draw_project_picker(&mut dashboard, &mut terminal);
+        let text = lines.join("\n");
+        for label in [
+            "Choose a project",
+            "Folders",
+            "Paste URL",
+            "Search",
+            "owner/visible",
+            "Use project",
+        ] {
+            assert!(
+                text.contains(label),
+                "missing {label:?} at {width}x{height}:\n{text}"
+            );
+        }
+        assert!(!text.contains("Add repository"), "{text}");
+        assert_eq!(
+            click_project_text(&mut dashboard, &mut terminal, "owner/visible"),
+            DashboardAction::None
+        );
+        assert_eq!(
+            project_wizard(&dashboard).form.borrow().focused(),
+            Some(WizardControl::ProjectResults)
+        );
+        assert_eq!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::CreateBundle {
+                sources: vec!["owner/visible".into()]
+            }
+        );
+    }
+}
+
+#[test]
+fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() {
+    for (width, height) in [(80, 24), (60, 20)] {
+        let mut dashboard = dashboard_at_project_picker();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        click_project_text(&mut dashboard, &mut terminal, "Folders");
+        let (context, _) = take_project_request(&mut dashboard);
+        dashboard.apply_project_discovery(
+            &context,
+            Ok(ProjectDiscovery {
+                entries: vec![discovered_repository("/work/visible")],
+                directory: Some("/work".into()),
+                parent: Some("/".into()),
+                truncated: false,
+            }),
+        );
+        let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+        for label in ["/work/visible", "Filter (Enter)", "Use project"] {
+            assert!(
+                text.contains(label),
+                "missing {label:?} at {width}x{height}:\n{text}"
+            );
+        }
+        assert_eq!(
+            click_project_text(&mut dashboard, &mut terminal, "Use project"),
+            DashboardAction::CreateBundle {
+                sources: vec!["/work/visible".into()],
+            }
+        );
+    }
+}
+
+#[test]
+fn project_picker_results_remain_visible_with_multiple_selected_repositories() {
+    for (width, height) in [(80, 24), (60, 20)] {
+        let mut dashboard = dashboard_at_project_picker();
+        focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
+        ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+        activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
+        let (context, _) = take_project_request(&mut dashboard);
+        dashboard.apply_project_discovery(
+            &context,
+            Ok(discovered_projects(vec![
+                discovered_repository("owner/app"),
+                discovered_repository("owner/shared"),
+                discovered_repository("owner/docs"),
+                discovered_repository("owner/next"),
+            ])),
+        );
+        focus_project_control(&mut dashboard, WizardControl::ProjectResults);
+        for _ in 0..3 {
+            ready_key(&mut dashboard, key(KeyCode::Enter));
+            ready_key(&mut dashboard, key(KeyCode::Down));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+        assert!(
+            text.contains("owner/next"),
+            "selected search result disappears at {width}x{height}:\n{text}"
+        );
+        assert!(text.contains("Use 3 repositories"), "{text}");
+        assert_eq!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            activate_project_control(&mut dashboard, WizardControl::Next),
+            DashboardAction::CreateBundle {
+                sources: vec![
+                    "owner/app".into(),
+                    "owner/shared".into(),
+                    "owner/docs".into(),
+                    "owner/next".into()
+                ],
+            }
+        );
+    }
+}
+
+#[test]
+fn project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions() {
+    for (width, height) in [(80, 24), (60, 20)] {
+        let mut dashboard = dashboard_at_project_picker();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        click_project_text(&mut dashboard, &mut terminal, "Paste URL");
+        click_project_text(
+            &mut dashboard,
+            &mut terminal,
+            "Use several repositories together",
+        );
+        assert!(project_wizard(&dashboard).project_picker.multiple);
+        focus_project_control(&mut dashboard, WizardControl::NewBundleSource);
+        type_source(&mut dashboard, "owner/visible");
+        let lines = draw_project_picker(&mut dashboard, &mut terminal);
+        let text = lines.join("\n");
+        let source_row = lines
+            .iter()
+            .position(|line| line.contains("owner/visible"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "source missing at {width}x{height}:\n{text}\n{:?}",
+                    project_wizard(&dashboard).new_bundle_source
+                )
+            });
+        let action_row = lines
+            .iter()
+            .position(|line| line.contains("Add repository"))
+            .unwrap();
+        assert!(source_row < action_row, "{width}x{height}:\n{text}");
+        assert_eq!(
+            click_project_text(&mut dashboard, &mut terminal, "Add repository"),
+            DashboardAction::None
+        );
+        assert_eq!(
+            project_wizard(&dashboard).new_bundle_repositories,
+            ["owner/visible"]
+        );
+        assert!(project_wizard(&dashboard).new_bundle_source.is_empty());
+        let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+        assert!(text.contains("Main  owner/visible"), "{text}");
+        assert!(text.contains("Remove"), "{text}");
+    }
 }
 
 #[test]
@@ -801,7 +1459,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            mjolnir_subagents: Some(false),
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
@@ -1024,7 +1682,8 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         .collect::<String>();
     assert!(rendered.contains("No guardian approval mode"));
 
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so Enter on the profile step passes the
+    // target step.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected local project directory step")
@@ -1099,7 +1758,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -1386,7 +2045,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 access: MountAccess::Ro,
             }],
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -2982,8 +3641,9 @@ fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
 
 #[test]
 fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
+    // The fixture's podman stays beside the bare target, so the target step
+    // has a choice and is shown.
     let mut config = config();
-    config.targets.clear();
     config
         .targets
         .insert("local".into(), TargetTemplate::LocalBare);
@@ -3020,8 +3680,9 @@ fn resume_target_next_mouse_release_advances_to_review() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
+    // The fixture's podman stays beside the bare target: this checkout can
+    // move into a container, so the target step has a choice and is shown.
     let mut config = config();
-    config.targets.clear();
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
@@ -3250,12 +3911,12 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
 }
 
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
-/// show the choice. The box follows the global `[subagents] enabled` setting.
+/// show the choice. The box starts unchecked: native sub-agents are the
+/// default.
 #[test]
 fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
     for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
-        let mut configuration = subagent_wizard_config();
-        configuration.subagents.enabled = true;
+        let configuration = subagent_wizard_config();
         let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
         dashboard.begin_new();
         let Mode::New(wizard) = &mut dashboard.mode else {
@@ -3265,8 +3926,8 @@ fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
         wizard.step = WizardStep::Review;
         wizard.project_directory = "/work/main".into();
         assert!(
-            wizard.mjolnir_subagents,
-            "the global setting is the default"
+            !wizard.mjolnir_subagents,
+            "native sub-agents are the default"
         );
 
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
@@ -3330,21 +3991,21 @@ fn new_session_wizard_sends_subagent_choice() {
     assert!(matches!(
         submit(0, false),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            mjolnir_subagents: Some(false),
             ..
         }
     ));
     assert!(matches!(
         submit(0, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            mjolnir_subagents: Some(true),
             ..
         }
     ));
     assert!(matches!(
         submit(1, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            mjolnir_subagents: Some(true),
             ..
         }
     ));
@@ -3755,6 +4416,349 @@ fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
     assert_eq!(target_ids, ["podman"]);
 }
 
+/// The fixture's targets plus the other standard local ones that
+/// `Config::with_local_targets` supplies on Linux: `localhost`, `podman` and
+/// `docker`.
+fn standard_local_targets_config() -> mj_core::config::Config {
+    let mut config = config();
+    let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
+        panic!("the fixture's podman target is a Podman container");
+    };
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config
+        .targets
+        .insert("docker".into(), TargetTemplate::LocalDocker { container });
+    config
+}
+
+/// A bare SSH target, which has no size to set.
+fn bare_ssh_target() -> TargetTemplate {
+    TargetTemplate::SshBare {
+        ssh: SshConnection {
+            host: "builder.example.com".into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        permissions: mj_core::config::PermissionMode::Guardian,
+        workspace_prefix: ".local/share/hel/workspaces".into(),
+    }
+}
+
+/// Answers the availability checks a wizard starts on its profile step, as
+/// the dashboard loop would: the targets in `unavailable` fail and every
+/// other one is ready.
+fn answer_target_checks(dashboard: &mut DashboardState, unavailable: &[&str]) {
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the profile step checks the targets");
+    };
+    for id in target_ids {
+        let result = if unavailable.contains(&id.as_str()) {
+            Err(format!("{id} is not installed"))
+        } else {
+            Ok(())
+        };
+        dashboard.apply_target_readiness(generation, id, result);
+    }
+}
+
+/// Activates the open wizard's Back button from the keyboard: Tab from
+/// Cancel, which comes just before it, then Enter.
+fn press_back(dashboard: &mut DashboardState) -> DashboardAction {
+    match &mut dashboard.mode {
+        Mode::New(wizard) => wizard.form.get_mut().focus(WizardControl::Cancel),
+        Mode::Resume(wizard) => wizard.form.get_mut().focus(WizardControl::Cancel),
+        _ => panic!("expected a wizard"),
+    }
+    dashboard.handle_key(key(KeyCode::Tab));
+    let focused = match &dashboard.mode {
+        Mode::New(wizard) => wizard.form.borrow().focused(),
+        Mode::Resume(wizard) => wizard.form.borrow().focused(),
+        _ => None,
+    };
+    assert_eq!(focused, Some(WizardControl::Back));
+    dashboard.handle_key(key(KeyCode::Enter))
+}
+
+fn new_wizard(dashboard: &DashboardState) -> &NewWizard {
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard
+}
+
+/// On a host without Podman or Docker, localhost is the only target the
+/// target step offers, so the wizard chooses it and goes from the profile
+/// step to the project step. The titles count three steps, Back skips the
+/// hidden step, and the review names the target.
+#[test]
+fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
+    // The last session ran on podman, so the draft starts there.
+    let session = stopped_session();
+    let state = State {
+        sessions: BTreeMap::from([(session.id.clone(), session)]),
+        ..State::default()
+    };
+    let mut dashboard =
+        DashboardState::new(standard_local_targets_config(), state, BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    assert_eq!(
+        nth_key(&dashboard.config.targets, new_wizard(&dashboard).target),
+        "podman"
+    );
+    answer_target_checks(&mut dashboard, &["podman", "docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("New session · 1/3 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert!(wizard.target_step_skipped);
+    assert_eq!(
+        nth_key(&dashboard.config.targets, wizard.target),
+        "localhost"
+    );
+    let project = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(
+        project.contains("New session · 2/3 local project"),
+        "{project}"
+    );
+
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
+    dashboard.handle_paste("/work/project");
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory {
+            target_template_id: "localhost".into(),
+            directory: "/work/project".into(),
+        }
+    );
+    dashboard.apply_project_directory_validation("/work/project", Ok(()));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("New session · 3/3 review"), "{review}");
+    assert!(review.contains("Target: localhost"), "{review}");
+
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
+    press_back(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Profile);
+}
+
+/// A second target the step could offer keeps the step: one that is ready,
+/// and one whose availability check has not answered yet.
+#[test]
+fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
+    for podman_ready in [true, false] {
+        let mut dashboard = DashboardState::new(
+            standard_local_targets_config(),
+            State::default(),
+            BTreeMap::new(),
+        );
+        open_new_session_wizard(&mut dashboard);
+        if podman_ready {
+            answer_target_checks(&mut dashboard, &["docker"]);
+        } else {
+            let Some(DashboardAction::CheckTargetReadiness { generation, .. }) =
+                dashboard.take_prerequisite_check()
+            else {
+                panic!("the profile step checks the targets");
+            };
+            dashboard.apply_target_readiness(
+                generation,
+                "docker".into(),
+                Err("docker is not installed".into()),
+            );
+        }
+        let profile = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(profile.contains("New session · 1/4 profile"), "{profile}");
+
+        dashboard.handle_key(key(KeyCode::Enter));
+        let wizard = new_wizard(&dashboard);
+        assert_eq!(
+            wizard.step,
+            WizardStep::Target,
+            "podman ready: {podman_ready}"
+        );
+        assert!(!wizard.target_step_skipped);
+        let target = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(target.contains("New session · 2/4 target"), "{target}");
+    }
+}
+
+/// A container target is sized on the target step, so even as the only
+/// target its step is shown.
+#[test]
+fn a_lone_container_target_keeps_its_step_for_sizing() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    open_new_session_wizard(&mut dashboard);
+    answer_target_checks(&mut dashboard, &[]);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("New session · 2/4 target"), "{target}");
+}
+
+/// A stopped session that opens a directory on an SSH host, with that host's
+/// bare target added to the standard local ones.
+fn dashboard_with_raw_ssh_session(state: SessionState) -> DashboardState {
+    let mut session = stopped_session();
+    session.state = state;
+    session.target_template_id = "machine".into();
+    session.project_directory = Some("/srv/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    dashboard
+        .config
+        .targets
+        .insert("machine".into(), bare_ssh_target());
+    dashboard
+}
+
+/// A session that opens a directory on an SSH host can only resume on a bare
+/// target there. Every other target is ready, but it cannot use them, so the
+/// wizard chooses the SSH target without showing the step.
+#[test]
+fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
+    let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Stopped);
+    assert_eq!(
+        dashboard.begin_resume_for("session-1"),
+        DashboardAction::None
+    );
+    answer_target_checks(&mut dashboard, &[]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Resume · 1/2 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert!(wizard.target_step_skipped);
+    assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "machine");
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("Resume · 2/2 review"), "{review}");
+    assert!(review.contains("Target: machine"), "{review}");
+
+    press_back(&mut dashboard);
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Profile);
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    let DashboardAction::PreflightResumeRepositories { launch } =
+        dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Resume on the review starts the resume");
+    };
+    assert!(matches!(
+        launch.as_ref(),
+        DashboardAction::ResumeSession { target_template_id, .. } if target_template_id == "machine"
+    ));
+}
+
+/// A checkout on this machine can resume in place or move into a container,
+/// so a ready podman is a second choice and the step is shown.
+#[test]
+fn resume_shows_the_target_step_when_two_targets_suit_the_session() {
+    let mut session = stopped_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    assert_eq!(
+        dashboard.begin_resume_for("session-1"),
+        DashboardAction::None
+    );
+    answer_target_checks(&mut dashboard, &["docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Resume · 1/3 profile"), "{profile}");
+
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(!wizard.target_step_skipped);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("Resume · 2/3 new target"), "{target}");
+}
+
+/// Move uses the resume wizard's rule: a live session on an SSH host can only
+/// move to a bare target there, so the step is skipped and the move is
+/// prepared for that target at once.
+#[test]
+fn move_skips_the_target_step_when_only_one_target_suits_the_session() {
+    let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Running);
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    answer_target_checks(&mut dashboard, &[]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Move · 1/2 profile"), "{profile}");
+
+    let preparation = dashboard.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(
+            &preparation,
+            DashboardAction::MoveSession {
+                target_template_id,
+                preparation_request_id: Some(_),
+                ..
+            } if target_template_id == "machine"
+        ),
+        "{preparation:?}"
+    );
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert!(wizard.target_step_skipped);
+    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(review.contains("Move · 2/2 confirm"), "{review}");
+    assert!(review.contains("Target: machine"), "{review}");
+
+    press_back(&mut dashboard);
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Profile);
+    assert!(
+        !wizard.preparing,
+        "leaving the review drops its preparation"
+    );
+}
+
+/// A live checkout on this machine can also move into a ready podman, so the
+/// Move wizard shows its target step.
+#[test]
+fn move_shows_the_target_step_when_two_targets_suit_the_session() {
+    let mut session = running_session();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some("/work/project".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = standard_local_targets_config();
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    answer_target_checks(&mut dashboard, &["docker"]);
+    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(profile.contains("Move · 1/3 profile"), "{profile}");
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert!(!wizard.target_step_skipped);
+    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(target.contains("Move · 2/3 new target"), "{target}");
+}
+
 fn ctrl_space() -> KeyEvent {
     KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
 }
@@ -3823,8 +4827,9 @@ fn project_directory_completes_on_the_target_host() {
 /// The bundle source also accepts `owner/repo` and URLs, so only text that
 /// reads as a path asks the controller for directories.
 #[test]
-fn bundle_source_completes_only_for_path_like_text() {
-    let mut dashboard = dashboard_at_new_bundle_editor();
+fn project_picker_url_completes_only_for_path_like_text() {
+    let mut dashboard = dashboard_at_project_picker();
+    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
     type_source(&mut dashboard, "owner/repo");
     assert_eq!(
         ready_key(&mut dashboard, ctrl_space()),
@@ -3945,7 +4950,7 @@ fn dashboard_at_local_project_step(history: &[&str]) -> DashboardState {
     }
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(
         matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::ProjectDirectory),
@@ -3974,7 +4979,7 @@ fn the_local_project_starts_as_the_repository_mj_was_started_in() {
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     dashboard.set_launch_project_directory(Some("/home/me/demo".into()));
     ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected the local project step")
@@ -4021,7 +5026,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 3;
     assert!(
         lines[field].contains("/work/remembered"),
         "the field draws its value: {:?}",
@@ -4135,7 +5140,7 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 3;
     let buttons = row_of(&lines, "Cancel");
     assert!(
         lines[field].contains("/srv/pro"),
@@ -4239,7 +5244,7 @@ fn opening_the_new_wizard_refreshes_recent_projects() {
     stored.remember_project_directory("local", std::path::Path::new("/work/used-this-run"));
     dashboard.apply_mount_history(stored.mount_history);
 
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // localhost is the only target, so its step is passed.
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected the New wizard")

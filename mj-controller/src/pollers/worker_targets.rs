@@ -48,6 +48,13 @@ pub fn dashboard_worker_targets_excluding(
 /// Sessions whose worker can answer credential requests right now. Sessions
 /// still provisioning or already disconnected would only produce connection
 /// errors, so they stay out.
+///
+/// Every session runs from a staged home of its own, on this machine as on any
+/// other target, so each one is reconciled the same way. The one exception is a
+/// local session an earlier release started from the profile home itself. Its
+/// worker still reads that home, so a push would replace the person's own
+/// skills tree; it is left out until it is next staged (see
+/// [`crate::controller::local_profile_homes`]).
 pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTarget> {
     controller
         .state
@@ -59,6 +66,9 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 SessionState::Running | SessionState::Checkpointing
             ) && session.target.is_some()
         })
+        .filter(|session| {
+            crate::controller::local_profile_homes::session_has_a_staged_home_of_its_own(session)
+        })
         .filter_map(|session| {
             let profile = controller.config.profiles.get(&session.last_profile)?;
             let spec = match controller.reconnect_command(&session.id) {
@@ -69,16 +79,6 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 }
             };
             let sync_github_token = target_syncs_github_token(session.target.as_ref());
-            // A session that runs out of the user's own harness home must not
-            // receive Mjolnir's managed skills; they would land in that home
-            // and stay there.
-            let owns_profile_home = match controller.session_owns_profile_home(&session.id) {
-                Ok(owns) => owns,
-                Err(error) => {
-                    tracing::warn!(session_id = %session.id, "could not decide profile home ownership for credential sync: {error:#}");
-                    false
-                }
-            };
             Some(CredentialSyncTarget {
                 session_id: session.id.clone(),
                 profile_id: session.last_profile.clone(),
@@ -86,7 +86,6 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 profile_home: profile.home.clone(),
                 authenticates_with_api_key: profile.auth_scheme().is_api_key(),
                 sync_github_token,
-                owns_profile_home,
                 spec,
             })
         })

@@ -492,10 +492,10 @@ pub fn export_checkpoint_with_native_state(
     validate_stage_path(&relay_root, &output_path, "checkpoint archive")?;
     let event_frontier = spec.canonical_session.event_frontier;
     let event_frontier_digest = spec.canonical_session.event_frontier_digest.clone();
-    // A session that never accepted a prompt legitimately has no native
-    // harness artifacts yet; requiring them would make an unused session
-    // impossible to close cleanly.
-    let prompted = canonical_session_contains_prompt(&spec.canonical_session);
+    // A native session that never received a prompt legitimately has no
+    // harness artifacts yet; requiring them would make an unused session, or
+    // one just replaced by `/clear`, impossible to close cleanly (R4-5).
+    let prompted = current_native_session_received_prompt(&spec.canonical_session);
     let native_started = std::time::Instant::now();
     let native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,

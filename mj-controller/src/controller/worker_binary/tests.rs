@@ -293,8 +293,8 @@ fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
     );
 }
 
-/// The session's stored choice decides, with the global setting as the
-/// fallback, and a child never gets the tools whatever either says.
+/// The session's stored choice decides, `None` means native sub-agents, and
+/// a child never gets the tools whatever the choice says.
 #[test]
 fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let claude = |choice| {
@@ -304,21 +304,20 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session
     };
 
-    assert!(!subagent_tools_enabled(&claude(Some(false)), true, false));
-    assert!(subagent_tools_enabled(&claude(Some(true)), false, false));
-    assert!(subagent_tools_enabled(&claude(None), true, false));
-    assert!(!subagent_tools_enabled(&claude(None), false, false));
-    assert!(!subagent_tools_enabled(&claude(Some(true)), true, true));
+    assert!(!subagent_tools_enabled(&claude(Some(false)), false));
+    assert!(subagent_tools_enabled(&claude(Some(true)), false));
+    assert!(!subagent_tools_enabled(&claude(None), false));
+    assert!(!subagent_tools_enabled(&claude(Some(true)), true));
 
     let mut grok = claude(Some(true));
     grok.harness_kind = HarnessKind::Grok;
-    assert!(!subagent_tools_enabled(&grok, true, false));
+    assert!(!subagent_tools_enabled(&grok, false));
 
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
-    assert!(subagent_tools_enabled(&codex, true, false));
-    codex.mjolnir_subagents = Some(false);
-    assert!(!subagent_tools_enabled(&codex, true, false));
+    assert!(!subagent_tools_enabled(&codex, false));
+    codex.mjolnir_subagents = Some(true);
+    assert!(subagent_tools_enabled(&codex, false));
 }
 
 #[cfg(unix)]
@@ -1495,6 +1494,220 @@ fn ssh_docker_install_uses_docker_for_remote_container_operations() {
     );
 }
 
+/// An SSH host that remembers which files exist, so consecutive installs see
+/// the cache an earlier install left behind. A `test -f` succeeds only for a
+/// path the host holds, and an `mv` adds its destination, which is how a
+/// completed upload enters the cache.
+#[derive(Default)]
+struct SshHostExecutor {
+    commands: RefCell<Vec<CommandSpec>>,
+    host_files: RefCell<HashSet<String>>,
+}
+impl CommandExecutor for SshHostExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        let mut status = 0;
+        if command.program == "ssh" {
+            let remote = command.args.last().cloned().unwrap_or_default();
+            let words = remote
+                .split(' ')
+                .map(|word| word.trim_matches('\''))
+                .collect::<Vec<_>>();
+            match words.as_slice() {
+                ["test", "-f", path] if !self.host_files.borrow().contains(*path) => status = 1,
+                ["mv", _, destination] => {
+                    self.host_files
+                        .borrow_mut()
+                        .insert((*destination).to_owned());
+                }
+                _ => {}
+            }
+        }
+        Ok(CommandOutput {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+fn install_on_ssh_host(
+    executor: &SshHostExecutor,
+    fixture: &PodmanInstallFixture,
+    locator: &targets::TargetLocator,
+    session: &str,
+) -> Vec<String> {
+    let root = session_worker_root(session);
+    install_worker_files(
+        executor,
+        locator,
+        session,
+        &root,
+        &format!("{root}/profile"),
+        &fixture.worker_binary,
+        &fixture.launch_config,
+        &fixture.ownership,
+        &fixture.profile_stage,
+    )
+    .unwrap();
+    rendered(&executor.commands.take())
+}
+/// The home-relative worker root SSH-bare and EC2 sessions use (see
+/// `targets::worker_root`), used for every install here so the roots are easy
+/// to name in assertions.
+fn session_worker_root(session: &str) -> String {
+    format!(".local/share/hel/workers/{session}")
+}
+/// An SSH-bare session on the same host as [`podman_install_fixture`]'s
+/// container.
+fn bare_locator_on_the_container_host(session: &str) -> targets::TargetLocator {
+    targets::TargetLocator::SshBare {
+        worker_id: None,
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: format!(".local/share/hel/workspaces/{session}"),
+    }
+}
+/// Scp commands that carry the worker binary itself.
+fn worker_uploads(lines: &[String], fixture: &PodmanInstallFixture) -> Vec<String> {
+    let source = format!("{} ", fixture.worker_binary.display());
+    lines
+        .iter()
+        .filter(|line| line.starts_with("scp ") && line.contains(&source))
+        .cloned()
+        .collect()
+}
+fn position_of(lines: &[String], needle: &str) -> usize {
+    lines
+        .iter()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("expected {needle:?} in {lines:#?}"))
+}
+/// R3-4 (J-16): every SSH-bare session uploaded its own 139 MB worker, so ten
+/// parallel creates on one host each held a daemon action slot for minutes.
+/// The binary now crosses the network once per build and host; each session
+/// still gets its own copy in its own worker root.
+#[test]
+fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let first = "0123456789abcdef0123456789abcdef";
+    let second = "fedcba9876543210fedcba9876543210";
+    let cache_dir = format!(".cache/mjolnir/workers/{}", fixture.digest);
+    let cached = format!("{cache_dir}/hel");
+    assert_eq!(
+        targets::worker_root(&bare_locator_on_the_container_host(first), first).unwrap(),
+        session_worker_root(first)
+    );
+
+    let lines = install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(first),
+        first,
+    );
+    let partial = format!("{cache_dir}/hel.partial-{first}");
+    assert_eq!(
+        worker_uploads(&lines, &fixture),
+        [format!(
+            "scp {} user@example.test:{partial}",
+            fixture.worker_binary.display()
+        )],
+        "the first session on a host uploads the worker once, to its own \
+         partial name in the cache, got {lines:#?}"
+    );
+    let probe = position_of(&lines, &format!("'test' '-f' '{cached}'"));
+    let publish = position_of(&lines, &format!("'mv' '{partial}' '{cached}'"));
+    let root = session_worker_root(first);
+    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
+    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
+    assert!(
+        probe < publish && publish < copy && copy < executable,
+        "probe, publish, copy, then chmod, got {lines:#?}"
+    );
+
+    let lines = install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(second),
+        second,
+    );
+    assert!(
+        worker_uploads(&lines, &fixture).is_empty(),
+        "the second session on the host must not upload the worker again, got {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("'mv'")),
+        "a cache hit renames nothing, got {lines:#?}"
+    );
+    position_of(&lines, &format!("'test' '-f' '{cached}'"));
+    let root = session_worker_root(second);
+    let copy = position_of(&lines, &format!("'cp' '{cached}' '{root}/hel'"));
+    let executable = position_of(&lines, &format!("'chmod' '700' '{root}/hel'"));
+    assert!(copy < executable, "copy before chmod, got {lines:#?}");
+    for name in ["launch.json", "ownership.json"] {
+        assert!(
+            lines.iter().any(|line| line.starts_with("scp ")
+                && line.ends_with(&format!("user@example.test:{root}/{name}"))),
+            "{name} is still uploaded per session, got {lines:#?}"
+        );
+    }
+}
+#[test]
+fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let bare = "0123456789abcdef0123456789abcdef";
+    install_on_ssh_host(
+        &executor,
+        &fixture,
+        &bare_locator_on_the_container_host(bare),
+        bare,
+    );
+
+    let container = "fedcba9876543210fedcba9876543210";
+    let lines = install_on_ssh_host(&executor, &fixture, &fixture.locator, container);
+    assert!(
+        worker_uploads(&lines, &fixture).is_empty(),
+        "a container session on the same host reuses the cached worker, got {lines:#?}"
+    );
+}
+#[test]
+fn ec2_installs_upload_the_worker_straight_into_the_session() {
+    // A disposable EC2 instance runs one session and is terminated with it, so
+    // a host cache there would only hold a second copy of the worker.
+    let fixture = podman_install_fixture();
+    let executor = SshHostExecutor::default();
+    let session = "0123456789abcdef0123456789abcdef";
+    let locator = targets::TargetLocator::AwsEc2 {
+        profile: "default".into(),
+        region: "us-east-1".into(),
+        instance_id: "i-test".into(),
+        ssh: SshTarget {
+            destination: "user@example.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: "workspace".into(),
+    };
+    let lines = install_on_ssh_host(&executor, &fixture, &locator, session);
+    assert_eq!(
+        worker_uploads(&lines, &fixture),
+        [format!(
+            "scp {} user@example.test:{}/hel",
+            fixture.worker_binary.display(),
+            session_worker_root(session)
+        )],
+        "expected a direct upload into the session's worker root, got {lines:#?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains(".cache/mjolnir/workers")),
+        "EC2 installs do not use the host cache, got {lines:#?}"
+    );
+}
+
 #[test]
 #[ignore = "requires Docker and the locally installed agent-dev image"]
 fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
@@ -2184,9 +2397,7 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         Some(Path::new("models.json")),
         "Codex reads the staged catalog as a top-level key"
     );
-    // The staged copy is what the session runs from, so a session on a
-    // local bare target must not use the profile home directly.
-    assert!(super::super::requires_private_profile_home(&profile));
+    // The staged copy is what the session runs from, on every target.
     assert!(
         !home.path().join("models.json").exists(),
         "the user's own profile home stays untouched"
@@ -2434,7 +2645,6 @@ fn a_native_codex_profile_gets_no_generated_catalog() {
         std::fs::read_to_string(staged.path().join("config.toml")).unwrap(),
         "model = \"gpt-5.5\"\n"
     );
-    assert!(!super::super::requires_private_profile_home(&profile));
 }
 
 #[test]
@@ -2587,6 +2797,128 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     assert_ne!(
         std::fs::read_to_string(staged.path().join("skills/mj/SKILL.md")).unwrap(),
         "the user's own\n"
+    );
+}
+
+/// Claude Code provisions `skills/synced/` from the user's claude.ai account,
+/// and keeps `skills/.trash/`, in whatever home it runs from, the session's
+/// included; the Codex CLI does the same with its built-in skills in
+/// `skills/.system/`. Launch leaves these to the harness rather than copying
+/// them into every session (4 MB of them for Claude on the launch host).
+#[test]
+fn staging_leaves_harness_owned_skills_to_the_harness() {
+    use mj_core::config::HarnessKind;
+    for kind in HarnessKind::ALL {
+        let owned: &[&str] = match kind {
+            HarnessKind::Claude => &[
+                "skills/synced/.bucket-org_user",
+                "skills/synced/org_user/manifest.json",
+                "skills/synced/org_user/docx/SKILL.md",
+                "skills/.trash/1789646711611/pdf/SKILL.md",
+            ],
+            HarnessKind::Codex => &[
+                "skills/.system/.codex-system-skills.marker",
+                "skills/.system/imagegen/SKILL.md",
+            ],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+        };
+        let home = tempfile::tempdir().unwrap();
+        for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
+            let path = home.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("{relative}\n")).unwrap();
+        }
+
+        let staged = tempfile::tempdir().unwrap();
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+        stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
+            "skills/review/SKILL.md\n",
+            "{kind:?}"
+        );
+        for path in kind.harness_owned_skill_paths() {
+            assert!(
+                owned
+                    .iter()
+                    .any(|relative| relative.starts_with(&format!("{path}/"))),
+                "no test file under {kind:?} {path}"
+            );
+            assert!(!staged.path().join(path).exists(), "{kind:?} {path}");
+        }
+        for relative in owned {
+            assert!(
+                !staged.path().join(relative).exists(),
+                "{kind:?} {relative}"
+            );
+        }
+        let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+        let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+        assert_eq!(installed, expected, "{kind:?}");
+    }
+}
+
+/// Launch finding R4-8: a profile home linked `skills/tufte-viz` from
+/// elsewhere, and the linked skill held a 2.2 MB demo. Staging copied both
+/// through the link; the session's worker then failed every skills poll on the
+/// large file, and the sync's own copy of the home did not read through the
+/// link at all. Stage and sync now agree, so the first sync neither fails nor
+/// removes the linked skill.
+#[cfg(unix)]
+#[test]
+fn staging_and_sync_agree_on_linked_and_oversized_skills() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("viz/demos")).unwrap();
+    std::fs::write(outside.path().join("viz/SKILL.md"), "viz skill\n").unwrap();
+    std::fs::write(
+        outside.path().join("viz/demos/large.html"),
+        vec![b'x'; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
+    std::fs::write(home.path().join("skills/review/SKILL.md"), "review skill\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("viz"), home.path().join("skills/viz")).unwrap();
+
+    let staged = tempfile::tempdir().unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+    assert_eq!(installed, expected);
+    assert!(
+        expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/SKILL.md"),
+        "the linked skill is part of the canonical tree"
+    );
+    assert!(
+        !expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/demos/large.html"),
+        "the oversized file is left out of both sides"
     );
 }
 
@@ -3926,6 +4258,382 @@ fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
     );
 }
 
+/// A fixture harness home shaped like a real one: the login and settings a
+/// session needs, next to native history, logs, caches and the skills the
+/// harness maintains itself. Each entry is `(home-relative path, whether a
+/// staged home gets it)`.
+fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
+    match kind {
+        HarnessKind::Codex => &[
+            ("auth.json", true),
+            ("config.toml", true),
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            (
+                "sessions/2026/09/25/rollout-2026-09-25T09-00-00-native.jsonl",
+                false,
+            ),
+            ("history.jsonl", false),
+            ("session_index.jsonl", false),
+            ("state_5.sqlite", false),
+            ("logs_2.sqlite", false),
+            ("thread_history_1.sqlite", false),
+            ("models_cache.json", false),
+            ("shell_snapshots/snapshot.sh", false),
+            (
+                "projects/hel-0123456789abcdef-0123456789abcdef0123456789abcdef/memory/MEMORY.md",
+                false,
+            ),
+            ("skills/.system/imagegen/SKILL.md", false),
+        ],
+        HarnessKind::Claude => &[
+            (".credentials.json", true),
+            (".claude.json", true),
+            ("settings.json", true),
+            ("CLAUDE.md", true),
+            ("skills/review/SKILL.md", true),
+            ("projects/-home-me-app/native.jsonl", false),
+            ("history.jsonl", false),
+            ("todos/native.json", false),
+            ("shell-snapshots/snapshot.sh", false),
+            ("statsig/cache", false),
+            ("skills/synced/account/SKILL.md", false),
+        ],
+        HarnessKind::Kimi => &[
+            ("credentials/kimi-code.json", true),
+            ("config.toml", true),
+            ("device_id", true),
+            ("skills/review/SKILL.md", true),
+            ("sessions/native/context.jsonl", false),
+            ("session_index.jsonl", false),
+            ("user-history/history.jsonl", false),
+            ("logs/kimi.log", false),
+            ("workspaces.json", false),
+            ("telemetry/events.json", false),
+        ],
+        HarnessKind::Grok => &[
+            ("auth.json", true),
+            ("config.toml", true),
+            ("agent_id", true),
+            ("skills/review/SKILL.md", true),
+            ("sessions/native/session_search.sqlite", false),
+            ("active_sessions.json", false),
+            ("logs/grok.log", false),
+            ("models_cache.json", false),
+            ("memory-v2/store.json", false),
+        ],
+        HarnessKind::Muse => &[
+            ("auth.json", true),
+            ("settings.json", true),
+            ("trust.json", true),
+            ("skills/review/SKILL.md", true),
+            ("cache/models.json", false),
+            ("logs/muse.log", false),
+        ],
+    }
+}
+
+/// Every regular file under `root`, as `/`-separated relative paths.
+fn files_under(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).unwrap();
+                files.insert(
+                    relative
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+        }
+    }
+    files
+}
+
+/// A staged home is what a session runs from on every target, this machine
+/// included. It gets exactly the login and settings the session needs, so the
+/// harness is signed in, and none of the profile home's native history, logs
+/// or caches.
+#[test]
+fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
+    for kind in HarnessKind::ALL {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        for (path, _) in fixture_home_entries(kind) {
+            let path = home.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, br#"{"fixture":true}"#).unwrap();
+        }
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+
+        let expected = fixture_home_entries(kind)
+            .iter()
+            .filter(|(_, staged)| *staged)
+            .map(|(path, _)| (*path).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(files_under(staged.path()), expected, "{kind:?}");
+        assert!(
+            mj_core::config::harness_authentication_marker(kind, staged.path()).is_file(),
+            "{kind:?} is signed in from its staged home"
+        );
+    }
+}
+
+/// A login as each harness writes it. A higher `generation` is a fresher copy
+/// of the same grant, which is what the credential sync orders copies by.
+fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
+    let login = match kind {
+        HarnessKind::Codex => serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+            },
+            "last_refresh": format!("2026-09-{:02}T09:00:00Z", 10 + generation),
+        }),
+        HarnessKind::Claude => serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": format!("access-{generation}"),
+                "refreshToken": format!("refresh-{generation}"),
+                "expiresAt": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
+        HarnessKind::Kimi => serde_json::json!({
+            "access_token": format!("access-{generation}"),
+            "refresh_token": format!("refresh-{generation}"),
+            "expires_at": 1_790_000_000_i64 + generation,
+        }),
+        HarnessKind::Grok => serde_json::json!({
+            "https://auth.x.ai::1": {
+                "key": format!("access-{generation}"),
+                "refresh_token": format!("refresh-{generation}"),
+                "expires_at": format!("2026-10-{:02}T09:00:00Z", 10 + generation),
+            }
+        }),
+        HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+    };
+    serde_json::to_vec(&login).unwrap()
+}
+
+/// The credential sync pushes a rotated login into a local session's staged
+/// home as it does into a container session's. The launch configuration tells
+/// the worker which file of its staged home holds the login. The sync compares
+/// that file with the profile's, finds the profile's fresher, and the worker's
+/// install writes it into the file the harness reads.
+#[test]
+fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
+    use mj_core::config::harness_authentication_marker;
+    use mj_core::credentials::{
+        SyncAction, read_credential_file, reconcile, write_credential_file,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+        let session_id = format!("{:032x}", index + 1);
+        let home = directory.path().join(format!("{}-home", kind.id()));
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.clone(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let canonical = profile.authentication_marker();
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, login_bytes(kind, 1)).unwrap();
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let (launch, _, target_home) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &locator,
+            &session_id,
+            None,
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+
+        // The session runs from its own staged home, never the profile home,
+        // and its harness is pointed there on every operating system.
+        assert_eq!(launch.harness_home, PathBuf::from(&target_home), "{kind:?}");
+        assert_ne!(launch.harness_home, home, "{kind:?}");
+        assert_eq!(
+            kind.home_from_environment(&launch.environment[kind.home_env()]),
+            launch.harness_home,
+            "{kind:?}"
+        );
+        // Where the worker's credential endpoint reads and installs, which
+        // must be the file the harness reads its login from.
+        let endpoint = launch
+            .harness_home
+            .join(launch.authentication_marker.as_deref().unwrap());
+        assert_eq!(
+            endpoint,
+            harness_authentication_marker(kind, &launch.harness_home),
+            "{kind:?}"
+        );
+        // Muse's staged root lies under the data directory; the rest of the
+        // exchange is the same for it, except that Muse stores no refresh
+        // time, so the sync never orders two different Muse copies.
+        if kind == HarnessKind::Muse {
+            continue;
+        }
+        stage_profile(&profile, &launch.harness_home).unwrap();
+
+        // The profile's login rotates while the session runs.
+        std::fs::write(&canonical, login_bytes(kind, 2)).unwrap();
+        let (profile_copy, profile_bytes) = read_credential_file(kind, &canonical).unwrap();
+        let (session_copy, _) = read_credential_file(kind, &endpoint).unwrap();
+        assert_eq!(
+            reconcile(&profile_copy, &session_copy),
+            SyncAction::Push,
+            "{kind:?}"
+        );
+        write_credential_file(kind, &endpoint, &profile_bytes).unwrap();
+
+        assert_eq!(
+            std::fs::read(harness_authentication_marker(kind, &launch.harness_home)).unwrap(),
+            login_bytes(kind, 2),
+            "{kind:?}"
+        );
+        assert_eq!(std::fs::read(&canonical).unwrap(), login_bytes(kind, 2));
+    }
+}
+
+/// A local session's project-memory replica lands in its staged home and goes
+/// with the session. Closing the session removes the staged home with the
+/// replica inside, both for a harness staged under the worker root and for
+/// Muse, whose root lies under the data directory. The profile home it was
+/// staged from keeps its login and gains no `projects/` directory.
+#[cfg(unix)]
+#[test]
+fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+
+    const CHILD: &str = "MJ_CLOSE_REMOVES_REPLICA_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "closing_a_local_session_removes_its_staged_home_and_memory_replica",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for (index, kind) in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Muse]
+        .into_iter()
+        .enumerate()
+    {
+        let session_id = format!("{:032x}", index + 1);
+        let home = directory.path().join(format!("{}-home", kind.id()));
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.clone(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let marker = profile.authentication_marker();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, login_bytes(kind, 1)).unwrap();
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let locator = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+        let (_, memory, target_home) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &locator,
+            &session_id,
+            None,
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+        let target_home = PathBuf::from(target_home);
+        assert!(memory.root.starts_with(&target_home), "{kind:?}");
+
+        // Stage and install as `prepare_worker_files` does on this machine.
+        let canonical = canonical_memory_root(&memory.project_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("MEMORY.md"), "- a remembered fact\n").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        stage_profile(&profile, stage.path()).unwrap();
+        stage_memory_replica(&memory, &target_home, stage.path()).unwrap();
+        std::fs::create_dir_all(&worker_root).unwrap();
+        for entry in std::fs::read_dir(stage.path()).unwrap() {
+            let entry = entry.unwrap();
+            copy_profile_entry(&entry.path(), &target_home.join(entry.file_name())).unwrap();
+        }
+        assert!(memory.root.join("MEMORY.md").is_file(), "{kind:?}");
+
+        targets::close_plan(&locator, &session_id)
+            .unwrap()
+            .execute(&targets::ProcessExecutor)
+            .unwrap();
+
+        assert!(!memory.root.exists(), "{kind:?}: the replica goes");
+        assert!(!target_home.exists(), "{kind:?}: the staged home goes");
+        assert!(!worker_root.exists(), "{kind:?}");
+        assert!(marker.is_file(), "{kind:?}: the profile keeps its login");
+        assert!(!home.join("projects").exists(), "{kind:?}");
+        assert!(
+            canonical.join("MEMORY.md").is_file(),
+            "the canonical project memory outlives the session"
+        );
+    }
+}
+
 /// Claude reads Mjolnir's MCP servers from its staged profile. A parent's
 /// entry serves delegation; a child's serves only `handback`, and the role
 /// travels in the arguments so one worker binary can serve either.
@@ -3949,4 +4657,85 @@ fn the_staged_claude_profile_names_the_sub_agent_role() {
         assert_eq!(args[..2], ["worker", "subagent-mcp"]);
         assert_eq!(args[args.len() - 2..], ["--role", role.id()], "{args:?}");
     }
+}
+
+/// Launch finding R11-1: a Claude child on a model without Auto mode ran in
+/// Accept edits, and Claude asked a person before it would run the child's own
+/// `handback`, so the child could not report without one. The staged settings
+/// allow every tool the role's `mj-agents` server lists, whatever the mode, and
+/// keep the person's own settings and rules.
+#[test]
+fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
+    use mj_core::subagent::SubagentMcpRole;
+
+    let allowed = |stage: &Path| -> (serde_json::Value, Vec<String>) {
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(stage.join("settings.json")).unwrap()).unwrap();
+        let allow = settings["permissions"]["allow"]
+            .as_array()
+            .expect("the staged settings have an allow list")
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect();
+        (settings, allow)
+    };
+
+    // A child's only tool is handback.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    let (settings, allow) = allowed(stage.path());
+    assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+    assert_eq!(
+        settings["permissions"]["deny"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(settings["model"], "opus");
+
+    // A profile with no settings file gets one.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
+
+    // A parent delegates without asking; a rule the person already has is
+    // kept once, in its place.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent).unwrap();
+    let (_, allow) = allowed(stage.path());
+    assert_eq!(allow[0], "mcp__mj-agents__wait");
+    assert_eq!(
+        allow
+            .iter()
+            .filter(|rule| *rule == "mcp__mj-agents__wait")
+            .count(),
+        1,
+        "{allow:?}"
+    );
+    for tool in [
+        "list_profiles",
+        "spawn",
+        "list_agents",
+        "send_input",
+        "wait",
+        "interrupt",
+        "close",
+    ] {
+        assert!(
+            allow.contains(&format!("mcp__mj-agents__{tool}")),
+            "{tool}: {allow:?}"
+        );
+    }
+    assert!(
+        !allow.iter().any(|rule| rule.ends_with("__handback")),
+        "a parent has no handback: {allow:?}"
+    );
 }

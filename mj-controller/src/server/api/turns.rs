@@ -104,9 +104,7 @@ pub(super) async fn prompt(
                 is_coming_up(session)
             };
             if !waiting {
-                return Err(ApiFailure::conflict(
-                    "this session cannot take a prompt right now",
-                ));
+                return Err(ApiFailure::conflict(prompt_refusal(session)));
             }
         }
         let held = hold.get_or_insert_with(|| state.held_prompts.hold(&session_id));
@@ -253,6 +251,45 @@ impl Drop for HeldPrompt<'_> {
 /// the request finishes with its own response, and shorter than the CLI's
 /// request timeout so the caller reads this answer rather than a timeout.
 const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Why a session that is not coming up refuses a prompt. A failed session
+/// will not take one however long the caller waits, so the refusal says it
+/// failed, why, and what can be done with it instead (launch finding R5-8).
+/// Resume is named only for a session with a checkpoint, the one thing a
+/// resume restores from (launch finding R6-1).
+fn prompt_refusal(session: &ViewerSession) -> String {
+    if session.lifecycle != ViewerLifecycleCategory::Failed {
+        return "this session cannot take a prompt right now".to_owned();
+    }
+    let id = &session.id;
+    let ways_out = [
+        (session.has_checkpoint && session.capabilities.resume)
+            .then(|| format!("resume it with `mj resume --session {id}`")),
+        session
+            .capabilities
+            .destroy
+            .then(|| format!("remove it with `mj destroy --session {id}`")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut refusal = if session.has_checkpoint {
+        "this session failed, so it cannot take a prompt"
+    } else {
+        "this session failed before it saved a checkpoint, so it cannot take a prompt or be resumed"
+    }
+    .to_owned();
+    if !ways_out.is_empty() {
+        refusal.push_str("; ");
+        refusal.push_str(&ways_out.join(" or "));
+    }
+    refusal.push('.');
+    if let Some(reason) = &session.launch_error {
+        refusal.push_str(" It failed with: ");
+        refusal.push_str(reason);
+    }
+    refusal
+}
 
 /// Whether a session is on its way to taking prompts: provisioning, or
 /// provisioned and waiting for its worker to attach.

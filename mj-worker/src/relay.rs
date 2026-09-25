@@ -60,6 +60,11 @@ pub enum HarnessTurnPolicy {
     CodexAdapter,
 }
 
+/// How long a stop sent during a turn Claude Code started on its own waits
+/// for the result that ends an interrupted cycle before the relay ends the
+/// turn itself.
+pub const HARNESS_TURN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Where this relay learns about commands the agent left running.
 ///
 /// Claude reports its own background tasks. Kimi uses Hel's terminals for
@@ -94,6 +99,11 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    /// A bridge has connected and its session is not open yet: the load or
+    /// new-session request and the model and mode applied after it. Output
+    /// in this window answers no prompt (R8-4). Never recovered from the
+    /// journal: every bridge start records its own `AgentInitialized`.
+    session_setup: bool,
     checkpoint_only: bool,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
@@ -155,6 +165,11 @@ pub struct DurableRelay {
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
     claude_pending_stops: BTreeSet<String>,
+    /// The first ordinal of the Claude harness turn a stop was applied to,
+    /// while that turn is still open. Claude Code answers a stop of a running
+    /// cycle with the cycle's result; a turn it never ran gets no answer, so
+    /// the coordinator ends it after [`HARNESS_TURN_STOP_GRACE`].
+    harness_turn_stop: Option<u64>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -270,6 +285,7 @@ impl DurableRelay {
                 // The accepted model and effort the worker pins on its first
                 // bridge start, exactly as it does after a restart.
                 snapshot.config.extend(restored.accepted_config);
+                snapshot.restored_native_session_unused = restored.native_session_unused;
                 for queued in restored.queued_prompts {
                     validate_identifier(&queued.command_id, "restored queued command ID")?;
                     if queued.content.is_empty() {
@@ -367,6 +383,7 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: None,
             acp_ready: false,
+            session_setup: false,
             checkpoint_only,
             steering_supported: None,
             automatic_steering: false,
@@ -389,6 +406,7 @@ impl DurableRelay {
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeSet::new(),
+            harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -773,9 +791,11 @@ impl DurableRelay {
     /// Claude Code a session's transcript, only at the first user message, so
     /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // Set when the agent sent conversation content, when a prompt was
-        // transmitted, when the session was resumed rather than created here,
-        // or when its identity arrived from outside this journal.
+        // Set when a prompt was transmitted, when Claude Code reported the
+        // result of a model cycle, when the session was resumed rather than
+        // created here, or when its identity arrived from outside this
+        // journal. Agent output alone does not set it: an adapter can send
+        // text with no model turn behind it (R4-3).
         if self.snapshot.native_session_used {
             return true;
         }
@@ -786,9 +806,12 @@ impl DurableRelay {
         // the floor has every event about it above the floor too, so the
         // archive cannot hold any of its content. An unknown opening ordinal —
         // an older snapshot, or no session opened yet — cannot be placed
-        // against the floor, so it counts as history.
+        // against the floor, so it counts as history. The exception is a relay
+        // restored from a checkpoint that shows the session it continues was
+        // never prompted: everything below the floor is that archive.
         match self.snapshot.native_session_opened_ordinal {
             Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
+            None if self.snapshot.restored_native_session_unused => {}
             _ => return true,
         }
         // A prompt that only waits in the durable queue never reached the
@@ -797,6 +820,14 @@ impl DurableRelay {
             .dispatches
             .values()
             .any(native_history::prompt_may_have_reached_agent)
+    }
+
+    /// Whether the checkpoint this relay was restored from shows that the
+    /// native session it continues never received a prompt, while no session
+    /// has opened here yet.
+    pub fn restored_native_session_unused(&self) -> bool {
+        self.snapshot.restored_native_session_unused
+            && self.snapshot.native_session_opened_ordinal.is_none()
     }
 
     /// Record that the native thread has been used and can never be replaced.
@@ -826,6 +857,15 @@ impl DurableRelay {
             | RelayObservation::Closed => Some(false),
             _ => None,
         };
+        let session_setup = match &observation {
+            RelayObservation::AgentInitialized { .. } => Some(true),
+            RelayObservation::SessionOpened { .. }
+            | RelayObservation::SessionConfigured { .. }
+            | RelayObservation::SessionRestarted
+            | RelayObservation::Closing
+            | RelayObservation::Closed => Some(false),
+            _ => None,
+        };
         // A restart or a close ends the harness process that owned whatever it
         // had left running, so nothing it reported is still alive.
         if matches!(
@@ -839,6 +879,9 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
             self.acp_ready = ready;
+        }
+        if let Some(setup) = session_setup {
+            self.session_setup = setup;
         }
         Ok(ordinal)
     }
@@ -878,6 +921,15 @@ impl DurableRelay {
         let ack = claude && self.is_claude_stop_acknowledgement(&update);
         if ack {
             self.claude_pending_stops.pop_first();
+        }
+        // The adapter publishes notices as agent text at times no model cycle
+        // runs. Such text is a notice row of its own, so it neither opens a
+        // turn that nothing would end nor joins the previous reply.
+        if claude
+            && !ack
+            && let Some(message) = self.notice_outside_any_turn(&update)
+        {
+            return self.record_observation(RelayObservation::Notice { message });
         }
         if claude && !ack && self.opens_harness_turn(&update) {
             self.append_relay_event(
@@ -928,6 +980,57 @@ impl DurableRelay {
         ))
     }
 
+    /// Remember a stop applied during a Claude harness turn, so the turn can
+    /// be ended if Claude Code never answers it.
+    fn note_harness_turn_stop(&mut self) {
+        if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
+            && self.snapshot.active_prompt.is_none()
+            && let Some(turn) = self.snapshot.harness_turn
+        {
+            self.harness_turn_stop = Some(turn.first_ordinal);
+        }
+    }
+
+    /// The first ordinal of the open Claude harness turn a stop was applied
+    /// to, while nothing has answered that stop yet.
+    pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
+        let turn = self.snapshot.harness_turn?;
+        (self.harness_turn_stop == Some(turn.first_ordinal)).then_some(turn.first_ordinal)
+    }
+
+    /// End the harness turn a stop was applied to, if it is still open. A
+    /// cycle Claude Code was running would have sent its result by now; a
+    /// turn that is still open was opened for output no cycle produced, and
+    /// nothing else would ever end it. Returns whether a turn was ended.
+    pub fn end_unanswered_harness_turn_stop(&mut self, first_ordinal: u64) -> Result<bool> {
+        if self.unanswered_harness_turn_stop() != Some(first_ordinal) {
+            return Ok(false);
+        }
+        self.harness_turn_stop = None;
+        tracing::warn!(
+            session_id = %self.snapshot.session_id,
+            first_ordinal,
+            "Claude Code did not answer a stop of the turn it started on its own; ending the turn"
+        );
+        self.settle_harness_turn(Some("stop_unanswered".to_owned()))?;
+        Ok(true)
+    }
+
+    /// Whether a request that configures the session, rather than a prompt,
+    /// is waiting for the harness's answer. The Claude adapter publishes some
+    /// notices as agent text while it answers such a request: a switch to a
+    /// model without Auto mode sends "Auto mode unavailable". No model cycle
+    /// runs for it, so no result would ever end a turn opened for that text.
+    fn configuration_request_in_flight(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            dispatch.state == RelayDispatchState::InFlight
+                && matches!(
+                    dispatch.command,
+                    RelayCommand::SetConfig { .. } | RelayCommand::SetSessionMode { .. }
+                )
+        })
+    }
+
     fn settle_harness_turn(&mut self, origin: Option<String>) -> Result<()> {
         self.append_relay_event(
             None,
@@ -952,12 +1055,42 @@ impl DurableRelay {
         self.persist_activity_transition()
     }
 
+    /// Whether agent output arriving now belongs to no turn: no prompt runs,
+    /// no harness turn is open, and the session is either still being set up
+    /// or answering a configuration request. The Claude adapter reports its
+    /// Auto mode fallback as agent text at both times: while a resumed
+    /// session loads and its model is applied (R8-4), and while it answers a
+    /// live model change (R4-2, R8-5).
+    fn output_outside_any_turn(&self) -> bool {
+        (self.session_setup || self.configuration_request_in_flight())
+            && self.snapshot.active_prompt.is_none()
+            && self.snapshot.harness_turn.is_none()
+    }
+
+    /// The notice row for agent text that belongs to no turn, without the
+    /// adapter's Markdown emphasis, which a notice row would show literally.
+    fn notice_outside_any_turn(&self, update: &SessionUpdate) -> Option<String> {
+        if !self.output_outside_any_turn() {
+            return None;
+        }
+        let message = background::agent_chunk_text(update)?
+            .replace("**", "")
+            .trim()
+            .to_owned();
+        (!message.is_empty()).then_some(message)
+    }
+
     /// Whether this update reveals the harness working with nothing of Hel's
-    /// in flight, which is what opens a harness-initiated turn.
+    /// in flight, which is what opens a harness-initiated turn. Output that
+    /// arrives while a configuration request waits for its answer belongs to
+    /// that request, and output while the session is set up belongs to no
+    /// turn.
     fn opens_harness_turn(&self, update: &SessionUpdate) -> bool {
         is_agent_output(update)
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
+            && !self.session_setup
+            && !self.configuration_request_in_flight()
             && !matches!(
                 self.snapshot.execution,
                 RelayExecutionState::Closing | RelayExecutionState::Closed

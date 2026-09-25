@@ -2249,9 +2249,16 @@ impl DashboardState {
         }
         match result {
             Ok(config) => {
+                // Workers read the Jev switch when they start, so a session
+                // already running keeps its old setting until then.
+                let jev_changed = config.jev != self.config.jev;
                 self.set_config(config);
                 self.cancel_modal();
-                self.set_notice("Settings saved. New sessions use these defaults. Web listener changes apply on its next start.");
+                self.set_notice(if jev_changed {
+                    "Settings saved. New sessions use these defaults and the new Jev setting; running sessions follow it after their next resume or restart. Web listener changes apply on its next start."
+                } else {
+                    "Settings saved. New sessions use these defaults. Web listener changes apply on its next start."
+                });
             }
             Err(error) => {
                 if let Some(dialog) = setup_dialog_mut(&mut self.mode) {
@@ -2466,7 +2473,7 @@ pub(crate) fn render_setup(
     }
     let help_y = inner.y + u16::from(nested);
     frame.render_widget(
-        Paragraph::new(schema::help(path))
+        Paragraph::new(schema::page_help(path, &dialog.draft))
             .wrap(Wrap { trim: false })
             .style(theme::muted()),
         Rect::new(inner.x, help_y, inner.width, 2),

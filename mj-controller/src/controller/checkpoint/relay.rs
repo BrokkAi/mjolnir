@@ -127,6 +127,35 @@ impl Controller {
     /// Kill a worker whose ACP turn will not finish, install the current
     /// binary, and reconnect. Restart recovery interrupts the in-flight prompt
     /// so a later BeginCheckpoint can be admitted.
+    /// Start the worker again without its harness, so a checkpoint can be
+    /// taken from the relay journal and the files on the target when the
+    /// harness does not come back (R4-3). The same mode a Move uses to
+    /// recover a source whose harness cannot start.
+    pub(super) async fn restart_worker_for_checkpoint_only(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        reconnect: &targets::CommandSpec,
+    ) -> Result<StandaloneSession> {
+        let mut launch = self.current_worker_launch_config(session_id, backend)?;
+        launch.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
+        self.restart_worker_with_installed_binary(
+            session_id,
+            executor,
+            InstalledWorkerRestart {
+                backend,
+                worker_root,
+                reconnect,
+                launch: Some(&launch),
+                prepared: false,
+                messages: &RESTART_FOR_CHECKPOINT,
+            },
+        )
+        .await
+    }
+
     pub(super) async fn restart_worker_for_checkpoint(
         &self,
         session_id: &str,

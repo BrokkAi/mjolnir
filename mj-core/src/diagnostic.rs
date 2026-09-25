@@ -47,10 +47,7 @@ impl TurnDiagnostic {
         }
         if let Some(code) = data.get("code").and_then(serde_json::Value::as_str) {
             self.code = Some(code.to_owned());
-        } else if let Some(code) = data
-            .get("codex_error_info")
-            .and_then(serde_json::Value::as_str)
-        {
+        } else if let Some(code) = codex_error_kind(data) {
             // Preserve provider metadata as evidence; retryability is Jev's decision.
             self.code = Some(code.to_owned());
         }
@@ -74,7 +71,14 @@ impl TurnDiagnostic {
     pub fn is_usage_limit(&self) -> bool {
         if matches!(
             self.code.as_deref(),
-            Some("usage_limit" | "quota_exceeded" | "provider.quota_exceeded")
+            Some(
+                "usage_limit"
+                    | "quota_exceeded"
+                    | "provider.quota_exceeded"
+                    // Codex's `codexErrorInfo` for an exhausted plan (J-25).
+                    | "usageLimitExceeded"
+                    | "usage_limit_exceeded"
+            )
         ) {
             return true;
         }
@@ -88,9 +92,51 @@ impl TurnDiagnostic {
     }
 }
 
+/// The kind of error the Codex bridge names beside the JSON-RPC code, in
+/// either spelling its versions use: a string such as `usageLimitExceeded`,
+/// or an object whose single key is the kind.
+pub fn codex_error_kind(data: &serde_json::Value) -> Option<&str> {
+    match data
+        .get("codexErrorInfo")
+        .or_else(|| data.get("codex_error_info"))?
+    {
+        serde_json::Value::String(kind) => Some(kind),
+        serde_json::Value::Object(kind) if kind.len() == 1 => {
+            kind.keys().next().map(String::as_str)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Launch finding J-25: Codex reports an exhausted plan as a JSON-RPC
+    /// internal error whose data names `codexErrorInfo: usageLimitExceeded`.
+    /// That is a usage limit, whatever its sentence says, and the sentence is
+    /// the diagnostic's message.
+    #[test]
+    fn a_codex_usage_limit_error_is_a_usage_limit() {
+        let error = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+            "message": "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 29th, 2026 10:20 PM.",
+            "codexErrorInfo": "usageLimitExceeded"
+        }));
+        let diagnostic = TurnDiagnostic::from_acp(&error);
+        assert!(diagnostic.is_usage_limit(), "{diagnostic:?}");
+        assert!(
+            diagnostic
+                .message
+                .starts_with("You’ve hit your usage limit")
+        );
+        assert_eq!(diagnostic.code.as_deref(), Some("usageLimitExceeded"));
+
+        let other = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+            "message": "stream disconnected before completion",
+            "codexErrorInfo": "responseStreamDisconnected"
+        }));
+        assert!(!TurnDiagnostic::from_acp(&other).is_usage_limit());
+    }
     #[test]
     fn only_explicit_exhaustion_is_quota_and_details_survive() {
         let diagnostic = TurnDiagnostic::from_provider(&serde_json::json!({

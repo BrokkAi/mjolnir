@@ -19,11 +19,7 @@ pub(crate) async fn native_muse_turn(
             "--disable-shell --disable-write".into(),
         ),
     ]);
-    HarnessKind::Muse.configure_home_environment(
-        home,
-        mj_core::config::HarnessHost::current(),
-        &mut environment,
-    );
+    HarnessKind::Muse.configure_home_environment(home, &mut environment);
     let resuming = resume.is_some();
     let spec = LaunchSpec {
         bridge_spec_path: None,

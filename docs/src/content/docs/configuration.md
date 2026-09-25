@@ -418,6 +418,40 @@ See [Search and restore archived sessions](/sessions/#search-and-restore-archive
 for what archiving deletes and keeps, and for the rule that the `sessionwiki`
 command-line tool must match the version Mjolnir links.
 
+## Sub-agents `[subagents]`
+
+A Claude or Codex session can start child sessions, called sub-agents, through
+Mjolnir's `spawn` tool. Whether a given session uses Mjolnir's sub-agents at
+all, instead of its harness's own, is a per-session choice: the checkbox in
+the TUI and web new-session forms, or `mj new --mj-subagents` /
+`--native-subagents` (native is the default). This section only sets how many
+sub-agents at once and which profiles the children may run on.
+
+```toml
+[subagents]
+# max_concurrent = 6
+
+[subagents.eligible_profiles]
+codex = true
+codex2 = true
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `max_concurrent` | integer | no | `6` | Most sub-agents one session may have running at once; between `1` and `64`. |
+| `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled profile is ignored, and `mj doctor` warns about it. An id that names no profile stops the configuration from loading. |
+
+A configuration file written before the per-session choice existed may still
+have an `enabled` key here. It is read and ignored, and a save drops it.
+
+A `spawn` call must name a model, or `current` for the parent session's own
+model. Unless the call also names a profile, Mjolnir runs the child on the
+eligible profile that offers that model and has the most quota left, meaning
+the lower of its 5-hour and weekly remaining percentages. A pay-per-use
+profile counts as 100% left, and a profile with no quota report comes last. On
+a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
+where its quota comes from and whether other sessions' sub-agents may use it.
+
 ## Profiles `[profiles.<id>]`
 
 Each profile names one harness installation or account on the controller:
@@ -655,7 +689,7 @@ EC2 machine launches one instance per session. See
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | yes | none | Non-blank image reference. |
+| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image `mj setup` writes. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
@@ -664,7 +698,8 @@ EC2 machine launches one instance per session. See
 | `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 
 The schema checks that `image` is non-blank but leaves CPU, memory, and platform
-syntax to the selected runtime. Profile `environment` and target `environment`
+syntax to the selected runtime. A key a target table does not use is ignored,
+and the daemon log names it once. Profile `environment` and target `environment`
 are different: profile values configure the harness and profile commands, while
 target values become container environment variables.
 

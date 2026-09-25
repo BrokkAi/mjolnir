@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::actions::{Availability, CommandId, spec};
 use crate::tile_layout::PaneId;
-use crate::{DashboardAction, DashboardState, Focus};
+use crate::{DashboardAction, DashboardState, Focus, SupportPane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceControl {
@@ -20,6 +20,8 @@ pub(crate) enum SurfaceControl {
     /// The close chip on one conversation pane's title row.
     ClosePane(PaneId),
     PaneMenu(PaneId),
+    /// A support pane's title, which opens the menu that hangs from it.
+    PaneTitleMenu(SupportPane),
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -156,6 +158,10 @@ impl DashboardState {
                     self.begin_pane_menu(pane);
                     DashboardAction::None
                 }
+                SurfaceControl::PaneTitleMenu(pane) => {
+                    self.begin_support_pane_menu(pane);
+                    DashboardAction::None
+                }
                 SurfaceControl::PanePin(pane) => {
                     if let Some(id) = self.pane_session(pane).map(str::to_owned) {
                         self.toggle_session_pin(id)
@@ -187,6 +193,33 @@ impl DashboardState {
     }
 }
 
+/// The text of a support pane's title: its name, and the dropdown mark when
+/// the title opens a menu.
+pub(crate) fn pane_title_label(name: &str, menu: bool) -> String {
+    if menu {
+        format!(" {name} {} ", theme::glyphs().dropdown)
+    } else {
+        format!(" {name} ")
+    }
+}
+
+/// Registers a support pane's title, drawn at `area`, as the button that
+/// opens its menu, and says whether the pointer is holding it down so the
+/// title can be drawn pressed.
+pub(crate) fn register_pane_title_menu(
+    dashboard: &DashboardState,
+    pane: SupportPane,
+    area: Rect,
+) -> bool {
+    if area.width == 0 || area.height == 0 {
+        return false;
+    }
+    let control = SurfaceControl::PaneTitleMenu(pane);
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    form.is_armed(control)
+}
+
 /// Draws the pinned three-cell workspace manager control. It is registered in
 /// the shared surface form so mouse presses are armed and released safely even
 /// when the pointer leaves the button between events.
@@ -200,9 +233,9 @@ pub(crate) fn render_workspace_menu(frame: &mut Frame, area: Rect, dashboard: &D
     let focused = dashboard.focus() == Focus::Workspaces
         && dashboard.workspace_control_focus == crate::workspaces::WorkspaceControlFocus::Menu;
     let style = if focused || form.is_armed(control) {
-        theme::selection(true)
+        theme::focus_control()
     } else {
-        theme::muted()
+        theme::muted().patch(theme::raised())
     };
     frame.render_widget(
         Paragraph::new(theme::glyphs().workspace_menu).style(style),
@@ -230,7 +263,10 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
             && dashboard.session_action_focus == Some(id)
             && !dashboard.modal_open();
         let style = if enabled && (focused || form.is_armed(control)) {
-            theme::selection(true)
+            theme::focus_control()
+        } else if enabled && id == CommandId::NewSessionWizard && !theme::is_mono() {
+            // Monochrome reserves bold reverse video for actual keyboard focus.
+            theme::active_control()
         } else if enabled {
             ratatui::style::Style::default()
                 .fg(theme::palette().text)
@@ -477,7 +513,9 @@ mod tests {
         let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
         assert_eq!(
             terminal.backend().buffer()[(create.0, create.1)].bg,
-            theme::palette().selection,
+            theme::focus_control()
+                .bg
+                .expect("focused button background"),
             "the keyboard-focused action uses the focused button style"
         );
 
@@ -492,6 +530,40 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::OpenResumeDialog
+        );
+    }
+
+    #[test]
+    fn monochrome_session_action_emphasis_follows_keyboard_focus() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = dashboard.config.clone();
+        config.theme = mj_core::config::UiTheme::Mono;
+        dashboard.set_config(config);
+        dashboard.focus_sessions();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut action_emphasis = |dashboard: &mut DashboardState| {
+            terminal
+                .draw(|frame| crate::render::render(frame, dashboard))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let lines = buffer_lines(buffer);
+            ["Create", "Open"].map(|label| {
+                let position = point(&lines, label);
+                buffer[position]
+                    .modifier
+                    .contains(ratatui::style::Modifier::BOLD)
+            })
+        };
+
+        assert_eq!(action_emphasis(&mut dashboard), [false, false]);
+        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(action_emphasis(&mut dashboard), [true, false]);
+        dashboard.handle_key(key(KeyCode::Right));
+        assert_eq!(action_emphasis(&mut dashboard), [false, true]);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::OpenResumeDialog,
+            "Enter must activate the only emphasized action"
         );
     }
 

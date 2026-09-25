@@ -10,15 +10,27 @@ use mj_tui::DashboardState;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);
+/// Applies one worker poll to the controller's records, the dashboard, and
+/// the open conversations. `persistence` is where the records it changes are
+/// saved; `None` saves nothing.
 pub(crate) fn apply_worker_poll_update(
     controller: &mut Controller,
     dashboard: &mut DashboardState,
+    chats: &mut std::collections::BTreeMap<String, mj_chat::chat::ActiveChat>,
     update: WorkerPollUpdate,
-    dashboard_io_tx: &tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
-    tracker: &crate::dashboard::CriticalOperationTracker,
+    persistence: Option<(
+        &tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
+        &crate::dashboard::CriticalOperationTracker,
+    )>,
 ) -> Result<bool> {
-    if apply_worker_record_update(controller, &update, Some((dashboard_io_tx, tracker)))? {
+    if apply_worker_record_update(controller, &update, persistence)? {
         dashboard.set_state(controller.state.clone());
+        // The Sessions row now reads the new title from the record. The open
+        // conversation's header must read it too, now: the daemon's later
+        // copy of the record is identical, so it refreshes nothing, and the
+        // header used to wait for the turn's end to change the record again
+        // (launch finding R5-7).
+        crate::dashboard::refresh_open_chats(chats, controller, dashboard);
     }
     match update.view.error {
         Some(ViewError::Unreachable(detail)) => {
@@ -45,6 +57,7 @@ pub(crate) fn apply_worker_poll_update(
                             | SessionState::Error
                     )
                 })
+                && let Some((dashboard_io_tx, tracker)) = persistence
             {
                 spawn_worker_record_persistence(
                     update.session_id.clone(),

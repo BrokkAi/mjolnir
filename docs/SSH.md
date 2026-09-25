@@ -5,7 +5,8 @@ Two runtimes can run on it:
 
 - `bare` — uses an existing Git project directory on the remote machine.
   When that path is the repository's primary checkout, Mjolnir creates a
-  session-specific linked worktree beside it and runs the harness there.
+  session-specific clone under `.mj/clones/<session-id>` in that repository
+  and runs the harness there.
 - `podman` (or `docker`) — starts a rootless container on the remote machine
   (the same model as on this machine, just reached over SSH) and runs the
   session inside it.
@@ -40,9 +41,10 @@ own message. A master exits 60 seconds after its last session closes, so
 `ssh` processes can outlive the daemon by that long.
 
 The control sockets live in `$XDG_RUNTIME_DIR/mjolnir/<instance>/` when that
-variable is set (`default` for the default instance), and in
-`<data dir>/ssh/` otherwise. Each instance has its own directory, so two
-daemons never share a master. A socket is named `<hash>-<shard>`, where the
+variable is set, and in `<data dir>/ssh/` otherwise. `<instance>` is
+`default` for the default instance, the name for `--instance`, and a
+16-character hash of the data directory when only `MJ_DATA_DIR` is set.
+Each instance has its own directory, so two daemons never share a master. A socket is named `<hash>-<shard>`, where the
 hash covers the destination and your `extra_args`, and the shard number counts
 the masters for that host from 0. A `<hash>-<shard>.lock` file beside each
 socket makes processes of the same instance (for example the old and new
@@ -66,9 +68,13 @@ on the master it joins, so probes for new sessions cannot push a master past
 the two spare sessions.
 
 If the server refuses a session anyway, the command never started, so Mjolnir
-retries it. The daemon log names this case "refused another session on a
-shared connection (MaxSessions)", which is different from a connection
-closed before authentication (`MaxStartups`).
+retries it, up to three attempts with a growing delay. The dashboard's own
+Git reads for the conversation header, the capacity probe, and the relay
+connection to each session's worker retry the same way. A refused session that gets in on a retry is logged only at debug level;
+one still refused on its last attempt is logged as a warning that names
+"refused another session on a shared connection (MaxSessions)". A
+connection closed before authentication (`MaxStartups`) is always a
+warning.
 
 If the target's `extra_args` already set `ControlMaster`, `ControlPath`, or
 `-S`, Mjolnir adds no sharing options at all for that target and leaves

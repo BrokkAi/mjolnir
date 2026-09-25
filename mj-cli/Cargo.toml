@@ -61,5 +61,7 @@ libc.workspace = true
 # daemon, which is exactly what the incident it reproduces did.
 rusqlite.workspace = true
 tempfile.workspace = true
+# Project cursor-addressed PTY redraws into the screen visible to the user.
+vte = { version = "0.14", default-features = false }
 # `start_paused` drives the force-destroy preemption timeout instantly.
 tokio = { workspace = true, features = ["test-util"] }

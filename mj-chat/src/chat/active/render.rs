@@ -519,8 +519,17 @@ pub(crate) fn render_composer_band(
     let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
     chat.config_chip_areas = config_chips;
     let mut prompt_block = theme::panel(prompt_focused)
+        .style(
+            Style::default()
+                .fg(theme::palette().text)
+                .bg(theme::palette().surface_raised),
+        )
         .padding(Padding::new(2, 1, 0, 0))
         .title(prompt_title);
+    // The input owns the accent edge; supporting panels use quieter chrome.
+    if prompt_focused {
+        prompt_block = prompt_block.border_style(theme::title(true));
+    }
     if let Some(activity_title) = activity_title {
         prompt_block = prompt_block.title(activity_title.right_aligned());
     }
@@ -704,7 +713,7 @@ pub(crate) fn render_composer_band(
             {
                 "What would you like to build?"
             } else {
-                ""
+                "Message the agent, or / for commands"
             },
             theme::muted(),
         ))]
@@ -720,7 +729,11 @@ pub(crate) fn render_composer_band(
     let input_scroll = cursor_row.saturating_add(1).saturating_sub(content_height);
     frame.render_widget(
         Paragraph::new(prompt_lines)
-            .style(Style::default().fg(theme::palette().text))
+            .style(
+                Style::default()
+                    .fg(theme::palette().text)
+                    .bg(theme::palette().surface_raised),
+            )
             .wrap(Wrap { trim: false })
             .scroll((input_scroll as u16, 0))
             .block(prompt_block),

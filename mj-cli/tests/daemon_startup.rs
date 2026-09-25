@@ -615,3 +615,116 @@ fn new_without_a_workspace_refuses_without_starting_a_daemon() {
         "refusing must not start the daemon"
     );
 }
+
+/// Launch finding R5-9: `mj new --workspace nosuch` started a stopped daemon
+/// (3.4 s) only to refuse the name. Like a missing `--workspace` (R2-14), the
+/// refusal now comes from the store, and no daemon is left behind.
+#[test]
+fn new_with_an_unknown_workspace_refuses_without_starting_a_daemon() {
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let project = storage.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    let output = common::own_test_daemons(&mut command)
+        .args([
+            "new",
+            "--workspace",
+            "nosuch",
+            "--profile",
+            "fake",
+            "--project-directory",
+        ])
+        .arg(&project)
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", storage.path().join("config"))
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown workspace \"nosuch\""), "{stderr}");
+    assert!(stderr.contains("this instance has none yet"), "{stderr}");
+    assert!(
+        !data.join("daemon.json").exists(),
+        "refusing must not start the daemon"
+    );
+    drop(storage);
+}
+
+/// Launch finding R5-9: with a daemon running, `mj acp --workspace nosuch`
+/// served, found its input closed, and exited 0 without a word. It now checks
+/// the name against the running daemon first and exits 1 with the refusal.
+#[test]
+fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
+    let storage = upgrade_storage();
+    let data = storage.path().join("data");
+    let config = storage.path().join("config");
+    fs::create_dir_all(&data).unwrap();
+    mj_controller::database::create_workspace_at(&data.join("mj.sqlite3"), "alpha").unwrap();
+    let mut daemon = common::own_test_daemons(&mut Command::new(env!("CARGO_BIN_EXE_mj")))
+        .arg("daemon-run")
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Ready once a management round trip succeeds, not merely once the
+    // endpoint file exists.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "the daemon exited before it was ready"
+        );
+        let mut status = Command::new(env!("CARGO_BIN_EXE_mj"));
+        let ready = common::own_test_daemons(&mut status)
+            .args(["daemon", "status"])
+            .env("MJ_DATA_DIR", &data)
+            .env("MJ_CONFIG_DIR", &config)
+            .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if ready.status.success() && String::from_utf8_lossy(&ready.stdout).contains(" started ") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon never answered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let mut acp = Command::new(env!("CARGO_BIN_EXE_mj"));
+    let output = common::own_test_daemons(&mut acp)
+        .args(["acp", "--workspace", "nosuch"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // Stop and reap the daemon this test started before the storage is
+    // removed; an unreaped child would look to the storage's cleanup like a
+    // daemon that outlived its stop.
+    let mut stop = Command::new(env!("CARGO_BIN_EXE_mj"));
+    let _ = common::own_test_daemons(&mut stop)
+        .args(["daemon", "stop"])
+        .env("MJ_DATA_DIR", &data)
+        .env("MJ_CONFIG_DIR", &config)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    drop(storage);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("unknown workspace \"nosuch\""), "{stderr}");
+    assert!(stderr.contains("alpha"), "{stderr}");
+}

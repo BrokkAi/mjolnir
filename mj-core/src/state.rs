@@ -192,6 +192,58 @@ pub enum TurnOutcomeKind {
     Interrupted { message: String },
 }
 
+/// How a turn ended, in words a person reads: "completed, end of turn",
+/// "interrupted", or "failed: <reason>".
+impl std::fmt::Display for TurnOutcomeKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed { stop_reason } => match classify_prompt_completion(stop_reason) {
+                PromptCompletion::Finished => formatter.write_str("completed, end of turn"),
+                PromptCompletion::InputRequired => {
+                    formatter.write_str("completed, waiting for input")
+                }
+                // A harness reports `cancelled` for a turn the client stopped.
+                PromptCompletion::Cancelled => formatter.write_str("interrupted"),
+                PromptCompletion::QuotaLimit => formatter.write_str("failed: quota limit reached"),
+                PromptCompletion::Error => {
+                    write!(formatter, "failed: {}", stop_reason_words(stop_reason))
+                }
+            },
+            Self::Rejected { message } => write!(
+                formatter,
+                "failed: {}",
+                message.lines().next().unwrap_or_default().trim()
+            ),
+            Self::Interrupted { .. } => formatter.write_str("interrupted"),
+        }
+    }
+}
+
+/// A stop reason as the harness spells it (`MaxTokens`, `max_turn_requests`)
+/// as lower-case words.
+fn stop_reason_words(stop_reason: &str) -> String {
+    let mut words = String::new();
+    let mut previous_lower = false;
+    for character in stop_reason.trim().chars() {
+        if character == '_' || character == '-' || character.is_whitespace() {
+            if !words.ends_with(' ') && !words.is_empty() {
+                words.push(' ');
+            }
+            previous_lower = false;
+            continue;
+        }
+        if character.is_uppercase() && previous_lower {
+            words.push(' ');
+        }
+        previous_lower = character.is_lowercase() || character.is_ascii_digit();
+        words.extend(character.to_lowercase());
+    }
+    match words.trim_end() {
+        "" => "no reason given".to_owned(),
+        words => words.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptCompletion {
     InputRequired,
@@ -1235,8 +1287,8 @@ pub struct SessionRecord {
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationAssessment>,
-    /// None follows the global `[subagents] enabled` setting at launch time;
-    /// Some(true) and Some(false) are explicit per-session choices.
+    /// None means native sub-agents at launch time; Some(true) and
+    /// Some(false) are explicit per-session choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mjolnir_subagents: Option<bool>,
     pub target_template_id: String,
@@ -1391,11 +1443,27 @@ impl SessionRecord {
         )
     }
 
+    /// The target access settings this session's commands use: the ones
+    /// recorded when its target was selected, with the machine's current ssh
+    /// options while they still reach the same host, user, and port, or the
+    /// configured target's when nothing was recorded.
     pub fn target_runtime_settings<'a>(
         &'a self,
         config: &Config,
     ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
         if let Some(runtime) = &self.target_runtime {
+            // How to reach the target follows the machine's current ssh
+            // options; where it is stays as recorded (launch finding R3-7).
+            if let Some(refreshed) =
+                config
+                    .targets
+                    .get(&self.target_template_id)
+                    .and_then(|template| {
+                        runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+                    })
+            {
+                return Ok(std::borrow::Cow::Owned(refreshed));
+            }
             return Ok(std::borrow::Cow::Borrowed(runtime));
         }
         let template = config.targets.get(&self.target_template_id).ok_or_else(|| {
@@ -1783,6 +1851,20 @@ impl Default for State {
 }
 
 impl State {
+    /// How a notice names a session: the title the session list shows
+    /// (`listed_title`, which includes the title it was created with), or its
+    /// short id when it has no title or its record is gone (launch findings
+    /// B-3, R5-5 and R8-3).
+    #[must_use]
+    pub fn session_notice_name(&self, session_id: &str) -> String {
+        match self.sessions.get(session_id) {
+            Some(session) if session.listed_title() != session.id => {
+                session.listed_title().to_owned()
+            }
+            _ => short_id(session_id).to_owned(),
+        }
+    }
+
     /// The session whose project identity names a row.
     ///
     /// A sub-agent child runs inside its parent's workspace and owns no

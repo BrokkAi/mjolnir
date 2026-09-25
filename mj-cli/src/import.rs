@@ -522,6 +522,7 @@ fn import_session_option(
     ImportSessionOption {
         native_session_id: session.native_session_id,
         title: session.title,
+        cwd: session.cwd,
         project_directory,
         details,
         unavailable_reason: session.unavailable_reason.map(ToOwned::to_owned),
@@ -837,6 +838,7 @@ mod tests {
         let option = |id: &str, title: &str| ImportSessionOption {
             native_session_id: id.into(),
             title: title.into(),
+            cwd: PathBuf::new(),
             project_directory: String::new(),
             details: String::new(),
             unavailable_reason: None,

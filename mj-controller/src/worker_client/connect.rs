@@ -22,19 +22,25 @@ impl RelayClient {
     }
 
     /// Start a relay proxy and complete its handshake, retrying while the
-    /// remote `sshd` is turning fresh connections away before authentication.
+    /// remote `sshd` is turning fresh connections away before authentication,
+    /// and while the worker has not bound its control socket yet.
     ///
     /// The whole daemon reconnects at once after a restart, which is exactly
     /// when a host at its `MaxStartups` ceiling drops the surplus. Those
     /// rejections say nothing about the worker, so escalating one to worker
-    /// recovery would destroy a healthy session.
+    /// recovery would destroy a healthy session. A worker that was started
+    /// moments ago has usually not bound its socket yet; that is routine too,
+    /// as long as the socket appears within [`WORKER_SOCKET_RETRY_DELAYS`].
     pub(super) async fn connect_with_timeouts(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
     ) -> Result<Self> {
-        for attempt in 1..=SSH_RETRY_ATTEMPTS {
+        let purpose = format!("{} for session {expected_session_id}", spec.purpose);
+        let mut refusals = 0;
+        let mut socket_waits = 0;
+        loop {
             let outcome = Self::connect_attempt(
                 spec,
                 expected_session_id,
@@ -42,28 +48,55 @@ impl RelayClient {
                 handshake_timeout,
             )
             .await;
-            let (error, refusal) = match outcome {
+            let (error, retry) = match outcome {
                 Ok(client) => return Ok(client),
-                Err(ConnectFailure { error, refusal }) => match refusal {
-                    Some(refusal) if attempt < SSH_RETRY_ATTEMPTS => (error, refusal),
-                    _ => return Err(error),
-                },
+                Err(ConnectFailure { error, retry: None }) => return Err(error),
+                Err(ConnectFailure {
+                    error,
+                    retry: Some(retry),
+                }) => (error, retry),
             };
-            let delay = mj_core::targets::ssh_retry_delay(attempt);
-            tracing::warn!(
-                session_id = %expected_session_id,
-                destination = spec.ssh_destination.as_deref().unwrap_or_default(),
-                purpose = %spec.purpose,
-                attempt,
-                attempts = SSH_RETRY_ATTEMPTS,
-                delay_ms = delay.as_millis() as u64,
-                error = %error,
-                "relay proxy: {}",
-                refusal.retry_message()
-            );
+            let delay = match retry {
+                // Logged by the routine every other refused ssh command uses:
+                // a MaxSessions refusal is routine while sessions start and
+                // goes to debug, one before authentication stays a warning
+                // (R7-1).
+                ConnectRetry::Refused(refusal, stderr) => {
+                    refusals += 1;
+                    let destination = spec.ssh_destination.as_deref().unwrap_or_default();
+                    if refusals == SSH_RETRY_ATTEMPTS {
+                        refusal.log_exhausted(destination, &purpose, &stderr);
+                        return Err(error);
+                    }
+                    let delay = mj_core::targets::ssh_retry_delay(refusals);
+                    refusal.log_retry(destination, &purpose, refusals, delay, &stderr);
+                    delay
+                }
+                ConnectRetry::SocketMissing => {
+                    let Some(&delay) = WORKER_SOCKET_RETRY_DELAYS.get(socket_waits) else {
+                        tracing::warn!(
+                            session_id = %expected_session_id,
+                            purpose = %purpose,
+                            operation = "hello",
+                            attempts = socket_waits + 1,
+                            error = format!("{error:#}"),
+                            "the worker's control socket is still missing; giving up on this connection"
+                        );
+                        return Err(error);
+                    };
+                    socket_waits += 1;
+                    tracing::debug!(
+                        session_id = %expected_session_id,
+                        purpose = %purpose,
+                        attempt = socket_waits,
+                        delay_ms = delay.as_millis() as u64,
+                        "the worker has not bound its control socket yet; retrying"
+                    );
+                    delay
+                }
+            };
             tokio::time::sleep(delay).await;
         }
-        unreachable!("the final attempt always returns");
     }
 
     /// One proxy launch and handshake.
@@ -157,11 +190,19 @@ impl RelayClient {
                 error
             })?;
         let stderr_tail: ProxyStderrTail = Default::default();
+        let handshake_done = Arc::new(AtomicBool::new(false));
         let draining = child.stderr.take().map(|errors| {
             let purpose = spec.purpose.clone();
             let session_id = expected_session_id.to_owned();
             let tail = stderr_tail.clone();
-            tokio::spawn(drain_proxy_stderr(errors, purpose, session_id, tail))
+            let handshake_done = handshake_done.clone();
+            tokio::spawn(drain_proxy_stderr(
+                errors,
+                purpose,
+                session_id,
+                tail,
+                handshake_done,
+            ))
         });
         let input = child
             .stdin
@@ -229,6 +270,7 @@ impl RelayClient {
                 // Hello succeeded, so this connection is past authentication
                 // and no longer counts against the server's startup budget.
                 drop(permit);
+                handshake_done.store(true, Ordering::Release);
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
             }
@@ -255,10 +297,11 @@ impl RelayClient {
                     None => None,
                 };
                 let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
+                let stderr = tail.join("\n");
                 let refusal = permit
                     .as_ref()
                     .and(status)
-                    .and_then(|status| ssh_refusal(status, &tail.join("\n")));
+                    .and_then(|status| ssh_refusal(status, &stderr));
                 drop(permit);
                 // A session turned away by the transport usually means its
                 // master died; make the retry check and reopen it.
@@ -267,10 +310,23 @@ impl RelayClient {
                 {
                     lease.invalidate();
                 }
-                Err(ConnectFailure {
-                    error: Self::attach_proxy_stderr(error, tail),
-                    refusal,
-                })
+                let error = Self::attach_proxy_stderr(error, tail);
+                let retry = match refusal {
+                    Some(refusal) => Some(ConnectRetry::Refused(refusal, stderr)),
+                    None if status.is_some() && worker_socket_missing(&stderr) => {
+                        Some(ConnectRetry::SocketMissing)
+                    }
+                    None => None,
+                };
+                match retry {
+                    // A launch that will be retried is logged by the retry.
+                    // Its proxy has exited and was reaped above, so dropping
+                    // `client` must not report that exit as a second warning.
+                    Some(_) => drop(client.child.take()),
+                    // Anything else is a failure of this proxy or its worker.
+                    None => log_relay_client_failure(&client, "hello", "relay-hello", &error),
+                }
+                Err(ConnectFailure { error, retry })
             }
         }
     }
@@ -336,23 +392,17 @@ impl RelayClient {
             worker_build,
         } = response
         else {
-            let error = anyhow!("relay returned an unexpected hello response");
-            log_relay_client_failure(self, "hello", "relay-hello", &error);
-            return Err(error);
+            bail!("relay returned an unexpected hello response");
         };
         if session_id != expected_session_id {
-            let error = anyhow!("relay belongs to session {session_id}, not {expected_session_id}");
-            log_relay_client_failure(self, "hello", "relay-hello", &error);
-            return Err(error);
+            bail!("relay belongs to session {session_id}, not {expected_session_id}");
         }
         if !RelayVersionRange::CURRENT.contains(negotiated) {
-            let error = anyhow!(
+            bail!(
                 "relay negotiated unsupported protocol {negotiated}; this controller supports {}-{}",
                 RELAY_MIN_PROTOCOL_VERSION,
                 RELAY_PROTOCOL_VERSION
             );
-            log_relay_client_failure(self, "hello", "relay-hello", &error);
-            return Err(error);
         }
         self.protocol_version = negotiated;
         self.session_id = session_id;
@@ -360,4 +410,12 @@ impl RelayClient {
         self.worker_build = worker_build;
         Ok(())
     }
+}
+
+/// Whether a relay proxy that exited during hello found no control socket to
+/// connect to. The worker's proxy reports a failed connect as "connect worker
+/// socket <path>" (`mj-worker`'s `proxy`), and a socket file that does not
+/// exist yet as ENOENT.
+fn worker_socket_missing(stderr: &str) -> bool {
+    stderr.contains("connect worker socket") && stderr.contains("No such file or directory")
 }

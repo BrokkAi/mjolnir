@@ -586,6 +586,14 @@ impl DashboardState {
         match result {
             Ok(entries) => {
                 let previous_busy = manager.busy;
+                // A rename or close started from its shortcut ends where the
+                // shortcut was pressed, as leaving it with Esc does (B-11).
+                // Read before the new entries can reset the view.
+                let return_to_dashboard = manager.leaves_to_dashboard()
+                    && matches!(
+                        previous_busy,
+                        Some(WorkspaceMutation::Rename | WorkspaceMutation::Close)
+                    );
                 let previous_view_id = manager.view_workspace_id().map(str::to_owned);
                 let previous_selected_id = manager
                     .selected_entry()
@@ -666,6 +674,13 @@ impl DashboardState {
                     }
                 }
                 manager.sync_form();
+                if return_to_dashboard {
+                    match &mut self.mode {
+                        Mode::WorkspaceManager(_) => self.cancel_modal(),
+                        Mode::Help(overlay) => *overlay.return_to = Mode::Dashboard,
+                        _ => {}
+                    }
+                }
                 return foreground;
             }
             Err(error) => {
@@ -936,14 +951,26 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
-    let mut block = theme::panel(focused).title(WORKSPACES_TITLE);
+    let brand = format!(" {} MJOLNIR", theme::glyphs().spark);
+    let branded_title = Line::from(vec![
+        Span::styled(brand, theme::title(true)),
+        Span::styled(" / ", theme::muted()),
+        Span::styled("Workspaces ", theme::title(focused)),
+    ]);
+    let version = format!(" {} ", dashboard.version_label);
+    let title = if branded_title.width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
+        <= usize::from(area.width)
+    {
+        branded_title
+    } else {
+        Line::raw(WORKSPACES_TITLE)
+    };
+    let title_width = title.width();
+    let mut block = theme::panel(focused).title(title);
     // The pane sits at the top of every dashboard, so its border is where the
     // build number costs nothing and is always in view. A sidebar too narrow
     // to hold both drops it rather than overlap the pane's own title.
-    let version = format!(" {} ", dashboard.version_label);
-    if usize::from(area.width)
-        >= Line::raw(WORKSPACES_TITLE).width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
-    {
+    if usize::from(area.width) >= title_width + Line::raw(&version).width() + BORDER_CORNER_CELLS {
         // The pane's own title style is bold; a build number is a stamp, not a
         // heading, so it drops back out of bold here.
         let style = theme::muted().remove_modifier(Modifier::BOLD);
@@ -1031,7 +1058,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         let tab_area = Rect::new(x, inner.y, width, 1);
         dashboard.register_workspace_tab_area(id.clone(), tab_area);
         let style = if index == selected {
-            theme::selection(true)
+            theme::active_control()
         } else {
             theme::muted()
         };
@@ -1114,11 +1141,16 @@ pub(crate) fn render_workspace_manager(
             WorkspaceManagerView::List => {
                 "Enter opens the selected workspace · Tab moves between controls".into()
             }
+            // Esc from a page leaves it for the list, unless the page was
+            // opened by its shortcut, which never showed the list (B-11).
             WorkspaceManagerView::Create => {
-                "Enter creates the workspace · Esc closes manager".into()
+                "Enter creates the workspace · Esc returns to the list".into()
+            }
+            WorkspaceManagerView::Rename { .. } if dialog.leaves_to_dashboard() => {
+                "Enter saves the new name · Esc cancels".into()
             }
             WorkspaceManagerView::Rename { .. } => {
-                "Enter saves the new name · Esc closes manager".into()
+                "Enter saves the new name · Esc returns to the list".into()
             }
             WorkspaceManagerView::Close { .. } if dialog.busy == Some(WorkspaceMutation::Close) => {
                 "Suspending sessions · Esc returns to the dashboard".into()
@@ -1127,7 +1159,7 @@ pub(crate) fn render_workspace_manager(
                 "Confirm deleting the workspace · Esc cancels".into()
             }
             WorkspaceManagerView::Drafts { .. } => {
-                "Enter recovers the selected draft · Esc closes manager".into()
+                "Enter recovers the selected draft · Esc returns to the list".into()
             }
         }
     };
@@ -1183,8 +1215,10 @@ pub(crate) fn render_workspace_manager(
             draft_count,
             ..
         } => {
+            let sessions = crate::widgets::counted(*session_count, "session", "sessions");
+            let drafts = crate::widgets::counted(*draft_count, "saved draft", "saved drafts");
             let text = format!(
-                "Delete {workspace_name:?}?\n\nSuspend {session_count} session(s), including active sub-agents.\nResumable histories are preserved.\nDiscard {draft_count} saved draft(s) and any unsent composer text.\nRemove this workspace after all sessions are suspended."
+                "Delete {workspace_name:?}?\n\nSuspend {sessions}, including active sub-agents.\nResumable histories are preserved.\nDiscard {drafts} and any unsent composer text.\nRemove this workspace after all sessions are suspended."
             );
             frame.render_widget(
                 Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),

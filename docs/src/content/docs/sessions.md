@@ -55,9 +55,15 @@ Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
 dashboard. The full wizard resolves four things:
 
 1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or Muse Code and the credentials to use.
-2. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
-3. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
+2. A [target](/targets/) selects the local, container, SSH, or EC2 environment.
+3. A project source supplies the working directory: a [bundle](/workspaces-bundles/) for a managed target, or an existing Git directory for a bare target.
 4. A final launch review, with optional attached directories and per-session container sizing where the target supports them.
+
+When only one target is available and it has no size to set, the wizard
+chooses that target and skips the target step. For example, on a host without
+Podman or Docker, `localhost` is the only target. The step numbers then count
+three steps, and the review still shows the target. A container or EC2 target
+keeps its step even when it is the only one, because you set its size there.
 
 **Create isolated checkout** on the final review controls whether a bare Git
 session gets a separate checkout or uses the selected directory directly. It
@@ -87,7 +93,7 @@ Press `Esc` to cancel the active agent turn or shell command. This does not stop
 
 A turn normally ends when the harness answers. If the harness bridge process exits, its connection closes, or the worker restarts, Mjolnir reports a failed turn within seconds, with the reason in `mj wait` and in the transcript. Optional stall bounds and key-enabled turn classification can also end Mjolnir’s tracked turn, as described below.
 
-Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Unless the turn classifier confidently identifies a request for your input, Mjolnir reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minute(s)`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj interrupt-turn` or `Esc`.
+Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Unless the turn classifier confidently identifies a request for your input, Mjolnir reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minutes`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj interrupt-turn` or `Esc`.
 
 There is one case Mjolnir cannot recover from: an adapter that finished the work — wrote its final message, made its commit — and then failed to send the reply. That work exists in the workspace and in the harness's own session files, but never reaches Mjolnir's transcript, so the turn stays running until you end it. If you would rather have Mjolnir end such turns automatically, set `MJ_TURN_STALL_TIMEOUT_MS` to a number of milliseconds of silence to allow; the turn then fails with the reason `harness_inactive`. It is off by default because the same setting will also end healthy turns that are merely slow.
 
@@ -96,6 +102,26 @@ Mjolnir automatically uses TypeSafe's Jev classifier to distinguish a question f
 Jev checks are recorded in local diagnostic logs, including scores, thresholds, timing, classifier questions, exact submitted JSON, and the actual application outcome. A positive assessment and an accepted continuation are recorded separately. Ordinary checks and retries do not add transcript messages. When the classifier identifies a running turn as waiting for input, the transcript shows: **Classifier: The agent appears to be waiting for you. The harness may still be running.**
 
 Exact inputs contain conversation text and live runtime facts. They are stored in `jev-decisions/decisions.*.jsonl` under the daemon data directory and each worker root, with four rotating 8 MiB segments per owner. HTTP authentication headers and configured TypeSafe keys are not recorded. The hosted proxy does not log request content. Details expire through rotation; no permanent audit database or history backfill is created.
+
+## Session actions
+
+The **⋯** button on a session row, `.` on the Sessions pane, and `prefix+.`
+open the session's action menu. The menu groups its actions under dividers:
+
+- **Content**: **Changed files** lists the files the session's checkout has
+  changed, with the branch and its distance from upstream.
+- **Organize**: **Rename…**, **Pin…**, and **Unpin**.
+- **Lifecycle**: **Container settings** (container sessions only), **Move…**,
+  **Suspend…**, and **Restart**.
+- After a plain divider: **Copy session ID** and **Destroy…**.
+
+The menu leaves out an action that does not apply to the session. An action
+that applies but cannot run yet stays in the menu, greyed, with the reason.
+
+**Copy session ID** puts the session's full ID on the clipboard, for commands
+such as `mj wait --session <id>`. The footer confirms the copy with the ID's
+first eight characters. The command palette (`prefix+:`) lists the same action
+under the session's name.
 
 ## Detach and reattach
 
@@ -149,7 +175,7 @@ Select a live session, press `prefix+:`, and choose **Suspend session**. Suspend
 1. Freezes dispatch at a safe boundary.
 2. Captures and verifies a current recovery archive.
 3. Terminates the owning process group or remote worker.
-4. Retires the session's managed worktree, container, or instance only after the worker has stopped.
+4. Retires the session's managed clone, container, or instance only after the worker has stopped.
 5. Leaves the session record and verified archive available to resume.
 
 If checkpoint creation or verification fails, suspension refuses teardown and
@@ -176,7 +202,9 @@ Provider archive metadata is shown read-only. Pressing Enter on a row opens the
 resume wizard, which lets you:
 
 - keep the original profile or choose another harness profile;
-- choose a compatible target and adjust its resources;
+- choose a compatible target and adjust its resources (when only one target
+  suits the session and it has no size to set, the wizard chooses it and
+  skips that step);
 - review or update repository origins if the archived Git history no longer exists at the configured source;
 - keep the pending prompt queue or discard it before launch.
 
@@ -249,7 +277,8 @@ Use **Move…** from the session action menu when a live session should continue
 with another profile, target, or both. Move is one daemon-owned operation: it
 prepares and checks the destination, interrupts the active turn only after you
 confirm, captures a verified checkpoint, and restores the same logical session
-on the destination.
+on the destination. Like the resume wizard, the Move wizard skips its target
+step when only one target suits the session and it has no size to set.
 
 How much is rebuilt depends on what changes. When the target, the attached
 directories, and the resource allocation all stay the same, Move replaces only
@@ -304,6 +333,8 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
+The Import view and `mj import` read the home of each enabled profile. A session Mjolnir runs writes its native history into its own staged home instead, on this machine as on every other target, so it never appears in the Import view, and your harness's own resume command, such as `codex resume` or `claude --resume`, does not list it either. Find it on the **Mjolnir** or **Archived** tab. See [Native session history](/profiles/#native-session-history).
+
 For scripting, select a specific native UUID or the latest session:
 
 ```sh
@@ -314,8 +345,9 @@ mj import muse --session <native-uuid> --bundle myapp
 ```
 
 Dashboard imports that will resume in a bare Git project also offer
-**Create managed worktree**, even when there are no import warnings. The saved
-choice takes effect on first resume.
+**Create isolated checkout**, even when there are no import warnings. The saved
+choice takes effect on first resume, which then makes the session's clone
+under `.mj/clones/<session id>`.
 
 Close the source harness before importing. If it changes the session during import, select it again after it stops. Unsupported native storage versions report an error rather than importing partial history.
 
@@ -483,12 +515,14 @@ Continue with [durability and recovery](/durability/) for the archive guarantees
 
 Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
 
-This is enabled by default. Uncheck **Enabled** under **Settings → Automatically continue unfinished requests** to disable it, or set:
+This is enabled by default. Uncheck **Enabled** under **Setup → Continuation** to disable it, or set:
 
 ```toml
 [continuation]
 enabled = false
 ```
+
+Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Setup reads **Off · Jev is off (Privacy)**.
 
 The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
 

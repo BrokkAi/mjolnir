@@ -334,7 +334,7 @@ pub(crate) fn render_import_bundle_confirmation(
         Checkbox::render(
             frame,
             Rect::new(inner.x, y, inner.width, 1),
-            "Create managed worktree",
+            "Create isolated checkout",
             confirmation.create_managed_worktree,
             true,
             &mut form,
@@ -546,7 +546,7 @@ pub(crate) fn render_changed_files(
         .state
         .sessions
         .get(&dialog.session_id)
-        .map(|session| session.display_title().to_owned())
+        .map(|session| session.listed_title().to_owned())
         .unwrap_or_else(|| dialog.session_id.clone());
     let title = dismissible_modal_title(
         &mut form,
@@ -1289,7 +1289,12 @@ pub(crate) fn confirmation_body(
             }
             if *active_children > 0 {
                 lines.push(Line::raw(format!(
-                    "This also suspends {active_children} active sub-agent(s) first."
+                    "This also suspends {} first.",
+                    crate::widgets::counted(
+                        *active_children,
+                        "active sub-agent",
+                        "active sub-agents"
+                    )
                 )));
             }
             (" Suspend session? ", lines)

@@ -1,5 +1,6 @@
 //! Pin placement and pane menus share the dashboard's component event model.
 use super::*;
+use crate::actions::CommandId;
 use crate::surface_controls::SurfaceControl;
 use crate::tile_layout::PaneId;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, ListActivation};
@@ -16,6 +17,8 @@ enum PaneOperation {
     Swap(PaneId, PaneId),
     Zoom(PaneId),
     Close(PaneId),
+    /// Runs one registry command, exactly as its key or palette row does.
+    Command(CommandId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub(crate) struct PaneMenu {
     /// destination pane, so a click on the menu must not count as a click
     /// on the pane beneath it.
     popup: std::cell::Cell<Rect>,
+    /// The title a dropdown hangs from. `None` centres the menu.
+    anchor: Option<Rect>,
 }
 
 impl DashboardState {
@@ -59,7 +64,43 @@ impl DashboardState {
             destinations,
             pressed_destination: None,
             popup: std::cell::Cell::new(Rect::default()),
+            anchor: None,
         });
+    }
+
+    /// Opens the small menu that hangs from a support pane's title: Refresh,
+    /// then the Setup pages for what the pane lists. Targets has Runtimes…
+    /// and Machines…; Profiles has Settings…, the Agent Profiles page.
+    /// Clicking the title opens it, and so does `.` while the pane has the
+    /// keyboard. Sessions has its own buttons, so it has no title menu.
+    pub(crate) fn begin_support_pane_menu(&mut self, pane: SupportPane) {
+        let (index, title, settings): (usize, &str, &[(&str, CommandId)]) = match pane {
+            SupportPane::Targets => (
+                1,
+                "Targets",
+                &[
+                    ("Runtimes…", CommandId::ManageTargets),
+                    ("Machines…", CommandId::ManageMachines),
+                ],
+            ),
+            SupportPane::Quota => (2, "Profiles", &[("Settings…", CommandId::ManageProfiles)]),
+            SupportPane::Sessions => return,
+        };
+        let entries = std::iter::once(("Refresh", CommandId::Refresh))
+            .chain(settings.iter().copied())
+            .map(|(label, command)| (label.to_owned(), PaneOperation::Command(command)))
+            .collect();
+        self.show_pane_menu(title, entries, false);
+        // The title's first cell: one in from the pane's left edge, after the
+        // border's corner or the minimized row's rule.
+        let anchor = self
+            .pane_areas
+            .map(|areas| areas[index])
+            .filter(|area| area.width > 1 && area.height > 0)
+            .map(|area| Rect::new(area.x + 1, area.y, 1, 1));
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = anchor;
+        }
     }
 
     pub(crate) fn begin_pin_menu(&mut self, session: String) {
@@ -242,6 +283,7 @@ impl DashboardState {
                 self.zoom_pane_command()
             }
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
+            PaneOperation::Command(id) => self.run_available_command(id),
         }
     }
 }
@@ -379,11 +421,43 @@ pub(crate) fn render_pane_chrome(frame: &mut Frame, dashboard: &DashboardState) 
     }
 }
 
+/// Where a dropdown sits: under the title it hangs from, as wide as its
+/// longest line needs. It opens upward when there is no room below, as for a
+/// minimized pane, whose one row sits just above the footer.
+fn dropdown_popup(
+    area: Rect,
+    anchor: Rect,
+    title: &str,
+    entries: &[(String, PaneOperation)],
+) -> Rect {
+    let content = entries
+        .iter()
+        .map(|(label, _)| Line::raw(label.as_str()).width())
+        // The title sits on the top border between the two corners.
+        .chain([Line::raw(title).width() + 2])
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(content + 4)
+        .unwrap_or(u16::MAX)
+        .max(16)
+        .min(area.width);
+    let height = (entries.len() as u16 + 2).min(area.height);
+    let x = anchor.x.min(area.right().saturating_sub(width)).max(area.x);
+    let y = if anchor.bottom().saturating_add(height) <= area.bottom() {
+        anchor.bottom()
+    } else {
+        anchor.y.saturating_sub(height).max(area.y)
+    };
+    Rect::new(x, y, width, height)
+}
+
 pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let Some(menu) = &dashboard.pane_menu else {
         return;
     };
-    let popup = if menu.destinations {
+    let popup = if let Some(anchor) = menu.anchor {
+        dropdown_popup(area, anchor, &menu.title, &menu.entries)
+    } else if menu.destinations {
         // Open inside the first destination pane, under its "[1] Pin here"
         // marker, so the chooser sits beside the panes it names; without a
         // drawn pane, centre it like any other menu.
@@ -473,7 +547,9 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_with_session, key, mouse_at, running_session};
+    use crate::test_support::{
+        dashboard_with_session, drawn, key, mouse_at, point, running_session,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -662,5 +738,262 @@ mod tests {
         );
         assert_eq!(d.selected_session_id(), None);
         assert!(d.pane_menu.is_none());
+    }
+
+    /// A press and release at one cell, as a click arrives from the terminal.
+    fn click(d: &mut DashboardState, at: (u16, u16)) -> DashboardAction {
+        d.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), at));
+        d.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), at))
+    }
+
+    /// Where the open dropdown was drawn, after drawing the surface once.
+    fn drawn_menu(d: &mut DashboardState) -> (Vec<String>, Rect) {
+        let lines = drawn(d, 140, 40);
+        let popup = d.pane_menu.as_ref().expect("the menu is open").popup.get();
+        (lines, popup)
+    }
+
+    /// The cell of a menu entry's first letter: inside the border, one row
+    /// per entry.
+    fn entry(popup: Rect, index: u16) -> (u16, u16) {
+        (popup.x + 1, popup.y + 1 + index)
+    }
+
+    /// The text drawn in `width` cells from (`x`, `y`).
+    fn cell_text(lines: &[String], x: u16, y: u16, width: usize) -> String {
+        lines[usize::from(y)]
+            .chars()
+            .skip(usize::from(x))
+            .take(width)
+            .collect()
+    }
+
+    /// The Setup entries a title menu lists after Refresh: the label, the
+    /// command it runs, and the Setup page (config section) that opens.
+    type SetupEntries = &'static [(&'static str, CommandId, &'static str)];
+
+    /// The two panes with a title menu: the pane, its index in `pane_areas`,
+    /// the name on its title, the focus that owns it, and its entries after
+    /// Refresh.
+    const TITLE_MENUS: [(SupportPane, usize, &str, Focus, SetupEntries); 2] = [
+        (
+            SupportPane::Targets,
+            1,
+            "Targets",
+            Focus::Targets,
+            &[
+                ("Runtimes…", CommandId::ManageTargets, "targets"),
+                ("Machines…", CommandId::ManageMachines, "machines"),
+            ],
+        ),
+        (
+            SupportPane::Quota,
+            2,
+            "Profiles",
+            Focus::Quota,
+            &[("Settings…", CommandId::ManageProfiles, "profiles")],
+        ),
+    ];
+
+    /// Asserts that `d` shows Setup on `page`, the page `command` opens.
+    fn assert_setup_page(d: &DashboardState, command: CommandId, page: &str) {
+        let mut expected = dashboard_with_session(running_session());
+        expected.dispatch_command(command);
+        assert!(matches!(d.mode, Mode::Setup(_)), "{page}");
+        assert_eq!(d.dialog_layer_key(), expected.dialog_layer_key(), "{page}");
+        assert!(
+            d.dialog_layer_key().contains(&format!("[{page:?}]")),
+            "{page}: {}",
+            d.dialog_layer_key()
+        );
+    }
+
+    /// User request 2026-09-25: the Targets and Profiles titles are
+    /// dropdowns. Clicking one opens a small menu hanging under that title,
+    /// with Refresh and then Runtimes… and Machines… (Targets) or Settings…
+    /// (Profiles), and leaves the keyboard where it was.
+    #[test]
+    fn clicking_a_support_pane_title_opens_its_menu_under_the_title() {
+        for (_, index, name, _, settings) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            d.focus_prompt();
+            let lines = drawn(&mut d, 140, 40);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            let title = point(&lines, &format!("{name} ▾"));
+            assert_eq!(title.1, pane.y, "{name}: the dropdown mark is on the title");
+
+            assert_eq!(click(&mut d, title), DashboardAction::None);
+            assert!(d.pane_menu.is_some(), "{name}");
+            assert_eq!(d.focus(), Focus::Prompt, "{name}");
+
+            let (lines, popup) = drawn_menu(&mut d);
+            assert_eq!(
+                (popup.x, popup.y),
+                (pane.x + 1, pane.y + 1),
+                "{name}: {lines:#?}"
+            );
+            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
+            let labels: Vec<&str> = d
+                .pane_menu
+                .as_ref()
+                .expect("the menu is open")
+                .entries
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
+            let expected: Vec<&str> = std::iter::once("Refresh")
+                .chain(settings.iter().map(|(label, _, _)| *label))
+                .collect();
+            assert_eq!(labels, expected, "{name}");
+            for (row, label) in (0..).zip(&expected) {
+                let (x, y) = entry(popup, row);
+                assert_eq!(
+                    cell_text(&lines, x, y, label.chars().count()),
+                    *label,
+                    "{lines:#?}"
+                );
+            }
+        }
+    }
+
+    /// Refresh runs the refresh `prefix+shift+r` runs. Each later entry opens
+    /// Setup on the page its command opens: Runtimes… as "Manage runtimes"
+    /// and Machines… as "Manage machines" (Targets), Settings… as "Manage
+    /// agent profiles" (Profiles).
+    #[test]
+    fn a_title_menu_refreshes_and_opens_each_setup_page() {
+        for (_, _, name, _, settings) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            let lines = drawn(&mut d, 140, 40);
+            let title = point(&lines, &format!("{name} ▾"));
+            click(&mut d, title);
+            let (_, popup) = drawn_menu(&mut d);
+            assert_eq!(
+                click(&mut d, entry(popup, 0)),
+                DashboardAction::RefreshAll,
+                "{name}"
+            );
+            assert!(d.pane_menu.is_none());
+            assert!(matches!(d.mode, Mode::Dashboard));
+
+            for (row, (_, command, page)) in (1..).zip(settings) {
+                let mut d = dashboard_with_session(running_session());
+                drawn(&mut d, 140, 40);
+                click(&mut d, title);
+                let (_, popup) = drawn_menu(&mut d);
+                assert_eq!(click(&mut d, entry(popup, row)), DashboardAction::None);
+                assert!(d.pane_menu.is_none(), "{name}");
+                assert_setup_page(&d, *command, page);
+            }
+        }
+    }
+
+    /// The number keys pick a title-menu entry directly: 1 is Refresh, and
+    /// 2 and 3 are Runtimes… and Machines… on Targets.
+    #[test]
+    fn number_keys_pick_a_title_menu_entry() {
+        for (_, _, name, focus, settings) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            drawn(&mut d, 140, 40);
+            d.focus = focus;
+            d.handle_key(key(KeyCode::Char('.')));
+            assert_eq!(
+                d.handle_key(key(KeyCode::Char('1'))),
+                DashboardAction::RefreshAll,
+                "{name}"
+            );
+            assert!(d.pane_menu.is_none(), "{name}");
+
+            for ((_, command, page), digit) in settings.iter().zip('2'..) {
+                let mut d = dashboard_with_session(running_session());
+                drawn(&mut d, 140, 40);
+                d.focus = focus;
+                d.handle_key(key(KeyCode::Char('.')));
+                assert_eq!(
+                    d.handle_key(key(KeyCode::Char(digit))),
+                    DashboardAction::None
+                );
+                assert!(d.pane_menu.is_none(), "{name}");
+                assert_setup_page(&d, *command, page);
+            }
+        }
+    }
+
+    /// The keyboard path: `.` on the focused pane opens the same menu, Enter
+    /// runs the entry under the cursor, and Esc closes it without running
+    /// anything.
+    #[test]
+    fn dot_opens_the_focused_pane_menu_and_esc_closes_it() {
+        for (_, index, name, focus, settings) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            drawn(&mut d, 140, 40);
+            d.focus = focus;
+            assert_eq!(d.handle_key(key(KeyCode::Char('.'))), DashboardAction::None);
+            let (lines, popup) = drawn_menu(&mut d);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            assert_eq!((popup.x, popup.y), (pane.x + 1, pane.y + 1), "{name}");
+            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
+            assert_eq!(d.handle_key(key(KeyCode::Esc)), DashboardAction::None);
+            assert!(d.pane_menu.is_none(), "{name}");
+            assert!(matches!(d.mode, Mode::Dashboard));
+            assert_eq!(d.focus(), focus);
+
+            d.handle_key(key(KeyCode::Char('.')));
+            assert_eq!(
+                d.handle_key(key(KeyCode::Enter)),
+                DashboardAction::RefreshAll,
+                "{name}"
+            );
+            d.handle_key(key(KeyCode::Char('.')));
+            d.handle_key(key(KeyCode::Down));
+            assert_eq!(d.handle_key(key(KeyCode::Enter)), DashboardAction::None);
+            let (_, command, page) = settings[0];
+            assert_setup_page(&d, command, page);
+        }
+    }
+
+    /// Minimized, Targets and Profiles are the last two rows above the
+    /// footer, so neither has room for the menu under its title and the
+    /// menu opens upward, still starting at the title's first column.
+    #[test]
+    fn a_minimized_pane_menu_opens_above_its_row() {
+        for (_, index, name, focus, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            for pane in [SupportPane::Targets, SupportPane::Quota] {
+                d.set_pane_size(pane, crate::PaneSize::Minimized);
+            }
+            drawn(&mut d, 140, 40);
+            d.focus = focus;
+            d.handle_key(key(KeyCode::Char('.')));
+            let (lines, popup) = drawn_menu(&mut d);
+            let pane = d.pane_areas.expect("pane areas")[index];
+            assert_eq!(pane.height, 1, "{name}");
+            assert!(popup.bottom() <= pane.y, "{name}: {lines:#?}");
+            assert_eq!(popup.x, pane.x + 1, "{name}");
+            let (x, y) = entry(popup, 0);
+            assert_eq!(cell_text(&lines, x, y, 7), "Refresh", "{lines:#?}");
+        }
+    }
+
+    /// The size chips share the title row with the dropdown and keep their
+    /// own clicks: a chip resizes the pane and opens no menu.
+    #[test]
+    fn the_size_controls_on_a_menu_title_still_resize_the_pane() {
+        for (pane_id, _, name, _, _) in TITLE_MENUS {
+            let mut d = dashboard_with_session(running_session());
+            drawn(&mut d, 140, 40);
+            for size in [crate::PaneSize::Minimized, crate::PaneSize::Standard] {
+                let chip = d
+                    .pane_size_control_areas
+                    .iter()
+                    .find(|(pane, chip, _)| *pane == pane_id && *chip == size)
+                    .map(|(_, _, area)| *area)
+                    .expect("the size chip is drawn");
+                click(&mut d, (chip.x + 1, chip.y));
+                assert_eq!(d.pane_size(pane_id), size, "{name}");
+                assert!(d.pane_menu.is_none(), "{name}");
+                drawn(&mut d, 140, 40);
+            }
+        }
     }
 }

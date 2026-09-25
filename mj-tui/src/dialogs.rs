@@ -80,6 +80,9 @@ pub(crate) enum DialogControl {
 pub struct ImportSessionOption {
     pub native_session_id: String,
     pub title: String,
+    /// The working directory the harness recorded, as `cwd` shows it on
+    /// this machine. `project_directory` is its display form.
+    pub cwd: std::path::PathBuf,
     pub project_directory: String,
     pub details: String,
     pub unavailable_reason: Option<String>,
@@ -534,7 +537,7 @@ impl DashboardState {
         let name = confirmation
             .session_id()
             .and_then(|session_id| self.state.sessions.get(session_id))
-            .map(|session| session.display_title().to_owned());
+            .map(|session| session.listed_title().to_owned());
         let dialog = ConfirmDialog::new(confirmation);
         match name {
             Some(name) => dialog.naming_session(&name),
@@ -1166,7 +1169,7 @@ impl DashboardState {
         };
         self.mode = Mode::Rename(RenameEditor {
             session_id: session.id.clone(),
-            session_name: session.display_title().to_owned(),
+            session_name: session.listed_title().to_owned(),
             title: TextInput::from_value(
                 session
                     .session_title_override

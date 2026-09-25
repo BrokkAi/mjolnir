@@ -61,6 +61,7 @@ fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionO
     crate::ImportSessionOption {
         native_session_id: id.into(),
         title: title.into(),
+        cwd: "/home/dev/Projects/hel".into(),
         project_directory: "~/Projects/hel".into(),
         details: "master · 1.0KB · ~/Projects/hel".into(),
         unavailable_reason: None,
@@ -520,6 +521,63 @@ fn a_live_session_hides_its_native_counterpart_from_the_dialog() {
     assert_eq!(titles(&merged), ["Idle native session"]);
 }
 
+/// R10-3: a `/clear` leaves the session's earlier native thread in the
+/// harness home. The store names one thread per session: until the next
+/// checkpoint the one from before `/clear`, after it the new one. So the
+/// Import tab offered session C's pre-`/clear` thread, whose history C
+/// still holds, and importing it would have duplicated that history. A
+/// thread that ran in a session's own checkout is that session's.
+#[test]
+fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
+    let clone = std::path::PathBuf::from(
+        "/home/dev/reverify-10/project/.mj/clones/0858ecafaa06ecd148aa8bcf70bba899",
+    );
+    let pre_clear = "01a0d8c9-2bc1-7041-9a64-4b8216558cdc";
+    let post_clear = "01a0d8c9-cc35-7e81-943e-0c480730ac99";
+    // Before and after the checkpoint that records the new thread.
+    for (stored, state) in [
+        (pre_clear, SessionState::Running),
+        (post_clear, SessionState::Stopped),
+    ] {
+        let mut session = stopped_session();
+        session.id = "0858ecafaa06ecd148aa8bcf70bba899".into();
+        session.state = state;
+        session.native_session_id = Some(stored.into());
+        session.project_directory = Some(clone.clone());
+        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+            kind: mj_core::state::ManagedCheckoutKind::Clone,
+            source_project_directory: "/home/dev/reverify-10/project".into(),
+            source_repository: "/home/dev/reverify-10/project".into(),
+            worktree_root: clone.clone(),
+            branch: "main".into(),
+            target: mj_core::state::ManagedWorktreeTarget::Local,
+            base_commit: None,
+        });
+        let mut before = native(pre_clear, "Remember PINEAPPLE and reply OK", 10);
+        before.cwd = clone.clone();
+        let mut after = native(post_clear, "What word did I ask you to remember?", 20);
+        after.cwd = clone.clone();
+        let mut own = native("user-thread", "The user's own thread", 5);
+        own.cwd = "/home/dev/reverify-10/project".into();
+        let merged = merged_resume_rows(
+            &config(),
+            &state_with(vec![session]),
+            &[codex_profile(vec![before, after, own])],
+            &[],
+        );
+        let importable = merged
+            .iter()
+            .filter(|row| matches!(row.key, ResumeRowKey::Native(..)))
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            importable,
+            ["The user's own thread"],
+            "with {stored} stored"
+        );
+    }
+}
+
 /// A record whose target was renamed or removed from config still reports
 /// the target it actually ran on.
 #[test]
@@ -720,6 +778,55 @@ fn the_destroy_button_replaces_the_d_key() {
     assert_eq!(confirm.session_name.as_deref(), Some("ACP pretty name"));
 }
 
+/// Launch finding R6-4: the Mjolnir tab listed a suspended session its
+/// harness had not named by its id (tmux/022), while the Destroy dialog and
+/// the notices called it "project via fake". The Mjolnir and Live tabs now
+/// list the title every other listing uses.
+#[test]
+fn a_session_its_harness_has_not_named_is_listed_by_its_created_title() {
+    let unnamed = |mut session: SessionRecord, id: &str, title: &str| {
+        session.id = id.into();
+        session.title = title.into();
+        session.acp_session_title = None;
+        session.session_title_override = None;
+        session.native_session_id = None;
+        session
+    };
+    let stopped = unnamed(
+        stopped_session(),
+        "f20058f83046cc4943a71686253e3661",
+        "project via fake",
+    );
+    let running = unnamed(
+        running_session(),
+        "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "sibling via fake",
+    );
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped, running]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    assert_eq!(titles(&rows(&dashboard)), ["sibling via fake"]);
+    let live = drawn(&mut dashboard, 140, 40);
+    let row = live
+        .iter()
+        .find(|line| line.contains("sibling via fake"))
+        .unwrap_or_else(|| panic!("no Live row names the session:\n{}", live.join("\n")));
+    assert!(!row.contains("0a1b2c3d4e5f"), "{row}");
+
+    switch_to_hel(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["project via fake"]);
+    let hel = drawn(&mut dashboard, 140, 40);
+    let row = hel
+        .iter()
+        .find(|line| line.contains("project via fake"))
+        .unwrap_or_else(|| panic!("no Mjolnir row names the session:\n{}", hel.join("\n")));
+    assert!(!row.contains("f20058f83046"), "{row}");
+}
+
 /// The active tab is highlighted whether or not the strip has focus, so
 /// the current tab is visible at a glance.
 #[test]
@@ -749,8 +856,8 @@ fn the_active_tab_is_highlighted_without_focus() {
     let y = buffer.area.y + row as u16;
     let active = buffer.area.x + cell_column(&lines[row], "Mjolnir");
     let inactive = buffer.area.x + cell_column(&lines[row], "Import");
-    assert_eq!(buffer[(active, y)].bg, theme::palette().accent);
-    assert_eq!(buffer[(inactive, y)].bg, theme::palette().surface_raised);
+    assert_eq!(Some(buffer[(active, y)].bg), theme::focus_control().bg);
+    assert_eq!(buffer[(inactive, y)].bg, theme::palette().selection);
 }
 
 /// Hel never modifies a harness home, so a native-only row has no destroy action.

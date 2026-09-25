@@ -233,9 +233,31 @@ pub fn build_cache_size_from_gigabytes(gigabytes: u64) -> String {
     format!("{gigabytes}GB")
 }
 
+/// The image a container target runs when its table names none: the
+/// reference image CI publishes, which `mj setup` also writes.
+fn default_container_image() -> String {
+    super::DEFAULT_CONTAINER_IMAGE.to_owned()
+}
+
+/// Every key a container runtime's table may carry beside `kind` and
+/// `machine`. A target table flattens [`ContainerTemplate`] into a tagged
+/// enum, where serde cannot refuse unknown keys, so the loader compares the
+/// table against this list to name the keys it ignores (R4-6).
+pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 8] = [
+    "image",
+    "pull_policy",
+    "platform",
+    "cpus",
+    "memory",
+    "environment",
+    "workspace_storage",
+    "build_cache",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
+    #[serde(default = "default_container_image")]
     pub image: String,
     #[serde(default, skip_serializing_if = "ImagePullPolicy::is_auto")]
     pub pull_policy: ImagePullPolicy,

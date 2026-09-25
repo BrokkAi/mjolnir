@@ -1,5 +1,7 @@
 use super::*;
 
+mod project_discovery;
+
 pub async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -581,8 +583,12 @@ pub async fn run_server(
                             let turn = outcome.completed_ordinal;
                             let child_id = relation.child_session_id.clone();
                             let parent_id = relation.parent_session_id.clone();
-                            let task_name = relation.task_name.clone();
-                            let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
+                            // The notice names the child as every listing does.
+                            let child_title = controller
+                                .state
+                                .sessions
+                                .get(&child_id)
+                                .map_or_else(|| relation.task_name.clone(), |child| child.listed_title().to_owned());
                             let handback_tool = relation.handback_tool;
                             let last_turn = outcome.clone();
                             let in_flight = snapshot
@@ -620,9 +626,8 @@ pub async fn run_server(
                                             .record_subagent_completion_notice(
                                                 parent_id,
                                                 &child_id,
-                                                &task_name,
-                                                turn,
-                                                &outcome_name,
+                                                &child_title,
+                                                &last_turn,
                                             )
                                             .await?;
                                     }
@@ -791,7 +796,7 @@ pub async fn run_server(
                             .profiles
                             .get(&result.profile_id)
                             .map(|profile| profile.kind);
-                        if let Some(notice) = credential_sync_notices.notice(&result, harness) {
+                        if let Some(notice) = credential_sync_notices.notice(&result, harness, &controller.state) {
                             eprintln!("Mjolnir: {notice}");
                         }
                     }
@@ -958,7 +963,7 @@ pub async fn run_server(
                     }
                 }
                 bundle = bundle_rx.recv(), if bundle_jobs.len() < MAX_CONCURRENT_BUNDLE_CREATIONS => {
-                    let Some(crate::server::BundleRequest { source, reply }) = bundle else {
+                    let Some(crate::server::BundleRequest { source, exact_sources, reply }) = bundle else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering bundle requests");
                         break;
                     };
@@ -971,9 +976,10 @@ pub async fn run_server(
                     let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     bundle_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
-                        let result = daemon_runtime
-                            .create_quick_bundle(source)
-                            .await;
+                        let result = match exact_sources {
+                            Some(sources) => daemon_runtime.create_bundle_from_sources(sources).await,
+                            None => daemon_runtime.create_quick_bundle(source).await,
+                        };
                         if let Err(error) = done.send(BundleCreated { result, reply }) {
                             tracing::debug!(%error, "bundle creation finished after the server stopped");
                         }
@@ -1075,6 +1081,10 @@ pub async fn run_server(
                                 request,
                                 &termination,
                             );
+                            continue;
+                        }
+                        crate::server::PreflightRequest::DiscoverProjects(request) => {
+                            project_discovery::spawn(&mut preflight_jobs, request, &termination);
                             continue;
                         }
                     };

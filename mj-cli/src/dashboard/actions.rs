@@ -54,8 +54,19 @@ pub(crate) fn apply_chat_toggle(
     };
     match toggle {
         ChatToggle::TranscriptRendering => chat.toggle_transcript_rendering(),
-        ChatToggle::Dictation => chat.toggle_dictation(),
+        ChatToggle::Dictation => {
+            if let Some(reason) = chat.toggle_dictation() {
+                dashboard.set_notice(reason);
+            }
+        }
     }
+}
+
+/// What the notice bar says after the session menu's Copy session ID. The
+/// clipboard gets the full ID; the notice names the short form the rest of
+/// the dashboard uses.
+pub(crate) fn copied_session_id_notice(session_id: &str) -> String {
+    format!("Copied session ID {}", short_id(session_id))
 }
 
 /// Carries out one dashboard action.
@@ -68,6 +79,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::None => {}
         DashboardAction::CopyNativeSessionId { native_session_id } => {
             context.copy_text(&native_session_id, "Copied session ID")?;
+        }
+        DashboardAction::CopySessionId { session_id } => {
+            context.copy_text(&session_id, &copied_session_id_notice(&session_id))?;
         }
         DashboardAction::ToggleTranscriptRendering => {
             let (dashboard, chat) = context.dashboard_and_visible_chat();
@@ -431,6 +445,20 @@ pub(crate) async fn apply_dashboard_action(
             target_ids,
         } => {
             for target_id in target_ids {
+                let template = context.controller.config.targets.get(&target_id).cloned();
+                // A local engine found not installed is not checked, or
+                // logged, on every poll (launch finding R8-6).
+                if let Some(message) = context.absent_engines.answer(
+                    &target_id,
+                    template.as_ref(),
+                    std::env::var_os("PATH").as_deref(),
+                ) {
+                    context
+                        .dashboard
+                        .apply_target_readiness(generation, target_id, Err(message));
+                    continue;
+                }
+                let checked_template = template.clone();
                 let config = context.controller.config.clone();
                 let reported_id = target_id.clone();
                 spawn_cancellable_io(
@@ -440,12 +468,36 @@ pub(crate) async fn apply_dashboard_action(
                     move |cancelled| {
                         let executor = CancellableProcessExecutor::new(cancelled)
                             .with_deadline(std::time::Duration::from_secs(15));
-                        config_only_controller(config).check_target_readiness(&target_id, &executor)
+                        // An engine that is not installed is an answer, not a
+                        // failure of the check, so it is not logged as one.
+                        match config_only_controller(config)
+                            .check_target_readiness(&target_id, &executor)
+                        {
+                            Ok(()) => Ok((Ok(()), false)),
+                            Err(error)
+                                if checked_template.as_ref().is_some_and(|template| {
+                                    crate::dashboard::absent_engines::engine_absent(
+                                        template,
+                                        std::env::var_os("PATH").as_deref(),
+                                    )
+                                }) =>
+                            {
+                                Ok((Err(format!("{error:#}")), true))
+                            }
+                            Err(error) => Err(error),
+                        }
                     },
-                    move |result| DashboardIoUpdate::TargetReadiness {
-                        generation,
-                        target_id: reported_id,
-                        result,
+                    move |checked| {
+                        let (result, engine_absent) = match checked {
+                            Ok(checked) => checked,
+                            Err(error) => (Err(error), false),
+                        };
+                        DashboardIoUpdate::TargetReadiness {
+                            generation,
+                            target_id: reported_id,
+                            result,
+                            absent_engine: template.filter(|_| engine_absent),
+                        }
                     },
                 );
             }
@@ -678,6 +730,26 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
+        }
+        DashboardAction::DiscoverProjects {
+            context: picker_context,
+            request,
+        } => {
+            let (cancelled, _) = spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "finding projects",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(15));
+                    mj_controller::project_picker::discover(&request, &executor)
+                },
+                move |result| DashboardIoUpdate::ProjectDiscovery {
+                    context: picker_context,
+                    result,
+                },
+            );
+            context.track_completion(cancelled);
         }
         DashboardAction::CompletePath { host, kind, prefix } => {
             let input_context = context.dashboard.path_input_context();
@@ -1156,7 +1228,7 @@ pub(crate) async fn apply_dashboard_action(
             target_template_ids,
         } => context.resolve_aws_resource_options(target_template_ids),
         DashboardAction::CreateBundle { sources } => {
-            context.dashboard.set_notice("Creating bundle…");
+            context.dashboard.set_notice("Preparing project…");
             spawn_create_bundle(
                 sources,
                 context.dashboard_io_tx.clone(),
@@ -1586,12 +1658,14 @@ impl DashboardContext {
             self.dashboard.focus_prompt();
         }
         let cancelled = Arc::new(AtomicBool::new(false));
+        let notice_name = self.session_notice_name(session_id);
         self.lifecycle_operations.insert(
             session_id.to_owned(),
             crate::dashboard::io::ActiveLifecycleOperation {
                 cancelled: cancelled.clone(),
                 kind,
                 retry_launch: None,
+                notice_name,
             },
         );
         LifecycleOperationRequest {

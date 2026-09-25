@@ -175,6 +175,38 @@ fn recoverable_error_session_stays_out_of_live_target_pollers() {
     assert!(credential_sync_targets(&recoverable_error).is_empty());
 }
 
+/// R7-3: a bare target has no container to sample, so the resource poller
+/// has nothing to ask it. It must skip the session without a warning: the
+/// dashboard rebuilds these targets on every poll, and each bare session
+/// used to log one warning each time (455 in 15 minutes with 12 sessions).
+/// Its worker is still polled.
+#[test]
+fn a_bare_session_is_left_out_of_resource_sampling_without_a_warning() {
+    let mut controller = podman_controller(SessionState::Running);
+    controller.config.targets.insert(
+        "local-bare".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    for session in controller.state.sessions.values_mut() {
+        session.target_template_id = "local-bare".into();
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: PathBuf::from("/tmp/mj-workers").join(&session.id),
+        });
+    }
+
+    let log = crate::test_log::CapturedLog::default();
+    let resource_targets =
+        tracing::subscriber::with_default(log.clone(), || dashboard_resource_targets(&controller));
+    assert!(resource_targets.is_empty());
+    let warnings = log.at_or_above(tracing::Level::WARN);
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    assert_eq!(
+        dashboard_worker_targets(&controller).len(),
+        1,
+        "the worker of a bare session is still polled"
+    );
+}
+
 /// A session gets its `target` as soon as the target exists, which is
 /// before its worker binary has finished being copied into place. Polling
 /// that window runs `execve` on a file `cp` still holds open for writing:
@@ -625,6 +657,56 @@ async fn capacity_results_are_revalidated_after_output_backpressure() {
     fixture.assert_no_start().await;
 }
 
+/// Launch finding R3-5: while SSH-bare sessions were starting, the capacity
+/// probe was refused a session on a shared connection ("Session open refused
+/// by peer", MaxSessions) and failed without a retry, where the relay and
+/// every executor-run ssh command retry. The command never ran, so it is
+/// retried; a probe that fails for its own reasons is not.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capacity_probe_refused_a_shared_session_is_retried() {
+    mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+    let directory = tempfile::tempdir().unwrap();
+    let probe = |name: &str, refusal: &str, exit: u8| {
+        let counter = directory.path().join(name);
+        let script = format!(
+            r#"
+count=$(cat {counter} 2>/dev/null || echo 0)
+echo $((count + 1)) > {counter}
+if [ "$count" -eq 0 ]; then
+  echo '{refusal}' >&2
+  exit {exit}
+fi
+echo sampled
+"#,
+            counter = counter.display()
+        );
+        let command = CommandSpec::new("sh", ["-c".to_owned(), script])
+            .ssh_destination("ubuntu@203.0.113.9")
+            .purpose("sample deployment host capacity");
+        (command, counter)
+    };
+    let attempts = |counter: &PathBuf| std::fs::read_to_string(counter).unwrap().trim().to_owned();
+
+    let (command, counter) = probe(
+        "refused",
+        "mux_client_request_session: session request failed: Session open refused by peer",
+        255,
+    );
+    let output = execute_resource_command(&command)
+        .await
+        .expect("a refused session is retried, not reported as a failed probe");
+    assert_eq!(output.stdout, b"sampled\n");
+    assert_eq!(attempts(&counter), "2");
+
+    let (command, counter) = probe("broken", "sh: free: not found", 1);
+    execute_resource_command(&command)
+        .await
+        .expect_err("a probe that fails by itself is reported");
+    assert_eq!(attempts(&counter), "1");
+    mj_core::targets::set_ssh_retry_backoff_for_test(None);
+}
+
 #[tokio::test(start_paused = true)]
 async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -739,7 +821,81 @@ fn a_healthy_credential_cycle_stays_out_of_the_ui() {
         failure: None,
         outcomes: Vec::new(),
     };
-    assert_eq!(CredentialSyncNotices::default().notice(&result, None), None);
+    assert_eq!(
+        CredentialSyncNotices::default().notice(&result, None, &State::default()),
+        None
+    );
+}
+
+/// Every harness's session on this machine is reconciled the way its session in
+/// a container is: against the same canonical profile home, with only the
+/// GitHub token left out. A local session an earlier release started from the
+/// profile home itself is left out while its staged home is a link to that
+/// home, because a push would go through the link into the person's own home.
+#[test]
+fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
+    let directory = tempfile::tempdir().unwrap();
+    for kind in mj_core::config::HarnessKind::ALL {
+        let mut controller = podman_controller(SessionState::Running);
+        let home = directory.path().join(kind.id());
+        std::fs::create_dir_all(&home).unwrap();
+        controller.config.profiles.insert(
+            kind.id().into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind,
+                home: home.clone(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        controller.config.targets.insert(
+            "local-bare".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let session = controller.state.sessions.values_mut().next().unwrap();
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        let session_id = session.id.clone();
+
+        let in_container = credential_sync_targets(&controller);
+        assert_eq!(in_container.len(), 1, "{kind:?}");
+        assert_eq!(in_container[0].profile_home, home, "{kind:?}");
+        assert_eq!(in_container[0].harness, kind);
+        assert!(in_container[0].sync_github_token, "{kind:?}");
+
+        let worker_root = directory
+            .path()
+            .join("workers")
+            .join(kind.id())
+            .join(&session_id);
+        std::fs::create_dir_all(worker_root.join("profile")).unwrap();
+        let session = controller.state.sessions.get_mut(&session_id).unwrap();
+        session.target_template_id = "local-bare".into();
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let on_this_machine = credential_sync_targets(&controller);
+        assert_eq!(on_this_machine.len(), 1, "{kind:?}");
+        assert_eq!(on_this_machine[0].profile_home, home, "{kind:?}");
+        assert_eq!(on_this_machine[0].harness, kind);
+        assert_eq!(
+            on_this_machine[0].authenticates_with_api_key,
+            in_container[0].authenticates_with_api_key
+        );
+        assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+
+        // Muse's staged root lies under the data directory, and Muse never
+        // ran from its profile home, so it has no linked form.
+        #[cfg(unix)]
+        if kind != mj_core::config::HarnessKind::Muse {
+            std::fs::remove_dir(worker_root.join("profile")).unwrap();
+            std::os::unix::fs::symlink(&home, worker_root.join("profile")).unwrap();
+            assert!(credential_sync_targets(&controller).is_empty(), "{kind:?}");
+        }
+    }
 }
 
 #[test]
@@ -805,7 +961,7 @@ fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
         }],
     };
-    let notice = notices.notice(&pushed, None).unwrap();
+    let notice = notices.notice(&pushed, None, &State::default()).unwrap();
     assert!(notice.contains("were pushed"), "{notice}");
     assert!(notice.contains("mj login --profile work"), "{notice}");
 
@@ -817,11 +973,16 @@ fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
         outcomes: Vec::new(),
         ..pushed
     };
-    let notice = notices.notice(&nothing_to_push, None).unwrap();
+    let notice = notices
+        .notice(&nothing_to_push, None, &State::default())
+        .unwrap();
     assert!(notice.contains("nothing fresher"), "{notice}");
     assert!(notice.contains("mj login --profile work"), "{notice}");
     // The per-session cooldown upstream limits these; the dedup must not.
-    assert_eq!(notices.notice(&nothing_to_push, None), Some(notice));
+    assert_eq!(
+        notices.notice(&nothing_to_push, None, &State::default()),
+        Some(notice)
+    );
 }
 
 #[test]
@@ -840,7 +1001,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     };
 
     let claude = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Claude))
+        .notice(&result, Some(HarnessKind::Claude), &State::default())
         .unwrap();
     assert!(
         claude.ends_with(
@@ -851,7 +1012,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
 
     // Only Claude can rotate ahead of expiry this way.
     let codex = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Codex))
+        .notice(&result, Some(HarnessKind::Codex), &State::default())
         .unwrap();
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
@@ -867,7 +1028,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         ..result
     };
     let claude_failure = CredentialSyncNotices::default()
-        .notice(&failed, Some(HarnessKind::Claude))
+        .notice(&failed, Some(HarnessKind::Claude), &State::default())
         .unwrap();
     assert!(
         claude_failure.contains("--setup-token`."),
@@ -892,7 +1053,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         }],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("returned no response"), "{notice}");
     assert!(notice.contains("were pushed"), "{notice}");
@@ -913,7 +1074,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         outcomes: Vec::new(),
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("reconciliation failed"), "{notice}");
     assert!(notice.contains("credential file is unreadable"), "{notice}");
@@ -934,7 +1095,7 @@ fn a_failed_credential_sync_is_reported() {
         }],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("worker proxy disconnected"), "{notice}");
 }
@@ -956,17 +1117,30 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
 
     assert!(
         notices
-            .notice(&failed("worker proxy disconnected"), None)
+            .notice(
+                &failed("worker proxy disconnected"),
+                None,
+                &State::default()
+            )
             .is_some()
     );
     assert_eq!(
-        notices.notice(&failed("worker proxy disconnected"), None),
+        notices.notice(
+            &failed("worker proxy disconnected"),
+            None,
+            &State::default()
+        ),
         None
     );
 
-    let changed = notices.notice(&failed("container is gone"), None).unwrap();
+    let changed = notices
+        .notice(&failed("container is gone"), None, &State::default())
+        .unwrap();
     assert!(changed.contains("container is gone"), "{changed}");
-    assert_eq!(notices.notice(&failed("container is gone"), None), None);
+    assert_eq!(
+        notices.notice(&failed("container is gone"), None, &State::default()),
+        None
+    );
 
     // A clean cycle forgets the failure, so a recurrence is reported again.
     let healthy = CredentialSyncResult {
@@ -978,8 +1152,12 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
         }],
     };
-    assert_eq!(notices.notice(&healthy, None), None);
-    assert!(notices.notice(&failed("container is gone"), None).is_some());
+    assert_eq!(notices.notice(&healthy, None, &State::default()), None);
+    assert!(
+        notices
+            .notice(&failed("container is gone"), None, &State::default())
+            .is_some()
+    );
 }
 
 #[test]
@@ -994,12 +1172,24 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
     };
     let mut notices = CredentialSyncNotices::default();
 
-    let notice = notices.notice(&failed("work"), None).unwrap();
+    let notice = notices
+        .notice(&failed("work"), None, &State::default())
+        .unwrap();
     assert!(notice.contains("profile work"), "{notice}");
-    assert_eq!(notices.notice(&failed("work"), None), None);
+    assert_eq!(
+        notices.notice(&failed("work"), None, &State::default()),
+        None
+    );
     // Another profile failing the same way is its own key.
-    assert!(notices.notice(&failed("personal"), None).is_some());
-    assert_eq!(notices.notice(&failed("work"), None), None);
+    assert!(
+        notices
+            .notice(&failed("personal"), None, &State::default())
+            .is_some()
+    );
+    assert_eq!(
+        notices.notice(&failed("work"), None, &State::default()),
+        None
+    );
 }
 
 #[test]
@@ -1029,7 +1219,7 @@ fn skills_and_github_syncs_speak_while_harness_credentials_stay_out_of_the_notic
         ],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(!notice.contains("harness credentials"), "{notice}");
     assert!(
@@ -1483,4 +1673,88 @@ fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
         }),
         None,
     ));
+}
+
+/// R8-3: every credential-sync notice named its session by short id ("Session
+/// 790051c5 returned no response; ...", tmux/047). A notice names a session
+/// the way the session list does, and by short id only when it has no title
+/// or its record is gone (the R5-4/R5-5 rule).
+#[test]
+fn credential_sync_notices_name_the_session_by_its_listed_title() {
+    use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
+
+    let session_id = "790051c5fe0447276d78ee1e5548bd4e";
+    let mut state = State::default();
+    let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
+    session.acp_session_title = Some("claude-a".into());
+    state.sessions.insert(session_id.into(), session);
+
+    let triggered =
+        |reason: CredentialSyncReason,
+         failure: Option<&str>,
+         outcome: Option<Result<Vec<CredentialSyncAction>, String>>| CredentialSyncResult {
+            profile_id: "claude".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: session_id.into(),
+                reason,
+            }),
+            failure: failure.map(str::to_owned),
+            outcomes: outcome
+                .map(|outcome| {
+                    vec![CredentialSyncOutcome {
+                        session_id: session_id.into(),
+                        outcome,
+                    }]
+                })
+                .unwrap_or_default(),
+        };
+    let results = [
+        triggered(
+            CredentialSyncReason::AuthenticationFailure,
+            Some("credential file is unreadable"),
+            None,
+        ),
+        triggered(
+            CredentialSyncReason::EmptyPromptResponse,
+            Some("credential file is unreadable"),
+            None,
+        ),
+        triggered(
+            CredentialSyncReason::AuthenticationFailure,
+            None,
+            Some(Ok(vec![CredentialSyncAction::Pushed])),
+        ),
+        triggered(CredentialSyncReason::AuthenticationFailure, None, None),
+        triggered(
+            CredentialSyncReason::EmptyPromptResponse,
+            None,
+            Some(Ok(vec![CredentialSyncAction::Pushed])),
+        ),
+        triggered(CredentialSyncReason::EmptyPromptResponse, None, None),
+        CredentialSyncResult {
+            profile_id: "claude".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: session_id.into(),
+                outcome: Err("worker proxy disconnected".into()),
+            }],
+        },
+    ];
+    for result in &results {
+        let notice = CredentialSyncNotices::default()
+            .notice(result, None, &state)
+            .unwrap();
+        assert!(notice.contains("claude-a"), "{notice}");
+        assert!(!notice.contains("790051c5"), "{notice}");
+    }
+
+    // A session whose record is gone is still named, by its short id.
+    let notice = CredentialSyncNotices::default()
+        .notice(&results[5], None, &State::default())
+        .unwrap();
+    assert!(
+        notice.starts_with("Session 790051c5 returned no response"),
+        "{notice}"
+    );
 }

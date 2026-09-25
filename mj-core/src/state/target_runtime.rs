@@ -31,6 +31,46 @@ pub enum TargetConnection {
     },
 }
 
+impl TargetRuntimeSettings {
+    /// These recorded settings with the SSH options `current` now gives the
+    /// same target, or `None` when there is nothing to take from it.
+    ///
+    /// A session's recorded access pins where its worker lives: the host, the
+    /// login user, and the port. The other options (a key, a `ControlPath`,
+    /// keepalives, host-key policy) say how to connect, so they follow the
+    /// machine's current configuration, as a resume does since J-21. Settings
+    /// of another kind, or that reach another place, are not taken.
+    pub fn with_current_ssh_options(&self, current: &Self) -> Option<Self> {
+        let (TargetConnection::Ssh { ssh: recorded }, TargetConnection::Ssh { ssh: now }) =
+            (&self.connection, &current.connection)
+        else {
+            return None;
+        };
+        if self.kind != current.kind || recorded == now {
+            return None;
+        }
+        let location = |ssh: &SshConnection| super::ManagedWorktreeTarget::Ssh {
+            destination: match &ssh.user {
+                Some(user) => format!("{user}@{}", ssh.host),
+                None => ssh.host.clone(),
+            },
+            ssh_args: ssh.extra_args.clone(),
+        };
+        if !location(recorded).same_location(&location(now)) {
+            return None;
+        }
+        let mut refreshed = self.clone();
+        refreshed.connection = TargetConnection::Ssh {
+            ssh: SshConnection {
+                identity_file: now.identity_file.clone(),
+                extra_args: now.extra_args.clone(),
+                ..recorded.clone()
+            },
+        };
+        Some(refreshed)
+    }
+}
+
 impl From<&TargetTemplate> for TargetRuntimeSettings {
     fn from(template: &TargetTemplate) -> Self {
         let connection = match template {

@@ -6,7 +6,19 @@ pub(super) fn project_memory_launch(
     workspace: &(String, Vec<String>),
     target_profile_home: &str,
 ) -> Result<ProjectMemoryLaunchConfig> {
-    let identity = if let Some(worktree) = &session.managed_worktree {
+    // A sub-agent records its parent's checkout as its project directory.
+    // For an isolated parent that is the parent's own clone, not the project,
+    // so the child takes the parent's checkout for its identity and shares
+    // the parent's memory (R10-4).
+    let parent_worktree = match &session.managed_worktree {
+        Some(_) => None,
+        None => crate::database::load_subagent_parent_worktree(&session.id)?,
+    };
+    let identity = if let Some(worktree) = session
+        .managed_worktree
+        .as_ref()
+        .or(parent_worktree.as_ref())
+    {
         ProjectMemoryIdentity::Repository {
             repository: RepositoryMemoryIdentity::Local {
                 canonical_root: std::fs::canonicalize(&worktree.source_repository)
@@ -129,17 +141,4 @@ pub(super) fn stage_memory_replica(
     let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;
     copy_profile_entry(&canonical, &profile_stage.join(replica))?;
     copy_profile_entry(&canonical, &profile_stage.join(baseline))
-}
-
-pub(super) fn seed_local_memory_replica(memory: &ProjectMemoryLaunchConfig) -> Result<()> {
-    let canonical = canonical_memory_root(&memory.project_key);
-    std::fs::create_dir_all(&canonical)?;
-    let canonical_has_files = directory_has_files(&canonical)?;
-    let replica_has_files = directory_has_files(&memory.root)?;
-    match (canonical_has_files, replica_has_files) {
-        (false, true) => copy_profile_entry(&memory.root, &canonical),
-        (true, false) => copy_profile_entry(&canonical, &memory.root),
-        _ => Ok(()),
-    }?;
-    copy_profile_entry(&canonical, &memory.baseline_root)
 }

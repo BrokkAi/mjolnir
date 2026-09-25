@@ -16,6 +16,9 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContainerEditor {
     pub(crate) session_id: String,
+    /// What the header calls the session: its title, as the row and the
+    /// other session dialogs do, not its id.
+    pub(crate) session_name: String,
     pub(crate) cpus: TextInput,
     pub(crate) memory: TextInput,
     pub(crate) mounts: Vec<AdditionalMount>,
@@ -135,7 +138,7 @@ impl ContainerEditor {
     fn rows(&self) -> Vec<Row<'_>> {
         use ContainerEditFocus::*;
         let mut rows = vec![
-            Row::Text(Line::raw(format!("Session: {}", self.session_id))),
+            Row::Text(Line::raw(format!("Session: {}", self.session_name))),
             Row::Text(Line::styled(
                 CONTAINER_EDIT_SCOPE,
                 Style::default().fg(theme::palette().muted),
@@ -554,6 +557,7 @@ impl DashboardState {
             .unwrap_or_default();
         let editor = ContainerEditor {
             session_id: session.id.clone(),
+            session_name: session.display_title().to_owned(),
             cpus: session.container_cpus.clone().unwrap_or_default().into(),
             memory: session.container_memory.clone().unwrap_or_default().into(),
             mounts: session.additional_mounts.clone(),

@@ -16,15 +16,18 @@ the target picker. Add SSH and AWS connections or customize runtime defaults in
 **prefix+s Settings → Machines** and **prefix+s Settings → Runtimes**. No setup
 command is required. A target that is checking or unavailable cannot advance;
 **prefix+shift+r** in the picker rechecks all targets. Dashboard
-**prefix+shift+r** refreshes host capacity. The optional
-`mj doctor --smoke` command exercises container creation and removal.
+**prefix+shift+r** refreshes host capacity. So does **Refresh** in the menu
+under the dashboard's Targets title (click the title, or press `.` while the
+pane has focus). The same menu's **Runtimes…** opens Settings → Runtimes, and
+its **Machines…** opens Settings → Machines. The optional `mj doctor --smoke`
+command exercises container creation and removal.
 
 ## Capability matrix
 
 | Runtime | Machine | Isolation boundary | New-session project | Supplemental directories | Resource choice | Target lifecycle |
 | --- | --- | --- | --- | --- | --- | --- |
-| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; managed session worktree is archived and retired on stop. |
-| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; per-session worktree/workspace is archived and retired. |
+| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; the session's managed clone is archived and retired on stop. |
+| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; the per-session clone or workspace is archived and retired. |
 | `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
 | `podman` | `local` (Linux/WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
@@ -102,9 +105,10 @@ it. Container and remote targets still need a static Linux worker; see
 [Install](/install/).
 
 There is no process, filesystem, or network isolation between the harness and
-your controller account. The harness also uses the configured profile home
-directly. Use this target only when you trust both the agent and its approval
-configuration.
+your controller account. The harness runs from a staged copy of the configured
+profile home, as on every target, but that copy isolates only its own state: the
+harness can still read your whole home directory, the profile home included. Use
+this target only when you trust both the agent and its approval configuration.
 
 ### Bare on an SSH machine
 

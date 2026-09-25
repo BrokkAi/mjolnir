@@ -1390,6 +1390,36 @@ mod tests {
         assert!(screen.contains("Prompt paused"));
     }
 
+    /// R4-13: the header of a failed review read "General done Verdictt".
+    /// The role strip and the tab strip draw the same row, and the tab strip
+    /// left the strip's wider spacing behind its own labels.
+    #[test]
+    fn the_review_header_names_each_tab_once() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let mut view = findings_view();
+        view.roles[0].state = RoleState::Clean;
+        if let Some(verdict) = view.verdict.as_mut() {
+            verdict.kind = VerdictKind::Failed;
+            verdict.text = "the review could not analyze the change".to_owned();
+        }
+        let mut review = TurnReview::new(view);
+        let mut terminal = Terminal::new(TestBackend::new(46, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_turn_review_pane(frame, Rect::new(0, 0, 46, 10), &mut review);
+            })
+            .expect("draw the failed review");
+        let buffer = terminal.backend().buffer();
+        let header = (0..46).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        assert_eq!(
+            header.trim(),
+            "│General done Verdict                        │"
+        );
+    }
+
     #[test]
     fn clean_role_is_presented_as_done() {
         let mut view = running_view();

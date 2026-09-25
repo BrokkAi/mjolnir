@@ -13,15 +13,14 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanPostcondition,
-    ProcessExecutor, SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    failed_podman_postcondition, podman_probe_observation, run_setup_smoke_test, ssh_command,
-    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
-    verify_ssh_docker, verify_ssh_podman,
+    ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable, PODMAN_DOCUMENTATION_URL,
+    PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
+    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
+    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
-    Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, TargetTemplate,
-    config_path,
+    Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
 };
 use mj_core::credentials::login_command;
 
@@ -192,23 +191,34 @@ pub fn run_with_config_path(
     checks.push(harness_discovery_check(config, executor));
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_eligibility_checks(config));
-    checks.extend(podman_checks(config, executor, options.smoke));
-    checks.extend(docker_checks(config, executor, options.smoke));
-    checks.extend(ssh_bare_checks(config, executor));
-    checks.extend(ssh_podman_checks(config, executor, options.smoke));
-    checks.extend(ssh_docker_checks(config, executor, options.smoke));
-    checks.extend(build_cache_checks(config, executor));
-    checks.extend(aws_checks(config, executor));
-    checks.extend(worker_binary_checks(config));
-    checks.push(daemon_build_check());
-    checks.extend(worker_freshness_checks(config));
-    checks.extend(review_residue_checks(config));
-    checks.push(apple_container_check(
+    let podman = podman_checks(config, executor, options.smoke);
+    let docker = docker_checks(config, executor, options.smoke);
+    let apple_container = apple_container_check(
         &apple_platform,
         executor,
         options.smoke,
         apple_container_image(config),
-    ));
+    );
+    let offered = config.map(|config| {
+        offered_targets(
+            config,
+            podman.iter().chain(&docker).chain([&apple_container]),
+        )
+    });
+    let offered = offered.as_ref().map_err(|gap| *gap);
+    checks.extend(podman);
+    checks.extend(docker);
+    checks.extend(ssh_bare_checks(config, executor));
+    checks.extend(ssh_podman_checks(config, executor, options.smoke));
+    checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(build_cache_checks(offered, executor));
+    checks.extend(aws_checks(config, executor));
+    checks.extend(worker_binary_checks(offered));
+    checks.push(daemon_build_check());
+    checks.extend(worker_freshness_checks(offered));
+    checks.extend(review_residue_checks(config));
+    // Reported last, where it has always been.
+    checks.push(apple_container);
     checks
 }
 
@@ -571,115 +581,131 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let title = format!("Harness profile {id}");
-            if !profile.enabled {
-                return DoctorCheck::ready(
-                    format!("harness.{id}"),
-                    title,
-                    "Profile is disabled; home and authentication checks were skipped.",
-                );
-            }
-            if let Some(default_home) = unscopable_home_is_ignored(config, profile) {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!(
-                        "{} is ignored by a session on this machine: {} on macOS reads {} \
-                         whatever {} says",
-                        profile.home.display(),
-                        profile.kind.display_name(),
-                        default_home.display(),
-                        profile.kind.home_env(),
-                    ),
-                    format!(
-                        "Set this profile's home to {}, or use it only on container and SSH \
-                         targets, where the home is still scoped.",
-                        default_home.display()
-                    ),
-                );
-            }
-            if !profile.home.is_dir() {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!("{} does not exist", profile.home.display()),
-                    format!(
-                        "{} If this profile should use an existing installation, select its home in Setup.",
-                        harness_login_remediation(id, profile)
-                    ),
-                );
-            }
-            if !harness_is_authenticated_with_executor(profile, executor) {
-                return DoctorCheck::fixable(
-                    format!("harness.{id}"),
-                    title,
-                    format!(
-                        "No usable authentication was detected for {}",
-                        profile.home.display()
-                    ),
-                    harness_login_remediation(id, profile),
-                );
-            }
-            DoctorCheck::ready(
-                format!("harness.{id}"),
-                title,
-                format!(
-                    "{} is present and authentication is available",
-                    profile.home.display()
-                ),
-            )
+            let mut check = harness_profile_check(id, profile, executor);
+            check.detail = format!("{} {}", profile_summary(config, id, profile), check.detail);
+            check
         })
         .collect()
 }
 
-/// The harness's own default home, for a profile whose configured home this
-/// machine cannot scope, and `None` when the home is honored as configured.
-///
-/// Claude Code on macOS is the only such case today: Mjolnir sets no
-/// `CLAUDE_CONFIG_DIR` there, so a profile pointing anywhere but Claude's own
-/// home would be silently unused. Saying so is better than letting the session
-/// run against a home nobody configured.
-fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Option<PathBuf> {
-    if profile
-        .kind
-        .scopes_home_with_environment(HarnessHost::current())
-    {
-        return None;
+/// The readiness of one profile: its home, and whether it can authenticate.
+fn harness_profile_check(
+    id: &str,
+    profile: &HarnessProfile,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let title = format!("Harness profile {id}");
+    if !profile.enabled {
+        return DoctorCheck::ready(
+            format!("harness.{id}"),
+            title,
+            "Profile is disabled; home and authentication checks were skipped.",
+        );
     }
-    // The variable still scopes a home on a container or SSH target, so a
-    // profile that can only run there is configured correctly and must not be
-    // told to collapse the separation its sessions rely on.
-    if !config
-        .targets
-        .values()
-        .any(|target| matches!(target, TargetTemplate::LocalBare))
-    {
-        return None;
+    if !profile.home.is_dir() {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!("{} does not exist", profile.home.display()),
+            format!(
+                "{} If this profile should use an existing installation, select its home in Setup.",
+                harness_login_remediation(id, profile)
+            ),
+        );
     }
-    let default_home = dirs::home_dir()?.join(profile.kind.default_home_leaf());
-    (profile.home != default_home).then_some(default_home)
+    if !harness_is_authenticated_with_executor(profile, executor) {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!(
+                "No usable authentication was detected for {}",
+                profile.home.display()
+            ),
+            harness_login_remediation(id, profile),
+        );
+    }
+    DoctorCheck::ready(
+        format!("harness.{id}"),
+        title,
+        format!(
+            "{} is present and authentication is available",
+            profile.home.display()
+        ),
+    )
 }
 
-/// Warn about a profile that is both listed for sub-agent use and disabled.
+/// One sentence saying what a profile is: its harness, where its quota comes
+/// from, and whether other sessions' sub-agents may use it. Quota ranking and
+/// delegation both depend on these, and none of them shows in the profile's
+/// own table in config.toml.
+fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> String {
+    let delegation = if config
+        .subagents
+        .eligible_profiles
+        .get(id)
+        .copied()
+        .unwrap_or(false)
+    {
+        "any session's sub-agents may use it"
+    } else {
+        "only its own sessions' sub-agents may use it"
+    };
+    format!(
+        "{}; {}; {delegation}.",
+        profile.kind.display_name(),
+        profile_quota_source(profile)
+    )
+}
+
+/// Where a profile's quota report comes from, in the terms the quota refresh
+/// uses: a Codex profile is read through its custom provider only when that
+/// provider's API key is in the profile's environment.
+fn profile_quota_source(profile: &HarnessProfile) -> String {
+    match profile.kind {
+        HarnessKind::Claude => "Claude subscription quota".to_owned(),
+        HarnessKind::Codex => match crate::quota::provider_credential(profile) {
+            Some(provider) if crate::zai_usage::serves_quota(&provider.host) => {
+                format!("quota from {}", provider.host)
+            }
+            Some(provider) => format!(
+                "pay-per-use through {}, counted as 100% left when choosing a sub-agent's profile",
+                provider.host
+            ),
+            None => match profile.codex_provider() {
+                Ok(None) => "ChatGPT subscription quota".to_owned(),
+                Ok(Some(provider)) => format!(
+                    "no quota report, because custom provider {:?} has no API key in this profile's environment",
+                    provider.id
+                ),
+                Err(error) => format!("its Codex config.toml could not be read ({error:#})"),
+            },
+        },
+        kind => format!("quota as {} reports it", kind.display_name()),
+    }
+}
+
+/// The sub-agent policy in one line, then a warning for each profile that is
+/// both listed for sub-agent use and disabled.
 ///
-/// The daemon keeps running and simply does not offer such a profile to a
-/// parent, because the delegation candidates and the spawn gate both require an
-/// enabled profile. This surfaces the contradiction so the eligible list and
-/// the profile's `enabled` flag can be reconciled, rather than leaving a profile
-/// the user meant to use silently unavailable.
+/// The daemon keeps running with such a profile and simply does not offer it
+/// to a parent, because the delegation candidates and the spawn gate both
+/// require an enabled profile. This surfaces the contradiction so the eligible
+/// list and the profile's `enabled` flag can be reconciled. An eligible id
+/// that names no profile never reaches here: the configuration fails to load,
+/// and the configuration check reports it.
 fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
     };
-    config
-        .subagents
-        .eligible_profiles
-        .iter()
-        .filter(|(_, eligible)| **eligible)
-        .filter_map(|(id, _)| {
-            let profile = config.profiles.get(id)?;
-            (!profile.enabled).then(|| {
-                DoctorCheck::warning(
+    let mut checks = vec![subagent_policy_check(config)];
+    checks.extend(
+        config
+            .subagents
+            .eligible_profiles
+            .iter()
+            .filter(|(_, eligible)| **eligible)
+            .filter_map(|(id, _)| match config.profiles.get(id) {
+                Some(profile) if !profile.enabled => Some(DoctorCheck::warning(
                     format!("subagents.{id}"),
                     format!("Sub-agent profile {id}"),
                     format!(
@@ -688,10 +714,34 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                     format!(
                         "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
                     ),
-                )
-            })
-        })
-        .collect()
+                )),
+                _ => None,
+            }),
+    );
+    checks
+}
+
+/// How many sub-agents a session may start, and on which profiles. Whether a
+/// given session uses Mjolnir sub-agents at all is a per-session choice, not
+/// a global policy, so this check only describes the shared limits.
+fn subagent_policy_check(config: &Config) -> DoctorCheck {
+    let subagents = &config.subagents;
+    let eligible = subagents
+        .eligible_profiles
+        .iter()
+        .filter(|(_, eligible)| **eligible)
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let others = if eligible.is_empty() {
+        "no other profile".to_owned()
+    } else {
+        eligible.join(", ")
+    };
+    let detail = format!(
+        "Claude and Codex sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        subagents.max_concurrent
+    );
+    DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
 }
 
 /// Point an unauthenticated profile at `mj login`, which already knows how to
@@ -726,7 +776,11 @@ fn podman_checks(
 ) -> Vec<DoctorCheck> {
     let effective = config.map(|config| config.clone().with_local_targets());
     let effective = effective.as_ref().map_err(|gap| *gap);
-    let explicit = config.is_ok_and(|config| !local_podman_targets(config).is_empty());
+    let explicit = config.is_ok_and(|config| {
+        local_podman_targets(config)
+            .iter()
+            .any(|(id, _)| config.configures_target(id))
+    });
     let preflight = builtin_target_availability(
         podman_check(effective, executor),
         explicit,
@@ -753,7 +807,7 @@ fn builtin_image_check(
     target_id: &str,
     check: DoctorCheck,
 ) -> DoctorCheck {
-    let explicit = config.is_ok_and(|config| config.targets.contains_key(target_id));
+    let explicit = config.is_ok_and(|config| config.configures_target(target_id));
     if explicit || check.status != CheckStatus::Fixable {
         return check;
     }
@@ -773,7 +827,9 @@ fn builtin_image_check(
 /// supplies whether or not their engine is installed. A standard target whose
 /// engine is missing or not running is reported as unavailable, as the
 /// dashboard's Targets pane marks it, rather than as a fault to fix: nobody
-/// asked for it. A target the user configured keeps the fixable result.
+/// asked for it. A target the user configured keeps the fixable result; a
+/// block that only repeats a standard target does not count as configured
+/// ([`Config::configures_target`]).
 fn builtin_target_availability(
     check: DoctorCheck,
     explicit: bool,
@@ -952,7 +1008,9 @@ fn docker_checks(
             )];
         }
     };
-    let explicit = !local_docker_targets(config).is_empty();
+    let explicit = local_docker_targets(config)
+        .iter()
+        .any(|(id, _)| config.configures_target(id));
     let effective = config.clone().with_local_targets();
     let targets = local_docker_targets(&effective);
     if targets.is_empty() {
@@ -992,12 +1050,20 @@ pub fn local_docker_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
                 preflight.version
             ),
         ),
-        Err(error) => DoctorCheck::fixable(
-            "runtime.docker",
-            "Docker",
-            format!("{error:#}"),
-            "Install and start Docker, then make sure `docker info` succeeds as the user running mj.",
-        ),
+        Err(error) => match error.downcast_ref::<DockerUnavailable>() {
+            Some(problem) => DoctorCheck::fixable(
+                "runtime.docker",
+                "Docker",
+                problem.to_string(),
+                problem.remediation(),
+            ),
+            None => DoctorCheck::fixable(
+                "runtime.docker",
+                "Docker",
+                format!("{error:#}"),
+                "Install and start Docker, then make sure `docker info` succeeds as the user running mj.",
+            ),
+        },
     }
 }
 
@@ -2138,6 +2204,35 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
     Ok(modified > started)
 }
 
+/// The targets the build-cache and worker-binary checks cover: every target
+/// the user configured, plus each standard local target
+/// ([`Config::with_local_targets`]) whose engine check in `engine_checks`
+/// passed. That is the set a new session can use. With no target blocks in
+/// config.toml, the built-in `podman` target on a host with working Podman
+/// still needs a worker (launch finding R5-2). A standard target whose
+/// engine is unavailable is shown as unavailable and needs none.
+fn offered_targets<'a>(
+    config: &Config,
+    engine_checks: impl IntoIterator<Item = &'a DoctorCheck>,
+) -> Config {
+    let ready = engine_checks
+        .into_iter()
+        .filter(|check| check.status == CheckStatus::Ready)
+        .map(|check| check.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let engine_ready = |target_id: &str| match target_id {
+        "podman" => ready.contains("runtime.podman"),
+        "docker" => ready.contains("runtime.docker"),
+        "apple-container" => ready.contains("runtime.apple-container"),
+        _ => true,
+    };
+    let mut offered = config.clone().with_local_targets();
+    offered
+        .targets
+        .retain(|id, _| config.configures_target(id) || engine_ready(id));
+    offered
+}
+
 fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let config = match config {
         Ok(config) => config,
@@ -2595,9 +2690,10 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
                 parts.push(residue.refs.join(", "));
             }
             if !residue.scratch_indexes.is_empty() {
-                parts.push(format!(
-                    "{} leftover scratch index file(s)",
-                    residue.scratch_indexes.len()
+                parts.push(mj_core::text::counted(
+                    residue.scratch_indexes.len(),
+                    "leftover scratch index file",
+                    "leftover scratch index files",
                 ));
             }
             format!("{}: {}", repository.display(), parts.join("; "))

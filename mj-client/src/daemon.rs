@@ -353,7 +353,7 @@ pub struct CreateSessionRequest {
     pub launch_base: Option<String>,
     #[serde(default)]
     pub launch_branch: Option<String>,
-    /// None follows the global `[subagents] enabled` setting at launch time.
+    /// None means native sub-agents, the same as `Some(false)`.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
     #[serde(default)]

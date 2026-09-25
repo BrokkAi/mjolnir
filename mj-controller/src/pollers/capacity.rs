@@ -273,10 +273,60 @@ pub(super) async fn collect_local_capacity_with(
     }
 }
 
+/// Run one resource probe. A probe the SSH server turned away never ran, so
+/// it is retried with the same backoff the executor and the relay use (launch
+/// finding R3-5); any other failure is reported at once.
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
+    use crate::targets::{SSH_RETRY_ATTEMPTS, SshRefusal, ssh_refusal, ssh_retry_delay};
+    let attempts = match command.ssh_destination {
+        Some(_) => SSH_RETRY_ATTEMPTS,
+        None => 1,
+    };
+    for attempt in 1..=attempts {
+        let (output, ssh_session) = run_resource_command(command).await?;
+        if output.status == 0 {
+            return Ok(output);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(destination) = command.ssh_destination.as_deref()
+            && let Some(refusal) = ssh_refusal(output.status, &stderr)
+        {
+            // A refused session found its master alive; a connection closed
+            // before authentication may mean the master is gone.
+            if refusal == SshRefusal::BeforeAuthentication
+                && let Some(lease) = &ssh_session
+            {
+                lease.invalidate();
+            }
+            // Only Unix leases own a shared session slot; free it before backoff.
+            #[cfg(unix)]
+            drop(ssh_session);
+            if attempt < attempts {
+                let delay = ssh_retry_delay(attempt);
+                refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
+        }
+        bail!(
+            "{} failed with status {}: {}",
+            command.purpose,
+            output.status,
+            stderr.trim()
+        );
+    }
+    unreachable!("the last attempt always returns")
+}
+
+/// Spawn one probe and collect its output, with the SSH session lease it ran
+/// on. The lease is returned so it outlives the child.
+async fn run_resource_command(
+    command: &CommandSpec,
+) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
     // A remote probe runs as one session on a shared SSH connection; the
     // lease is held until the probe has exited.
-    let (command, _ssh_session) = if command.ssh_session.is_some() {
+    let (command, ssh_session) = if command.ssh_session.is_some() {
         let requested = command.clone();
         tokio::task::spawn_blocking(move || {
             requested
@@ -314,13 +364,5 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
         stdout: output.stdout,
         stderr: output.stderr,
     };
-    if command_output.status != 0 {
-        bail!(
-            "{} failed with status {}: {}",
-            command.purpose,
-            command_output.status,
-            String::from_utf8_lossy(&command_output.stderr).trim()
-        );
-    }
-    Ok(command_output)
+    Ok((command_output, ssh_session))
 }

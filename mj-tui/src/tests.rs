@@ -485,7 +485,7 @@ fn alt_z_on_prompt_explains_that_prompt_is_not_resizable() {
     chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.notice().as_deref(),
-        Some("Select Sessions, Targets, or Quota before cycling the pane size.")
+        Some("Select Sessions, Targets, or Profiles before cycling the pane size.")
     );
     assert_eq!(dashboard.focus, Focus::Prompt);
 }
@@ -1693,6 +1693,9 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     );
     assert!(dashboard.is_stopped_subagent(&child.id));
     assert!(!dashboard.is_stopped_subagent(&parent.id));
+    // The host empties a pane whose session this calls suspended, which
+    // would take the read-only view away as soon as Browse showed it.
+    assert!(!dashboard.pane_session_is_suspended(&child.id));
 
     dashboard.open_subagent_workspace(parent.id.clone());
     assert_eq!(
@@ -2731,6 +2734,47 @@ fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
     assert_eq!(dashboard.focus(), Focus::Sessions);
 }
 
+/// R4-11: a Kimi session made in the wizard took about 30 seconds to launch
+/// and then did not open; the selection sat on the first row, which is where
+/// the clamp puts it when a refresh does not carry the selected session.
+/// Nobody chose that row, so finishing the launch still opens the session.
+#[test]
+fn a_finished_launch_opens_the_session_a_refresh_displaced() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.select_active_session("session-2");
+    let mut refreshed = dashboard.state.clone();
+    let launching = refreshed
+        .sessions
+        .remove("session-2")
+        .expect("the launching session");
+    dashboard.set_state(refreshed.clone());
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    refreshed.sessions.insert(launching.id.clone(), launching);
+    dashboard.set_state(refreshed);
+
+    dashboard.finish_new_session("session-2");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.focus(), Focus::Prompt);
+}
+
+/// R4-11: after a suspend, the dashboard reported "Could not open Session
+/// claude-b: Session opening did not respond within 15 seconds" although
+/// nothing asked to open it. The pane still named the suspended session, and
+/// the end of its lifecycle re-armed an attach to a session with no worker.
+#[test]
+fn a_suspended_session_is_not_attached_to() {
+    let mut dashboard = dashboard_with_two_sessions();
+    assert!(dashboard.pane_session_can_attach("session-1"));
+    dashboard
+        .state
+        .sessions
+        .get_mut("session-1")
+        .expect("session")
+        .state = SessionState::Stopped;
+    assert!(!dashboard.pane_session_can_attach("session-1"));
+}
+
 /// When the selection is still on the launching session, finishing the
 /// launch opens it for its first prompt, as before.
 #[test]
@@ -3312,7 +3356,7 @@ fn clicking_the_zoom_chip_unzooms() {
 /// style, and its neighbour does not, so the focused pane is visible without
 /// reading the composer.
 #[test]
-fn the_focused_pane_draws_an_accented_transcript_border() {
+fn the_focused_pane_draws_a_distinct_transcript_border() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
@@ -3331,9 +3375,9 @@ fn the_focused_pane_draws_an_accented_transcript_border() {
     };
     let buffer = terminal.backend().buffer();
     assert_eq!(
-        buffer[corner(&dashboard, second)].fg,
-        mj_chat::theme::palette().accent,
-        "the focused pane's transcript border is accented"
+        Some(buffer[corner(&dashboard, second)].fg),
+        mj_chat::theme::border(true).fg,
+        "the focused pane's transcript border uses the focused style"
     );
     assert_eq!(
         buffer[corner(&dashboard, first)].fg,
@@ -4828,6 +4872,56 @@ fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
     );
 }
 
+/// R10-2: a native Codex child that had finished while its parent was still
+/// running read "No messages yet" in the Sub-agents view, its conversation
+/// never appeared, and Enter did nothing, although the store held its
+/// transcript. The host empties any pane whose session
+/// `pane_session_is_suspended` calls suspended (R4-11), and a finished native
+/// child's presentation row is `Stopped`, so Browse let it go as soon as the
+/// selection put it there.
+#[test]
+fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
+    let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+    dashboard.open_subagent_workspace(parent_id);
+    assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+    assert!(
+        !dashboard.pane_session_is_suspended(&id),
+        "a finished native child is read from the store; no pane lets it go"
+    );
+
+    // Browse follows the selection onto the child.
+    let browse = dashboard.browse_pane();
+    dashboard.set_pane_session(browse, Some(&id));
+    let lines = drawn(&mut dashboard, 140, 40);
+    let screen = lines.join("\n");
+    assert!(
+        screen.contains("Reading calc.py") && screen.contains("Native agent"),
+        "the child's stored transcript is drawn in its pane: {screen}"
+    );
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Review calc · completed"))
+        .expect("the child's row");
+    let row_text = lines[row..row + 4].join("\n");
+    assert!(
+        !row_text.contains("No messages yet"),
+        "the row shows the child's last message: {row_text}"
+    );
+    assert!(
+        row_text.contains("calc.py adds and subtracts"),
+        "{row_text}"
+    );
+
+    // Enter on the row opens the child's conversation.
+    dashboard.focus_sessions();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: id.clone()
+        }
+    );
+}
+
 #[test]
 fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     use mj_core::native_agent::*;
@@ -5032,6 +5126,80 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
     );
 }
 
+/// Launch finding R11-1: a Claude sub-agent sat on a permission question in
+/// the Sub-agents view while its parent's row read only "Working" with no
+/// attention mark, so nobody knew to look. A child's question marks its parent
+/// the way the parent's own question would: the row's symbol, the attention
+/// queue and a notification, and the row says whose question it is.
+#[test]
+fn a_subagent_question_marks_its_parent_for_attention() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    dashboard
+        .state
+        .sessions
+        .get_mut("child-session")
+        .unwrap()
+        .acp_session_title = Some("Answer project codename".into());
+    set_working(&mut dashboard, &parent);
+    set_working(&mut dashboard, "child-session");
+    dashboard.set_current_session(None);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+    assert!(dashboard.notification_events(0).is_empty());
+
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
+    assert_eq!(
+        dashboard
+            .attention_queue()
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [parent.as_str()],
+        "the queue lists top-level rows, so it leads to the parent"
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("ACP pretty name"))
+        .expect("the parent's row is drawn");
+    assert!(
+        lines[row].contains(&format!(
+            "{} ACP pretty name",
+            mj_chat::theme::glyphs().waiting
+        )),
+        "{}",
+        lines[row]
+    );
+    assert!(
+        lines[row + 1].contains("Sub-agent question"),
+        "{}",
+        lines[row + 1]
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(due[0].level, AttentionLevel::Waiting);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
+
+    // Answering the child's question clears the parent's mark.
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .clear();
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+}
+
 #[test]
 fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -5101,12 +5269,44 @@ fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
     assert!(!rename.contains("Session: session-1"), "{rename}");
 }
 
-/// Without a title the dialogs fall back to the id, which is the only name
-/// the session has.
+/// R4-12: a session nobody has named yet keeps the title it was created with
+/// ("project via claude"), and the session list shows that title (R2-8). The
+/// palette heading, the Suspend confirmation and the Rename dialog named it
+/// by its id instead.
+#[test]
+fn dialogs_name_an_unnamed_session_by_the_title_it_was_created_with() {
+    let mut session = running_session();
+    session.acp_session_title = None;
+    session.title = "project via claude".into();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+
+    dashboard.begin_session_palette();
+    let palette = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(palette.contains("project via claude"), "{palette}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: project via claude"), "{suspend}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::RenameSession);
+    let rename = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rename.contains("Session: project via claude"), "{rename}");
+    assert!(!rename.contains("Session: session-1"), "{rename}");
+}
+
+/// A session with no name at all falls back to its id, the only name it has.
 #[test]
 fn suspend_confirmation_falls_back_to_the_id_for_an_untitled_session() {
     let mut session = running_session();
     session.acp_session_title = None;
+    session.title = String::new();
     let mut dashboard = dashboard_with_session(session);
     dashboard
         .session_details

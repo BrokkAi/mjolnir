@@ -580,6 +580,27 @@ impl SubagentBackend for FakeBackend {
         })
     }
 
+    /// The parent's own profile, offering what `profile_config` reports.
+    fn subagent_candidates(
+        &self,
+        parent_profile: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async move {
+            let choices = self
+                .profile_config(parent_profile.clone(), None, false)
+                .await?;
+            Ok(SubagentCandidates {
+                offered: vec![SubagentCandidate {
+                    profile_id: parent_profile,
+                    harness: mj_core::config::HarnessKind::Codex,
+                    choices,
+                    remaining_percent: None,
+                }],
+                unavailable: Vec::new(),
+            })
+        })
+    }
+
     fn session_handle(
         &self,
         session_id: String,
@@ -1310,6 +1331,91 @@ async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wa
     assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
+/// Launch finding R5-8: a prompt to a session in the `error` state was
+/// refused with "this session cannot take a prompt right now", which reads
+/// as "try again". It now says the session failed, why, and the two ways
+/// out.
+#[tokio::test]
+async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        let session = &mut snapshot.sessions[0];
+        session.state = "error".into();
+        session.lifecycle = ViewerLifecycleCategory::Failed;
+        session.has_error = true;
+        session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        // A checkpoint from an earlier suspension is what makes resume a
+        // way out (launch finding R6-1).
+        session.has_checkpoint = true;
+        session.capabilities.prompt = false;
+        session.capabilities.resume = true;
+        session.capabilities.destroy = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"are you there"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await.to_string();
+    assert!(!body.contains("right now"), "{body}");
+    assert!(body.contains("this session failed"), "{body}");
+    assert!(
+        body.contains("worker bootstrap failed: operation cancelled"),
+        "{body}"
+    );
+    assert!(body.contains("mj resume --session session-1"), "{body}");
+    assert!(body.contains("mj destroy --session session-1"), "{body}");
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
+/// Launch finding R6-1: a launch that failed before it saved a checkpoint was
+/// refused with advice to `mj resume` it, and that resume then failed in the
+/// background with "session has no checkpoint". The refusal names only what
+/// can work: destroying the session.
+#[tokio::test]
+async fn a_prompt_to_a_session_that_failed_before_its_first_checkpoint_offers_only_destroy() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        // The fixture record has no checkpoint, like a launch that failed
+        // before its first one. The capabilities are what the phone
+        // projection publishes for a failed session with no operation.
+        let session = &mut snapshot.sessions[0];
+        session.state = "error".into();
+        session.lifecycle = ViewerLifecycleCategory::Failed;
+        session.has_error = true;
+        session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        session.capabilities.prompt = false;
+        session.capabilities.resume = true;
+        session.capabilities.destroy = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"are you there"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await.to_string();
+    assert!(!body.contains("mj resume"), "{body}");
+    assert!(body.contains("before it saved a checkpoint"), "{body}");
+    assert!(body.contains("mj destroy --session session-1"), "{body}");
+    assert!(
+        body.contains("worker bootstrap failed: operation cancelled"),
+        "{body}"
+    );
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
@@ -1517,9 +1623,16 @@ async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await.to_string();
     assert!(
-        body.contains("the workspace name \\\"default\\\" is reserved; choose another name"),
+        body.contains("the workspace name \\\"default\\\" is reserved"),
         "{body}"
     );
+    // Launch finding R3-11: the refusal gave no reason. It says what the
+    // name is kept for.
+    assert!(
+        body.contains("sessions made before Mjolnir had workspaces"),
+        "{body}"
+    );
+    assert!(body.contains("choose another name"), "{body}");
     assert!(backend.workspaces.0.lock().unwrap().is_empty());
 }
 
@@ -2221,6 +2334,59 @@ fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
         resolve_wait(&ready, &request).map(|decision| decision.outcome),
         Some(WaitOutcome::Finished)
     );
+}
+
+/// Launch finding R3-1: `mj wait` with no turn, run right after
+/// `mj new ... "<prompt>"`, answered "finished" with `chat_phase idle` while
+/// the first prompt was still waiting to be submitted. The session was
+/// attached and idle, but the prompt `mj new` handed over had not become a
+/// turn yet. That prompt is work in flight, like a running turn.
+#[tokio::test(start_paused = true)]
+async fn a_wait_right_after_creating_with_a_prompt_waits_for_that_prompt() {
+    let idle_session = || {
+        Some(TurnState {
+            execution: MaterializedExecutionState::Idle,
+            active_turn: None,
+            last_turn_outcome: None,
+        })
+    };
+    let can_take_prompt = |snapshot: &mut ViewerSnapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    };
+    let wait = |app: axum::Router| async move {
+        let response = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"timeout_secs":2}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        json_body(response).await
+    };
+
+    let queued_first_prompt = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![idle_session()]),
+        start_status: Some(StartStatus::Pending),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(queued_first_prompt, can_take_prompt);
+    let body = wait(app).await;
+    assert_eq!(
+        body["outcome"], "timeout",
+        "the first prompt has not been answered yet: {body}"
+    );
+
+    // With nothing handed over at creation, an idle session that can take a
+    // prompt has nothing to wait for.
+    let nothing_queued = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![idle_session()]),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(nothing_queued, can_take_prompt);
+    assert_eq!(wait(app).await["outcome"], "finished");
 }
 
 #[test]
@@ -3075,6 +3241,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
+    session.has_checkpoint = true;
     session.capabilities.resume = true;
     session.capabilities.prompt = false;
     session.incompatible_resume_targets.clear();
@@ -3193,6 +3360,70 @@ fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
     assert!(!refusal.contains("close"), "{refusal}");
 }
 
+/// Launch finding R6-1: `mj resume` on a session with no checkpoint was
+/// accepted, and the daemon's resume then failed with "session has no
+/// checkpoint" where the caller never saw it. The API now refuses it at once,
+/// with that reason, the way it refuses every other resume that cannot work.
+#[tokio::test]
+async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            make_stopped(snapshot);
+            // A launch that failed before its first checkpoint.
+            let session = &mut snapshot.sessions[0];
+            session.has_checkpoint = false;
+            session.state = "error".into();
+            session.lifecycle = ViewerLifecycleCategory::Failed;
+            session.has_error = true;
+            session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        });
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the resume was admitted instead of refused")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    let error = body["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("session has no checkpoint"), "{error}");
+    assert!(error.contains("mj destroy --session session-1"), "{error}");
+    assert!(actions.try_recv().is_err(), "no resume reaches the daemon");
+}
+
+/// Launch finding R6-1: the published session says whether its record holds
+/// a checkpoint, which is what the resume route and the prompt refusal read.
+#[test]
+fn a_published_session_says_whether_it_has_a_checkpoint() {
+    let (config, mut state) = sample_config_state();
+    let record = state.sessions.get_mut("session-1").unwrap();
+    record.state = mj_core::state::SessionState::Error;
+    assert!(record.checkpoint.is_none());
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(!snapshot.sessions[0].has_checkpoint);
+
+    state.sessions.get_mut("session-1").unwrap().checkpoint =
+        Some(mj_core::state::CheckpointMetadata {
+            archive_path: "/private/archive.hel.zip".into(),
+            sha256: "a".repeat(64),
+            created_at: "now".into(),
+            event_frontier: 3,
+        });
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert!(snapshot.sessions[0].has_checkpoint);
+    let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();
+    assert!(
+        !published.contains("/private/archive.hel.zip"),
+        "{published}"
+    );
+}
+
 #[tokio::test]
 async fn resuming_an_unknown_session_is_not_found() {
     let (app, _actions, _snapshot_tx, _bundles) =
@@ -3267,7 +3498,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready"}"#,
+                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3"}"#,
             ))
             .unwrap(),
         )
@@ -3280,6 +3511,36 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     assert_eq!(body["session"]["id"], SPAWNED_CHILD);
     assert_eq!(body["task_name"], "probe");
     assert!(body.get("request_key").is_none(), "{body}");
+}
+
+/// A child's model is the one thing a spawn must state: without it there is
+/// nothing to choose a profile by.
+#[tokio::test]
+async fn a_spawn_without_a_model_is_refused() {
+    let (app, _actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].harness_kind = "codex".to_owned();
+        });
+    let parent = {
+        let snapshot = snapshot_tx.borrow();
+        snapshot.sessions[0].id.clone()
+    };
+    let response = app
+        .oneshot(
+            bearer(Request::post(format!(
+                "/api/v1/sessions/{parent}/subagents"
+            )))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_name":"probe","instructions":"say ready"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(body.to_string().contains("spawn needs a model"), "{body}");
 }
 
 /// The caller-chosen key is gone, as it is from session creation: a request
@@ -3301,7 +3562,7 @@ async fn a_spawn_naming_a_request_key_is_refused() {
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready","request_key":"probe-1"}"#,
+                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3","request_key":"probe-1"}"#,
             ))
             .unwrap(),
         )

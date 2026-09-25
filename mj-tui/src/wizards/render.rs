@@ -16,7 +16,7 @@ pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
         WizardStep::Target => WizardControl::TargetList,
         WizardStep::Bundle => WizardControl::BundleList,
         WizardStep::ProjectDirectory => WizardControl::ProjectDirectory,
-        WizardStep::NewBundle => WizardControl::NewBundleSource,
+        WizardStep::NewBundle => WizardControl::ProjectResults,
         WizardStep::Mounts => WizardControl::MountSource,
         WizardStep::Review => WizardControl::Submit,
     }
@@ -29,6 +29,29 @@ fn launch_directory_chosen(dashboard: &DashboardState, wizard: &NewWizard) -> bo
         .launch_project_directory
         .as_deref()
         .is_some_and(|launch| std::path::Path::new(wizard.project_directory.trim()) == launch)
+}
+
+/// Whether the wizard's title leaves the target step out of its step
+/// numbers. On the profile step this is a forecast of whether Next there
+/// would pass the target step.
+fn target_step_hidden<W: WizardDraft>(dashboard: &DashboardState, wizard: &W) -> bool {
+    match wizard.step() {
+        WizardStep::Profile => dashboard.lone_target(wizard).is_some(),
+        _ => wizard.target_step_skipped(),
+    }
+}
+
+/// A step's place in its wizard's title, such as `2/4`. `position` and
+/// `total` count every step, with the target step second; a hidden target
+/// step is taken out of both.
+fn step_counter(position: usize, total: usize, target_hidden: bool) -> String {
+    let hidden = usize::from(target_hidden);
+    let position = if position > 2 {
+        position - hidden
+    } else {
+        position
+    };
+    format!("{position}/{}", total - hidden)
 }
 
 pub(crate) fn begin_form_frame(form: &mut Dialog<WizardControl>, _initial: WizardControl) {
@@ -49,9 +72,14 @@ pub(crate) fn render_new_wizard(
     let focused_before_frame = form.focused();
     let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
+    let target_hidden = target_step_hidden(dashboard, wizard);
     if wizard.step == WizardStep::Review {
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&dashboard.config.targets[&target_id]);
+        let title = format!(
+            " New session · {} review ",
+            step_counter(4, 4, target_hidden)
+        );
         let bundle_id = (!raw_project)
             .then(|| nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle));
         render_review_wizard(
@@ -91,7 +119,7 @@ pub(crate) fn render_new_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                title: " New session · 4/4 review ",
+                title: &title,
                 submit_label: if wizard.remote_preflight_error.is_some() {
                     "Retry"
                 } else {
@@ -212,11 +240,11 @@ pub(crate) fn render_new_wizard(
         let title_line = dismissible_modal_title(
             &mut form,
             popup,
-            if local {
-                "New session · 3/4 local project"
-            } else {
-                "New session · 3/4 remote project"
-            },
+            format!(
+                "New session · {} {} project",
+                step_counter(3, 4, target_hidden),
+                if local { "local" } else { "remote" }
+            ),
             theme::title(true),
             true,
         );
@@ -292,177 +320,16 @@ pub(crate) fn render_new_wizard(
         return;
     }
     if wizard.step == WizardStep::NewBundle {
-        let popup_height = u16::try_from(wizard.new_bundle_repositories.len())
-            .unwrap_or(u16::MAX)
-            .saturating_add(8)
-            .clamp(10, 24);
-        let popup = centered_modal(frame, surfaces, 76, popup_height, area);
-        let content = popup.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        let title_line = dismissible_modal_title(
-            &mut form,
-            popup,
-            "New bundle",
-            theme::title(true),
-            !wizard.bundle_creation_in_flight,
-        );
-        frame.render_widget(theme::modal().title(title_line), popup);
-        frame.render_widget(
-            Paragraph::new("Repositories (first is primary):"),
-            Rect::new(content.x, content.y, content.width, 1.min(content.height)),
-        );
-        let list_y = content.y.saturating_add(1);
-        let list_height = if wizard.new_bundle_repositories.is_empty() {
-            1.min(content.height.saturating_sub(5))
-        } else {
-            u16::try_from(wizard.new_bundle_repositories.len())
-                .unwrap_or(u16::MAX)
-                .min(content.height.saturating_sub(6))
-        };
-        let list_area = Rect::new(content.x, list_y, content.width, list_height);
-        if wizard.new_bundle_repositories.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(
-                    "No repositories added yet.",
-                    Style::default().fg(theme::palette().muted),
-                )),
-                list_area,
-            );
-        } else {
-            let rows = wizard
-                .new_bundle_repositories
-                .iter()
-                .enumerate()
-                .map(|(index, source)| {
-                    if index == 0 {
-                        Line::raw(format!("primary  {source}"))
-                    } else {
-                        Line::raw(format!("         {source}"))
-                    }
-                })
-                .collect::<Vec<_>>();
-            ChoiceList::render(
-                frame,
-                list_area,
-                &rows,
-                wizard.new_bundle_selected,
-                &mut form,
-                WizardControl::NewBundleRepositories,
-            );
-            if wizard.bundle_creation_in_flight {
-                form.declare_with_enabled(
-                    WizardControl::NewBundleRepositories,
-                    ControlKind::ChoiceList {
-                        len: wizard.new_bundle_repositories.len(),
-                        selected: wizard.new_bundle_selected,
-                    },
-                    false,
-                );
-            }
-        }
-        let source_label_y = list_y.saturating_add(list_height);
-        frame.render_widget(
-            Paragraph::new("GitHub source or local Git path with a network remote:"),
-            Rect::new(
-                content.x,
-                source_label_y,
-                content.width,
-                1.min(content.height),
-            ),
-        );
-        // Two button rows sit at the foot of this dialog; the popup keeps off
-        // both of them.
-        let buttons_y = content.bottom().saturating_sub(2);
-        PathField::render_within(
-            frame,
-            Rect::new(
-                content.x,
-                content.y,
-                content.width,
-                buttons_y.saturating_sub(content.y),
-            ),
-            Rect::new(
-                content.x,
-                source_label_y.saturating_add(1),
-                content.width,
-                1.min(content.height),
-            ),
-            &wizard.new_bundle_source,
-            &mut form,
-            WizardControl::NewBundleSource,
-        );
-        let help_y = content.bottom().saturating_sub(3);
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                if wizard.bundle_creation_in_flight {
-                    "Creating bundle…"
-                } else {
-                    "Enter adds · Delete removes · Tab moves focus · Esc cancels"
-                },
-                Style::default().fg(theme::palette().muted),
-            )),
-            Rect::new(content.x, help_y, content.width, 1.min(content.height)),
-        );
-        let action_enabled =
-            !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty();
-        Dialog::render_actions(
-            frame,
-            Rect::new(
-                content.x,
-                content.bottom().saturating_sub(2),
-                content.width,
-                1.min(content.height),
-            ),
-            &[
-                (WizardControl::Add, "Add repository", action_enabled),
-                (
-                    WizardControl::NewBundleRemove,
-                    "Remove selected repository",
-                    !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
-                ),
-            ],
-            &mut form,
-        );
-        Dialog::render_actions(
-            frame,
-            Rect::new(
-                content.x,
-                content.bottom().saturating_sub(1),
-                content.width,
-                1.min(content.height),
-            ),
-            &[
-                (
-                    WizardControl::Cancel,
-                    "Cancel",
-                    !wizard.bundle_creation_in_flight,
-                ),
-                (
-                    WizardControl::Back,
-                    "Back",
-                    !wizard.bundle_creation_in_flight,
-                ),
-                (
-                    WizardControl::Next,
-                    if wizard.bundle_creation_in_flight {
-                        "Creating…"
-                    } else {
-                        "Create bundle"
-                    },
-                    !wizard.bundle_creation_in_flight
-                        && !wizard.new_bundle_sources_for_submit().is_empty(),
-                ),
-            ],
-            &mut form,
-        );
+        projects::render_project_picker(frame, area, wizard, &mut form, surfaces);
         form.end_frame(initial);
         return;
     }
     let (title, choices, selected): (_, Vec<PickerChoice>, _) = match wizard.step {
         WizardStep::Profile => (
-            " New session · 1/4 profile ",
+            format!(
+                " New session · {} profile ",
+                step_counter(1, 4, target_hidden)
+            ),
             profile_table(
                 dashboard
                     .config
@@ -473,13 +340,30 @@ pub(crate) fn render_new_wizard(
             wizard.profile,
         ),
         WizardStep::Bundle => (
-            " New session · 3/4 project bundle ",
+            format!(
+                " New session · {} choose a project ",
+                step_counter(3, 4, target_hidden)
+            ),
             bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
                 .into_iter()
                 .map(|id| {
                     let bundle = &dashboard.config.bundles[id];
+                    let sources = bundle
+                        .repositories
+                        .iter()
+                        .map(|repository| {
+                            repository.github.clone().unwrap_or_else(|| {
+                                repository
+                                    .local
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| repository.id.clone())
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     PickerChoice::text(format!(
-                        "{id}  {}",
+                        "{id}  {} · {sources}",
                         crate::widgets::counted(
                             bundle.repositories.len(),
                             "repository",
@@ -491,7 +375,10 @@ pub(crate) fn render_new_wizard(
             wizard.bundle,
         ),
         WizardStep::Target => (
-            " New session · 2/4 target ",
+            format!(
+                " New session · {} target ",
+                step_counter(2, 4, target_hidden)
+            ),
             dashboard
                 .config
                 .targets
@@ -522,7 +409,11 @@ pub(crate) fn render_new_wizard(
     let mut help = vec![if wizard.step == WizardStep::Target {
         picker_help(&resource_help(dashboard))
     } else {
-        picker_help("↑/↓ select · Tab moves focus · Enter activates")
+        picker_help(if wizard.step == WizardStep::Bundle {
+            "Choose saved project files, or browse GitHub and folders for another."
+        } else {
+            "↑/↓ select · Tab moves focus · Enter activates"
+        })
     }];
     if wizard.step == WizardStep::Profile
         && dashboard
@@ -535,7 +426,7 @@ pub(crate) fn render_new_wizard(
     render_picker(
         frame,
         area,
-        title,
+        &title,
         choices,
         help,
         PickerNavigation {
@@ -571,11 +462,11 @@ pub(crate) fn render_new_wizard(
             },
             pinned_action: (wizard.step == WizardStep::Bundle).then_some((
                 WizardControl::Add,
-                "New bundle…",
+                "Add project…",
                 true,
             )),
             empty_hint: (wizard.step == WizardStep::Bundle && dashboard.config.bundles.is_empty())
-                .then_some("No bundles yet."),
+                .then_some("Choose a project to get started."),
         },
         &mut form,
         surfaces,
@@ -1105,9 +996,10 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
     id: K,
 ) {
     let selected = combo.selection(id, access_index(choices, access));
+    // `ComboBox::render` adds the dropdown glyph itself.
     let value = choices
         .get(selected)
-        .map(|choice| ComboBox::display_value(access_description(*choice)))
+        .map(|choice| access_description(*choice))
         .unwrap_or_default();
     let options = choices
         .iter()
@@ -1117,7 +1009,7 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
         frame,
         bounds,
         field,
-        &value,
+        value,
         &options,
         selected,
         expanded,
@@ -1416,7 +1308,12 @@ pub(crate) fn render_resume_wizard(
                 }
             }
         };
-        let review_title = resume_wizard_title(wizard, "3/3 review", "3/3 confirm");
+        let counter = step_counter(3, 3, target_step_hidden(dashboard, wizard));
+        let review_title = resume_wizard_title(
+            wizard,
+            &format!("{counter} review"),
+            &format!("{counter} confirm"),
+        );
         render_review_wizard(
             frame,
             area,
@@ -1531,6 +1428,7 @@ pub(crate) fn render_resume_wizard(
         form.end_frame(initial);
         return;
     }
+    let target_hidden = target_step_hidden(dashboard, wizard);
     let (title, choices, selected, mut help) = match wizard.step {
         WizardStep::Profile => {
             let profiles = dashboard.resume_wizard_profiles(wizard);
@@ -1574,19 +1472,22 @@ pub(crate) fn render_resume_wizard(
             {
                 help.push(guardian_footnote());
             }
+            let step = format!(
+                "{} profile (cross-harness supported)",
+                step_counter(1, 3, target_hidden)
+            );
             (
-                resume_wizard_title(
-                    wizard,
-                    "1/3 profile (cross-harness supported)",
-                    "1/3 profile (cross-harness supported)",
-                ),
+                resume_wizard_title(wizard, &step, &step),
                 profile_table(rows),
                 wizard.profile,
                 help,
             )
         }
         WizardStep::Target => (
-            resume_wizard_title(wizard, "2/3 new target", "2/3 new target"),
+            {
+                let step = format!("{} new target", step_counter(2, 3, target_hidden));
+                resume_wizard_title(wizard, &step, &step)
+            },
             dashboard
                 .config
                 .targets

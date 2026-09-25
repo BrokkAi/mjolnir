@@ -51,6 +51,10 @@ pub(super) async fn run_daemon_runtime(
     tokio::task::spawn_blocking(crate::controller::pin_worker_binary_sources)
         .await
         .context("worker source snapshot task failed")??;
+    // Lock files outlive the SSH masters they guarded (launch finding R3-11).
+    tokio::task::spawn_blocking(crate::targets::SshSessions::remove_stale_master_locks)
+        .await
+        .context("SSH master lock cleanup task failed")?;
     Controller::recover_config_id_rename()?;
     let config = Config::load()?;
     crate::database::recover_interrupted_checkpointing_sessions(
@@ -59,6 +63,32 @@ pub(super) async fn run_daemon_runtime(
     crate::controller::reconcile_managed_checkpoint_archives()?;
 
     let controller = Controller::load()?;
+    // A local session an earlier release started from a profile home keeps
+    // running from it until it is next staged. The link has to be in place
+    // before any launch configuration is refreshed or any credential sync runs.
+    {
+        let state = controller.state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::controller::local_profile_homes::link_profile_homes_of_earlier_sessions(&state)
+        })
+        .await
+        .context("earlier sessions' profile home link task failed")?;
+    }
+    // Earlier releases left each such session's project-memory replica in the
+    // profile home, where nothing removed it when the session ended.
+    {
+        let config = config.clone();
+        let state = controller.state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::controller::local_profile_homes::remove_replicas_left_in_profile_homes(
+                &config,
+                &state,
+                &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(15)),
+            )
+        })
+        .await
+        .context("leftover project-memory replica cleanup task failed")?;
+    }
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .await
         .context("bind Mjolnir daemon loopback endpoint")?;

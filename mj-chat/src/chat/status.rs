@@ -160,6 +160,11 @@ impl ChatState {
         }
     }
 
+    /// The session name the conversation's title shows.
+    pub fn header_title(&self) -> &str {
+        &self.header_title
+    }
+
     /// Records whether the session has a prompt of ours in flight, which is
     /// what the relay accepts a cancellation for.
     pub(crate) fn set_prompt_in_flight(&mut self, in_flight: bool) {

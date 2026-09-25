@@ -15,6 +15,7 @@ pub mod doctor;
 pub(crate) mod handoff;
 pub mod image;
 pub mod import;
+pub mod project_picker;
 pub mod quota;
 pub mod readline;
 pub mod recovery;
@@ -47,4 +48,6 @@ pub mod image_pull_gate;
 pub mod recovery_gate;
 
 mod continuation;
+#[cfg(test)]
+mod test_log;
 mod upgrade;

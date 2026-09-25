@@ -9,6 +9,9 @@ impl DashboardState {
         match wizard.step {
             WizardStep::Profile => {
                 wizard.step = WizardStep::Target;
+                if self.skip_target_step(&mut wizard) {
+                    return self.advance_resume_wizard(wizard);
+                }
                 wizard.form.get_mut().focus(step_initial(wizard.step));
                 let action = if wizard.resource_allocation.is_some() {
                     DashboardAction::None

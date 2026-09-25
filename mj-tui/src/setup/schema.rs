@@ -25,7 +25,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
+            json!({"max_concurrent":6,"eligible_profiles":{}})
         }
         "build_cache" if path.len() == 1 => {
             json!({"enabled": true})
@@ -413,28 +413,30 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
         "continuation" => {
             if section["enabled"] == Value::Bool(false) {
                 "Off".to_owned()
+            } else if !jev_enabled(draft) {
+                // `Config::automatic_continuation_enabled`: the classifier
+                // that judges each reply is Jev, so without it nothing runs.
+                "Off · Jev is off (Privacy)".to_owned()
             } else {
                 "On · 3 continuations plus quota recovery".to_owned()
             }
         }
         "jev" => {
             if section["enabled"] == Value::Bool(false) {
-                "Off · nothing is sent".to_owned()
+                "Off · new sessions send nothing".to_owned()
             } else {
                 "On · sends turn text for classification".to_owned()
             }
         }
         "subagents" => {
-            if section["enabled"] == Value::Bool(false) {
-                "Off".to_owned()
-            } else {
-                // A cleared limit is the default one, which still applies.
-                let limit = section["max_concurrent"].as_u64().unwrap_or(
-                    u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
-                        .unwrap_or(u64::MAX),
-                );
-                format!("On · up to {limit}")
-            }
+            // A cleared limit is the default one, which still applies.
+            // Whether any given session uses Mjolnir sub-agents is now a
+            // per-session choice, so this page only bounds them.
+            let limit = section["max_concurrent"].as_u64().unwrap_or(
+                u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
+                    .unwrap_or(u64::MAX),
+            );
+            format!("Up to {limit} at once")
         }
         "sessionwiki" => match section["archive_after_days"].as_u64() {
             Some(days) => format!("Archives after {days} days"),
@@ -603,6 +605,23 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     values.iter().map(|v| Value::String((*v).into())).collect()
 }
 
+/// Whether the draft leaves the hosted Jev service on.
+fn jev_enabled(draft: &Value) -> bool {
+    draft["jev"]["enabled"] != Value::Bool(false)
+}
+
+/// The description drawn above the page `path`: its [`help`], except where
+/// another setting in the draft changes what the page does. Continuation
+/// cannot run while Jev is off, whatever its own box says.
+pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
+    match path {
+        [section] if section == "continuation" && !jev_enabled(draft) => {
+            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
+        }
+        _ => help(path),
+    }
+}
+
 pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {
@@ -662,7 +681,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
         }
         "jev" => {
-            "Sends turn and help-search text to a hosted classifier. Off: nothing is sent and continuation stops."
+            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."

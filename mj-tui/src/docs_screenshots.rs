@@ -1,9 +1,10 @@
 //! Deterministic documentation captures rendered by the real terminal UI.
 //!
 //! The test is ignored because it writes committed documentation assets. Run
-//! it explicitly whenever the terminal surface changes:
+//! it explicitly whenever the terminal surface changes. Clear `NO_COLOR` so
+//! Settings describes the same theme as the captured terminal palette:
 //!
-//!     cargo test -p brokk-mj-tui generate_documentation_screenshots -- --ignored --nocapture
+//!     NO_COLOR= cargo test -p brokk-mj-tui generate_documentation_screenshots -- --ignored --nocapture
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -16,40 +17,46 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
+use mj_chat::chat::{ActiveChat, ChatState, Notices, SessionHeaderIdentity};
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
-use mj_core::state::{MaterializedExecutionState, STATE_VERSION, SessionState, State};
+use mj_core::state::{
+    MaterializedExecutionState, MaterializedSession, STATE_VERSION, SessionState, State,
+    TranscriptBody,
+};
 
 use mj_client::quota::{ProfileQuota, QuotaWindow};
 use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage};
 
-use crate::render::render;
+use crate::combined::render_combined_for_test;
 use crate::test_support::{
-    agent_message, chord, config, materialized_session_for, open_new_session_wizard, open_palette,
-    running_session, transcript_item,
+    agent_message, buffer_lines, chord, config, materialized_session_for, open_new_session_wizard,
+    open_palette, running_session, transcript_item,
 };
-use crate::{DashboardState, PaneSize, SupportPane};
+use crate::{DashboardState, Focus, PaneSize, SupportPane};
 
 const COLUMNS: u16 = 140;
 const ROWS: u16 = 42;
 const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 18;
 const PADDING: u16 = 14;
-const TERMINAL_BACKGROUND: &str = "#0b1220";
+const TERMINAL_BACKGROUND: &str = "#0f1214";
+const CONVERSATION_ID: &str = "terminal-polish";
+const CONVERSATION_TITLE: &str = "Polish the terminal workspace";
 /// Stands in for the build number on every capture. It reads as a placeholder
 /// so nobody mistakes a screenshot for a claim about the version they run.
 const DOCUMENTATION_VERSION: &str = "vX.Y.Z";
 
-#[test]
+#[tokio::test]
 #[ignore = "writes the committed documentation screenshots"]
-fn generate_documentation_screenshots() {
+async fn generate_documentation_screenshots() {
     let output = documentation_screenshot_directory();
     fs::create_dir_all(&output).expect("create documentation screenshot directory");
 
     let mut dashboard = documentation_dashboard();
     capture(
         &output.join("dashboard.svg"),
-        "Mjolnir terminal dashboard",
-        "The current Mjolnir terminal surface with active sessions, the conversation and prompt regions, target capacity, quota, and the contextual key footer.",
+        "Mjolnir terminal workspace",
+        "The Mjolnir terminal workspace with session navigation, a conversation containing user, agent, and tool messages, an unsent prompt, target capacity, quota, and contextual keyboard controls.",
         &mut dashboard,
     );
 
@@ -58,7 +65,7 @@ fn generate_documentation_screenshots() {
     capture(
         &output.join("new-session.svg"),
         "Mjolnir new-session wizard",
-        "The current Mjolnir new-session wizard over the terminal dashboard, at the profile-selection step.",
+        "The Mjolnir new-session wizard over the terminal workspace, at the profile-selection step.",
         &mut wizard,
     );
 
@@ -67,7 +74,7 @@ fn generate_documentation_screenshots() {
     capture(
         &output.join("command-palette.svg"),
         "Mjolnir command palette",
-        "The current Mjolnir command palette over the terminal dashboard, with session, pane, and global commands grouped together.",
+        "The Mjolnir command palette over the terminal workspace, with session, pane, and global commands grouped together.",
         &mut palette,
     );
 
@@ -121,8 +128,8 @@ fn documentation_dashboard() -> DashboardState {
     let mut sessions = BTreeMap::new();
     for (index, (id, title, profile, harness, target)) in [
         (
-            "docs-control-plane",
-            "Document the v2 control plane",
+            CONVERSATION_ID,
+            CONVERSATION_TITLE,
             "codex-1",
             HarnessKind::Codex,
             "podman",
@@ -157,7 +164,7 @@ fn documentation_dashboard() -> DashboardState {
         session.native_session_id = Some(format!("native-{index}"));
         session.created_at.clone_from(&now);
         session.updated_at.clone_from(&now);
-        session.workspace_id = if index == 1 {
+        session.workspace_id = if index == 2 {
             "maintenance".into()
         } else {
             "default".into()
@@ -212,35 +219,17 @@ fn documentation_dashboard() -> DashboardState {
     // wrong in these files from the next release onwards, and it would make
     // every regeneration a diff even when the surface had not changed.
     dashboard.version_label = DOCUMENTATION_VERSION.into();
-    dashboard.set_workspace_name("Mjolnir docs".into());
+    dashboard.set_workspace_name("Mjolnir".into());
     dashboard.set_workspace_names(BTreeMap::from([
-        ("default".into(), "Docs".into()),
+        ("default".into(), "Mjolnir".into()),
         ("maintenance".into(), "Maintenance".into()),
     ]));
-    dashboard.select_active_session("docs-control-plane");
+    dashboard.select_active_session(CONVERSATION_ID);
+    dashboard.set_current_session(Some(CONVERSATION_ID));
     dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
+    dashboard.focus = Focus::Prompt;
 
-    apply_documentation_transcript(
-        &mut dashboard,
-        "docs-control-plane",
-        vec![
-            transcript_item(
-                1,
-                mj_core::state::TranscriptBody::User {
-                    content: vec![serde_json::json!({
-                        "type": "text",
-                        "text": "Rebuild the documentation around the current control plane."
-                    })],
-                },
-            ),
-            agent_message(
-                2,
-                "The guide hierarchy is mapped; I am validating every configuration field now.",
-            ),
-        ],
-        true,
-        refreshed,
-    );
+    dashboard.apply_materialized_session(&documentation_conversation());
     apply_documentation_transcript(
         &mut dashboard,
         "recovery-audit",
@@ -258,7 +247,7 @@ fn documentation_dashboard() -> DashboardState {
             1,
             "Podman, Docker, SSH, Apple container, and EC2 guides are linked.",
         )],
-        true,
+        false,
         refreshed,
     );
 
@@ -283,6 +272,54 @@ fn documentation_dashboard() -> DashboardState {
         refreshed,
     );
     dashboard
+}
+
+fn documentation_conversation() -> MaterializedSession {
+    let mut conversation = materialized_session_for(
+        CONVERSATION_ID,
+        vec![
+            transcript_item(
+                1,
+                TranscriptBody::User {
+                    content: vec![serde_json::json!({
+                        "type": "text",
+                        "text": "Refresh the terminal styling while keeping the current panels."
+                    })],
+                },
+            ),
+            agent_message(
+                2,
+                "I'll give the navigation, conversation, and prompt a consistent visual treatment.",
+            ),
+            transcript_item(
+                3,
+                TranscriptBody::Tool {
+                    call: serde_json::json!({
+                        "toolCallId": "inspect-terminal",
+                        "title": "Inspect terminal layout and shared styles",
+                        "kind": "read",
+                        "status": "completed",
+                        "content": []
+                    }),
+                    terminal_outputs: Vec::new(),
+                    terminal_refs: Vec::new(),
+                    presentation: None,
+                },
+            ),
+            agent_message(
+                4,
+                "**The workspace is now easier to scan.**\n\n\
+                 - Quiet graphite panels with mint focus accents\n\
+                 - Clear author labels and readable conversation spacing\n\
+                 - Compact session details and a distinct prompt\n\n\
+                 The shared styles live in `mj-chat/src/theme.rs`; session behavior is unchanged.",
+            ),
+        ],
+    );
+    conversation.execution = MaterializedExecutionState::Idle;
+    conversation.last_activity_at_ms =
+        Some(i64::try_from(now_epoch_seconds()).unwrap() * 1_000 - 3_000);
+    conversation
 }
 
 fn apply_documentation_transcript(
@@ -347,10 +384,42 @@ fn now_epoch_seconds() -> u64 {
 }
 
 fn capture(path: &Path, title: &str, description: &str, dashboard: &mut DashboardState) {
+    // The real combined renderer needs an attached chat as well as session-list
+    // state. This in-memory backend cannot contact a daemon or live session.
+    let fixture = mj_client::session::replacement_session_test_fixture(CONVERSATION_ID, 4);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "mjolnir",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    *chat = ChatState::from_materialized(&documentation_conversation(), &[], &[]);
+    chat.set_header_summary("podman", "codex-1", CONVERSATION_TITLE);
+    chat.set_harness_kind(HarnessKind::Codex);
+    chat.set_draft("Check the narrow-terminal layout and the light theme next.".into());
+    let mut chats = BTreeMap::from([(CONVERSATION_ID.to_owned(), chat)]);
     let mut terminal = Terminal::new(TestBackend::new(COLUMNS, ROWS)).expect("test terminal");
     terminal
-        .draw(|frame| render(frame, dashboard))
+        .draw(|frame| {
+            render_combined_for_test(frame, dashboard, &mut chats, &BTreeMap::new(), false);
+        })
         .expect("render documentation frame");
+    if dashboard.mode == crate::Mode::Dashboard {
+        let visible = buffer_lines(terminal.backend().buffer()).join("\n");
+        for content in [
+            "Refresh the terminal styling",
+            "The workspace is now easier to scan.",
+            "Check the narrow-terminal layout",
+        ] {
+            assert!(
+                visible.contains(content),
+                "capture must display {content}:\n{visible}"
+            );
+        }
+    }
     let svg = buffer_svg(terminal.backend().buffer(), title, description);
     fs::write(path, svg).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }
@@ -437,7 +506,7 @@ pub(crate) fn buffer_svg(buffer: &Buffer, title: &str, description: &str) -> Str
                 svg,
                 "    <text x=\"{draw_x}\" y=\"{}\" fill=\"{}\"{attributes}>{}</text>",
                 draw_y + 14,
-                color_hex(foreground, "#d8d4df"),
+                color_hex(foreground, "#efede8"),
                 xml_escape(symbol)
             )
             .unwrap();

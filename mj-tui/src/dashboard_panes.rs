@@ -69,7 +69,7 @@ impl DashboardState {
     /// not resizable, so it explains how to choose a pane instead.
     pub fn cycle_focused_pane_size(&mut self) {
         let Some(pane) = self.focus.support_pane() else {
-            self.set_notice("Select Sessions, Targets, or Quota before cycling the pane size.");
+            self.set_notice("Select Sessions, Targets, or Profiles before cycling the pane size.");
             return;
         };
         let mut next = self.pane_size(pane).cycled();

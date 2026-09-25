@@ -453,6 +453,29 @@ fn the_container_editor_says_when_a_session_has_no_build_cache() {
     );
 }
 
+/// Launch finding R3-11 (with J-24): the container editor named the session
+/// by its 32-hex id where the row and every other dialog use its title, and
+/// drew its access choice with two dropdown glyphs ("ro · read-only ▾ ▾").
+#[test]
+fn the_container_editor_names_the_session_and_draws_one_dropdown_glyph() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open_container_editor(&mut dashboard);
+    let shown = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(shown.contains("Session: ACP pretty name"), "{shown}");
+    assert!(!shown.contains("Session: session-1"), "{shown}");
+    let access = shown
+        .lines()
+        .find(|line| line.contains("Access:"))
+        .unwrap_or_else(|| panic!("no access row:\n{shown}"));
+    assert_eq!(
+        access
+            .matches(mj_chat::components::ComboBox::glyph())
+            .count(),
+        1,
+        "{access}"
+    );
+}
+
 fn dashboard_with_container_session() -> DashboardState {
     let mut session = running_session();
     session.additional_mounts = vec![AdditionalMount {
@@ -961,22 +984,19 @@ fn rename_editor_highlights_save_until_cancel_takes_focus() {
     // footer buttons.
     assert_eq!(
         button_styles(&mut dashboard),
-        (
-            theme::palette().surface_raised,
-            theme::palette().surface_raised
-        )
+        (theme::palette().selection, theme::palette().selection)
     );
 
     dashboard.handle_key(key(KeyCode::Tab));
     assert_eq!(
         button_styles(&mut dashboard),
-        (theme::palette().accent, theme::palette().surface_raised)
+        (theme::palette().accent, theme::palette().selection)
     );
 
     dashboard.handle_key(key(KeyCode::Tab));
     assert_eq!(
         button_styles(&mut dashboard),
-        (theme::palette().surface_raised, theme::palette().accent)
+        (theme::palette().selection, theme::palette().accent)
     );
 }
 
@@ -1450,11 +1470,7 @@ fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
     let source_y = buffer.area.y + source_row as u16;
     let source_x = buffer.area.x + cell_column(&lines[source_row], "Source:");
     let field_x = source_x + 8;
-    assert!(
-        buffer[(field_x, source_y)]
-            .modifier
-            .contains(Modifier::UNDERLINED)
-    );
+    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(true).bg);
     assert_eq!(
         cursor_position,
         Position {
@@ -1475,14 +1491,8 @@ fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
     let button_y = buffer.area.y + button_row as u16;
     let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
     let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-    assert_eq!(
-        buffer[(cancel_x, button_y)].bg,
-        theme::palette().surface_raised
-    );
-    assert_eq!(
-        buffer[(check_x, button_y)].bg,
-        theme::palette().surface_raised
-    );
+    assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().selection);
+    assert_eq!(buffer[(check_x, button_y)].bg, theme::palette().selection);
 
     dashboard.handle_key(key(KeyCode::Tab));
     terminal
@@ -1497,11 +1507,7 @@ fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
     let button_y = buffer.area.y + button_row as u16;
     let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
     assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().accent);
-    assert!(
-        !buffer[(field_x, source_y)]
-            .modifier
-            .contains(Modifier::UNDERLINED)
-    );
+    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(false).bg);
 }
 
 #[test]

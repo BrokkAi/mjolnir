@@ -61,56 +61,50 @@ impl Controller {
             instance_id: Some(mj_core::config::instance_identity()),
         }
         .write(&ownership_path)?;
+        // Every session runs from a staged copy of its profile, on every target,
+        // so `target_profile_home` is always a home the session owns and the
+        // stage is always installed there.
         let profile_stage = staging.path().join("profile");
-        // Files are staged only into a home the session owns. The alternative
-        // is `target_profile_home` being the user's own harness home, where
-        // installing the stage would overwrite their configuration with the
-        // daemon's copy and leave it there. The private-home decision is read
-        // from the one place that makes it rather than restated here.
-        if crate::controller::session_owns_profile_home(backend, session_id, profile) {
-            let started = Instant::now();
-            let result = stage_profile(profile, &profile_stage);
-            tracing::debug!(
-                session_id,
-                elapsed_ms = started.elapsed().as_millis(),
-                "profile staging completed"
-            );
-            result?;
-            stage_managed_skills(profile.kind, &profile_stage)?;
-            stage_codex_catalog(
-                &session.last_profile,
-                profile,
-                &profile_stage,
-                &fetch_catalog_over_https,
-                &SharedCatalogCache,
-            )?;
-            append_hel_target_environment(profile.kind, &profile_stage, backend)?;
-            apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
-            if profile.kind == mj_core::config::HarnessKind::Claude {
-                if launch.subagent_tools {
-                    configure_claude_subagent_mcp(
-                        &profile_stage,
-                        worker_root,
-                        mj_core::subagent::SubagentMcpRole::Parent,
-                    )?;
-                } else if launch.handback_tool {
-                    configure_claude_subagent_mcp(
-                        &profile_stage,
-                        worker_root,
-                        mj_core::subagent::SubagentMcpRole::Child,
-                    )?;
-                }
+        let started = Instant::now();
+        let result = stage_profile(profile, &profile_stage);
+        tracing::debug!(
+            session_id,
+            elapsed_ms = started.elapsed().as_millis(),
+            "profile staging completed"
+        );
+        result?;
+        stage_managed_skills(profile.kind, &profile_stage)?;
+        stage_codex_catalog(
+            &session.last_profile,
+            profile,
+            &profile_stage,
+            &fetch_catalog_over_https,
+            &SharedCatalogCache,
+        )?;
+        append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+        apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
+        if profile.kind == mj_core::config::HarnessKind::Claude {
+            if launch.subagent_tools {
+                configure_claude_subagent_mcp(
+                    &profile_stage,
+                    worker_root,
+                    mj_core::subagent::SubagentMcpRole::Parent,
+                )?;
+            } else if launch.handback_tool {
+                configure_claude_subagent_mcp(
+                    &profile_stage,
+                    worker_root,
+                    mj_core::subagent::SubagentMcpRole::Child,
+                )?;
             }
-            stage_memory_replica(
-                &project_memory,
-                Path::new(&target_profile_home),
-                &profile_stage,
-            )?;
-            if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-                configure_kimi_project_memory_mcp(&profile_stage, worker_root, &project_memory)?;
-            }
-        } else {
-            seed_local_memory_replica(&project_memory)?;
+        }
+        stage_memory_replica(
+            &project_memory,
+            Path::new(&target_profile_home),
+            &profile_stage,
+        )?;
+        if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
+            configure_kimi_project_memory_mcp(&profile_stage, worker_root, &project_memory)?;
         }
         let worker_binary = worker_binary_for(backend, executor)?;
 
@@ -293,26 +287,9 @@ impl Controller {
             &target,
         )?;
         apply_jev_switch(&mut launch, self.config.jev.enabled);
-        launch.subagent_tools =
-            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        launch.subagent_tools = subagent_tools_enabled(session, subagent.is_some());
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
-        // Claude reads Mjolnir's delegation server from a configuration file in
-        // its harness home, never over ACP, so a session running out of the
-        // user's own home has no way to be given one. Leaving the flag set
-        // would take Claude's own Agent and Task tools away without putting
-        // anything in their place.
-        if launch.subagent_tools
-            && profile.kind == mj_core::config::HarnessKind::Claude
-            && !crate::controller::session_owns_profile_home(backend, session_id, profile)
-        {
-            tracing::info!(
-                session_id,
-                "Mjolnir sub-agents need a harness home of their own; this Claude session runs \
-                 out of the user's own home and keeps Claude's Agent and Task tools instead"
-            );
-            launch.subagent_tools = false;
-        }
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
         // configuration has an eligible reviewer, and that is not a child. A child
@@ -453,16 +430,16 @@ pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
 }
 
 /// Whether this session gets Mjolnir's delegation tools in place of its
-/// harness's own. The session's stored choice governs and `None` follows the
-/// global `[subagents] enabled` setting, so a session created before the
-/// per-session choice existed behaves as it always did. A child never gets
-/// them, and only Claude and Codex can receive them at all.
+/// harness's own. The session's stored choice governs; `None` means native
+/// sub-agents, so a session created before the per-session choice existed (or
+/// through `mj new` with neither flag given) gets its harness's own
+/// sub-agents. A child never gets them, and only Claude and Codex can receive
+/// them at all.
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,
-    global_enabled: bool,
     is_child: bool,
 ) -> bool {
-    session.mjolnir_subagents.unwrap_or(global_enabled)
+    session.mjolnir_subagents.unwrap_or(false)
         && !is_child
         && matches!(
             session.harness_kind,
@@ -589,11 +566,9 @@ pub(super) fn worker_launch_config(
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.clone());
-    profile.kind.configure_home_environment(
-        Path::new(&target_profile_home),
-        backend.harness_host(),
-        &mut environment,
-    );
+    profile
+        .kind
+        .configure_home_environment(Path::new(&target_profile_home), &mut environment);
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
@@ -625,11 +600,15 @@ pub(super) fn worker_launch_config(
             review_capture: false,
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
-            // The staged home mirrors the profile home, so the controller's
-            // marker file name is the one the worker must check.
+            // The staged home mirrors the profile home, so the marker's path
+            // within the profile home is the one the worker must check and
+            // the credential sync must write. Kimi's is nested
+            // (`credentials/kimi-code.json`); its file name alone named a file
+            // at the top of the staged home that Kimi never reads.
             authentication_marker: profile
                 .authentication_marker()
-                .file_name()
+                .strip_prefix(&profile.home)
+                .ok()
                 .map(|name| name.to_string_lossy().into_owned()),
             bridge_command: PathBuf::from(bridge_command),
             bridge_args,

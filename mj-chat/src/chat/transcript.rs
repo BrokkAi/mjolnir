@@ -210,7 +210,7 @@ impl TranscriptSnapshot {
                 }
             })
             .collect::<Vec<_>>();
-        suppress_duplicate_standalone_terminal_output(&mut entries);
+        apply_entry_list_rules(&mut entries);
         Self::from_entries_at(entries, session.applied_event_ordinal)
     }
 
@@ -722,7 +722,7 @@ impl ChatState {
         let shift = prefix.len();
         let tail = std::mem::replace(&mut self.entries, prefix);
         self.entries.extend(tail);
-        suppress_duplicate_standalone_terminal_output(&mut self.entries);
+        apply_entry_list_rules(&mut self.entries);
         self.unconverted_prefix = 0;
         self.prefix_seam = None;
         if let TranscriptAnchor::Row { entry, row } = self.anchor {
@@ -733,6 +733,18 @@ impl ChatState {
         }
         self.invalidate_render_cache();
         true
+    }
+
+    /// Whether the view still rests where the opening reveal put it, which
+    /// the reader did not choose: no scroll has moved it since.
+    pub(super) fn rests_on_opening_reveal(&self) -> bool {
+        self.revealed_anchor.is_some_and(|(revealed, _)| {
+            matches!(
+                self.anchor,
+                TranscriptAnchor::Row { entry, row: 0 }
+                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
+            )
+        })
     }
 
     fn viewport(&mut self, width: u16, height: usize) -> TranscriptViewport {
@@ -756,13 +768,8 @@ impl ChatState {
         // reader did not scroll there. Once something newer arrives, follow
         // the tail again. Any scroll by the reader moves the anchor off the
         // revealed row and ends this.
-        if let Some((revealed, last)) = self.revealed_anchor {
-            let still_revealed = matches!(
-                self.anchor,
-                TranscriptAnchor::Row { entry, row: 0 }
-                    if self.entries.get(entry).map(|entry| entry.start_seq) == Some(revealed)
-            );
-            if !still_revealed {
+        if let Some((_, last)) = self.revealed_anchor {
+            if !self.rests_on_opening_reveal() {
                 self.revealed_anchor = None;
             } else if self.entries.last().map(|entry| entry.start_seq) != Some(last) {
                 self.anchor = TranscriptAnchor::Bottom;

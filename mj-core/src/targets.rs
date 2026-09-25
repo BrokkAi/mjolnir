@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{HarnessHost, HarnessKind, ImagePullPolicy};
+use crate::config::{HarnessKind, ImagePullPolicy};
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -608,20 +608,13 @@ fn with_ssh_admission(
         let Some(refusal) = refusal else {
             return Ok(output);
         };
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if attempt == SSH_RETRY_ATTEMPTS {
+            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
             return Ok(output);
         }
         let delay = ssh_retry_delay(attempt);
-        tracing::warn!(
-            destination,
-            purpose = command.purpose.as_str(),
-            attempt,
-            attempts = SSH_RETRY_ATTEMPTS,
-            delay_ms = delay.as_millis() as u64,
-            stderr = String::from_utf8_lossy(&output.stderr).trim(),
-            "{}",
-            refusal.retry_message()
-        );
+        refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
         if !sleep_unless_cancelled(delay, is_cancelled) {
             bail!("operation cancelled while {}", command.purpose);
         }
@@ -1752,16 +1745,6 @@ impl TargetTemplate {
 }
 
 impl TargetLocator {
-    /// The operating system the harness will run on. Only a bare localhost
-    /// target runs it on this machine; every other locator is a Linux
-    /// container or a Linux host reached over SSH.
-    pub const fn harness_host(&self) -> HarnessHost {
-        match self {
-            Self::LocalBare { .. } => HarnessHost::current(),
-            _ => HarnessHost::Other,
-        }
-    }
-
     /// The target kind spelling shared with [`crate::config::TargetTemplate`].
     pub const fn kind_name(&self) -> &'static str {
         match self {

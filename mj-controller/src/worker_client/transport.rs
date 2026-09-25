@@ -25,7 +25,7 @@ pub(super) fn log_relay_client_failure(
             relay_error_code = ?rejection.code,
             relay_retryable = rejection.retryable,
             transport_dead,
-            error = %error,
+            error = format!("{error:#}"),
             "relay request rejected"
         ),
         None => tracing::warn!(
@@ -34,7 +34,7 @@ pub(super) fn log_relay_client_failure(
             %operation,
             %request_id,
             transport_dead,
-            error = %error,
+            error = format!("{error:#}"),
             "relay request failed"
         ),
     }

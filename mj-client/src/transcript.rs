@@ -151,7 +151,7 @@ pub fn materialized_chat_entries_with_diffstats(
             )
         })
         .collect::<Vec<_>>();
-    suppress_duplicate_standalone_terminal_output(&mut entries);
+    apply_entry_list_rules(&mut entries);
     entries
 }
 
@@ -169,7 +169,7 @@ pub fn materialized_prefix_entries(items: &[Arc<TranscriptItem>], frontier: u64)
         .iter()
         .map(|item| materialized_chat_entry(item, frontier))
         .collect::<Vec<_>>();
-    suppress_duplicate_standalone_terminal_output(&mut entries);
+    apply_entry_list_rules(&mut entries);
     entries
 }
 
@@ -223,8 +223,49 @@ pub fn materialized_chat_entries_reusing(
             materialized_chat_entry(item, session.applied_event_ordinal)
         })
         .collect::<Vec<_>>();
-    suppress_duplicate_standalone_terminal_output(&mut entries);
+    apply_entry_list_rules(&mut entries);
     entries
+}
+
+/// The rules that read a converted entry list as a whole rather than one
+/// item at a time. Every path that builds or splices an entry list runs
+/// them, so reused entries are brought up to date too.
+pub fn apply_entry_list_rules(entries: &mut [ChatEntry]) {
+    suppress_duplicate_standalone_terminal_output(entries);
+    mark_tools_ended_after_interrupt(entries);
+}
+
+/// Marks each completed tool call whose turn was interrupted while it still
+/// ran. Codex keeps a command going after an interrupt ends the turn and
+/// reports it completed when it ends on its own, which read as the
+/// interrupted turn's finished work (R10-1). A tool belongs to the turn that
+/// the next prompt ends; it ended after the interruption when its item last
+/// changed after that turn's "Interrupted" marker was recorded.
+pub fn mark_tools_ended_after_interrupt(entries: &mut [ChatEntry]) {
+    let mut interrupted_at = None;
+    for entry in entries.iter_mut().rev() {
+        let Some(item) = entry.source.0.as_ref() else {
+            entry.ended_after_interrupt = false;
+            continue;
+        };
+        match &item.body {
+            TranscriptBody::User { .. } => interrupted_at = None,
+            TranscriptBody::System { .. }
+                if item.stable_id.starts_with(HARNESS_TURN_ITEM_PREFIX) =>
+            {
+                interrupted_at = None;
+            }
+            TranscriptBody::System { .. }
+                if item.stable_id.starts_with(TURN_INTERRUPTED_ITEM_PREFIX) =>
+            {
+                interrupted_at = Some(item.created_at_ms);
+            }
+            _ => {}
+        }
+        entry.ended_after_interrupt = entry.role == ChatRole::Tool
+            && entry.tool_status == Some(ToolStatus::Completed)
+            && interrupted_at.is_some_and(|at| item.last_changed_at_ms > at);
+    }
 }
 
 /// Hide a legacy standalone result from Rich surfaces when a completed tool
@@ -507,13 +548,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         ChatRole::User => ("user", user_label(entry).to_owned()),
         ChatRole::Agent => ("agent", "Agent".to_owned()),
         ChatRole::Thought => ("thought", "Thinking".to_owned()),
-        ChatRole::Tool => (
-            "tool",
-            format!(
-                "Tool · {}",
-                tool_status_name(entry.tool_status.unwrap_or(ToolStatus::Pending))
-            ),
-        ),
+        ChatRole::Tool => ("tool", format!("Tool · {}", tool_state_name(entry))),
         ChatRole::Plan => ("plan", "Plan".to_owned()),
         ChatRole::PlanProposal => ("plan-proposal", "Proposed plan".to_owned()),
         ChatRole::System => ("system", "Mjolnir".to_owned()),
@@ -566,8 +601,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
             .collect(),
         glyph: entry_glyph(entry),
         tone: entry_tone(entry),
-        tool_status: (entry.role == ChatRole::Tool)
-            .then(|| tool_status_name(entry.tool_status.unwrap_or(ToolStatus::Pending))),
+        tool_status: (entry.role == ChatRole::Tool).then(|| tool_state_name(entry)),
         diffstats: entry
             .tool_diffstats
             .iter()
@@ -700,6 +734,7 @@ pub fn entry_tone(entry: &ChatEntry) -> &'static str {
         ChatRole::User => "user",
         ChatRole::Agent => "agent",
         ChatRole::Thought => "thinking",
+        ChatRole::Tool if entry.ended_after_interrupt => "system",
         ChatRole::Tool => match entry.tool_status.unwrap_or(ToolStatus::Pending) {
             ToolStatus::Pending => "system",
             ToolStatus::Running => "running",
@@ -752,6 +787,21 @@ pub const fn tool_status_name(status: ToolStatus) -> &'static str {
         ToolStatus::Failed => "failed",
     }
 }
+
+/// The state a tool row names for a call that ended after its turn was
+/// interrupted.
+pub const TOOL_ENDED_AFTER_INTERRUPT: &str = "ended after interrupt";
+
+/// The state a tool row names: its call's status, except for a call that
+/// ended after its turn was interrupted.
+pub fn tool_state_name(entry: &ChatEntry) -> &'static str {
+    if entry.ended_after_interrupt {
+        TOOL_ENDED_AFTER_INTERRUPT
+    } else {
+        tool_status_name(entry.tool_status.unwrap_or(ToolStatus::Pending))
+    }
+}
+
 pub fn is_completed_tool(entry: &ChatEntry) -> bool {
     entry.role == ChatRole::Tool && entry.tool_status == Some(ToolStatus::Completed)
 }
@@ -856,9 +906,12 @@ pub fn entry_collapse_states(
         }
         return states;
     }
+    // A tool that ended after its turn was interrupted keeps its own row, so
+    // a summary of finished work never speaks for it.
     let streak_member = |index: usize| {
         entries[index].role == ChatRole::Thought
             || (is_completed_tool(&entries[index])
+                && !entries[index].ended_after_interrupt
                 && !expanded_tool_calls.contains(&entries[index].start_seq))
     };
     let mut start = 0;
@@ -1000,6 +1053,7 @@ pub fn entry_glyph(entry: &ChatEntry) -> &'static str {
         ChatRole::Plan => "◇",
         ChatRole::PlanProposal => "◈",
         ChatRole::System => "─",
+        ChatRole::Tool if entry.ended_after_interrupt => "■",
         ChatRole::Tool => match entry.tool_status.unwrap_or(ToolStatus::Pending) {
             ToolStatus::Pending => "•",
             ToolStatus::Running => "●",

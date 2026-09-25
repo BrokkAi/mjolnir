@@ -25,7 +25,7 @@ mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
 
 | Flag | Meaning |
 | --- | --- |
-| `--workspace <name>` | The workspace the sessions are created in. Required: every session lives in a workspace the dashboard and the web viewer list. Without it `mj acp` exits at once, listing the workspaces and how to create one (`mj workspaces create <name>`). |
+| `--workspace <name>` | The workspace the sessions are created in. Required: every session lives in a workspace the dashboard and the web viewer list. Without it `mj acp` exits at once, listing the workspaces and how to create one (`mj workspaces create <name>`). A name no workspace has is refused the same way at start, checked against the running daemon's workspaces or, when no daemon is running, against the saved ones, so no daemon is started just to refuse it. |
 | `--profile <id>` | The [profile](/profiles/) whose account and harness run the session. Omitted follows your saved default. |
 | `--target <id>` | The [target](/targets/) the session runs on: this machine, a container, an SSH host, or an EC2 instance. Omitted follows your saved default. |
 | `--bundle <id>` | The [bundle](/workspaces-bundles/) to provision on a managed target. Without one, the working directory the client submits becomes the project, which is what a local target needs. |
@@ -145,7 +145,11 @@ releases it once you have checked. A failed suspension leaves the session live, 
 that was not destroyed is still there; either way `mj sessions --session <id>`
 shows it and `mj suspend` or `mj destroy` retries. A creation still in flight
 when the program leaves is waited for, so its session is retired too; a creation
-the daemon refused made no session, so there is nothing to retire.
+the daemon refused made no session, so there is nothing to retire. An adapter
+that created no session because `session/new` was refused, for example for an
+unknown workspace, exits with a non-zero status and that refusal on standard
+error. A refused request reaches the program as a JSON-RPC error whose
+`message` is the refusal itself.
 
 Sessions kept or suspended are durable: a turn interrupted by the pipe closing
 leaves a session that `mj` can resume, and the work it had checkpointed is still

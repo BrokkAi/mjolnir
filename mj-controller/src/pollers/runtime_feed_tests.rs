@@ -87,6 +87,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         store_id: None,
         native_session_id: None,
         native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: None,
         agent_capabilities: None,

@@ -1,5 +1,13 @@
 use super::*;
 
+/// Marks the boundary between a provider's replay of old history and the live
+/// updates of this connection. A resumed worker starts with updates off so a
+/// `session/load` replay does not duplicate turns the durable relay already
+/// holds; every way a session opens must call this once its updates are live.
+pub(super) fn accept_live_session_updates(session_updates_enabled: &AtomicBool) {
+    session_updates_enabled.store(true, Ordering::Release);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -155,6 +163,9 @@ pub(super) async fn serve_session(
     // Kept on the wire for older workers; no harness can lose native
     // continuity this way any more.
     let native_continuity_lost = false;
+    // Set when the recorded native session is replaced because it was never
+    // used; `session_opened` carries it so a resume can accept the new one.
+    let mut replaced_unused_native_session_id = None;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // Native children require replay to recover identity and transcripts.
@@ -177,7 +188,8 @@ pub(super) async fn serve_session(
                 .resume
                 .is_some()
         {
-            session_updates_enabled.store(true, Ordering::Release);
+            // `session/resume` does not replay, so everything it sends is live.
+            accept_live_session_updates(session_updates_enabled);
             let resumed = connection
                 .send_request(resume_session_request(spec, session_id.clone()))
                 .block_task()
@@ -251,6 +263,7 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                 }
+                replaced_unused_native_session_id = Some(existing.clone());
                 None
             }
         };
@@ -268,7 +281,7 @@ pub(super) async fn serve_session(
                 }
                 // The response is the boundary between provider replay and
                 // future live updates for this connection.
-                session_updates_enabled.store(true, Ordering::Release);
+                accept_live_session_updates(session_updates_enabled);
                 Some((session_id, config_options, modes))
             }
             None => None,
@@ -280,6 +293,11 @@ pub(super) async fn serve_session(
         if let Some((id, options, modes)) = loaded_session {
             (id, options, modes, true)
         } else {
+            // A new native session has no history to replay, whether this is a
+            // first launch or a resume that replaced an unused session. Without
+            // this, a fallback from a failed reload dropped every reply the new
+            // session sent for the rest of the worker's life (R8-1).
+            accept_live_session_updates(session_updates_enabled);
             let created = connection
                 .send_request(new_session_request(spec, true))
                 .block_task()
@@ -312,20 +330,9 @@ pub(super) async fn serve_session(
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
-    //
     let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        enforce_execution_mode(
-            connection,
-            &session_id,
-            desired_mode,
-            &mut config_options,
-            &mut modes,
-        )
-        .await?;
-    }
     // Grok Build publishes model selection through its legacy catalogue. Keep
     // any standard selectors it also returns while projecting model/effort
     // into the shape the rest of Hel reads.
@@ -333,7 +340,13 @@ pub(super) async fn serve_session(
         grok::merge_config_options(&mut config_options, state);
     }
     // Model selection can replace the effort catalogue. Both must be
-    // restored before SessionConfigured releases queued prompts.
+    // restored before SessionConfigured releases queued prompts. They are
+    // restored before the execution mode, because a harness judges a mode
+    // against the model the session runs: the Claude adapter answers Auto on
+    // a model without it with Accept edits. On `session/new` that adapter
+    // describes its default model until a model is selected, whatever model
+    // Claude Code started on, so a mode asked for first was judged against
+    // the wrong model and Claude Code refused it (R8-2).
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
     {
         let accepted = spec
@@ -409,16 +422,61 @@ pub(super) async fn serve_session(
                 "kept the bridge's value after clear because the reported value could not be restored"
             );
         }
-        if let Some(mode) = &reset.mode {
-            enforce_execution_mode(
-                connection,
-                &session_id,
-                mode,
-                &mut config_options,
-                &mut modes,
+    }
+    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+        let enforced = enforce_execution_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            desired_mode,
+            &mut config_options,
+            &mut modes,
+        )
+        .await;
+        if let Err(error) = enforced {
+            // A new session the harness refuses the mode for keeps the
+            // harness's own mode rather than failing the worker, which left a
+            // resumed session suspended on every retry (R8-2). A reloaded
+            // session still fails: it has history, opened in this mode before.
+            let Some(refusal) = (!resumed).then(|| mode_refusal(&error)).flatten() else {
+                return Err(error);
+            };
+            tracing::warn!(
+                harness = ?spec.harness,
+                mode = desired_mode,
+                error = format!("{error:#}"),
+                "the harness refused the execution mode for a new session"
+            );
+            emit_runtime_event(
+                events,
+                RuntimeEvent::Warning {
+                    message: refused_mode_warning(
+                        spec.harness,
+                        desired_mode,
+                        &refusal,
+                        modes.as_ref(),
+                        &config_options,
+                    ),
+                },
             )
             .await?;
         }
+    }
+    if let Some(mode) = spec
+        .clear_context_request
+        .as_ref()
+        .or(spec.context_restore.as_ref())
+        .and_then(|reset| reset.mode.as_ref())
+    {
+        enforce_execution_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            mode,
+            &mut config_options,
+            &mut modes,
+        )
+        .await?;
     }
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
@@ -480,6 +538,7 @@ pub(super) async fn serve_session(
                 resumed,
                 execution_mode: enforcement.map(|enforcement| enforcement.label().to_owned()),
                 native_continuity_lost,
+                replaced_unused_native_session_id,
             },
         )
         .await?;
@@ -647,6 +706,7 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
+                let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();
                 // A prompt asking the harness to compact its context is
                 // answered by compacting, and the bridges report that with
@@ -808,19 +868,19 @@ pub(super) async fn serve_session(
                                 }
                                 Err(error) => {
                                     grok_usage.clear();
-                                    diagnostic = Some(mj_core::diagnostic::TurnDiagnostic::from_acp(&error));
+                                    // The raw error, JSON data and all, goes to
+                                    // the log; the conversation gets one line.
+                                    tracing::warn!(harness = ?spec.harness, error = %error, "prompt failed");
+                                    let failed = mj_core::diagnostic::TurnDiagnostic::from_acp(&error);
+                                    let (stop_reason, warning) =
+                                        prompt_error_outcome(spec.harness, &error, &failed);
+                                    diagnostic = Some(failed);
                                     emit_runtime_event(
                                         events,
-                                        RuntimeEvent::Warning {
-                                            message: prompt_failure_warning(&error),
-                                        },
+                                        RuntimeEvent::Warning { message: warning },
                                     )
                                     .await?;
-                                    if spec.harness == HarnessKind::Kimi && diagnostic.as_ref().is_some_and(|d| d.is_usage_limit()) {
-                                        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
-                                    } else {
-                                        PROMPT_ERROR_STOP_REASON.to_owned()
-                                    }
+                                    stop_reason
                                 }
                             };
                             emit_runtime_event(

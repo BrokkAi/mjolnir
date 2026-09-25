@@ -636,7 +636,7 @@ impl DashboardState {
                 recoverable: session.checkpoint.is_some(),
             };
             self.mode = Mode::Confirm(
-                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+                ConfirmDialog::new(confirmation).naming_session(session.listed_title()),
             );
             return DashboardAction::None;
         }
@@ -667,7 +667,7 @@ impl DashboardState {
                 recoverable: session.checkpoint.is_some(),
             };
             self.mode = Mode::Confirm(
-                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+                ConfirmDialog::new(confirmation).naming_session(session.listed_title()),
             );
             return DashboardAction::None;
         }

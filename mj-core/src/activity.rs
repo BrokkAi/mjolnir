@@ -334,11 +334,12 @@ pub fn silent_for_ms(facts: &ActivityFacts, now_ms: i64) -> Option<u64> {
 /// 1 minute" makes the message read like a bug in itself.
 #[must_use]
 pub fn describe_duration(millis: u64) -> String {
+    use crate::text::counted;
     let seconds = millis / 1_000;
     if seconds < 90 {
-        return format!("{seconds} second(s)");
+        return counted(seconds, "second", "seconds");
     }
-    format!("about {} minute(s)", seconds / 60)
+    format!("about {}", counted(seconds / 60, "minute", "minutes"))
 }
 
 /// Below this, silence is ordinary and saying so is noise rather than news.

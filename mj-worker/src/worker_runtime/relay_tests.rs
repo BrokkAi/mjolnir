@@ -675,26 +675,34 @@ fn installed_credentials_are_owner_only() {
 
 #[test]
 fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
-    let home = tempfile::tempdir().unwrap();
-    let mut config = launch_config(&home.path().to_string_lossy());
-    config.harness = HarnessKind::Kimi;
-    config.environment = BTreeMap::from([(
-        "KIMI_CODE_HOME".to_owned(),
-        home.path().to_string_lossy().into_owned(),
-    )]);
-    let endpoint = credential_endpoint(&config).unwrap();
-    let bytes = serde_json::to_vec(&serde_json::json!({
-        "access_token": "access",
-        "expires_at": 1_755_000_000,
-    }))
-    .unwrap();
+    // A configuration persisted before the controller stated the marker, and
+    // one stating it the way the controller does now: both install where Kimi
+    // reads its login.
+    for stated in [None, Some("credentials/kimi-code.json".to_owned())] {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = launch_config(&home.path().to_string_lossy());
+        config.harness = HarnessKind::Kimi;
+        config.authentication_marker = stated.clone();
+        config.environment = BTreeMap::from([(
+            "KIMI_CODE_HOME".to_owned(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+        let endpoint = credential_endpoint(&config).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "access_token": "access",
+            "expires_at": 1_755_000_000,
+        }))
+        .unwrap();
 
-    unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
+        unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
 
-    assert_eq!(
-        std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
-        bytes
-    );
+        assert_eq!(
+            std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
+            bytes,
+            "{stated:?}"
+        );
+        assert!(!home.path().join("kimi-code.json").exists(), "{stated:?}");
+    }
 }
 
 #[test]
@@ -740,11 +748,9 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     config.harness = mj_core::config::HarnessKind::Muse;
     config.environment.clear();
     config.harness_home = "profiles/session/muse".into();
-    config.harness.configure_home_environment(
-        Path::new("profiles/session/muse"),
-        mj_core::config::HarnessHost::Other,
-        &mut config.environment,
-    );
+    config
+        .harness
+        .configure_home_environment(Path::new("profiles/session/muse"), &mut config.environment);
     resolve_relative_harness_home(&mut config, Path::new("/home/remote"));
     let endpoint = credential_endpoint(&config).unwrap();
     assert_eq!(
@@ -790,8 +796,9 @@ fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
     let mut config = launch_config("/profile");
     config.harness = HarnessKind::Claude;
     config.harness_home = "/home/user/.claude".into();
-    // Claude on macOS is launched with no CLAUDE_CONFIG_DIR at all, so the
-    // stated home is the only thing that can locate its credentials.
+    // The stated home is authoritative even for a launch environment that
+    // carries no home variable, as a Claude session on macOS had before every
+    // local session ran from a staged home.
     config.environment.clear();
 
     let endpoint = credential_endpoint(&config).unwrap();
@@ -1801,6 +1808,37 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
     drop(event_tx);
     drop(wake_tx);
     coordinator.await.unwrap().unwrap();
+}
+
+/// The context the relay attached to a claimed prompt goes first, in the
+/// block the ACP runtime turns into what each harness receives.
+#[test]
+fn a_claimed_prompt_carries_its_hidden_context_first() {
+    let user = ContentBlock::Text(TextContent::new("ship it"));
+    let claimed = |hidden_prompt_context: Option<&str>| mj_core::relay::ClaimedRelayCommand {
+        command_id: "prompt-1".into(),
+        accepted_ordinal: 1,
+        command: RelayCommand::Prompt {
+            prompt: vec![user.clone()],
+        },
+        hidden_prompt_context: hidden_prompt_context.map(str::to_owned),
+        steering_prompt: None,
+    };
+    let prompt_of = |claimed| match unix::acp_command(&claimed) {
+        Some(CommandRequest::Prompt { prompt, .. }) => prompt,
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(
+        prompt_of(claimed(Some(
+            "<mj-project-memory>notes</mj-project-memory>"
+        ))),
+        vec![
+            crate::acp::hidden_context_block("<mj-project-memory>notes</mj-project-memory>".into()),
+            user.clone(),
+        ]
+    );
+    assert_eq!(prompt_of(claimed(None)), vec![user.clone()]);
 }
 
 #[tokio::test]
@@ -3221,6 +3259,121 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
     coordinator.await.unwrap().unwrap();
 }
 
+/// R4-2, replayed from the recorded session: `/model haiku` before any
+/// prompt made the Claude adapter answer with agent text, the worker opened a
+/// turn for it that nothing ever ended, and every stop was "completed" while
+/// the session stayed Running.
+#[tokio::test(start_paused = true)]
+async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "model-haiku",
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "haiku".into(),
+        },
+    );
+    wake_tx.try_send(()).unwrap();
+    let CommandRequest::SetConfig { request_id, .. } = next_command(&mut command_rx).await else {
+        panic!("the model change must reach the prompt loop");
+    };
+    // The adapter publishes its notice before it answers the request.
+    event_tx
+        .send(agent_output(
+            "**Auto mode unavailable:** the selected model does not support Auto mode; using Accept edits instead.",
+            "auto-mode-notice",
+        ))
+        .unwrap();
+    event_tx
+        .send(RuntimeEvent::ConfigApplied {
+            request_id,
+            key: "model".into(),
+            value: "haiku".into(),
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| {
+        state.config.get("model").map(String::as_str) == Some("haiku")
+    })
+    .await;
+    let state = relay.lock().unwrap().operational_state();
+    assert!(
+        state.harness_turn.is_none(),
+        "the answer to a model change opened a turn"
+    );
+    assert_eq!(state.execution, RelayExecutionState::Idle);
+
+    // Any turn Claude Code does not know about must still be stoppable.
+    event_tx
+        .send(agent_output("Text no cycle will ever settle", "orphan-1"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output at idle did not open a turn",
+    )
+    .await;
+    submit(
+        &mut relay.lock().unwrap(),
+        "interrupt-turn",
+        RelayCommand::CancelTurn,
+    );
+    wake_tx.try_send(()).unwrap();
+    let CommandRequest::Cancel { request_id, .. } = next_command(&mut command_rx).await else {
+        panic!("the interrupt must reach the prompt loop as a cancel");
+    };
+    event_tx
+        .send(RuntimeEvent::CancelApplied { request_id })
+        .unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .unanswered_harness_turn_stop()
+                .is_some()
+        },
+        "the applied stop was not recorded",
+    )
+    .await;
+    assert!(
+        harness_turn_open(&relay),
+        "the harness may still answer the stop with its result"
+    );
+    tokio::time::sleep(crate::relay::HARNESS_TURN_STOP_GRACE).await;
+    wait_until(
+        || !harness_turn_open(&relay),
+        "a stop the harness never answered left the turn running",
+    )
+    .await;
+    assert_eq!(
+        relay.lock().unwrap().operational_state().execution,
+        RelayExecutionState::Idle
+    );
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let temp = tempfile::tempdir().unwrap();
@@ -4554,6 +4707,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
             queued_prompts: Vec::new(),
             accepted_config: Default::default(),
+            native_session_unused: false,
         })
         .unwrap(),
     )
@@ -4597,6 +4751,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
             ]
             .into_iter()
             .collect(),
+            native_session_unused: false,
         })
         .unwrap(),
     )
@@ -4607,6 +4762,63 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
         crate::acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options);
     assert_eq!(accepted.model.as_deref(), Some("opus[1m]"));
     assert_eq!(accepted.effort.as_deref(), Some("high"));
+}
+
+/// I2-7: a session suspended before any prompt resumed on a relay restored
+/// from its checkpoint, with the native identity arriving in the launch
+/// configuration. The worker counted that identity as used because its own
+/// journal had not created it, so when Codex answered "thread not found" it
+/// refused to start a fresh thread. The checkpoint now says the session was
+/// never prompted, and that holds until the replacement opens.
+#[test]
+fn a_restored_never_prompted_session_may_replace_its_native_session() {
+    for native_session_unused in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        std::fs::write(
+            mj_core::relay::restored_relay_seed_path(&root),
+            serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+                event_frontier: 7,
+                event_frontier_digest: "b".repeat(64),
+                queued_prompts: Vec::new(),
+                accepted_config: Default::default(),
+                native_session_unused,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+        config.native_session_id = Some("missing-thread".into());
+
+        for _worker_start in 0..2 {
+            let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+            unix::record_imported_native_identity(&config, &mut relay).unwrap();
+            assert_eq!(
+                unix::select_resume_session(&config, &relay).as_deref(),
+                Some("missing-thread")
+            );
+            assert_eq!(
+                relay.native_session_may_have_history(),
+                !native_session_unused,
+                "unused={native_session_unused}"
+            );
+        }
+
+        let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "replacement".into(),
+                resumed: false,
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            relay.native_session_may_have_history(),
+            !native_session_unused,
+            "the replacement opened here and has not been used"
+        );
+    }
 }
 
 /// Codex rebuilds a resumed thread from the launch request, so the bridge has
@@ -4876,6 +5088,7 @@ fn resume_uses_the_latest_recorded_identity_before_the_launch_identity() {
             native_session_id: "native-relay".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     let mut config = launch_config("/var/lib/hel/profiles/session");
@@ -4899,6 +5112,7 @@ fn an_unused_codex_thread_is_still_resumed_before_any_decision() {
             native_session_id: "unused".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit(
@@ -4945,6 +5159,7 @@ fn an_imported_native_identity_is_recorded_as_used_at_startup() {
             native_session_id: "imported".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     unix::record_imported_native_identity(&config, &mut local).unwrap();
@@ -4960,6 +5175,7 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
             native_session_id: "used".into(),
             resumed: false,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     // What the ACP layer reports when the agent sends content or a prompt is
@@ -5582,6 +5798,7 @@ async fn checkpoint_only_daemon_preserves_work_and_seals_without_a_harness() {
             native_session_id: "saved-native-session".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     submit(&mut durable, "interrupted-turn", prompt("working"));
@@ -5944,6 +6161,7 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
             native_session_id: "saved-native-session".into(),
             resumed: true,
             native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
         })
         .unwrap();
     drop(durable);

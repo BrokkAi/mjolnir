@@ -44,6 +44,10 @@ pub fn restore_checkpoint_with_native_state(
     // Deserialize and validate the schema-2 canonical projection before any
     // repository, relay, or native-session state can be mutated.
     let canonical_session = archive.canonical_session()?;
+    // The archive carries no relay journal, so this is the restored worker's
+    // only evidence about the native session it continues.
+    let native_session_unused =
+        spec.restore_native && !current_native_session_received_prompt(&canonical_session);
     // The relay that opens next needs the frontier it continues from and the
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
@@ -64,6 +68,7 @@ pub fn restore_checkpoint_with_native_state(
         } else {
             Default::default()
         },
+        native_session_unused,
     };
     if spec.discard_queued_prompts {
         seed.queued_prompts.clear();

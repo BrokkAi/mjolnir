@@ -310,11 +310,16 @@ pub fn repair_origin_refs(git: &dyn GitCommandRunner, path: &Path, id: &str) -> 
     )
 }
 
-pub fn canonical_session_contains_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
-    snapshot
-        .transcript
-        .iter()
-        .any(|item| matches!(&item.body, CanonicalTranscriptBody::User { .. }))
+/// Whether the native session the checkpoint continues ever received a
+/// prompt. `/clear` replaces the native session, so only the conversation
+/// after the newest context boundary belongs to the current one. Codex writes
+/// a rollout, and Claude Code a transcript, only when a turn runs, so a
+/// session with no prompt here has no native history to lose.
+pub fn current_native_session_received_prompt(snapshot: &CanonicalSessionSnapshot) -> bool {
+    let start = snapshot.current_context_start();
+    snapshot.transcript.iter().any(|item| {
+        item.position >= start && matches!(&item.body, CanonicalTranscriptBody::User { .. })
+    })
 }
 
 /// Refuse a repository with modified submodule content. A snapshot records

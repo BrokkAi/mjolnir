@@ -184,16 +184,22 @@ pub(crate) fn drawn_session_rows_with_options(
                 if let Some(last) = rows.last_mut() {
                     last.spacing = 1;
                 }
-                let mut spans = vec![Span::styled(
-                    format!("{hotkey}{label}"),
-                    Style::default()
-                        .fg(theme::palette().secondary)
-                        .add_modifier(Modifier::BOLD),
-                )];
+                let mut spans = vec![
+                    Span::styled(hotkey, theme::muted()),
+                    Span::styled(label, theme::title(false)),
+                ];
                 // A folded project hides its rows, so the heading says what
                 // is waiting inside it. An unfolded one shows every symbol.
                 if dashboard.collapsed_project_keys.contains(&key) {
                     spans.extend(attention_badge(dashboard.project_attention_summary(&key)));
+                }
+                let remaining =
+                    usize::from(width).saturating_sub(spans.iter().map(Span::width).sum::<usize>());
+                if remaining > 2 {
+                    spans.push(Span::styled(
+                        format!(" {}", theme::glyphs().rule.repeat(remaining - 1)),
+                        theme::border(false),
+                    ));
                 }
                 pending_heading = Some((key, Line::from(spans)));
             }
@@ -281,16 +287,7 @@ pub(crate) fn drawn_session_rows_with_options(
                             },
                         ));
                     }
-                    rows.push(DrawnSessionRow {
-                        session: Some(index),
-                        heading: heading_key,
-                        lines,
-                        spacing,
-                    });
-                    continue;
-                }
-
-                if let Some(transition) = dashboard.transition_kind(&session.id) {
+                } else if let Some(transition) = dashboard.transition_kind(&session.id) {
                     lines.push(session_transition_line(
                         &prefix,
                         session,
@@ -301,15 +298,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         width,
                         None,
                     ));
-                    rows.push(DrawnSessionRow {
-                        session: Some(index),
-                        heading: heading_key,
-                        lines,
-                        spacing,
-                    });
-                    continue;
-                }
-                if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
+                } else if let Some(transition) = dashboard.transition_failure_kind(&session.id) {
                     lines.push(session_transition_line(
                         &prefix,
                         session,
@@ -320,15 +309,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         width,
                         session.last_error.as_deref(),
                     ));
-                    rows.push(DrawnSessionRow {
-                        session: Some(index),
-                        heading: heading_key,
-                        lines,
-                        spacing,
-                    });
-                    continue;
-                }
-                if expanded && !options.summary_only {
+                } else if expanded && !options.summary_only {
                     expanded_session_lines(
                         &mut lines,
                         session,
@@ -365,7 +346,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
-                        line.style = line.style.patch(theme::raised());
+                        line.style = theme::selection(false).patch(line.style);
                     }
                 }
                 rows.push(DrawnSessionRow {
@@ -463,7 +444,9 @@ pub(crate) fn expanded_session_lines(
     detailed_activity_clocks: bool,
     git: Option<&str>,
 ) {
-    let style = Style::default().fg(session_band_color(attention, detail, session.state));
+    let style = Style::default()
+        .fg(session_band_color(attention, detail, session.state))
+        .add_modifier(Modifier::BOLD);
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
     // The ellipsis action occupies the last three cells of the first line.
     // Keep the activity and output lines at the full content width so a
@@ -506,7 +489,8 @@ pub(crate) fn expanded_session_lines(
             None => ("", None, false),
         },
     };
-    let output_width = usize::from(width.saturating_sub(2));
+    let output_prefix = format!("  {}", theme::glyphs().role_gutter);
+    let output_width = usize::from(width).saturating_sub(Line::raw(&output_prefix).width());
     let mut output = message
         .map(|message| {
             let text = if label.is_empty() {
@@ -522,12 +506,14 @@ pub(crate) fn expanded_session_lines(
     }
     output.resize(2, Line::default());
     for mut line in output.into_iter().take(2) {
-        let mut spans = vec![Span::raw("  ")];
+        let mut spans = vec![Span::styled(output_prefix.clone(), theme::border(false))];
         spans.append(&mut line.spans);
         let mut line = Line::from(spans);
-        if muted {
-            line.style = Style::default().fg(theme::palette().muted);
-        }
+        line.style = if muted {
+            theme::muted()
+        } else {
+            Style::default().fg(theme::palette().text)
+        };
         lines.push(line);
     }
 }
@@ -584,6 +570,11 @@ pub(crate) fn session_activity_line(
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
+    } else if attention == AttentionLevel::Waiting {
+        // Waiting with no question or review of its own: one of its Mjolnir
+        // sub-agents is waiting on a question (see
+        // `DashboardState::attention_level`).
+        "Sub-agent question".to_owned()
     } else if detail.is_some_and(|detail| {
         matches!(
             detail.activity.state().last_known(),
@@ -670,18 +661,8 @@ pub(crate) fn session_activity_line(
     if let Some(spinner) = spinner {
         spans.push(Span::styled(format!("{spinner} "), facts.style()));
     }
-    let status_separator = if identity.is_empty() && !show_permission {
-        ""
-    } else {
-        "  "
-    };
-    spans.push(Span::styled(identity, facts.style()));
-    if show_permission && let Some(permission) = permission {
-        spans.push(Span::raw(" "));
-        spans.push(permission);
-    }
     spans.push(Span::styled(
-        format!("{status_separator}{status}"),
+        status,
         facts.style().add_modifier(if facts.needs_input() {
             Modifier::BOLD
         } else {
@@ -693,6 +674,13 @@ pub(crate) fn session_activity_line(
             format!(" {queue}"),
             facts.style().add_modifier(Modifier::BOLD),
         ));
+    }
+    if !identity.is_empty() || show_permission {
+        spans.push(Span::styled(format!("  {identity}"), theme::muted()));
+    }
+    if show_permission && let Some(permission) = permission {
+        spans.push(Span::raw(" "));
+        spans.push(permission);
     }
     Line::from(spans)
 }
@@ -722,7 +710,7 @@ pub(crate) fn compact_session_lines(
         now_epoch_seconds,
         attention,
     };
-    let style = facts.style();
+    let style = facts.style().add_modifier(Modifier::BOLD);
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
     // The ellipsis action occupies the last three cells of the first line;
     // retain the full width for the status line below it.
@@ -1192,9 +1180,17 @@ pub(crate) fn render_sessions(
         .with_offset(offset)
         .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
-    if drawn.is_empty() && dashboard.sessions_filter.is_some() && rows_area.height > 0 {
+    if drawn.is_empty() && rows_area.height > 0 {
+        let lines = if dashboard.sessions_filter.is_some() {
+            vec![Line::raw("No sessions match · Esc clears the filter")]
+        } else {
+            vec![
+                Line::styled("No sessions yet", theme::title(false)),
+                Line::raw("Create new work or open a session."),
+            ]
+        };
         frame.render_widget(
-            Paragraph::new("No sessions match · Esc clears the filter")
+            Paragraph::new(lines)
                 .style(theme::muted())
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             rows_area,

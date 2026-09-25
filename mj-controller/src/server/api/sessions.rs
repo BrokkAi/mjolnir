@@ -148,6 +148,7 @@ pub(super) async fn start_session(
                 model: request.model,
                 effort: request.effort,
                 prompt: request.prompt,
+                ..Default::default()
             },
         )
         .await?;
@@ -245,6 +246,12 @@ pub(super) async fn resume(
         let session = require_session_record(&snapshot, &session_id)?;
         if !session.capabilities.resume {
             return Err(ApiFailure::conflict(resume_refusal(session)));
+        }
+        // The daemon's resume restores a checkpoint and nothing else. Without
+        // one it could only fail after this route had answered, where the
+        // caller never sees why (launch finding R6-1).
+        if !session.has_checkpoint {
+            return Err(ApiFailure::conflict(no_checkpoint_refusal(session)));
         }
         let resolved = |named: Option<String>, recorded: &str, field: &str| match named {
             Some(value) => Ok(value),
@@ -346,6 +353,28 @@ pub(super) fn resume_refusal(session: &ViewerSession) -> String {
             "this session has an operation running; wait for it to finish, then resume".to_owned()
         }
     }
+}
+
+/// Why a session with no checkpoint cannot be resumed, and what can be done
+/// with it instead.
+fn no_checkpoint_refusal(session: &ViewerSession) -> String {
+    let failed = session.lifecycle == ViewerLifecycleCategory::Failed;
+    let mut refusal = "this session has no checkpoint to resume from".to_owned();
+    if failed {
+        refusal.push_str(", because it failed before it saved one");
+    }
+    refusal.push('.');
+    if session.capabilities.destroy {
+        refusal.push_str(&format!(
+            " Remove it with `mj destroy --session {}`.",
+            session.id
+        ));
+    }
+    if let Some(reason) = session.launch_error.as_ref().filter(|_| failed) {
+        refusal.push_str(" It failed with: ");
+        refusal.push_str(reason);
+    }
+    refusal
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +506,7 @@ pub(super) async fn wiki_restore(
                 model: request.model,
                 effort: request.effort,
                 prompt: None,
+                ..Default::default()
             },
         )
         .await?;

@@ -13,7 +13,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
         ("continuation", "Enabled"),
         ("jev", "Enabled"),
-        ("subagents", "Enabled"),
         ("build_cache", "Enabled"),
         ("phone", "Enabled"),
         ("phone", "Detect Tailscale"),
@@ -39,6 +38,74 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
             "{section} › {label} has no On/Off text: {row:?}"
         );
     }
+}
+
+/// Continuation runs only while Jev is on (`Config::automatic_continuation_enabled`).
+/// With Jev off, the Continuation row and page say it is off and why, and
+/// point to the Privacy page, rather than "On" and a ticked box alone.
+/// Launch re-verification finding R3-2.
+#[test]
+fn continuation_reads_as_off_while_jev_is_off() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.jev.enabled = false;
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Continuation"))
+        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
+    assert!(row.contains("Off"), "{row:?}");
+    assert!(row.contains("Jev"), "{row:?}");
+    assert!(!row.contains("On ·"), "{row:?}");
+
+    dashboard.begin_settings_section("continuation", None);
+    let page = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(page.contains("Jev is off"), "{page}");
+    assert!(page.contains("Privacy"), "{page}");
+
+    // With Jev on, the page and row keep their ordinary text.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Continuation"))
+        .unwrap();
+    assert!(row.contains("On · 3 continuations"), "{row:?}");
+}
+
+/// Workers read the Jev switch when they start, so a running session keeps
+/// classifying until it is resumed or restarted. The page and the save
+/// notice say so instead of "Off: nothing is sent". Launch re-verification
+/// finding R3-8.
+#[test]
+fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
+    let jev = schema::help(&["jev".to_owned()]);
+    assert!(!jev.contains("nothing is sent"), "{jev}");
+    assert!(jev.contains("resume or restart"), "{jev}");
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("jev", None);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.draft["jev"]["enabled"] = json!(false);
+    let generation = dialog.generation;
+    let saved = saved_config(dialog);
+    assert!(!saved.jev.enabled);
+    dashboard.setup_saved(generation, Ok(saved));
+    let notice = dashboard.notice().unwrap();
+    assert!(
+        notice.contains("running sessions follow it after their next resume or restart"),
+        "{notice}"
+    );
+
+    // A save that leaves Jev alone does not mention it.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    let generation = dialog.generation;
+    let saved = saved_config(dialog);
+    dashboard.setup_saved(generation, Ok(saved));
+    assert!(!dashboard.notice().unwrap().contains("Jev"));
 }
 
 /// The additional eligible profiles are a set of checkboxes, so their row
@@ -216,7 +283,7 @@ fn account_path_apply_expands_home_before_config_and_quota_use() {
     let profile = &config.profiles["codex-1"];
     assert_eq!(profile.home, expected);
     let mut environment = profile.environment.clone();
-    profile.kind.configure_home_environment(
+    profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),
         &mut environment,
@@ -2528,9 +2595,24 @@ fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description()
     );
 
     dashboard.begin_settings_section("continuation", None);
-    let text = drawn(&mut dashboard, 100, 30)
-        .iter()
-        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let body = dashboard
+        .frame_surfaces()
+        .surface(mj_chat::selection::SurfaceId::ModalBody)
+        .expect("rendered Settings modal surface")
+        .rect;
+    let buffer = terminal.backend().buffer();
+    // Join only the modal's cells: backdrop text beside a wrapped help line
+    // must not become part of its description.
+    let text = (body.y..body.bottom())
+        .map(|y| {
+            (body.x..body.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join(" ");
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2625,11 +2707,11 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
         row_summary(&[], key, &dialog.draft[key], &dialog.draft, None)
     };
     assert_eq!(summary(&dialog, "sessionwiki"), "Archives after 30 days");
-    assert_eq!(summary(&dialog, "subagents"), "On · up to 4");
+    assert_eq!(summary(&dialog, "subagents"), "Up to 4 at once");
 
     edit_field(&mut dialog, "subagents", "max_concurrent", "");
     dialog.apply_editor(true).unwrap();
-    assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
+    assert_eq!(summary(&dialog, "subagents"), "Up to 6 at once");
 }
 
 /// A long save error is shown whole: the notice grows to fit it instead of
@@ -2746,6 +2828,15 @@ fn every_setting_description_fits_its_two_rows() {
         .map(|path| path.join("."))
         .collect::<Vec<_>>();
     assert!(overflowing.is_empty(), "{overflowing:#?}");
+    let jev_off = json!({"jev": {"enabled": false}});
+    let continuation = schema::page_help(&["continuation".to_owned()], &jev_off);
+    assert!(
+        ratatui::widgets::Paragraph::new(continuation)
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            <= 2,
+        "{continuation}"
+    );
 }
 
 /// A new SSH machine keeps its workspaces under Mjolnir's own directory, not

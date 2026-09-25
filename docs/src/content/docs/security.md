@@ -21,18 +21,19 @@ following.
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
 | Jev turn classifier | After a minute of silence in a turn, and after a reply ends: up to 1 KiB of your latest prompt, up to 2 KiB of the latest assistant text, a size-limited transcript summary, tool titles (up to 128 bytes each), the harness name, and counts of background and queued commands. | The public Cloudflare proxy `mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards it to TypeSafe (`api.typesafe.ai`). With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, it goes straight to `api.typesafe.ai` with your key. | `[jev] enabled = false`, or **Setup → Privacy → Jev (hosted service)**. A blank key does not disable it; it falls back to the proxy. |
-| Automatic continuation | When a reply ends and the agent may have stopped early: your messages since the last context reset and recent assistant replies. Tool history is not sent. | The same proxy (`/v2/continuation-verdict`), or `api.typesafe.ai` with your key. | `[continuation] enabled = false` or `[jev] enabled = false` in `config.toml`, or **Settings → Automatically continue unfinished requests**. |
+| Automatic continuation | When a reply ends and the agent may have stopped early: your messages since the last context reset and recent assistant replies. Tool history is not sent. | The same proxy (`/v2/continuation-verdict`), or `api.typesafe.ai` with your key. | `[continuation] enabled = false` or `[jev] enabled = false` in `config.toml`, or clear **Enabled** under **Setup → Continuation**. |
 | Semantic help search | While you type in the help filter, 200 ms after the last key: the filter text and the text of every help row. | The same proxy (`/v1/help-search`), or `api.typesafe.ai` with your key. | `[jev] enabled = false`. It runs only while the help filter has text. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
 One switch stops every Jev request: set `enabled = false` under `[jev]` in
 `config.toml`, or clear **Setup → Privacy → Jev (hosted service)**. Then
-nothing in the first three rows leaves the machine. What you give up: a turn
-ends only when the harness ends it, so a turn that goes quiet while the agent
-waits for you stays **Working** until the harness reports the end of the
-turn; automatic continuation does not run; and help search matches text
-only. Workers read the switch when they start, so resume or restart a
-running session for it to apply there. See
+nothing in the first three rows leaves the machine from the dashboard or
+from sessions started afterwards. Workers read the switch when they start,
+so a session that was already running keeps sending turn text until you
+resume or restart it. What you give up: a turn ends only when the harness
+ends it, so a turn that goes quiet while the agent waits for you stays
+**Working** until the harness reports the end of the turn; automatic
+continuation does not run; and help search matches text only. See
 [Configuration](/configuration/#hosted-jev-service-jev).
 
 The proxy source is in `services/jev-proxy/`. It does not write request bodies
@@ -107,12 +108,19 @@ home from a harness-specific allowlist:
 | Kimi Code | Authentication, config, device ID, instructions, MCP config, skills, agents, and plugins |
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
 
-Symbolic links encountered while copying an allowlisted profile entry are
-skipped. Files outside the allowlist—such as general shell state, unrelated
-cloud credentials, and arbitrary caches—do not enter the session merely
-because they live beneath your home directory.
+Symbolic links inside an allowlisted profile entry are followed: the session
+receives the contents of the file or directory a link points to, even when the
+target is outside the harness home. Check where your profile's links point
+before you use it with a target. A link whose target is missing is skipped.
+Files outside the allowlist—such as general shell state, unrelated cloud
+credentials, and arbitrary caches—do not enter the session merely because they
+live beneath your home directory.
 
-The staged skills tree also carries the Mjolnir-authored `mj` skill.
+The staged skills tree also carries the Mjolnir-authored `mj` skill. It does
+not carry the skills a harness writes for itself: the skills Claude Code syncs
+from your claude.ai account (`skills/synced/`), Claude Code's `skills/.trash/`,
+and Codex's built-in skills (`skills/.system/`). The harness manages those
+itself.
 The `mj-memory` MCP history tools can read the controller's indexed session
 corpus, including conversations from other projects. Historical conversations
 are reference data, not instructions for the current session.

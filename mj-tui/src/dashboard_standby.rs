@@ -203,7 +203,7 @@ impl DashboardState {
                 if self.go.is_some() {
                     self.go_conversation_title(&session.id)
                 } else {
-                    session.display_title().to_owned()
+                    session.listed_title().to_owned()
                 }
             }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),

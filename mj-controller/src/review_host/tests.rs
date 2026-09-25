@@ -197,6 +197,9 @@ struct FakeManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
     publisher: crate::session_manager::RemoteSessionPublisher,
+    /// Refusals the next captures answer with, in order, the way a lease
+    /// the recovery copy holds refuses a reviewer action.
+    capture_refusals: std::collections::VecDeque<String>,
     _shutdown: crate::session_manager::SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
@@ -219,6 +222,7 @@ impl FakeManager {
             control: channels.control,
             requests: channels.requests,
             publisher: channels.publisher,
+            capture_refusals: std::collections::VecDeque::new(),
             _shutdown: channels.shutdown,
             _targets: channels.targets,
         };
@@ -241,6 +245,10 @@ impl FakeManager {
         manager
     }
 
+    fn refuse_next_capture(&mut self, reason: &str) {
+        self.capture_refusals.push_back(reason.to_owned());
+    }
+
     /// The next request the host makes, or a failure if it makes none.
     async fn next(&mut self) -> RemoteSessionRequest {
         tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
@@ -250,7 +258,8 @@ impl FakeManager {
     }
 
     /// Answers reviewer actions until one matches `wanted`, which is then
-    /// returned unanswered for the test to answer itself.
+    /// returned unanswered for the test to answer itself. A capture is
+    /// refused first while [`Self::refuse_next_capture`] has queued one.
     async fn next_reviewer(
         &mut self,
         wanted: impl Fn(&Option<String>, &ReviewerAction) -> bool,
@@ -267,6 +276,12 @@ impl FakeManager {
                     reply,
                     ..
                 } => {
+                    if matches!(action, ReviewerAction::CaptureDelta { .. })
+                        && let Some(refusal) = self.capture_refusals.pop_front()
+                    {
+                        let _ = reply.send(Err(refusal));
+                        continue;
+                    }
                     if wanted(&role, &action) {
                         return (role, action, reply);
                     }
@@ -379,6 +394,13 @@ struct FakeEnvironment {
     writes: Mutex<Vec<(TurnReviewState, std::thread::ThreadId)>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
+    /// Refusals the next reviewer resolutions answer with, in order.
+    resolve_refusals: Mutex<std::collections::VecDeque<String>>,
+    /// How many times the host waited for background work on the session.
+    background_waits: std::sync::atomic::AtomicUsize,
+    /// Set to make reviewer resolution wait forever, the way an Auto
+    /// reviewer choice can take minutes on a real host (I2-10).
+    resolve_hangs: std::sync::atomic::AtomicBool,
 }
 
 struct SaveGate {
@@ -430,7 +452,22 @@ impl FakeEnvironment {
             writes: Mutex::new(Vec::new()),
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
+            resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
+            background_waits: std::sync::atomic::AtomicUsize::new(0),
+            resolve_hangs: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    fn refuse_next_resolve(&self, reason: &str) {
+        self.resolve_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(reason.to_owned());
+    }
+
+    fn background_waits(&self) -> usize {
+        self.background_waits
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn state(&self) -> TurnReviewState {
@@ -482,7 +519,21 @@ impl ReviewEnvironment for FakeEnvironment {
         'a,
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     > {
+        let refusal = self
+            .resolve_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
         Box::pin(async move {
+            if let Some(refusal) = refusal {
+                return Err(refusal);
+            }
+            if self
+                .resolve_hangs
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                std::future::pending::<()>().await;
+            }
             Ok(mj_core::review::settings::ResolvedReviewSettings {
                 profile: config.profile.unwrap_or_else(|| "auto-reviewer".into()),
                 main: mj_core::review::settings::ReviewModelSettings {
@@ -553,6 +604,137 @@ impl ReviewEnvironment for FakeEnvironment {
             .active = None;
         Ok(Vec::new())
     }
+
+    fn background_work_settled<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _deadline: tokio::time::Instant,
+    ) -> mj_client::session::BoxFuture<'a, ()> {
+        self.background_waits
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Box::pin(async {})
+    }
+}
+
+/// R4-9: a turn that ended with a command still running in the background
+/// also started the automatic recovery copy, which took the session's lease
+/// while the review was choosing its reviewer. The review gave up with "Turn
+/// review did not start: another operation was using the session". It now
+/// waits for that background work and tries again, within a bound.
+#[tokio::test]
+async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
+    let session = session_id("waitforcopy0");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment.refuse_next_resolve("reviewer operation cancelled for session lifecycle change");
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+
+    // Preparation captures the change before it chooses a reviewer (I2-10).
+    // Only a turn that changed something goes on to choose one.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    assert_eq!(
+        environment.background_waits(),
+        1,
+        "the capture waited for background work, and no reviewer choice has"
+    );
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+
+    // The copy's lease cancels the first choice. The review waits, chooses
+    // again, opens, and starts work on the capture.
+    let (_, action, _reply) = manager
+        .next_reviewer(|_, action| {
+            matches!(
+                action,
+                ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
+            )
+        })
+        .await;
+    assert!(matches!(
+        action,
+        ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
+    ));
+    assert_eq!(
+        environment.background_waits(),
+        3,
+        "after the capture's wait, the refused choice and its retry each waited"
+    );
+    assert!(
+        host.view(session)
+            .is_none_or(|view| !view.status.contains("did not start")),
+        "{:?}",
+        host.view(session)
+    );
+    host.shutdown().await.unwrap();
+}
+
+/// A refusal that has nothing to do with another operation is not retried.
+#[tokio::test]
+async fn a_review_refused_for_another_reason_does_not_wait() {
+    let session = session_id("nowaitrefuse");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment.refuse_next_resolve("no reviewer profile is enabled");
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    // Preparation captures the change before it chooses a reviewer (I2-10).
+    // Only a turn that changed something reaches the refused choice.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the refused review releases prompts");
+    assert_eq!(
+        environment.background_waits(),
+        2,
+        "one wait before the capture and one before the only choice"
+    );
+    host.shutdown().await.unwrap();
 }
 
 fn armed(profile: Option<&str>) -> ReviewConfigSource {
@@ -765,18 +947,17 @@ async fn a_headless_turn_is_reviewed_and_resolves_itself() {
     );
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
 
-    // Then the capture that defines what is under review.
+    // Then the capture that defines what is under review. Preparation takes
+    // it before choosing a reviewer (I2-10), so it comes before the review
+    // opens and before its active marker is written; the capture changes no
+    // review state, and the prompt hold is already in place.
     let (_, action, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert!(matches!(action, ReviewerAction::CaptureDelta { .. }));
     assert!(
         host.refuses_prompt(session),
-        "the review holds the session's prompts from the moment it opens"
-    );
-    assert!(
-        environment.state().active.is_some(),
-        "the active marker is durable before review work starts"
+        "the review holds the session's prompts from before the capture"
     );
     // Nothing changed, so the review records its baseline and resolves.
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
@@ -817,6 +998,142 @@ async fn a_headless_turn_is_reviewed_and_resolves_itself() {
     .expect("a resolved review releases prompts and drains its durable close");
     assert!(host.view(session).is_none(), "the review is over");
     assert_eq!(environment.state().active, None);
+    assert!(
+        environment
+            .writes()
+            .first()
+            .is_some_and(|(state, _)| state.active.is_some()),
+        "the active marker is durable before the review moves the baseline"
+    );
+}
+
+/// Launch finding I2-10: with review on, a Codex turn that changed no files
+/// showed "Preparing reviewer…" and held prompts for two minutes before
+/// "Nothing to review: the turn changed no files". Choosing a reviewer is the
+/// slow step, and a turn with nothing to review needs none, so the capture
+/// comes first and an empty one resolves without waiting for a reviewer.
+#[tokio::test]
+async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
+    let session = session_id("nochanges00");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
+
+    finish_a_turn(&manager, &host).await;
+
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: std::path::PathBuf::from("/workspace/app"),
+            baseline_tree: Some("reviewed-tree".to_owned()),
+            current_tree: "reviewed-tree".to_owned(),
+            patch: String::new(),
+            diffstat: "0 files changed".to_owned(),
+            changed_lines: 0,
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::AdvanceBaseline { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::BaselineAdvanced));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the review records its outcome in the conversation");
+    assert_eq!(notice, "Nothing to review: the turn changed no files");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) || host.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the review releases the session's prompts");
+}
+
+/// The capture is a reviewer action too, so the recovery copy's lease can
+/// refuse it as it refuses the reviewer choice (R4-9). Preparation then had
+/// no capture and went on to choose a reviewer, so a turn that changed
+/// nothing still waited through an Auto choice before "Nothing to review"
+/// (I2-10). The capture now waits for background work and tries again.
+#[tokio::test]
+async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_reviewer() {
+    let session = session_id("capturewait0");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    manager.refuse_next_capture("session is reserved for a lifecycle operation");
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
+
+    finish_a_turn(&manager, &host).await;
+
+    // The fake refused the first capture. This is the retry, and nothing has
+    // chosen a reviewer yet: a choice would hang and never capture again.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    assert_eq!(
+        environment.background_waits(),
+        2,
+        "each capture waited for background work first"
+    );
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: std::path::PathBuf::from("/workspace/app"),
+            baseline_tree: Some("reviewed-tree".to_owned()),
+            current_tree: "reviewed-tree".to_owned(),
+            patch: String::new(),
+            diffstat: "0 files changed".to_owned(),
+            changed_lines: 0,
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::AdvanceBaseline { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::BaselineAdvanced));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the review records its outcome in the conversation");
+    assert_eq!(notice, "Nothing to review: the turn changed no files");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) || host.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the review releases the session's prompts");
+    host.shutdown().await.unwrap();
 }
 
 /// A prompt that landed before the admission hold is reflected by the
@@ -909,6 +1226,21 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
         .await;
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    // Preparation captures the change before the review opens (I2-10); a
+    // turn with a change keeps the review open.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
     starting
         .await
         .expect("start task")
@@ -937,8 +1269,22 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
         .await;
-    let open_gate = environment.block_saves();
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    // Preparation captures the change before the review opens (I2-10).
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let open_gate = environment.block_saves();
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
     tokio::time::timeout(Duration::from_secs(5), open_gate.entered())
         .await
         .expect("the active write reaches the blocking lane");
@@ -954,9 +1300,10 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     );
 
     open_gate.release();
-    let (_, _, _capture_reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
+    // Whatever the open review asks for first (its analysis or its
+    // reviewer) stays unanswered, which keeps the review open, as holding
+    // the capture did when the review took it.
+    let _first_request = manager.next().await;
     assert!(environment.state().active.is_some());
     assert!(host.view(session).is_some());
 
@@ -1211,8 +1558,13 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
         }],
     }));
 
+    // The capture now arrives while the review is still being prepared
+    // (I2-10), so wait for the review itself rather than for any view.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.view(session).is_none() {
+        while host
+            .view(session)
+            .is_none_or(|view| view.status.contains("Preparing"))
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -1259,10 +1611,12 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     );
     finish_a_turn(&manager, &host).await;
 
+    // Preparation captures the change before the review opens (I2-10), so
+    // the active marker is durable by the time a reviewer starts rather than
+    // by the capture.
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
-    assert!(environment.state().active.is_some());
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
         repositories: vec![mj_core::relay::RepoDelta {
             root: PathBuf::from("/workspace/app"),
@@ -1276,6 +1630,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
         .await;
+    assert!(environment.state().active.is_some());
     let _ = reply.send(Err("review harness failed to launch".to_owned()));
 
     tokio::time::timeout(Duration::from_secs(5), async {

@@ -575,6 +575,31 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
     assert_eq!(checks[3].status, CheckStatus::Ready);
 }
 
+/// Launch finding R5-3: doctor and `mj setup` gave a missing Docker the raw
+/// error chain ("run docker for check Docker daemon: No such file or
+/// directory (os error 2)"). They now say it is not installed and how to
+/// fix that.
+#[test]
+fn a_missing_docker_is_reported_as_not_installed() {
+    let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
+        std::io::ErrorKind::NotFound,
+    ))
+    .context("run docker for check Docker daemon"))]);
+
+    let check = local_docker_runtime_check(&executor);
+
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert_eq!(check.detail, "Docker is not installed on this host.");
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.starts_with("Install Docker")),
+        "{:?}",
+        check.remediation
+    );
+}
+
 #[test]
 fn docker_checks_probe_the_daemon_then_the_configured_image() {
     let executor = FakeExecutor::new([
@@ -665,6 +690,54 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
         checks[0].status,
         CheckStatus::Fixable,
         "a target the user configured is still a fault to fix"
+    );
+}
+
+/// Launch finding R3-3: a Setup save once wrote the built-in `[targets.docker]`
+/// and `[targets.podman]` blocks into config.toml, and doctor then reported a
+/// missing engine as a fault to fix. A block identical to the built-in target
+/// is still the built-in target.
+#[test]
+fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
+    let written = config_with([
+        (
+            "docker",
+            TargetTemplate::LocalDocker {
+                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            },
+        ),
+        (
+            "podman",
+            TargetTemplate::LocalPodman {
+                container: container(mj_core::config::DEFAULT_CONTAINER_IMAGE),
+            },
+        ),
+    ]);
+    let docker = docker_checks(Ok(&written), &AlwaysFailingExecutor, false);
+    assert_eq!(docker.len(), 1);
+    assert_eq!(
+        docker[0].status,
+        CheckStatus::Unsupported,
+        "{}",
+        docker[0].detail
+    );
+    assert!(docker[0].detail.contains("built-in `docker` target"));
+    let podman = podman_checks(Ok(&written), &AlwaysFailingExecutor, false);
+    assert_eq!(podman.len(), 1);
+    assert_eq!(
+        podman[0].status,
+        CheckStatus::Unsupported,
+        "{}",
+        podman[0].detail
+    );
+
+    let missing_image = FakeExecutor::new([Ok(output(b"29.0.1 linux\n")), Ok(failed(b""))]);
+    let checks = docker_checks(Ok(&written), &missing_image, false);
+    assert_eq!(
+        checks[1].status,
+        CheckStatus::Warning,
+        "{}",
+        checks[1].detail
     );
 }
 
@@ -1203,6 +1276,64 @@ fn ssh_bare_checks_are_skipped_without_a_valid_config() {
     assert!(executor.commands.borrow().is_empty());
 }
 
+/// With no target blocks in config.toml, the dashboard still offers the
+/// built-in `podman` target, and doctor's engine and image checks cover it;
+/// the worker-binary checks said "No container target is configured" and the
+/// freshness check for Linux targets was missing (launch finding R5-2). A
+/// built-in target whose engine is unavailable needs no worker.
+#[test]
+fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
+    let engines = [
+        DoctorCheck::ready(
+            "runtime.podman",
+            "Rootless Podman",
+            "Podman 5.7.0 has a valid rootless UID map.",
+        ),
+        DoctorCheck::unsupported(
+            "runtime.docker",
+            "Docker",
+            "Docker is not available, so the built-in `docker` target is marked unavailable.",
+        ),
+    ];
+
+    let offered = offered_targets(&Config::default(), &engines);
+
+    let ids = worker_binary_checks(Ok(&offered))
+        .into_iter()
+        .map(|check| check.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["worker.podman"]);
+    assert_eq!(
+        container_worker_architectures(Ok(&offered)),
+        [normalized_worker_architecture(std::env::consts::ARCH)]
+    );
+}
+
+/// A target the user configured is checked whatever its engine's state, as
+/// before.
+#[test]
+fn worker_checks_keep_a_configured_target_whose_engine_is_unavailable() {
+    let config = config_with([(
+        "pd",
+        TargetTemplate::LocalPodman {
+            container: container("example.test/own:latest"),
+        },
+    )]);
+    let engines = [DoctorCheck::unsupported(
+        "runtime.podman",
+        "Rootless Podman",
+        "Podman is not installed.",
+    )];
+
+    let offered = offered_targets(&config, &engines);
+
+    let ids = worker_binary_checks(Ok(&offered))
+        .into_iter()
+        .map(|check| check.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["worker.pd"]);
+}
+
 #[test]
 fn worker_check_for_an_ssh_podman_target_without_platform_is_unsupported() {
     let config = config_with([(
@@ -1301,7 +1432,6 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     );
 }
 
-#[cfg(target_os = "macos")]
 fn claude_config_with_home<const N: usize>(
     home: &std::path::Path,
     targets: [(&str, TargetTemplate); N],
@@ -1328,63 +1458,16 @@ fn claude_config_with_home<const N: usize>(
     }
 }
 
-/// A home Mjolnir cannot point the harness at must be reported, not used
-/// silently. Only macOS has such a case today, so only macOS asserts it.
-#[cfg(target_os = "macos")]
+/// A local session runs from a staged copy of whatever home the profile names,
+/// on macOS as elsewhere, so a Claude home other than `~/.claude` is used as
+/// configured and is not reported.
 #[test]
-fn doctor_reports_a_claude_home_macos_cannot_scope() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("claude-work");
-    std::fs::create_dir_all(&home).unwrap();
-    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
-
-    let executor = FakeExecutor::new([]);
-    let checks = harness_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert!(
-        checks[0]
-            .detail
-            .contains("is ignored by a session on this machine")
-            && checks[0].detail.contains("CLAUDE_CONFIG_DIR"),
-        "{}",
-        checks[0].detail
-    );
-    let default_home = dirs::home_dir().unwrap().join(".claude");
-    assert!(
-        checks[0]
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains(&default_home.to_string_lossy().into_owned()),
-        "{:?}",
-        checks[0].remediation
-    );
-}
-
-/// The variable still scopes a home on a container or SSH target, so a profile
-/// that only runs there is correct as configured and must not be told to
-/// repoint its home at `~/.claude`.
-#[cfg(target_os = "macos")]
-#[test]
-fn doctor_accepts_a_scoped_claude_home_used_only_off_this_machine() {
+fn doctor_accepts_a_claude_home_other_than_the_default_on_this_machine() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("claude-work");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join(".credentials.json"), b"{}").unwrap();
-    let config = claude_config_with_home(
-        &home,
-        [(
-            "builder",
-            serde_json::from_value(serde_json::json!({
-                "kind": "ssh-bare",
-                "host": "builder",
-                "permissions": "guardian",
-            }))
-            .unwrap(),
-        )],
-    );
+    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
 
     let executor = FakeExecutor::new([]);
     let checks = harness_checks(Ok(&config), &executor);
@@ -1978,4 +2061,178 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
     let repositories =
         crate::doctor::review_residue_repositories([project.clone()], &[&running_worktree]);
     assert!(repositories.is_empty(), "{repositories:?}");
+}
+
+fn doctor_profile(kind: HarnessKind, home: PathBuf) -> HarnessProfile {
+    HarnessProfile {
+        // Disabled, so the check reports the profile without probing its
+        // login: the summary sentence is the subject here.
+        enabled: false,
+        kind,
+        home,
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    }
+}
+
+fn subagent_config(eligible: &[&str], profiles: &[&str]) -> Config {
+    Config {
+        profiles: profiles
+            .iter()
+            .map(|id| {
+                (
+                    (*id).to_owned(),
+                    HarnessProfile {
+                        enabled: true,
+                        ..doctor_profile(HarnessKind::Codex, PathBuf::from("/nonexistent").join(id))
+                    },
+                )
+            })
+            .collect(),
+        subagents: mj_core::config::SubagentConfig {
+            eligible_profiles: eligible.iter().map(|id| ((*id).to_owned(), true)).collect(),
+            ..Default::default()
+        },
+        ..Config::default()
+    }
+}
+
+#[test]
+fn the_subagent_policy_names_how_many_children_and_which_profiles() {
+    let config = subagent_config(&["codex2", "deepseek"], &["codex", "codex2", "deepseek"]);
+    let checks = subagent_eligibility_checks(Ok(&config));
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(checks[0].id, "subagents.policy");
+    assert_eq!(checks[0].status, CheckStatus::Ready);
+    assert_eq!(
+        checks[0].detail,
+        "Claude and Codex sessions may opt in, up to 6 sub-agents at once per session. A \
+         session's sub-agents may use its own profile and: codex2, deepseek."
+    );
+
+    let alone = subagent_config(&[], &["codex"]);
+    assert!(
+        subagent_eligibility_checks(Ok(&alone))[0]
+            .detail
+            .ends_with("its own profile and: no other profile."),
+    );
+
+    // The deprecated global switch no longer changes this check's detail.
+    let mut off = subagent_config(&["codex"], &["codex"]);
+    off.subagents.enabled = false;
+    assert_eq!(
+        subagent_eligibility_checks(Ok(&off))[0].detail,
+        subagent_eligibility_checks(Ok(&subagent_config(&["codex"], &["codex"])))[0].detail
+    );
+}
+
+/// An eligible id that names no profile is a configuration error, not a
+/// warning: the file fails to load, and doctor's configuration check says so.
+#[test]
+fn an_eligible_id_that_names_no_profile_fails_the_configuration_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "version = {}\n\n[subagents.eligible_profiles]\ncodx = true\n",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+    .unwrap();
+
+    let checks = run_with_config_path(
+        &path,
+        &AlwaysFailingExecutor,
+        ApplePlatform::Linux,
+        DoctorOptions { smoke: false },
+    );
+
+    let config = checks
+        .iter()
+        .find(|check| check.id == "config")
+        .expect("the configuration is checked");
+    assert_eq!(config.status, CheckStatus::Fixable);
+    assert!(
+        config.detail.contains("\"codx\" is not defined"),
+        "{}",
+        config.detail
+    );
+}
+
+#[test]
+fn each_profile_line_says_where_its_quota_comes_from_and_who_may_delegate_to_it() {
+    let homes = tempfile::tempdir().unwrap();
+    let chatgpt = homes.path().join("codex");
+    let deepseek = homes.path().join("deepseek");
+    let keyless = homes.path().join("keyless");
+    for home in [&chatgpt, &deepseek, &keyless] {
+        std::fs::create_dir_all(home).unwrap();
+    }
+    let provider = "model_provider = \"deepseek\"\n\n[model_providers.deepseek]\n\
+                    base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n\
+                    env_key = \"DEEPSEEK_API_KEY\"\n";
+    std::fs::write(deepseek.join("config.toml"), provider).unwrap();
+    std::fs::write(keyless.join("config.toml"), provider).unwrap();
+    let mut deepseek_profile = doctor_profile(HarnessKind::Codex, deepseek);
+    deepseek_profile
+        .environment
+        .insert("DEEPSEEK_API_KEY".into(), "sk-test".into());
+    let config = Config {
+        profiles: [
+            ("codex", doctor_profile(HarnessKind::Codex, chatgpt)),
+            ("deepseek", deepseek_profile),
+            ("keyless", doctor_profile(HarnessKind::Codex, keyless)),
+            (
+                "claude",
+                doctor_profile(HarnessKind::Claude, homes.path().join("claude")),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, profile)| (id.to_owned(), profile))
+        .collect(),
+        subagents: mj_core::config::SubagentConfig {
+            eligible_profiles: [("codex".to_owned(), true), ("deepseek".to_owned(), true)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+
+    let checks = harness_checks(Ok(&config), &AlwaysFailingExecutor);
+    let detail = |id: &str| {
+        checks
+            .iter()
+            .find(|check| check.id == format!("harness.{id}"))
+            .unwrap_or_else(|| panic!("{id} is reported"))
+            .detail
+            .clone()
+    };
+    assert_eq!(
+        detail("codex"),
+        "Codex; ChatGPT subscription quota; any session's sub-agents may use it. Profile is \
+         disabled; home and authentication checks were skipped."
+    );
+    assert!(
+        detail("deepseek").starts_with(
+            "Codex; pay-per-use through api.deepseek.com, counted as 100% left when choosing a \
+             sub-agent's profile; any session's sub-agents may use it."
+        ),
+        "{}",
+        detail("deepseek")
+    );
+    assert!(
+        detail("keyless").contains("custom provider \"deepseek\" has no API key"),
+        "{}",
+        detail("keyless")
+    );
+    assert!(
+        detail("claude").starts_with(
+            "Claude Code; Claude subscription quota; only its own sessions' sub-agents may use it."
+        ),
+        "{}",
+        detail("claude")
+    );
 }

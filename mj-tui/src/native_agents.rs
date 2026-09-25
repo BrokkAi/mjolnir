@@ -131,9 +131,27 @@ impl DashboardState {
                 }
             };
             pane.stopping &= pane.agent.state == NativeAgentState::Running;
+            self.set_native_row_excerpt(&id, &pane.projection.transcript);
             self.native_agents.insert(id, pane);
         }
         self.clamp_selections();
+    }
+
+    /// Gives a native child's row the excerpt other rows get from their
+    /// stored summary. A native child has no summary of its own, so without
+    /// this its row read "No messages yet" whatever it had said (R10-2).
+    fn set_native_row_excerpt(
+        &mut self,
+        id: &str,
+        transcript: &[std::sync::Arc<mj_core::state::TranscriptItem>],
+    ) {
+        let none = crate::ingest::MaterializedProjectionCache::default();
+        let detail = self.session_details.entry(id.to_owned()).or_default();
+        detail.last_agent_message =
+            crate::ingest::last_agent_message(transcript, 0, &none).map(|(_, text)| text);
+        detail.latest_agent_activity_after_last_user =
+            crate::ingest::latest_agent_activity(transcript, 0, &none).map(|(_, text)| text);
+        detail.last_agent_message_follows_last_user = detail.last_agent_message.is_some();
     }
 
     pub fn native_agent_history_loaded(
@@ -186,6 +204,7 @@ impl DashboardState {
             _ => return None,
         }
         .to_owned();
+        let has_children = self.subagent_count_for(&id) > 0;
         let pane = self.native_agents.get_mut(&id)?;
         match key.code {
             KeyCode::PageUp => {
@@ -211,11 +230,15 @@ impl DashboardState {
                 self.selected_session_id = Some(parent.clone());
                 return Some(DashboardAction::Open { session_id: parent });
             }
-            KeyCode::Right | KeyCode::Enter => {
-                if self.subagent_count_for(&id) > 0 {
-                    self.open_subagent_workspace(id);
-                }
+            KeyCode::Right | KeyCode::Enter if has_children => {
+                self.open_subagent_workspace(id);
             }
+            // With no children of its own, Enter on the row opens the child's
+            // conversation, as it does for any other row (R10-2).
+            KeyCode::Enter if self.focus == Focus::Sessions => {
+                return Some(DashboardAction::Open { session_id: id });
+            }
+            KeyCode::Right | KeyCode::Enter => {}
             KeyCode::Char('s')
                 if key.modifiers.is_empty()
                     && pane.agent.capabilities.cancel
@@ -241,6 +264,11 @@ impl DashboardState {
         prompt_area: ratatui::layout::Rect,
     ) {
         use ratatui::widgets::{Block, Borders, Paragraph};
+        let children = if self.subagent_count_for(id) > 0 {
+            " · Enter: children"
+        } else {
+            ""
+        };
         let Some(pane) = self.native_agents.get_mut(id) else {
             return;
         };
@@ -258,11 +286,11 @@ impl DashboardState {
             frame.render_widget(Paragraph::new(lines), inner);
         }
         let controls = if pane.stopping {
-            "Suspending…"
+            "Suspending…".to_owned()
         } else if pane.agent.capabilities.cancel && pane.agent.state == NativeAgentState::Running {
-            "s: stop · PgUp/PgDn: scroll · Enter: children · p: parent"
+            format!("s: stop · PgUp/PgDn: scroll{children} · p: parent")
         } else {
-            "PgUp/PgDn: scroll · Enter: children · p: parent · controlled by parent"
+            format!("PgUp/PgDn: scroll{children} · p: parent · controlled by parent")
         };
         frame.render_widget(
             Paragraph::new(format!("{}\n{}", pane.agent.task, controls))
