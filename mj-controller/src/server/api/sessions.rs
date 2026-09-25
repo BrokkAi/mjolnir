@@ -148,6 +148,7 @@ pub(super) async fn start_session(
                 model: request.model,
                 effort: request.effort,
                 prompt: request.prompt,
+                ..Default::default()
             },
         )
         .await?;
@@ -505,6 +506,7 @@ pub(super) async fn wiki_restore(
                 model: request.model,
                 effort: request.effort,
                 prompt: None,
+                ..Default::default()
             },
         )
         .await?;

@@ -65,6 +65,7 @@ pub(super) async fn spawn_subagent(
                 model: Some(selection.model),
                 effort: selection.effort,
                 prompt: Some(relation.initial_prompt.clone()),
+                fast_mode: selection.fast_mode,
             },
         )
         .await?;
@@ -85,6 +86,7 @@ pub(crate) struct SubagentSelection {
     pub profile_id: String,
     pub model: String,
     pub effort: Option<String>,
+    pub fast_mode: bool,
 }
 
 /// Settle a spawn's profile, model and effort; both spawn paths use this.
@@ -148,10 +150,12 @@ pub(crate) async fn resolve_subagent_selection(
                 .any(|choice| &choice.value == effort)
         }),
     };
+    let fast_mode = mj_core::codex_catalog::is_luna_model(&model);
     Ok(SubagentSelection {
         profile_id: chosen.profile_id,
         model,
         effort,
+        fast_mode,
     })
 }
 
@@ -547,5 +551,131 @@ mod tests {
             "codex2",
         );
         assert_eq!(ids(&merged), vec!["deepseek", "codex4", "codex3"]);
+    }
+
+    /// Just enough of a backend to drive `resolve_subagent_selection`: one
+    /// profile's candidates, and no live parent session (so effort inherits
+    /// nothing and the parent's real model is never consulted).
+    struct FakeSelectionBackend {
+        candidates: SubagentCandidates,
+    }
+
+    impl SubagentBackend for FakeSelectionBackend {
+        fn subagent_candidates(
+            &self,
+            _parent_profile: String,
+        ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+            let candidates = self.candidates.clone();
+            Box::pin(async move { Ok(candidates) })
+        }
+        fn session_handle(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, AnyResult<Option<SessionHandle>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn prompt(&self, _session_id: String, _text: String) -> BoxFuture<'_, AnyResult<u64>> {
+            Box::pin(async { anyhow::bail!("not used in this test") })
+        }
+        fn turn_state(&self, _session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn turn_summary(
+            &self,
+            _session_id: String,
+            _turn: TurnSpan,
+        ) -> BoxFuture<'_, AnyResult<TurnSummary>> {
+            Box::pin(async { anyhow::bail!("not used in this test") })
+        }
+        fn start_followup(
+            &self,
+            _session_id: String,
+            _followup: StartFollowup,
+        ) -> BoxFuture<'_, AnyResult<()>> {
+            Box::pin(async { anyhow::bail!("not used in this test") })
+        }
+        fn start_status(
+            &self,
+            _session_id: String,
+        ) -> BoxFuture<'_, AnyResult<Option<StartStatus>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn transcript(
+            &self,
+            _session_id: String,
+            _after_seq: u64,
+            _limit: usize,
+            _role: Option<mj_core::transcript::TranscriptRole>,
+        ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn diff(
+            &self,
+            _session_id: String,
+            _options: DiffOptions,
+        ) -> BoxFuture<'_, Result<String, ExportError>> {
+            Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
+        fn read_file(
+            &self,
+            _session_id: String,
+            _path: PathBuf,
+        ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>> {
+            Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
+        fn push_branch(
+            &self,
+            _session_id: String,
+            _branch: String,
+        ) -> BoxFuture<'_, Result<PushedBranch, ExportError>> {
+            Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
+        fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
+            Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_luna_model_selection_turns_on_fast_mode() {
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![candidate("codex", Some(50), &["luna"])],
+                unavailable: Vec::new(),
+            },
+        });
+        let selection = resolve_subagent_selection(
+            &backend,
+            "parent-session",
+            "codex",
+            None,
+            Some("luna"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(selection.fast_mode);
+    }
+
+    #[tokio::test]
+    async fn a_non_luna_model_selection_leaves_fast_mode_off() {
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![candidate("codex", Some(50), &["nova", "astra"])],
+                unavailable: Vec::new(),
+            },
+        });
+        for model in ["nova", "astra"] {
+            let selection = resolve_subagent_selection(
+                &backend,
+                "parent-session",
+                "codex",
+                None,
+                Some(model),
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(!selection.fast_mode, "{model} must not turn on fast mode");
+        }
     }
 }

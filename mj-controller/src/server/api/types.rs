@@ -145,7 +145,7 @@ pub struct StartSessionRequest {
     /// Branch to check out in a new isolated workspace.
     #[serde(default)]
     pub launch_branch: Option<String>,
-    /// None follows the global `[subagents] enabled` setting.
+    /// None means native sub-agents, the same as `Some(false)`.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
@@ -506,6 +506,7 @@ pub struct StartFollowup {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub prompt: Option<String>,
+    pub fast_mode: bool,
 }
 
 /// How far a created session's follow-up has got. Served in M2.

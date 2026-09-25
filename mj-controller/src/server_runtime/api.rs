@@ -435,6 +435,7 @@ impl ApiBackend {
                         model: Some(selection.model),
                         effort: selection.effort,
                         prompt: Some(relation.initial_prompt.clone()),
+                        fast_mode: selection.fast_mode,
                     },
                 )
                 .await?;
@@ -1197,7 +1198,7 @@ async fn apply_followup(
 
     // Setting a configuration option needs the harness's own session, not just
     // a connected worker: the options it accepts arrive with it.
-    let needs_config = followup.model.is_some() || followup.effort.is_some();
+    let needs_config = followup.model.is_some() || followup.effort.is_some() || followup.fast_mode;
     loop {
         let view = handle.view();
         if let Some(ViewError::TargetMissing(detail)) = &view.error {
@@ -1237,6 +1238,28 @@ async fn apply_followup(
             "this agent does not offer {value} as a {key}"
         );
         handle.set_config(key.to_owned(), value).await?;
+    }
+
+    // Fast mode is best effort: a Luna sub-agent should start fast, but a
+    // spawn must not fail just because the agent does not offer the option
+    // or the set_config call itself fails.
+    if followup.fast_mode {
+        let offers_on = handle.view().snapshot.is_some_and(|snapshot| {
+            mj_core::acp::session_config_choices(&snapshot.operational.config_options, "fast-mode")
+                .iter()
+                .any(|choice| choice.value == "on")
+        });
+        if offers_on
+            && let Err(error) = handle
+                .set_config("fast-mode".to_owned(), "on".to_owned())
+                .await
+        {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "could not turn on Codex fast mode for a Luna sub-agent"
+            );
+        }
     }
 
     still_starting(&states, &exports, &session_id)?;
