@@ -1830,6 +1830,43 @@ fn an_older_config_version_is_still_rejected() {
     );
 }
 
+/// A hand-written config.toml without its `version` line stopped `mj` with
+/// the raw TOML error "missing field `version`", which did not say what to
+/// add (launch finding R14-4, reverify-14 tmux/026).
+#[test]
+fn a_config_without_a_version_names_the_line_to_add() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "[profiles.codex]\nkind = \"codex\"\nhome = \"/nonexistent\"\n",
+    )
+    .unwrap();
+
+    let error = Config::load_from(&path).unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "{}: config.toml needs a `version = {CONFIG_VERSION}` line at the top (the current \
+             configuration schema); see https://mjolnir.brokk.ai/configuration/",
+            path.display()
+        )
+    );
+
+    // Any other parse error keeps the parser's words after the file's path.
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[profiles.codex\n"),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.starts_with(&format!("parse Mjolnir config {}: ", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("TOML parse error"), "{error}");
+}
+
 #[test]
 fn a_malformed_newer_config_is_still_an_error() {
     let directory = tempfile::tempdir().unwrap();
