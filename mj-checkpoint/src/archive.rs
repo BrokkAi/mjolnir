@@ -719,7 +719,9 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if repositories.iter().any(|repo| {
+        schema_version: if carries_agent_reports(&descriptors) {
+            ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+        } else if repositories.iter().any(|repo| {
             !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
         }) {
             ARCHIVE_SCHEMA_VERSION_CLONE_REFS
@@ -1297,7 +1299,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_SHARDED
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1321,9 +1324,20 @@ fn expected_schema_version(payloads: &[PayloadDescriptor]) -> u32 {
     }
 }
 
+/// Whether an archive carries sub-agent report files, which only a build that
+/// knows to restore them beside the repositories may read.
+fn carries_agent_reports(payloads: &[PayloadDescriptor]) -> bool {
+    payloads.iter().any(|payload| {
+        matches!(&payload.role, PayloadRole::NativeArtifact { relative_path }
+            if relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR))
+    })
+}
+
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema =
-        if manifest.repositories.iter().any(|repo| {
+        if carries_agent_reports(&manifest.payloads) {
+            ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+        } else if manifest.repositories.iter().any(|repo| {
             !repo.metadata.saved_refs.is_empty() || !repo.metadata.stash_stack.is_empty()
         }) {
             ARCHIVE_SCHEMA_VERSION_CLONE_REFS
@@ -1333,6 +1347,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     ensure!(
         manifest.schema_version == expected_schema
             || (expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
+                && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
                 && manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT),
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         manifest.schema_version,

@@ -140,7 +140,7 @@ pub(super) fn load_subagent_report_from(
         .query_row(
             "SELECT handback_command_id, handback_message, handback_recorded_at_ms,
                     reminder_command_id, reminder_for_command_id, reminder_sent_at_ms,
-                    reminder_failed_for_command_id, awaited_ordinal
+                    reminder_failed_for_command_id, awaited_ordinal, report_dir
              FROM subagent_handbacks WHERE child_session_id = ?1",
             [child_session_id],
             |row| {
@@ -153,6 +153,7 @@ pub(super) fn load_subagent_report_from(
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -166,6 +167,7 @@ pub(super) fn load_subagent_report_from(
         reminder_at,
         reminder_failed_for,
         awaited_ordinal,
+        report_dir,
     )) = row
     else {
         return Ok(mj_core::subagent::SubagentReport::default());
@@ -193,7 +195,34 @@ pub(super) fn load_subagent_report_from(
         },
         reminder_failed_for,
         awaited_ordinal: awaited_ordinal.and_then(|ordinal| u64::try_from(ordinal).ok()),
+        report_dir,
     })
+}
+
+/// Record the directory Mjolnir created for a child's report files. It is
+/// recorded only for a sub-agent child.
+pub fn record_subagent_report_dir(child_session_id: &str, report_dir: &str) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    let report_dir = report_dir.to_owned();
+    submit_database_write("record_subagent_report_dir", move |_| {
+        record_subagent_report_dir_to(&database_path(), &child_session_id, &report_dir)
+    })
+}
+
+pub(super) fn record_subagent_report_dir_to(
+    path: &Path,
+    child_session_id: &str,
+    report_dir: &str,
+) -> Result<()> {
+    open(path)?.execute(
+        "INSERT INTO subagent_handbacks(child_session_id, report_dir)
+         SELECT ?1, ?2 WHERE EXISTS (
+             SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
+         )
+         ON CONFLICT(child_session_id) DO UPDATE SET report_dir = excluded.report_dir",
+        params![child_session_id, report_dir],
+    )?;
+    Ok(())
 }
 
 /// Record that the parent gave a child a prompt, accepted at `ordinal`. It is

@@ -17,7 +17,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState};
+use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState, bounded_report};
 
 use crate::quota::ProfileQuota;
 
@@ -426,6 +426,7 @@ impl ApiBackend {
                         working_directory: working_directory.clone(),
                         initial_prompt: prompt,
                         request_key: request.request_id.clone(),
+                        report_root: None,
                     })
                     .await?;
                 // Registration completes the first prompt (it names the
@@ -440,11 +441,18 @@ impl ApiBackend {
                     },
                 )
                 .await?;
+                let report_dir = blocking("load sub-agent report directory", {
+                    let child_id = relation.child_session_id.clone();
+                    move || crate::database::load_subagent_report(&child_id)
+                })
+                .await?
+                .report_dir;
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
+                    "report_dir":report_dir,
                 }))
             }
             SubagentToolAction::ListAgents => {
@@ -483,6 +491,7 @@ impl ApiBackend {
                             awaited_ordinal: None,
                             answered_ordinal: None,
                             failed_turn: None,
+                            report_dir: None,
                         };
                         let (summary, progress) = summaries
                             .get(&relation.child_session_id)
@@ -534,6 +543,7 @@ impl ApiBackend {
             SubagentToolAction::WaitAgents {
                 child_session_ids,
                 timeout_seconds,
+                return_when,
             } => {
                 for child_id in child_session_ids {
                     self.require_owned_child(parent_session_id, child_id)
@@ -577,19 +587,23 @@ impl ApiBackend {
                             starts.insert(id.clone(), status);
                         }
                     }
-                    let complete = summaries.iter().all(|(id, summary, progress)| {
-                        let record = self.exports.session_record(id);
-                        subagent_status(
-                            record.as_ref(),
-                            summary.as_ref(),
-                            starts.get(id),
-                            None,
-                            self.exports.close_is_requested(id),
-                            progress,
-                        )
-                        .2
-                    });
-                    if complete || tokio::time::Instant::now() >= deadline {
+                    let finished = summaries
+                        .iter()
+                        .map(|(id, summary, progress)| {
+                            let record = self.exports.session_record(id);
+                            subagent_status(
+                                record.as_ref(),
+                                summary.as_ref(),
+                                starts.get(id),
+                                None,
+                                self.exports.close_is_requested(id),
+                                progress,
+                            )
+                            .2
+                        })
+                        .collect::<Vec<_>>();
+                    let complete = finished.iter().all(|done| *done);
+                    if return_when.satisfied(&finished) || tokio::time::Instant::now() >= deadline {
                         // Only read now, and only here: this is the one answer
                         // that has to be the child's own report.
                         let ids: Vec<String> =
@@ -615,20 +629,15 @@ impl ApiBackend {
                                     self.exports.close_is_requested(&id),
                                     &progress,
                                 );
-                                serde_json::json!({
-                                    "child_session_id":id,
-                                    "report_source":report_source(&state, &progress.report),
-                                    "state":state,
-                                    "finished":finished,
-                                    "output":output,
-                                })
+                                wait_agent_entry(&id, &state, output, finished, &progress)
                             })
                             .collect::<Vec<_>>();
-                        let total = agents.len();
                         let unfinished = agents
                             .iter()
                             .filter(|agent| agent["finished"] != serde_json::Value::Bool(true))
-                            .count();
+                            .filter_map(|agent| agent["child_session_id"].as_str())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
                         // What the caller has waited, not what this execution
                         // has: a request picked up late, or executed again
                         // after a restart, already spent part of its budget.
@@ -655,9 +664,8 @@ impl ApiBackend {
                             "waited_seconds": waited_seconds,
                             "agents": agents,
                             "next_action": mj_core::subagent::next_action(
-                                complete,
-                                unfinished,
-                                total,
+                                child_session_ids,
+                                &unfinished,
                             ),
                         }));
                     }
@@ -697,8 +705,11 @@ impl ApiBackend {
                 );
                 ensure!(
                     message.chars().count() <= mj_core::subagent::MAX_HANDBACK_CHARS,
-                    "a report can be at most {} characters; shorten it and call handback again",
-                    mj_core::subagent::MAX_HANDBACK_CHARS
+                    "a report can be at most {} characters and this one has {}. Write the details \
+                     to files in the report directory named in your first prompt, then call \
+                     handback again with a short report that lists their paths",
+                    mj_core::subagent::MAX_HANDBACK_CHARS,
+                    message.chars().count()
                 );
                 let record = blocking("load sub-agent record", {
                     let child_id = child_id.clone();
@@ -1076,6 +1087,9 @@ pub(crate) struct ChildProgress {
     pub answered_ordinal: Option<u64>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
+    /// The directory on the parent's target where the child writes the
+    /// details its report points to.
+    pub report_dir: Option<String>,
 }
 
 impl ChildProgress {
@@ -1088,6 +1102,7 @@ impl ChildProgress {
             awaited_ordinal: None,
             answered_ordinal: None,
             failed_turn: None,
+            report_dir: None,
         }
     }
 
@@ -1135,7 +1150,33 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(|turn| turn.accepted_ordinal),
         failed_turn,
+        report_dir: recorded.report_dir,
     })
+}
+
+/// One child's entry in a `wait` answer. A handback is already within the
+/// cap; a last message that stands in for one is not, so every output is
+/// bounded here and marked when it was cut.
+fn wait_agent_entry(
+    id: &str,
+    state: &str,
+    output: Option<String>,
+    finished: bool,
+    progress: &ChildProgress,
+) -> serde_json::Value {
+    let output = output.map(|output| bounded_report(&output));
+    let mut agent = serde_json::json!({
+        "child_session_id":id,
+        "report_source":report_source(state, &progress.report),
+        "state":state,
+        "finished":finished,
+        "output":output.as_ref().map(|(output, _)| output),
+        "report_dir":progress.report_dir,
+    });
+    if output.is_some_and(|(_, truncated)| truncated) {
+        agent["truncated"] = serde_json::Value::Bool(true);
+    }
+    agent
 }
 
 /// Where a finished child's `output` came from: its handback, or the last

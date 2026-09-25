@@ -28,6 +28,10 @@ pub fn is_context_boundary(stable_id: &str) -> bool {
 pub const ARCHIVE_SCHEMA_VERSION_CONTEXT: u32 = 5;
 /// Git refs and stash entries are preserved in independently owned clones.
 pub const ARCHIVE_SCHEMA_VERSION_CLONE_REFS: u32 = 6;
+/// Sub-agent report files, restored beside the repositories rather than into
+/// the harness home. It supersedes every earlier schema: an archive that
+/// carries reports declares it whatever else it carries.
+pub const ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS: u32 = 7;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";

@@ -573,6 +573,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: the directory on the parent's target where a child writes
+    // the details its report points to. A nullable column only this build
+    // reads, like `awaited_ordinal`.
+    if version < 51 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "subagent_handbacks",
+            "report_dir",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE subagent_handbacks ADD COLUMN report_dir TEXT;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (51, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 51;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

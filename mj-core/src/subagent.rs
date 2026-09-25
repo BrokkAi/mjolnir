@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Longest time a sub-agent completion wait may remain pending.
 pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
-/// How long a `wait` call blocks when the caller gives no timeout.
-pub const DEFAULT_WAIT_SECONDS: u64 = 300;
+/// How long a `wait` call blocks when the caller gives no timeout: as long as
+/// the caller's harness allows, since every `wait` call costs the parent a
+/// request carrying its whole context. [`subagent_wait_timeout_for`] caps it at
+/// the harness's own ceiling.
+pub const DEFAULT_WAIT_SECONDS: u64 = MAX_WAIT_SECONDS;
 
 /// The `spawn` model value that means "the model the parent is running now".
 pub const CURRENT_MODEL: &str = "current";
@@ -110,7 +113,7 @@ pub fn still_running_payload(
         "status": WAIT_STATUS_STILL_RUNNING,
         "waited_seconds": waited_seconds,
         "agents": agents,
-        "next_action": next_action(false, child_session_ids.len(), child_session_ids.len()),
+        "next_action": next_action(child_session_ids, child_session_ids),
     });
     if let Some(note) = note
         && let Some(object) = payload.as_object_mut()
@@ -123,14 +126,30 @@ pub fn still_running_payload(
 /// The one sentence that tells the model what to do with this answer. It is
 /// part of the answer rather than of the tool description because a model
 /// reads the answer it just got far more reliably than a schema it read once.
-pub fn next_action(complete: bool, unfinished: usize, total: usize) -> String {
-    if complete {
+///
+/// `unfinished` names the children still running out of the `total` asked
+/// about. When some finished, the sentence names the ones left to wait for, so
+/// a parent does not collect the finished children's reports again.
+pub fn next_action(total: &[String], unfinished: &[String]) -> String {
+    if unfinished.is_empty() {
         return "All children finished. Their reports are in each agent's output field.".to_owned();
     }
+    if unfinished.len() == total.len() {
+        return format!(
+            "{} of {} child sessions are still running; this is not a failure. \
+             Call wait again with the same child_session_ids to keep waiting, \
+             or do other work first and call wait later.",
+            unfinished.len(),
+            total.len()
+        );
+    }
     format!(
-        "{unfinished} of {total} child sessions are still running; this is not a failure. \
-         Call wait again with the same child_session_ids to keep waiting, \
-         or do other work first and call wait later."
+        "{} of {} child sessions finished; their reports are in output. The others are still \
+         running, which is not a failure. Call wait with the remaining child_session_ids to \
+         keep waiting: {}.",
+        total.len() - unfinished.len(),
+        total.len(),
+        unfinished.join(", ")
     )
 }
 
@@ -199,6 +218,10 @@ pub enum SubagentToolAction {
         child_session_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
+        /// Left off the wire when it is the default, so a wait for every
+        /// child reads exactly as it did before the field existed.
+        #[serde(default, skip_serializing_if = "ReturnWhen::is_all")]
+        return_when: ReturnWhen,
     },
     InterruptAgent {
         child_session_id: String,
@@ -211,6 +234,33 @@ pub enum SubagentToolAction {
     Handback {
         message: String,
     },
+}
+
+/// When a `wait` answers before its timeout: once every named child finished,
+/// or once any one of them did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnWhen {
+    #[default]
+    All,
+    Any,
+}
+
+impl ReturnWhen {
+    #[must_use]
+    pub fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+
+    /// Whether a wait with this rule is answered, given which children
+    /// finished. A wait naming no children has nothing to wait for.
+    #[must_use]
+    pub fn satisfied(self, finished: &[bool]) -> bool {
+        match self {
+            Self::All => finished.iter().all(|done| *done),
+            Self::Any => finished.is_empty() || finished.iter().any(|done| *done),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,18 +398,60 @@ pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
 /// shows it.
 pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your report has not been delivered. Call the mj-agents handback tool now with your full report, then stop.";
 
+/// What a child's report must contain and what it must leave to files. Shared
+/// by the first-prompt note, the child's server instructions and the handback
+/// tool description, so the three cannot drift apart.
+pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Hand back a question and stop when the fix needs a design choice, touches a file you were not given, changes a persisted identity, a public contract or an epoch, or the failure also occurs on the base commit.";
+
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
-/// showed children skipping it.
-pub const HANDBACK_PROMPT_NOTE: &str = "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your full report: the session that started you reads only that report, not the rest of this conversation.";
+/// showed children skipping it. `report_dir` is the directory Mjolnir created
+/// for this child's files.
+#[must_use]
+pub fn handback_prompt_note(report_dir: &str) -> String {
+    format!(
+        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {HANDBACK_REPORT_RULES}"
+    )
+}
 
 /// How long a sent reminder may be neither queued, running nor finished before
 /// the child's report stops waiting for it. Someone removed it from the queue,
 /// or it never reached the child; either way it is not coming.
 pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 
-/// The longest report a child can hand back: the same limit as a prompt.
-pub const MAX_HANDBACK_CHARS: usize = 65_536;
+/// The longest report a child can hand back, and the longest output a `wait`
+/// shows for any child. Details belong in files in the child's report
+/// directory; the parent reads this on every later request it makes.
+pub const MAX_HANDBACK_CHARS: usize = 4_000;
+
+/// Directory under a parent's workspace root that holds its children's report
+/// directories, outside every repository.
+pub const REPORT_ROOT_DIR: &str = ".mj-agents";
+
+/// For a session whose workspace root is not Mjolnir's (a bare project), the
+/// report root sits inside the project, under a path its `info/exclude` lists.
+pub const PROJECT_REPORT_ROOT_DIR: &str = ".mj/agents";
+
+/// Archive prefix for the report files a checkpoint carries.
+pub const ARCHIVE_REPORT_DIR: &str = "mj-agent-reports";
+
+/// Cut `text` to [`MAX_HANDBACK_CHARS`] characters, saying how much was left
+/// out and how the parent can get it. Returns the text and whether it was cut.
+#[must_use]
+pub fn bounded_report(text: &str) -> (String, bool) {
+    let total = text.chars().count();
+    if total <= MAX_HANDBACK_CHARS {
+        return (text.to_owned(), false);
+    }
+    let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
+    (
+        format!(
+            "{kept}\n[truncated: {} more characters; use send_input to ask the child to write the details to files in its report directory and send you the paths]",
+            total - MAX_HANDBACK_CHARS
+        ),
+        true,
+    )
+}
 
 /// Whether a command id names a handback reminder.
 #[must_use]
@@ -399,6 +491,10 @@ pub struct SubagentReport {
     /// The child has not answered it until a finished turn reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaited_ordinal: Option<u64>,
+    /// The absolute directory on the parent's target where this child writes
+    /// the details its report points to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_dir: Option<String>,
 }
 
 /// Whether the parent's newest prompt has yet to be answered: no finished
@@ -818,6 +914,112 @@ mod tests {
             remaining_subagent_wait(2_000_000, Some(45), 1_000_000),
             Duration::from_secs(45)
         );
+    }
+
+    #[test]
+    fn a_wait_without_a_timeout_waits_as_long_as_the_harness_allows() {
+        use crate::config::HarnessKind;
+        use std::time::Duration;
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Claude), None),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+        assert_eq!(
+            subagent_wait_timeout_for(None, None),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Codex), None),
+            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn a_wait_for_every_child_is_unchanged_on_the_wire() {
+        let all = SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["c1".into()],
+            timeout_seconds: Some(5),
+            return_when: ReturnWhen::All,
+        };
+        let encoded = serde_json::to_value(&all).unwrap();
+        assert!(encoded["params"].get("return_when").is_none(), "{encoded}");
+        // A request written before the field existed reads as a wait for all.
+        let old: SubagentToolAction = serde_json::from_str(
+            r#"{"action":"wait_agents","params":{"child_session_ids":["c1"],"timeout_seconds":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(old, all);
+        let any = SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["c1".into()],
+            timeout_seconds: None,
+            return_when: ReturnWhen::Any,
+        };
+        let encoded = serde_json::to_value(&any).unwrap();
+        assert_eq!(encoded["params"]["return_when"], "any");
+        assert_eq!(
+            serde_json::from_value::<SubagentToolAction>(encoded).unwrap(),
+            any
+        );
+    }
+
+    #[test]
+    fn return_when_decides_whether_a_wait_is_answered() {
+        assert!(ReturnWhen::All.satisfied(&[true, true]));
+        assert!(!ReturnWhen::All.satisfied(&[true, false]));
+        assert!(ReturnWhen::Any.satisfied(&[false, true]));
+        assert!(!ReturnWhen::Any.satisfied(&[false, false]));
+    }
+
+    #[test]
+    fn next_action_names_only_the_children_left_to_wait_for() {
+        let ids = |names: &[&str]| names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
+        let total = ids(&["c1", "c2", "c3"]);
+        assert!(next_action(&total, &[]).starts_with("All children finished"));
+        let none = next_action(&total, &total);
+        assert!(none.contains("Call wait again with the same"), "{none}");
+        let some = next_action(&total, &ids(&["c3"]));
+        assert!(
+            some.contains("2 of 3") && some.contains("c3") && !some.contains("c1"),
+            "{some}"
+        );
+    }
+
+    #[test]
+    fn a_long_report_is_cut_on_a_character_boundary_and_says_how_to_get_the_rest() {
+        let short = "done".to_owned();
+        assert_eq!(bounded_report(&short), (short.clone(), false));
+        let exact = "é".repeat(MAX_HANDBACK_CHARS);
+        assert_eq!(bounded_report(&exact), (exact.clone(), false));
+        let long = "é".repeat(MAX_HANDBACK_CHARS + 25);
+        let (cut, truncated) = bounded_report(&long);
+        assert!(truncated);
+        assert!(cut.starts_with(&exact));
+        assert!(cut.contains("[truncated: 25 more characters"), "{cut}");
+        assert!(cut.contains("send_input"), "{cut}");
+    }
+
+    #[test]
+    fn the_report_rules_state_the_enforced_cap_and_the_test_failure_fields() {
+        let cap = format!(
+            "{},{:03}",
+            MAX_HANDBACK_CHARS / 1000,
+            MAX_HANDBACK_CHARS % 1000
+        );
+        assert!(
+            HANDBACK_REPORT_RULES.contains(&cap),
+            "{HANDBACK_REPORT_RULES}"
+        );
+        for needed in [
+            "name",
+            "one-line reason",
+            "path of its log",
+            "report directory",
+        ] {
+            assert!(HANDBACK_REPORT_RULES.contains(needed), "{needed}");
+        }
+        let note = handback_prompt_note("/workspace/p/.mj-agents/c1");
+        assert!(note.contains("/workspace/p/.mj-agents/c1"), "{note}");
+        assert!(note.contains(HANDBACK_REPORT_RULES));
     }
 
     #[test]

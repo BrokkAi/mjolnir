@@ -1825,6 +1825,20 @@ async fn a_child_hands_back_one_report_per_turn() {
         empty.message
     );
 
+    // A report past the cap is refused, and the refusal says where the
+    // details go, so the child can retry with a short report.
+    let long = hand_back(
+        "child-1",
+        &"x".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 1),
+    )
+    .await;
+    assert!(long.is_error, "{}", long.message);
+    assert!(
+        long.message.contains("report directory") && long.message.contains("4000"),
+        "{}",
+        long.message
+    );
+
     let stranger = hand_back("parent-1", "a report").await;
     assert!(stranger.is_error, "{}", stranger.message);
     assert!(
@@ -1861,6 +1875,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 awaited_ordinal: awaited,
                 answered_ordinal: answered,
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
+                report_dir: None,
             }
         };
     let status = |start: Option<&StartStatus>, progress: &ChildProgress| {
@@ -1897,4 +1912,31 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
         )
     );
     assert_eq!(report_source("failed", &ReportState::Fallback), None);
+}
+
+/// A last message that stands in for a missing handback has no bound, so the
+/// wait cuts it and tells the parent how to get the rest; every entry names
+/// the child's report directory.
+#[test]
+fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
+    let mut progress = ChildProgress::settled(ReportState::Fallback);
+    progress.report_dir = Some("/workspace/p/.mj-agents/c1".into());
+    let long = "y".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 10);
+    let entry = super::wait_agent_entry("c1", "completed", Some(long), true, &progress);
+    assert_eq!(entry["truncated"], true, "{entry}");
+    assert_eq!(entry["report_dir"], "/workspace/p/.mj-agents/c1");
+    assert_eq!(entry["report_source"], "last_message");
+    let output = entry["output"].as_str().unwrap();
+    assert!(output.contains("10 more characters") && output.contains("send_input"));
+
+    let short = super::wait_agent_entry(
+        "c1",
+        "completed",
+        Some("done".into()),
+        true,
+        &ChildProgress::settled(ReportState::Delivered("done".into())),
+    );
+    assert_eq!(short["output"], "done");
+    assert!(short.get("truncated").is_none(), "{short}");
+    assert_eq!(short["report_source"], "handback");
 }
