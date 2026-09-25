@@ -192,6 +192,58 @@ pub enum TurnOutcomeKind {
     Interrupted { message: String },
 }
 
+/// How a turn ended, in words a person reads: "completed, end of turn",
+/// "interrupted", or "failed: <reason>".
+impl std::fmt::Display for TurnOutcomeKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed { stop_reason } => match classify_prompt_completion(stop_reason) {
+                PromptCompletion::Finished => formatter.write_str("completed, end of turn"),
+                PromptCompletion::InputRequired => {
+                    formatter.write_str("completed, waiting for input")
+                }
+                // A harness reports `cancelled` for a turn the client stopped.
+                PromptCompletion::Cancelled => formatter.write_str("interrupted"),
+                PromptCompletion::QuotaLimit => formatter.write_str("failed: quota limit reached"),
+                PromptCompletion::Error => {
+                    write!(formatter, "failed: {}", stop_reason_words(stop_reason))
+                }
+            },
+            Self::Rejected { message } => write!(
+                formatter,
+                "failed: {}",
+                message.lines().next().unwrap_or_default().trim()
+            ),
+            Self::Interrupted { .. } => formatter.write_str("interrupted"),
+        }
+    }
+}
+
+/// A stop reason as the harness spells it (`MaxTokens`, `max_turn_requests`)
+/// as lower-case words.
+fn stop_reason_words(stop_reason: &str) -> String {
+    let mut words = String::new();
+    let mut previous_lower = false;
+    for character in stop_reason.trim().chars() {
+        if character == '_' || character == '-' || character.is_whitespace() {
+            if !words.ends_with(' ') && !words.is_empty() {
+                words.push(' ');
+            }
+            previous_lower = false;
+            continue;
+        }
+        if character.is_uppercase() && previous_lower {
+            words.push(' ');
+        }
+        previous_lower = character.is_lowercase() || character.is_ascii_digit();
+        words.extend(character.to_lowercase());
+    }
+    match words.trim_end() {
+        "" => "no reason given".to_owned(),
+        words => words.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptCompletion {
     InputRequired,

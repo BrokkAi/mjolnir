@@ -1001,13 +1001,28 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
         Arc::new(NoExports),
     );
 
+    // Launch finding R11-3: the notice read `finished turn 46 (completed {
+    // stop_reason: "endturn" })`, Rust's debug form of the outcome and the
+    // turn's completion ordinal, where the child's own `mj wait` said turn
+    // 16. It names the turn as `mj wait` does, and the outcome in words.
+    let outcome = mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(16),
+        turn_start_position: Some(17),
+        completed_ordinal: 46,
+        completed_at_ms: 0,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        },
+    };
     backend
         .record_subagent_completion_notice(
             "parent-1".into(),
             "child-abcdef012345",
-            "audit deps",
-            3,
-            "completed",
+            "Answer project codename",
+            &outcome,
         )
         .await
         .unwrap();
@@ -1020,9 +1035,9 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
     let RelayCommand::RecordNotice { text } = command else {
         panic!("a finished sub-agent must be a notice, not {command:?}");
     };
-    assert!(
-        text.contains("audit deps") && text.contains("finished turn 3"),
-        "unexpected notice text: {text}"
+    assert_eq!(
+        text,
+        "Subagent \"Answer project codename\" (child-ab) finished turn 16 (completed, end of turn)."
     );
     assert!(
         !text.contains("full child output"),

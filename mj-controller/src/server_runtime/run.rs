@@ -583,8 +583,12 @@ pub async fn run_server(
                             let turn = outcome.completed_ordinal;
                             let child_id = relation.child_session_id.clone();
                             let parent_id = relation.parent_session_id.clone();
-                            let task_name = relation.task_name.clone();
-                            let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
+                            // The notice names the child as every listing does.
+                            let child_title = controller
+                                .state
+                                .sessions
+                                .get(&child_id)
+                                .map_or_else(|| relation.task_name.clone(), |child| child.listed_title().to_owned());
                             let handback_tool = relation.handback_tool;
                             let last_turn = outcome.clone();
                             let in_flight = snapshot
@@ -622,9 +626,8 @@ pub async fn run_server(
                                             .record_subagent_completion_notice(
                                                 parent_id,
                                                 &child_id,
-                                                &task_name,
-                                                turn,
-                                                &outcome_name,
+                                                &child_title,
+                                                &last_turn,
                                             )
                                             .await?;
                                     }

@@ -770,13 +770,16 @@ impl ApiBackend {
     /// or start one. The child's output is not included — it is collected
     /// with `wait` and read in the child transcript; the notice only says
     /// what happened.
+    ///
+    /// `child_title` is the child's listed title. The turn is named by the
+    /// number the child's own `mj wait` and `mj prompt` print (its accepted
+    /// ordinal), and the outcome in words (R11-3).
     pub async fn record_subagent_completion_notice(
         &self,
         parent_session_id: String,
         child_session_id: &str,
-        task_name: &str,
-        turn: u64,
-        outcome: &str,
+        child_title: &str,
+        outcome: &mj_core::state::MaterializedTurnOutcome,
     ) -> Result<()> {
         ensure!(
             !matches!(
@@ -790,11 +793,16 @@ impl ApiBackend {
             .session(parent_session_id.clone())
             .await
             .with_context(|| format!("session {parent_session_id} is not running"))?;
+        let turn = match outcome.accepted_ordinal {
+            Some(turn) => format!("turn {turn}"),
+            None => "a turn".to_owned(),
+        };
         submit_notice(
             &handle,
             format!(
-                "Subagent {task_name:?} ({}) finished turn {turn} ({outcome}).",
-                mj_core::state::short_id(child_session_id)
+                "Subagent \"{child_title}\" ({}) finished {turn} ({}).",
+                mj_core::state::short_id(child_session_id),
+                outcome.outcome
             ),
         )
         .await?;

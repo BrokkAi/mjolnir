@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::server::api::{
-    ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest, WaitOutcome,
-    WaitRequest, WaitResponse,
+    ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
+    WaitOutcome, WaitRequest, WaitResponse,
 };
 
 use mj_client::daemon::WikiSessionStatus;
@@ -806,6 +806,31 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     lines
 }
 
+/// What `mj sessions --session` prints for one session, one line per entry.
+fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {}  {}",
+        session.id, session.state, session.title
+    )];
+    // Silence is reported, never acted on. A turn waiting on a long build
+    // is quiet and healthy, so this says what is true and leaves the
+    // decision — keep waiting, or `mj interrupt-turn` — to the reader.
+    if let Some(note) = session
+        .activity_state
+        .as_ref()
+        .and_then(|state| mj_core::activity::silence_note(state, now_ms))
+    {
+        lines.push(format!("running, {note}"));
+    }
+    if let Some(error) = &session.error {
+        lines.push(format!("error: {error}"));
+    }
+    if let Some(outcome) = &session.last_turn_outcome {
+        lines.push(format!("last turn {}", outcome.outcome));
+    }
+    lines
+}
+
 fn relay_state_name(state: RelayState) -> &'static str {
     match state {
         RelayState::Connected => "connected",
@@ -927,20 +952,8 @@ pub(crate) async fn sessions(
         if args.json {
             return print_json(&session);
         }
-        println!("{}  {}  {}", session.id, session.state, session.title);
-        // Silence is reported, never acted on. A turn waiting on a long build
-        // is quiet and healthy, so this says what is true and leaves the
-        // decision — keep waiting, or `mj interrupt-turn` — to the reader.
-        if let Some(note) = session.activity_state.as_ref().and_then(|state| {
-            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
-        }) {
-            println!("running, {note}");
-        }
-        if let Some(error) = &session.error {
-            println!("error: {error}");
-        }
-        if let Some(outcome) = &session.last_turn_outcome {
-            println!("last turn {:?}", outcome.outcome);
+        for line in session_report_lines(&session, mj_core::clock::epoch_millis()) {
+            println!("{line}");
         }
         return Ok(());
     }
@@ -1600,6 +1613,61 @@ mod tests {
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
         );
+    }
+
+    /// Launch finding R11-3: `mj sessions --session` printed `last turn
+    /// Completed { stop_reason: "EndTurn" }`, Rust's debug form. It says how
+    /// the turn ended in words.
+    #[test]
+    fn one_session_names_how_its_last_turn_ended_in_words() {
+        let with_outcome = |outcome: serde_json::Value| {
+            let mut session = wait_response("finished", serde_json::json!({})).session;
+            session.last_turn_outcome = Some(
+                serde_json::from_value(serde_json::json!({
+                    "command_id": "prompt-1",
+                    "accepted_ordinal": 16,
+                    "completed_ordinal": 46,
+                    "completed_at_ms": 0,
+                    "outcome": outcome,
+                }))
+                .unwrap(),
+            );
+            session_report_lines(&session, 0)
+        };
+        let finished =
+            with_outcome(serde_json::json!({"kind": "completed", "stop_reason": "EndTurn"}));
+        assert_eq!(
+            finished,
+            ["s1  running  t", "last turn completed, end of turn"]
+        );
+        for (outcome, words) in [
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "end_turn"}),
+                "completed, end of turn",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "Cancelled"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "interrupted", "message": "Interrupted by the user"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "MaxTokens"}),
+                "failed: max tokens",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "max_turn_requests"}),
+                "failed: max turn requests",
+            ),
+            (
+                serde_json::json!({"kind": "rejected", "message": "the session is closing\nmore detail"}),
+                "failed: the session is closing",
+            ),
+        ] {
+            assert_eq!(with_outcome(outcome)[1], format!("last turn {words}"),);
+        }
     }
 
     /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with
