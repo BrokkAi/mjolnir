@@ -6,7 +6,19 @@ pub(super) fn project_memory_launch(
     workspace: &(String, Vec<String>),
     target_profile_home: &str,
 ) -> Result<ProjectMemoryLaunchConfig> {
-    let identity = if let Some(worktree) = &session.managed_worktree {
+    // A sub-agent records its parent's checkout as its project directory.
+    // For an isolated parent that is the parent's own clone, not the project,
+    // so the child takes the parent's checkout for its identity and shares
+    // the parent's memory (R10-4).
+    let parent_worktree = match &session.managed_worktree {
+        Some(_) => None,
+        None => crate::database::load_subagent_parent_worktree(&session.id)?,
+    };
+    let identity = if let Some(worktree) = session
+        .managed_worktree
+        .as_ref()
+        .or(parent_worktree.as_ref())
+    {
         ProjectMemoryIdentity::Repository {
             repository: RepositoryMemoryIdentity::Local {
                 canonical_root: std::fs::canonicalize(&worktree.source_repository)

@@ -92,6 +92,27 @@ pub fn load_subagent(child_session_id: &str) -> Result<Option<mj_core::subagent:
         .transpose()
 }
 
+/// The managed checkout of a sub-agent's parent, or `None` when
+/// `child_session_id` is not a sub-agent or its parent owns no checkout. A
+/// child works in its parent's checkout without owning it.
+pub fn load_subagent_parent_worktree(
+    child_session_id: &str,
+) -> Result<Option<mj_core::state::ManagedWorktree>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT s.managed_worktree FROM subagent_sessions r
+             JOIN sessions s ON s.session_id = r.parent_session_id
+             WHERE r.child_session_id = ?1",
+            [child_session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|json| serde_json::from_str(&json).context("decode the parent's managed checkout"))
+        .transpose()
+}
+
 pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(

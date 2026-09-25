@@ -1248,6 +1248,111 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     assert!(relaunch.subagent_tools);
 }
 
+/// R10-4: the Mjolnir sub-agents of an isolated session were given a project
+/// memory keyed by their parent's clone (`<project>/.mj/clones/<parent>`),
+/// not by the project, so their first prompt carried an empty memory index
+/// while the parent had the project's memory. A child must read the memory
+/// its parent reads, and its writes must reconcile into the same canonical
+/// store.
+#[test]
+fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
+    const MARKER: &str = "MJ_TEST_SUBAGENT_PROJECT_MEMORY_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_subagent_of_an_isolated_session_shares_its_parents_project_memory",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let clone = project.path().join(".mj/clones").join(parent_id);
+    std::fs::create_dir_all(&clone).unwrap();
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(clone.clone());
+    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: project.path().to_path_buf(),
+        source_repository: project.path().to_path_buf(),
+        worktree_root: clone.clone(),
+        branch: "master".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    parent.mjolnir_subagents = Some(true);
+    let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: parent_root.clone(),
+    });
+    controller
+        .state
+        .sessions
+        .insert(parent_id.to_owned(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+
+    let child = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            parent_session_id: parent_id.to_owned(),
+            task_name: "Review calc.py".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Review calc.py".into(),
+            request_key: "review-calc".into(),
+        })
+        .unwrap();
+    let child_id = child.child_session_id;
+    assert_eq!(
+        controller.state.sessions[&child_id].project_directory,
+        Some(clone),
+        "the child works in its parent's clone"
+    );
+
+    // Writes reconcile into the parent's canonical store.
+    assert_eq!(
+        controller
+            .project_memory_sync_target(&child_id)
+            .unwrap()
+            .canonical_root,
+        controller
+            .project_memory_sync_target(parent_id)
+            .unwrap()
+            .canonical_root,
+    );
+    // The child's worker is handed the parent's memory identity.
+    let memory_key = |controller: &Controller, id: &str, root: PathBuf| {
+        controller
+            .current_worker_launch_config(
+                id,
+                &targets::TargetLocator::LocalBare {
+                    worker_root: root.to_string_lossy().into_owned(),
+                },
+            )
+            .unwrap()
+            .project_memory
+            .expect("Codex receives project memory")
+            .project_key
+    };
+    let child_root = mj_core::config::data_dir().join("workers").join(&child_id);
+    assert_eq!(
+        memory_key(&controller, &child_id, child_root),
+        memory_key(&controller, parent_id, parent_root),
+    );
+}
+
 /// Auto captures a baseline even with automation off, so manual review can
 /// measure the first turn in a single-profile installation.
 #[test]
