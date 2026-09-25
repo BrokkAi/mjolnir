@@ -75,21 +75,27 @@ impl DashboardState {
     pub(crate) fn render_stopped_subagent(
         &mut self,
         frame: &mut ratatui::Frame,
+        pane_id: crate::tile_layout::PaneId,
         id: &str,
         transcript_area: ratatui::layout::Rect,
         prompt_area: ratatui::layout::Rect,
     ) {
         use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-        let title = self.state.sessions.get(id).map_or_else(
+        let name = self.state.sessions.get(id).map_or_else(
             || id.to_owned(),
             |session| session.display_title().to_owned(),
+        );
+        let title = crate::pane_controls::child_pane_title(
+            self,
+            pane_id,
+            transcript_area.width,
+            &name,
+            &["stopped"],
         );
         let Some(pane) = self.stopped_subagents.get_mut(id) else {
             return;
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {title} · stopped "));
+        let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(transcript_area);
         frame.render_widget(block, transcript_area);
         match (&mut pane.transcript, &pane.error) {

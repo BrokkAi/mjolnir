@@ -259,6 +259,7 @@ impl DashboardState {
     pub(crate) fn render_native_agent(
         &mut self,
         frame: &mut ratatui::Frame,
+        pane_id: crate::tile_layout::PaneId,
         id: &str,
         transcript_area: ratatui::layout::Rect,
         prompt_area: ratatui::layout::Rect,
@@ -269,10 +270,19 @@ impl DashboardState {
         } else {
             ""
         };
+        let Some(agent) = self.native_agents.get(id).map(|pane| &pane.agent) else {
+            return;
+        };
+        let title = crate::pane_controls::child_pane_title(
+            self,
+            pane_id,
+            transcript_area.width,
+            &agent.name,
+            &[agent.activity_label(), agent.availability.label()],
+        );
         let Some(pane) = self.native_agents.get_mut(id) else {
             return;
         };
-        let title = format!(" {} · {} ", pane.agent.name, pane.agent.lifecycle_label());
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(transcript_area);
         frame.render_widget(block, transcript_area);

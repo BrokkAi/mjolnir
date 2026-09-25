@@ -1721,7 +1721,8 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
                 let area = frame.area();
                 let transcript = ratatui::layout::Rect::new(0, 0, area.width, 12);
                 let prompt = ratatui::layout::Rect::new(0, 12, area.width, 4);
-                dashboard.render_stopped_subagent(frame, "child-session", transcript, prompt);
+                let pane = dashboard.browse_pane();
+                dashboard.render_stopped_subagent(frame, pane, "child-session", transcript, prompt);
             })
             .unwrap();
         terminal.backend().to_string()
@@ -4898,9 +4899,10 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
         screen.contains("Reading calc.py") && screen.contains("Native agent"),
         "the child's stored transcript is drawn in its pane: {screen}"
     );
+    // The pane's title row names the child too; the row is in Sessions.
     let row = lines
         .iter()
-        .position(|line| line.contains("Review calc · completed"))
+        .position(|line| line.contains("Review calc · completed") && !line.contains("Conversation"))
         .expect("the child's row");
     let row_text = lines[row..row + 4].join("\n");
     assert!(
@@ -4920,6 +4922,37 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
             session_id: id.clone()
         }
     );
+}
+
+/// Launch finding R12-3 (also R11 tmux/012): a native child's pane header
+/// read "Browse | Conversation d · availability unknown". The pane chrome
+/// draws its label over the left of the title row and its chips over the
+/// right, and the native pane's own title started under the label, which
+/// covered " Review calc · complete". The title starts after the label, names
+/// the child first, and drops status words from the end when the row is
+/// short. At 80 columns the pane is 42 wide and the chrome leaves 7 columns,
+/// so the name itself is cut.
+#[test]
+fn a_native_child_pane_header_names_the_child_first() {
+    let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+    dashboard.open_subagent_workspace(parent_id);
+    let browse = dashboard.browse_pane();
+    dashboard.set_pane_session(browse, Some(&id));
+    for (width, title) in [
+        (140, "Review calc · completed · availability unknown "),
+        (100, "Review calc · completed "),
+        (90, "Review calc "),
+        (80, "Rev…"),
+    ] {
+        let header = drawn(&mut dashboard, width, 40)
+            .into_iter()
+            .find(|line| line.contains("Browse | Conversation"))
+            .expect("the pane's title row");
+        assert!(
+            header.contains(&format!("Browse | Conversation  {title}─")),
+            "{width} columns: {header}"
+        );
+    }
 }
 
 #[test]

@@ -316,6 +316,49 @@ pub(crate) fn pane_chrome_width(dashboard: &DashboardState, pane: PaneId, width:
     u16::try_from(drawn).unwrap_or(u16::MAX).min(width - 12)
 }
 
+/// The title of a pane that shows a child's conversation read-only in place
+/// of a chat (a native child, a stopped sub-agent): the child's name first,
+/// then as many of its `status` words as fit, dropped from the end. A name
+/// too long for the row alone ends in an ellipsis.
+///
+/// Like the chat title, it starts after the label `render_pane_chrome` draws
+/// at the left of the title row and stops short of the chips at the right.
+/// The native child's title started under the label, so the row read
+/// "Browse | Conversation d · availability unknown" (R12-3).
+pub(crate) fn child_pane_title(
+    dashboard: &DashboardState,
+    pane: PaneId,
+    width: u16,
+    name: &str,
+    status: &[&str],
+) -> Line<'static> {
+    let lead = pane_chrome_width(dashboard, pane, width);
+    let room = usize::from(
+        width
+            .saturating_sub(2)
+            .saturating_sub(lead)
+            .saturating_sub(pane_title_reserve(dashboard, width, 0)),
+    );
+    let fitted = (0..=status.len())
+        .rev()
+        .map(|shown| {
+            let mut title = format!(" {name}");
+            for word in &status[..shown] {
+                title.push_str(" · ");
+                title.push_str(word);
+            }
+            title.push(' ');
+            Line::from(title)
+        })
+        .find(|title| title.width() <= room)
+        .unwrap_or_else(|| {
+            mj_chat::chat::truncate_line_to_width(Line::from(format!(" {name} ")), room)
+        });
+    let mut spans = vec![ratatui::text::Span::raw(" ".repeat(usize::from(lead)))];
+    spans.extend(fitted.spans);
+    Line::from(spans)
+}
+
 /// How many columns from the right of a pane's title row the pane chips
 /// start at: the pin chip, then the menu chip, then room for the close chip.
 const PANE_CHROME_CHIPS_RESERVE: u16 = 10;

@@ -877,7 +877,7 @@ fn render_combined_themed(
             .filter(|id| dashboard.is_native_agent(id))
             .map(str::to_owned);
         if let Some(id) = native_id {
-            dashboard.render_native_agent(frame, &id, transcript_area, prompt_area);
+            dashboard.render_native_agent(frame, pane_id, &id, transcript_area, prompt_area);
             continue;
         }
         let stopped_id = dashboard
@@ -885,7 +885,7 @@ fn render_combined_themed(
             .filter(|id| dashboard.is_stopped_subagent(id))
             .map(str::to_owned);
         if let Some(id) = stopped_id {
-            dashboard.render_stopped_subagent(frame, &id, transcript_area, prompt_area);
+            dashboard.render_stopped_subagent(frame, pane_id, &id, transcript_area, prompt_area);
             continue;
         }
         if !pane_focused {

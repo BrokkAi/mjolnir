@@ -86,15 +86,20 @@ impl NativeAgent {
         }
     }
 
-    pub fn lifecycle_label(&self) -> String {
-        let activity = match self.state {
+    /// What the agent is doing or how its work ended: "working",
+    /// "completed", "failed", "interrupted" or "disconnected".
+    pub fn activity_label(&self) -> &'static str {
+        match self.state {
             NativeAgentState::Running => "working",
             NativeAgentState::Completed => "completed",
             NativeAgentState::Failed => "failed",
             NativeAgentState::Cancelled => "interrupted",
             NativeAgentState::Disconnected => "disconnected",
-        };
-        format!("{activity} · {}", self.availability.label())
+        }
+    }
+
+    pub fn lifecycle_label(&self) -> String {
+        format!("{} · {}", self.activity_label(), self.availability.label())
     }
 
     pub fn apply_availability(
