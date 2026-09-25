@@ -890,7 +890,7 @@ fn run_setup_dialog_inner(
     }
 
     writeln!(output, "Writing {}...", config_path.display())?;
-    Config::update_to(config_path, |latest| {
+    let (written, ()) = Config::update_to(config_path, |latest| {
         apply_setup_additions(latest, &additions)
     })?;
     // A failed smoke test is a fixable prerequisite, not a reason to abandon
@@ -910,11 +910,29 @@ fn run_setup_dialog_inner(
         output,
         "Advanced users can edit TOML for extra profiles, virtual monorepos, SSH, and AWS."
     )?;
-    writeln!(
-        output,
-        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
-    )?;
+    writeln!(output, "{}", setup_next_step(&written))?;
     Ok(SetupOutcome::Written)
+}
+
+/// Setup's last line: what to do next with the configuration it wrote. With
+/// no enabled profile the dashboard has no Sessions pane to press n in, so
+/// the first step is an agent to run (launch finding R13-3).
+fn setup_next_step(config: &Config) -> String {
+    if config.enabled_profiles().next().is_some() {
+        return "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
+            .to_owned();
+    }
+    match config
+        .keybinds()
+        .labels(mj_core::config::KeyAction::OpenSettings)
+        .into_iter()
+        .next()
+    {
+        Some(key) => format!(
+            "Install a coding agent, then run `mj` and open Settings ({key}) to add its profile."
+        ),
+        None => "Install a coding agent, then run `mj` and open Settings from the command palette to add its profile.".to_owned(),
+    }
 }
 
 /// Setup only adds entries. Existing identifiers may belong to live sessions.

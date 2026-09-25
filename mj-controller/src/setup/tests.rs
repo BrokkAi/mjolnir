@@ -1324,8 +1324,11 @@ fn a_failed_smoke_test_becomes_a_fixable_line_in_the_closing_report() {
         output.contains("Apply the remediations above, then rerun `mj doctor`."),
         "{output}"
     );
+    // No agent was discovered, so the last line says to install one.
     assert!(
-        output.ends_with("Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session.\n"),
+        output.ends_with(
+            "Install a coding agent, then run `mj` and open Settings (ctrl+b s) to add its profile.\n"
+        ),
         "{output}"
     );
 }
@@ -1375,6 +1378,40 @@ fn setup_finishes_with_the_standard_doctor_report_for_the_config_it_wrote() {
         output.contains("Apply the remediations above, then rerun `mj doctor`."),
         "{output}"
     );
+}
+
+/// With no agent found, setup wrote no profile and its own doctor pass said
+/// no session can start, yet its last line said to press n in the Sessions
+/// pane, which a dashboard without a profile does not show (launch finding
+/// R13-3). The last line now says what to do first.
+#[test]
+fn setup_without_an_agent_ends_by_saying_to_install_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    let executor = FakeExecutor::succeeds();
+    let mut input = b"y\n".as_slice();
+    let mut output = Vec::new();
+
+    let outcome = run_setup_dialog_with(
+        &mut input,
+        &mut output,
+        &config_path,
+        &discovery_without_runtimes(),
+        &executor,
+        &executor,
+    )
+    .unwrap();
+
+    assert_eq!(outcome, SetupOutcome::Written);
+    assert!(Config::load_from(&config_path).unwrap().profiles.is_empty());
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.ends_with(
+            "Install a coding agent, then run `mj` and open Settings (ctrl+b s) to add its profile.\n"
+        ),
+        "{output}"
+    );
+    assert!(!output.contains("press n in the Sessions pane"), "{output}");
 }
 
 #[test]
