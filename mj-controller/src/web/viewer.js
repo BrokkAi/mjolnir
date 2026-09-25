@@ -1387,7 +1387,7 @@ function freshDraft() {
     preflighted: false,
     worktreeOptions: null,
     createManagedWorktree: false,
-    mjolnirSubagents: snapshot?.subagents_enabled === true,
+    mjolnirSubagents: false,
     worktreeSelection: null,
     bundleSource: '',
     creatingBundle: false,
@@ -1397,8 +1397,8 @@ function freshDraft() {
 }
 
 /// Only Claude and Codex receive Mjolnir's delegation tools, so only they are
-/// offered the choice. Every other harness sends no opinion and keeps
-/// following the global `[subagents] enabled` setting.
+/// offered the choice. Every other harness sends no opinion, which means
+/// native sub-agents.
 function subagentChoiceApplies() {
   const kind = snapshot?.profiles.find(profile => profile.id === newDraft?.profileId)?.harness_kind;
   return kind === 'claude' || kind === 'codex';

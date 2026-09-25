@@ -251,10 +251,16 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 }
 
 /// Global policy for Mjolnir-managed child agents.
+///
+/// Whether sub-agents run at all is now a per-session choice
+/// (`SessionRecord.mjolnir_subagents`), not a global setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SubagentConfig {
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    /// Deprecated global switch retained for read compatibility with
+    /// configurations written before the per-session choice existed. It is
+    /// ignored and omitted from newly written configurations.
+    #[serde(default, skip_serializing)]
     pub enabled: bool,
     #[serde(
         default = "default_subagent_limit",
@@ -269,7 +275,7 @@ pub struct SubagentConfig {
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_concurrent: default_subagent_limit(),
             eligible_profiles: BTreeMap::new(),
         }
@@ -277,8 +283,10 @@ impl Default for SubagentConfig {
 }
 
 impl SubagentConfig {
+    /// The deprecated `enabled` key is never written, so a section holding
+    /// only that key is still a default section and stays out of the file.
     fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.max_concurrent == default_subagent_limit() && self.eligible_profiles.is_empty()
     }
 
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
@@ -308,13 +316,12 @@ impl SubagentConfig {
 
     #[must_use]
     pub fn profile_is_eligible(&self, parent: &str, candidate: &str) -> bool {
-        self.enabled
-            && (parent == candidate
-                || self
-                    .eligible_profiles
-                    .get(candidate)
-                    .copied()
-                    .unwrap_or(false))
+        parent == candidate
+            || self
+                .eligible_profiles
+                .get(candidate)
+                .copied()
+                .unwrap_or(false)
     }
 }
 

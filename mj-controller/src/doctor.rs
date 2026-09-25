@@ -660,9 +660,7 @@ fn harness_profile_check(
 /// delegation both depend on these, and none of them shows in the profile's
 /// own table in config.toml.
 fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> String {
-    let delegation = if !config.subagents.enabled {
-        "sub-agents are off"
-    } else if config
+    let delegation = if config
         .subagents
         .eligible_profiles
         .get(id)
@@ -772,28 +770,26 @@ fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     checks
 }
 
-/// Who may start sub-agents, how many, and on which profiles.
+/// How many sub-agents a session may start, and on which profiles. Whether a
+/// given session uses Mjolnir sub-agents at all is a per-session choice, not
+/// a global policy, so this check only describes the shared limits.
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
-    let detail = if subagents.enabled {
-        let eligible = subagents
-            .eligible_profiles
-            .iter()
-            .filter(|(_, eligible)| **eligible)
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>();
-        let others = if eligible.is_empty() {
-            "no other profile".to_owned()
-        } else {
-            eligible.join(", ")
-        };
-        format!(
-            "On for Claude and Codex sessions, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
-            subagents.max_concurrent
-        )
+    let eligible = subagents
+        .eligible_profiles
+        .iter()
+        .filter(|(_, eligible)| **eligible)
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let others = if eligible.is_empty() {
+        "no other profile".to_owned()
     } else {
-        "Off; sessions get no sub-agent tools.".to_owned()
+        eligible.join(", ")
     };
+    let detail = format!(
+        "Claude and Codex sessions may opt in, up to {} sub-agents at once per session. A session's sub-agents may use its own profile and: {others}.",
+        subagents.max_concurrent
+    );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
 }
 

@@ -1470,11 +1470,48 @@ fn version_eight_enables_parent_only_subagents_by_default() {
     let config = Config::load_from(&path).unwrap();
 
     assert_eq!(config.version, CONFIG_VERSION);
-    assert!(config.subagents.enabled);
     assert_eq!(config.subagents.max_concurrent, 6);
     assert!(config.subagents.eligible_profiles.is_empty());
     assert!(config.subagents.profile_is_eligible("work", "work"));
     assert!(!config.subagents.profile_is_eligible("work", "other"));
+}
+
+/// The global `[subagents] enabled` switch was removed; whether a session
+/// uses Mjolnir sub-agents is now stored per session. A config file left
+/// over from before the removal must still load, and a save must drop the
+/// key.
+#[test]
+fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[subagents]\nenabled = true\n"),
+    )
+    .unwrap();
+
+    let mut config = Config::load_from(&path).unwrap();
+    assert_eq!(config.subagents.max_concurrent, 6);
+    assert!(config.subagents.eligible_profiles.is_empty());
+    // profile_is_eligible no longer consults the deprecated flag at all.
+    assert!(config.subagents.profile_is_eligible("work", "work"));
+
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("enabled"), "{saved}");
+    assert!(!saved.contains("[subagents]"), "{saved}");
+    assert_eq!(
+        Config::load_from(&path).unwrap().subagents.max_concurrent,
+        6
+    );
+
+    // Other settings in the same section survive the same round trip.
+    config.subagents.max_concurrent = 4;
+    config.save_to(&path).unwrap();
+    assert_eq!(
+        Config::load_from(&path).unwrap().subagents.max_concurrent,
+        4
+    );
 }
 
 #[test]

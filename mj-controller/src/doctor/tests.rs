@@ -2155,8 +2155,8 @@ fn the_subagent_policy_names_how_many_children_and_which_profiles() {
     assert_eq!(checks[0].status, CheckStatus::Ready);
     assert_eq!(
         checks[0].detail,
-        "On for Claude and Codex sessions, up to 6 sub-agents at once per session. A session's \
-         sub-agents may use its own profile and: codex2, deepseek."
+        "Claude and Codex sessions may opt in, up to 6 sub-agents at once per session. A \
+         session's sub-agents may use its own profile and: codex2, deepseek."
     );
 
     let alone = subagent_config(&[], &["codex"]);
@@ -2166,11 +2166,12 @@ fn the_subagent_policy_names_how_many_children_and_which_profiles() {
             .ends_with("its own profile and: no other profile."),
     );
 
+    // The deprecated global switch no longer changes this check's detail.
     let mut off = subagent_config(&["codex"], &["codex"]);
     off.subagents.enabled = false;
     assert_eq!(
         subagent_eligibility_checks(Ok(&off))[0].detail,
-        "Off; sessions get no sub-agent tools."
+        subagent_eligibility_checks(Ok(&subagent_config(&["codex"], &["codex"])))[0].detail
     );
 }
 

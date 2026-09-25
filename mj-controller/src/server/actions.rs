@@ -20,7 +20,7 @@ pub enum ControllerAction {
         launch_base: Option<String>,
         #[serde(default)]
         launch_branch: Option<String>,
-        /// None follows the global `[subagents] enabled` setting.
+        /// None means native sub-agents.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,
         /// Which workspace the session belongs to. Optional on the wire so a

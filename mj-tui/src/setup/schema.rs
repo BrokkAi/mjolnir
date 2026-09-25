@@ -25,7 +25,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
+            json!({"max_concurrent":6,"eligible_profiles":{}})
         }
         "build_cache" if path.len() == 1 => {
             json!({"enabled": true})
@@ -429,16 +429,14 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             }
         }
         "subagents" => {
-            if section["enabled"] == Value::Bool(false) {
-                "Off".to_owned()
-            } else {
-                // A cleared limit is the default one, which still applies.
-                let limit = section["max_concurrent"].as_u64().unwrap_or(
-                    u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
-                        .unwrap_or(u64::MAX),
-                );
-                format!("On · up to {limit}")
-            }
+            // A cleared limit is the default one, which still applies.
+            // Whether any given session uses Mjolnir sub-agents is now a
+            // per-session choice, so this page only bounds them.
+            let limit = section["max_concurrent"].as_u64().unwrap_or(
+                u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
+                    .unwrap_or(u64::MAX),
+            );
+            format!("Up to {limit} at once")
         }
         "sessionwiki" => match section["archive_after_days"].as_u64() {
             Some(days) => format!("Archives after {days} days"),

@@ -293,8 +293,8 @@ fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
     );
 }
 
-/// The session's stored choice decides, with the global setting as the
-/// fallback, and a child never gets the tools whatever either says.
+/// The session's stored choice decides, `None` means native sub-agents, and
+/// a child never gets the tools whatever the choice says.
 #[test]
 fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let claude = |choice| {
@@ -304,21 +304,20 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session
     };
 
-    assert!(!subagent_tools_enabled(&claude(Some(false)), true, false));
-    assert!(subagent_tools_enabled(&claude(Some(true)), false, false));
-    assert!(subagent_tools_enabled(&claude(None), true, false));
-    assert!(!subagent_tools_enabled(&claude(None), false, false));
-    assert!(!subagent_tools_enabled(&claude(Some(true)), true, true));
+    assert!(!subagent_tools_enabled(&claude(Some(false)), false));
+    assert!(subagent_tools_enabled(&claude(Some(true)), false));
+    assert!(!subagent_tools_enabled(&claude(None), false));
+    assert!(!subagent_tools_enabled(&claude(Some(true)), true));
 
     let mut grok = claude(Some(true));
     grok.harness_kind = HarnessKind::Grok;
-    assert!(!subagent_tools_enabled(&grok, true, false));
+    assert!(!subagent_tools_enabled(&grok, false));
 
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
-    assert!(subagent_tools_enabled(&codex, true, false));
-    codex.mjolnir_subagents = Some(false);
-    assert!(!subagent_tools_enabled(&codex, true, false));
+    assert!(!subagent_tools_enabled(&codex, false));
+    codex.mjolnir_subagents = Some(true);
+    assert!(subagent_tools_enabled(&codex, false));
 }
 
 #[cfg(unix)]
