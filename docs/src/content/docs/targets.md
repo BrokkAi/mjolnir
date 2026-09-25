@@ -105,9 +105,10 @@ it. Container and remote targets still need a static Linux worker; see
 [Install](/install/).
 
 There is no process, filesystem, or network isolation between the harness and
-your controller account. The harness also uses the configured profile home
-directly. Use this target only when you trust both the agent and its approval
-configuration.
+your controller account. The harness runs from a staged copy of the configured
+profile home, as on every target, but that copy isolates only its own state: the
+harness can still read your whole home directory, the profile home included. Use
+this target only when you trust both the agent and its approval configuration.
 
 ### Bare on an SSH machine
 

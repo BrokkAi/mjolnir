@@ -26,15 +26,10 @@ There are five harness kinds. A Codex profile can also authenticate with an API
 key against a model provider other than OpenAI; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
 
-On macOS, Claude Code keeps every profile's credentials in one Keychain item
-whatever `CLAUDE_CONFIG_DIR` says
-([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
-so the variable scopes nothing and only moves Claude off the settings, history,
-and MCP servers you logged in with. Mjolnir therefore leaves it unset for a
-Claude session on this machine: the session uses `~/.claude` directly, with no
-staged per-session copy. A Claude profile whose `home` is somewhere else is
-reported by `mj doctor` as ignored. Container and SSH targets are unaffected,
-because the variable does scope a home on Linux.
+A session never runs from the profile home itself. Every session, on every
+target including a bare runtime on this machine, runs from a staged copy of the
+home that belongs to the session, and the harness's home variable points at
+that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
 `mj setup` checks the home variable first and otherwise looks in the
 conventional location. A detected home becomes the explicit `home` path in
@@ -108,9 +103,9 @@ What changes for such a profile:
   not also its own reviewer. When the catalog lists no flash model, Codex reviews
   with the session model. Change the choice with
   [`guardian_review_model`](#choose-the-guardian-review-model).
-- **A private staged home, always.** Even on a raw local target, the session runs
-  from a copy of the profile home rather than the home itself, so the generated
-  catalog never lands in your own Codex directory.
+- **The catalog stays in the staged home.** Like every session, the session
+  runs from a staged copy of the profile home, so the generated catalog never
+  lands in your own Codex directory.
 - **Quota** is reported for Z.ai (`api.z.ai`) and Zhipu (`open.bigmodel.cn`)
   hosts, which publish the Coding Plan windows. Any other provider reports that
   quota is unavailable for it; the profile still runs sessions.
@@ -297,6 +292,11 @@ environment before starting the harness's interactive login:
 The login command is always resolved from the controller's `PATH`. A profile
 selects credentials and environment, not another harness executable.
 
+On macOS, Claude Code keeps its login in one Keychain item rather than in the
+home ([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
+so `mj login` for a Claude profile leaves `CLAUDE_CONFIG_DIR` unset there and
+signs in to that one item. Every Claude profile on a Mac shares it.
+
 After login, Mjolnir compares the authentication marker before and after the
 command and reports whether it changed. A successful update is reconciled into
 live sessions while the daemon is running.
@@ -323,10 +323,18 @@ model requests, not Claude Remote Control or claude.ai connectors. Remove that
 file to return the profile to its normal synced credentials. `--setup-token` is
 valid only for Claude profiles.
 
-## What enters a managed target
+## What a session's staged home holds
 
-Mjolnir does not copy an entire home directory. When it stages a profile into a
-container, remote host, or instance, it copies only this allowlist:
+Every session runs from a staged home that belongs to it alone. On a bare
+runtime on this machine it is `workers/<session id>/profile` under Mjolnir's
+data directory (`profiles/<session id>/muse` for Muse), in a container
+`/var/lib/hel/profiles/<session id>`, and on an SSH machine or EC2 instance
+`~/.local/share/hel/profiles/<session id>`. The harness's home variable, such as
+`CODEX_HOME` or `CLAUDE_CONFIG_DIR`, points at it, on macOS as elsewhere.
+Closing the session removes it.
+
+Mjolnir does not copy an entire home directory. It copies only this allowlist
+from the profile home:
 
 | Harness | Staged home entries |
 | --- | --- |
@@ -345,11 +353,41 @@ Claude Code's own `skills/synced/` and `skills/.trash/` directories, and
 Codex's own `skills/.system/`, are not copied; see
 [Skills synchronization](#skills-synchronization).
 
+Mjolnir then adds its own files to the staged home:
+
+- the managed `mj` skill (see [Managed skills](#managed-skills));
+- the session's replica of its project memory, under `projects/`;
+- for a Claude session with Mjolnir sub-agents, or a Claude sub-agent, the
+  `mj-agents` MCP server in `.claude.json`;
+- for a Codex profile with a custom provider, the generated `models.json` and
+  the `config.toml` line that points at it;
+- for Kimi Code on a target other than this machine, the `mj-memory` MCP server
+  in `mcp.json`;
+- for Muse, the permission profile in its settings;
+- in a container or on an EC2 instance, a note in the instruction file
+  (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
+
 History, caches, SSH and GPG keys, shell dotfiles, cloud configuration, editor
 state, and package-registry credentials are not copied merely because they sit
-under your user home. A raw local session uses the configured local harness home
-directly, except for Muse's private copy. A private copy isolates agent state;
-it does not sandbox a raw local process.
+under your user home. The profile home's own native history is not copied
+either, and nothing Mjolnir adds is ever written to the profile home. A staged
+home isolates agent state; it does not sandbox a raw local process, which runs
+as your account and can read your whole home directory.
+
+### Sessions from earlier releases
+
+Earlier releases ran a local session of Codex, Kimi Code or Grok Build, and a
+Claude Code session on macOS, from the profile home itself. Such a session that
+is still open keeps running from there until it is suspended and resumed, or
+moved, which stages it like any other. Until then its credentials and skills are
+not synchronized.
+
+Those sessions also left their project-memory replicas under `projects/hel-*` in
+the profile home. When the daemon starts, it removes each replica whose session
+has ended. It keeps a replica while its session is in this instance's store or
+a running process names the session, so it does not remove one that another
+Mjolnir instance still uses. A Claude Code project directory also holds the
+session's native transcripts; those stay.
 
 Credential bytes travel only in direct controller-to-worker messages. They are
 excluded from the durable event journal and recovery archives. Fingerprints and
@@ -408,12 +446,11 @@ in whatever home it runs from, including a session's home. Mjolnir does not
 stage, compare, or push them, and it never replaces or removes them in a
 session.
 
-For a session with its own profile home, the sync reads the controller-side
-`skills/` the way launch staging copies it. It follows symbolic links, leaves out
-a link whose target is missing, and reads a directory that links back into
-itself once, so a linked skill is part of both the staged and the synced tree.
-For a session that runs from your own harness home, both sides of the
-comparison leave symbolic links out.
+The sync reads the controller-side `skills/` the way launch staging copies it.
+It follows symbolic links, leaves out a link whose target is missing, and reads
+a directory that links back into itself once, so a linked skill is part of both
+the staged and the synced tree. It writes only into the session's staged home,
+never into your own `skills/` directory.
 
 The sync has these limits:
 
@@ -437,10 +474,9 @@ within the limits.
 ### Managed skills
 
 Mjolnir installs the `mj` skill (driving Mjolnir sessions from an agent) into
-every session whose harness home belongs to the session. It is written at launch
-and merged into the tree pushed on every reconciliation. A user skill at the
-same path is replaced by the managed copy. Sessions using your own harness home
-do not receive the managed skill, so your own `skills/` directory is left alone.
+every session's staged home. It is written at launch and merged into the tree
+pushed on every reconciliation. A user skill at the same path is replaced by the
+managed copy in the session only; your own `skills/` directory is left alone.
 
 Session recall and file provenance are provided by the `mj-memory` MCP server:
 `search_sessions`, `get_session_brief`, `search_session`, `read_session`,
