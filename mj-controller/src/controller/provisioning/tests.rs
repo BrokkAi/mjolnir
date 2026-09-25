@@ -1101,6 +1101,14 @@ fn noting_a_launch_failure_writes_the_diagnostic_and_returns_the_reason() {
     )
     .unwrap();
     assert!(saved.contains("Connection closed by 10.0.0.1 port 22"));
+    // The file a person opens is headed with the product's name, not the
+    // internal "Hel" (launch finding R13-9).
+    assert!(
+        saved.starts_with(&format!(
+            "Mjolnir session launch failure\nsession: {session_id}\n"
+        )),
+        "{saved}"
+    );
 }
 #[test]
 fn inherited_git_settings_allow_only_portable_non_executable_values() {

@@ -139,6 +139,13 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
             command.env_remove("MJ_UPGRADE_RESUME_FILE");
+            // The program runs through `/proc/self/exe` on Linux, which `ps`
+            // would otherwise show as the daemon's name. `mj daemon-run` is
+            // what a person looks for (launch finding R13-9); nothing reads
+            // the daemon's argv[0], and the checks that recognize a daemon
+            // read argv[1].
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
             Ok(LaunchedDaemon { pid, log_offset })
         }

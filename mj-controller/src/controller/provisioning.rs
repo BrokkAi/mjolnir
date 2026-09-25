@@ -822,7 +822,7 @@ fn persist_launch_failure_to(directory: &Path, session_id: &str, detail: &str) -
     let path = directory.join(format!("{session_id}-launch-error.txt"));
     let detail = bounded_launch_diagnostic(detail);
     let body = format!(
-        "Hel session launch failure\nsession: {session_id}\nat: {}\n\n{detail}\n",
+        "Mjolnir session launch failure\nsession: {session_id}\nat: {}\n\n{detail}\n",
         now()
     );
     atomic_write(&path, body.as_bytes())?;

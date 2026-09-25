@@ -131,6 +131,32 @@ fn assert_upgraded(path: &std::path::Path) {
     );
 }
 
+/// In `ps` the daemon was listed as `/proc/self/exe daemon-run`, so a person
+/// could not find it by the name `mj` (launch finding R13-9). It is started
+/// through `/proc/self/exe` so that it runs the client's own inode, and now
+/// carries `mj` as its program name.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_daemon_is_listed_as_mj_daemon_run() {
+    let storage = upgrade_storage();
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
+            .unwrap();
+    let command_line = fs::read(format!("/proc/{}/cmdline", metadata.pid)).unwrap();
+    let arguments = command_line
+        .split(|byte| *byte == 0)
+        .take(2)
+        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, ["mj", "daemon-run"]);
+}
+
 #[test]
 fn ordinary_startup_migrates_an_old_store_without_a_daemon() {
     let storage = upgrade_storage();
