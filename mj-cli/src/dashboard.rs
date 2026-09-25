@@ -10,6 +10,7 @@
 //! wait, the drains, and the action handling in [`actions`] be separate
 //! functions over the same state.
 
+pub(crate) mod absent_engines;
 pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
@@ -307,6 +308,9 @@ pub(crate) struct DashboardContext {
     quota: Feed<Receiver<QuotaUpdate>>,
     pub(crate) manual_quota_refresh_generation: Option<u64>,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
+    /// Local container targets whose engine is not installed, answered
+    /// without a check until their configuration or the engine changes.
+    pub(crate) absent_engines: absent_engines::AbsentEngines,
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
@@ -1557,6 +1561,7 @@ impl DashboardContext {
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
+            absent_engines: absent_engines::AbsentEngines::default(),
             path_input_job: None,
             completion_job: None,
             review_discovery_cancel: None,

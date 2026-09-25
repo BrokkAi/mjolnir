@@ -170,6 +170,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         target_id: String,
         result: std::result::Result<(), String>,
+        /// The configuration checked, when the check found its local
+        /// engine's command not installed.
+        absent_engine: Option<mj_core::config::TargetTemplate>,
     },
     MountHistory(
         std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
@@ -940,7 +943,20 @@ impl DashboardContext {
                 generation,
                 target_id,
                 result,
+                absent_engine,
             } => {
+                if let (Some(template), Err(message)) = (&absent_engine, &result)
+                    && self
+                        .absent_engines
+                        .record(&target_id, template, message.clone())
+                {
+                    tracing::info!(
+                        target_id,
+                        reason = %message,
+                        "the target's container engine is not installed; the dashboard checks it \
+                         again only when its configuration changes or the engine is installed"
+                    );
+                }
                 self.dashboard
                     .apply_target_readiness(generation, target_id, result);
             }
