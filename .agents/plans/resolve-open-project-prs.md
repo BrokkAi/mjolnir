@@ -16,7 +16,7 @@ Resolve the three open pull requests without losing useful work. Users should ge
 - [x] (2026-09-25 14:32Z) Prepared #1148 without conflicts. The complete combined workspace test run passed, including 802 TUI tests, 11 PTY tests, upgrade regressions and doc tests; all-target Clippy and formatting also passed.
 - [x] (2026-09-25 14:34Z) Published `85b8f6bd`; GitHub confirms #1147 merged. Closed superseded #1145 after preserving its browser groups and removed both coordination labels.
 - [x] (2026-09-25 14:35Z) All 15 PR #1148 checks passed for unchanged head `7d087f36`, including the 40-minute macOS job.
-- [ ] Publish the terminal merge after #1148's final macOS job completes, remove its coordination label, and verify no open PR remains.
+- [x] (2026-09-25 14:36Z) Published terminal merge `c9e67ab6`; GitHub confirms #1148 merged, #1145 closed, and no open PRs remain. Removed all three coordination labels.
 
 ## Surprises & Discoveries
 
@@ -32,7 +32,7 @@ Keep single-repository selection immediate; only explicitly enabling multi-repos
 
 ## Outcomes & Retrospective
 
-Both applicable PRs are integrated and the combined result passes the complete workspace test run, including all 802 TUI tests and 11 PTY tests. All-target Clippy, formatting, diff checks, Python fixture syntax, 51 Node tests and 110 deterministic browser tests pass. The browser suite retains its three pre-existing lab-dependent skips. The Windows failure from #1147 was `hidden_context_block` being unused on Windows; master already contains its fix in `905610dd` and subsequent test platform guards in `32c3435b`. #1147 is merged on GitHub and #1145 is closed with its unique browser capability preserved. Only the terminal PR's final macOS CI job and remote publication remain. Success means no open PR remains from the initial set.
+Both applicable PRs are merged on GitHub and the combined result passes the complete workspace test run, including all 802 TUI tests and 11 PTY tests. All-target Clippy, formatting, diff checks, Python fixture syntax, 51 Node tests and 110 deterministic browser tests pass. The browser suite retains its three pre-existing lab-dependent skips. The Windows failure from #1147 was `hidden_context_block` being unused on Windows; master already contains its fix in `905610dd` and subsequent test platform guards in `32c3435b`. #1147 is merged as `85b8f6bd`, #1148 is merged as `c9e67ab6`, and #1145 is closed with its unique browser capability preserved. The final GitHub open-PR query returned an empty list. The initial backlog is fully resolved, and all coordination labels are removed.
 
 ## Context and Orientation
 
@@ -62,4 +62,4 @@ Initial master: `7cff9e91`. #1147 head: `a43bf76f`. #1145 head: `c7ac0494`. #114
 
 Reuse the existing project discovery endpoint and cancellable requests. Group creation uses `POST /api/bundles` with `{ sources: [...] }`; no schema change, dependency, worker protocol change, or crate is needed. All long-running discovery remains in supervised tasks.
 
-Created on 2026-09-25 to record the integration and validation required by the requested PR cleanup. Updated after the full browser suite passed and master-compatible terminal wording was retained.
+Created on 2026-09-25 to record the integration and validation required by the requested PR cleanup. Updated after the browser and combined Rust suites passed, all terminal PR CI checks passed, both merges were published, and GitHub confirmed the backlog was empty.
