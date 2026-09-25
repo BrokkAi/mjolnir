@@ -1693,6 +1693,9 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     );
     assert!(dashboard.is_stopped_subagent(&child.id));
     assert!(!dashboard.is_stopped_subagent(&parent.id));
+    // The host empties a pane whose session this calls suspended, which
+    // would take the read-only view away as soon as Browse showed it.
+    assert!(!dashboard.pane_session_is_suspended(&child.id));
 
     dashboard.open_subagent_workspace(parent.id.clone());
     assert_eq!(
@@ -4866,6 +4869,56 @@ fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
     assert!(
         lines[first + 1].contains("xxxx") || lines[first + 2].contains("xxxx"),
         "continuation lines under the age column: {lines:#?}"
+    );
+}
+
+/// R10-2: a native Codex child that had finished while its parent was still
+/// running read "No messages yet" in the Sub-agents view, its conversation
+/// never appeared, and Enter did nothing, although the store held its
+/// transcript. The host empties any pane whose session
+/// `pane_session_is_suspended` calls suspended (R4-11), and a finished native
+/// child's presentation row is `Stopped`, so Browse let it go as soon as the
+/// selection put it there.
+#[test]
+fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
+    let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+    dashboard.open_subagent_workspace(parent_id);
+    assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+    assert!(
+        !dashboard.pane_session_is_suspended(&id),
+        "a finished native child is read from the store; no pane lets it go"
+    );
+
+    // Browse follows the selection onto the child.
+    let browse = dashboard.browse_pane();
+    dashboard.set_pane_session(browse, Some(&id));
+    let lines = drawn(&mut dashboard, 140, 40);
+    let screen = lines.join("\n");
+    assert!(
+        screen.contains("Reading calc.py") && screen.contains("Native agent"),
+        "the child's stored transcript is drawn in its pane: {screen}"
+    );
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Review calc · completed"))
+        .expect("the child's row");
+    let row_text = lines[row..row + 4].join("\n");
+    assert!(
+        !row_text.contains("No messages yet"),
+        "the row shows the child's last message: {row_text}"
+    );
+    assert!(
+        row_text.contains("calc.py adds and subtracts"),
+        "{row_text}"
+    );
+
+    // Enter on the row opens the child's conversation.
+    dashboard.focus_sessions();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: id.clone()
+        }
     );
 }
 

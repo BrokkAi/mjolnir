@@ -120,8 +120,21 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::DestroySession,
 ];
 
+/// The menu of a harness-native child. Its parent's harness owns it, and
+/// Mjolnir keeps no record of its own for it to rename, pin, restart or
+/// destroy, so reading its conversation is what applies (R10-2).
+const NATIVE_AGENT_MENU_COMMANDS: &[CommandId] = &[CommandId::OpenSession];
+
 fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
-    SESSION_MENU_COMMANDS
+    let commands = if dashboard
+        .command_session_id()
+        .is_some_and(|id| dashboard.is_native_agent(id))
+    {
+        NATIVE_AGENT_MENU_COMMANDS
+    } else {
+        SESSION_MENU_COMMANDS
+    };
+    commands
         .iter()
         .filter_map(|id| {
             let availability = (spec(*id).available)(dashboard);
@@ -143,6 +156,7 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
 
 fn session_menu_label(id: CommandId) -> &'static str {
     match id {
+        CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
         CommandId::PinSession => "Pin…",
         CommandId::UnpinSession => "Unpin",
@@ -558,7 +572,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         let mut section = None;
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
-                CommandId::ChangedFiles => 0,
+                CommandId::OpenSession | CommandId::ChangedFiles => 0,
                 CommandId::RenameSession | CommandId::PinSession | CommandId::UnpinSession => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
@@ -863,8 +877,8 @@ mod tests {
     use crate::SessionOperationKind;
     use crate::render::render;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, drawn, key, mouse_at, open_palette, operation, point,
-        running_session, stopped_session,
+        buffer_lines, dashboard_with_finished_native_child, dashboard_with_session, drawn, key,
+        mouse_at, open_palette, operation, point, running_session, stopped_session,
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
@@ -1060,6 +1074,30 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// R10-2: a native child's menu offered Rename, Pin, Restart and Destroy,
+    /// none of which a harness-owned child can take: its parent's harness
+    /// owns it, and Mjolnir has no record of its own to rename or destroy.
+    /// The menu offers what does apply, which is opening its conversation.
+    #[test]
+    fn a_native_childs_menu_offers_only_what_applies_to_it() {
+        let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+        dashboard.open_subagent_workspace(parent_id);
+        assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+        dashboard.focus_sessions();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert_eq!(session_menu_layout(&dashboard), ["[Content]", "Open"]);
+        let lines = drawn(&mut dashboard, 120, 40);
+        assert!(
+            row_of(&lines, "Review calc · completed").is_some(),
+            "the menu is titled with the child's name: {lines:#?}"
+        );
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::Open { session_id: id }
+        );
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     #[test]

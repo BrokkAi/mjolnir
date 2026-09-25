@@ -217,7 +217,7 @@ fn latest_agent_activity_in(
         .find_map(|(offset, item)| agent_activity_text(item).map(|text| (start + offset, text)))
 }
 
-fn latest_agent_activity(
+pub(crate) fn latest_agent_activity(
     transcript: &[Arc<TranscriptItem>],
     unchanged_prefix: usize,
     previous: &MaterializedProjectionCache,

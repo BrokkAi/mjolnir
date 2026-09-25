@@ -439,6 +439,43 @@ pub(crate) fn dashboard_with_one_subagent() -> (DashboardState, String) {
     (dashboard, parent.id)
 }
 
+/// A dashboard with one running parent and one finished harness-native
+/// child, as R10 saw one: Codex's "Review calc", completed, availability
+/// unknown, with its transcript in the store. Returns the parent's id and
+/// the child's presentation id.
+pub(crate) fn dashboard_with_finished_native_child() -> (DashboardState, String, String) {
+    use mj_core::native_agent::*;
+    let parent = running_session();
+    let mut dashboard = dashboard_with_session(parent.clone());
+    let agent = NativeAgent {
+        availability: NativeAgentAvailability::Unknown,
+        availability_reason: None,
+        stable_id: None,
+        owner_session_id: parent.id.clone(),
+        session_id: "01a0d8d0-76ad-7e03-917d-8416c910f32c".into(),
+        parent_session_id: None,
+        name: "Review calc".into(),
+        task: "Delegated task for Review calc".into(),
+        capabilities: NativeAgentCapabilities {
+            cancel: true,
+            close: false,
+        },
+        state: NativeAgentState::Completed,
+    };
+    let id = agent.view_id();
+    let mut projection = mj_core::state::MaterializedSession::empty(&id);
+    projection.transcript = vec![
+        thought(87, "Reading calc.py"),
+        agent_message(153, "calc.py adds and subtracts correctly."),
+    ];
+    dashboard.set_native_agents(vec![NativeAgentView {
+        generation_ordinal: 81,
+        agent,
+        projection,
+    }]);
+    (dashboard, parent.id, id)
+}
+
 pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
     DeploymentCapacityTarget {
         id: "local".into(),

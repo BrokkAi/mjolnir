@@ -19,7 +19,7 @@ impl DashboardState {
     /// Whether `id` is a Mjolnir sub-agent whose session has stopped, so its
     /// conversation can only be read.
     pub fn is_stopped_subagent(&self, id: &str) -> bool {
-        self.state.subagents.contains_key(id) && self.pane_session_is_suspended(id)
+        self.state.subagents.contains_key(id) && self.session_has_no_worker(id)
     }
 
     /// Start showing a stopped sub-agent. Returns whether the host has to load

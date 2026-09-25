@@ -228,16 +228,29 @@ impl DashboardState {
         ));
     }
 
-    /// Whether a pane holding `session_id` must not attach to it: the
-    /// session is suspended (or otherwise not running) and no transition is
-    /// bringing it back.
-    pub fn pane_session_is_suspended(&self, session_id: &str) -> bool {
+    /// Whether `session_id` is not running and no transition is bringing it
+    /// back, so it has no worker to attach to.
+    pub(crate) fn session_has_no_worker(&self, session_id: &str) -> bool {
         self.transition_kind(session_id).is_none()
             && self
                 .state
                 .sessions
                 .get(session_id)
                 .is_some_and(|session| !session.state.is_active())
+    }
+
+    /// Whether a pane holding `session_id` must let it go rather than attach
+    /// to it: the session is suspended (or otherwise not running) and no
+    /// transition is bringing it back.
+    ///
+    /// A harness-native child and a stopped Mjolnir sub-agent have no worker
+    /// either, but their panes draw them from the store, so they stay
+    /// (R10-2: a finished native child's row is `Stopped`, and Browse let it
+    /// go as soon as the selection put it there).
+    pub fn pane_session_is_suspended(&self, session_id: &str) -> bool {
+        self.session_has_no_worker(session_id)
+            && !self.is_native_agent(session_id)
+            && !self.state.subagents.contains_key(session_id)
     }
 
     /// Whether a pane showing `session_id` may start attaching to it: no
