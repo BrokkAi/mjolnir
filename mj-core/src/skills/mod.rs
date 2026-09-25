@@ -9,9 +9,11 @@
 //! is testable in isolation.
 
 use crate::hex::lower_hex;
+use std::io::{Read as _, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use flate2::Compression;
 use sha2::{Digest, Sha256};
 
 use crate::config::HarnessKind;
@@ -29,7 +31,22 @@ pub const MAX_SKILLS_ARCHIVE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SKILLS_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SKILLS_FILES: usize = 1024;
 
-const ARCHIVE_MAGIC: &[u8; 8] = b"HELSKIL1";
+/// An archive whose entries are stored as they are.
+const PLAIN_MAGIC: &[u8; 8] = b"HELSKIL1";
+/// An archive whose body, everything a `HELSKIL1` archive holds after its
+/// magic, is gzip-compressed.
+const GZIP_MAGIC: &[u8; 8] = b"HELSKIL2";
+
+/// How an archive is written for the wire. Both formats carry the same
+/// entries, and an archive's fingerprint does not depend on which one carries
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsArchiveFormat {
+    /// `HELSKIL1`: every file stored as it is.
+    Plain,
+    /// `HELSKIL2`: the `HELSKIL1` body, gzip-compressed at the default level.
+    Gzip,
+}
 
 /// Non-secret metadata about one copy of a skills tree. Fingerprints compare
 /// trees; there is no freshness concept because the controller copy always
@@ -70,28 +87,61 @@ impl SkillsArchive {
         }
     }
 
-    /// SHA-256 over the canonical encoding. Collection sorts entries, so two
-    /// homes holding the same tree fingerprint identically.
+    /// SHA-256 over the `HELSKIL1` encoding, whichever format carries the
+    /// archive, so a fingerprint does not change with the wire format.
+    /// Collection sorts entries, so two homes holding the same tree
+    /// fingerprint identically.
     pub fn fingerprint(&self) -> String {
-        lower_hex(Sha256::digest(self.encode()))
+        lower_hex(Sha256::digest(self.encode(SkillsArchiveFormat::Plain)))
     }
 
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(ARCHIVE_MAGIC.len() + 4);
-        out.extend_from_slice(ARCHIVE_MAGIC);
-        out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        for entry in &self.entries {
-            out.extend_from_slice(&(entry.path.len() as u32).to_le_bytes());
-            out.extend_from_slice(entry.path.as_bytes());
-            out.extend_from_slice(&(entry.bytes.len() as u64).to_le_bytes());
-            out.extend_from_slice(&entry.bytes);
+    pub fn encode(&self, format: SkillsArchiveFormat) -> Vec<u8> {
+        match format {
+            SkillsArchiveFormat::Plain => {
+                let mut out = Vec::with_capacity(self.plain_len());
+                out.extend_from_slice(PLAIN_MAGIC);
+                self.write_body(&mut out)
+                    .expect("writing into memory cannot fail");
+                out
+            }
+            SkillsArchiveFormat::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(GZIP_MAGIC.to_vec(), Compression::default());
+                self.write_body(&mut encoder)
+                    .and_then(|()| encoder.finish())
+                    .expect("compressing into memory cannot fail")
+            }
         }
-        out
     }
 
-    /// Parse an untrusted archive. Every rule that keeps an install inside
-    /// the whitelist is enforced here and again at install time: relative
-    /// `/`-separated paths, no traversal, sorted and unique, within caps.
+    /// Bytes in the `HELSKIL1` encoding, counted without writing it.
+    fn plain_len(&self) -> usize {
+        PLAIN_MAGIC.len()
+            + 4
+            + self
+                .entries
+                .iter()
+                .map(|entry| 4 + entry.path.len() + 8 + entry.bytes.len())
+                .sum::<usize>()
+    }
+
+    /// Everything an archive holds after its magic: the entry count, then
+    /// each entry's path and contents, each preceded by its length.
+    fn write_body(&self, out: &mut impl Write) -> std::io::Result<()> {
+        out.write_all(&(self.entries.len() as u32).to_le_bytes())?;
+        for entry in &self.entries {
+            out.write_all(&(entry.path.len() as u32).to_le_bytes())?;
+            out.write_all(entry.path.as_bytes())?;
+            out.write_all(&(entry.bytes.len() as u64).to_le_bytes())?;
+            out.write_all(&entry.bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Parse an untrusted archive in either format. Every rule that keeps an
+    /// install inside the whitelist is enforced here and again at install
+    /// time: relative `/`-separated paths, no traversal, sorted and unique,
+    /// within caps.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_SKILLS_ARCHIVE_BYTES {
             bail!(
@@ -100,9 +150,20 @@ impl SkillsArchive {
             );
         }
         let mut cursor = Cursor(bytes);
-        if cursor.take(ARCHIVE_MAGIC.len())? != ARCHIVE_MAGIC {
+        let magic = cursor.take(PLAIN_MAGIC.len())?;
+        if magic == PLAIN_MAGIC {
+            Self::decode_body(cursor.rest())
+        } else if magic == GZIP_MAGIC {
+            // Inflated, the archive has the limit a `HELSKIL1` archive has.
+            let limit = MAX_SKILLS_ARCHIVE_BYTES - PLAIN_MAGIC.len();
+            Self::decode_body(&inflate(cursor.rest(), limit as u64)?)
+        } else {
             bail!("skills archive has a bad magic header");
         }
+    }
+
+    fn decode_body(body: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor(body);
         let count = cursor.u32()? as usize;
         if count > MAX_SKILLS_FILES {
             bail!("skills archive holds {count} files, above the {MAX_SKILLS_FILES} file limit");
@@ -135,6 +196,26 @@ impl SkillsArchive {
         }
         Ok(Self { entries })
     }
+}
+
+/// Inflate the gzip body of a `HELSKIL2` archive. `limit` bounds the inflated
+/// size, so a small hostile archive cannot make the reader allocate without
+/// bound.
+fn inflate(compressed: &[u8], limit: u64) -> Result<Vec<u8>> {
+    let mut decoder = flate2::bufread::GzDecoder::new(compressed);
+    let mut body = Vec::new();
+    decoder
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut body)
+        .context("skills archive body is not valid gzip")?;
+    if body.len() as u64 > limit {
+        bail!("skills archive inflates to more than {limit} bytes");
+    }
+    if !decoder.into_inner().is_empty() {
+        bail!("skills archive has trailing bytes");
+    }
+    Ok(body)
 }
 
 /// How a collection treats a symbolic link inside a skills tree.
@@ -185,12 +266,11 @@ fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let archive = SkillsArchive { entries };
-    let encoded = archive.encode();
-    if encoded.len() > MAX_SKILLS_ARCHIVE_BYTES {
+    let encoded = archive.plain_len();
+    if encoded > MAX_SKILLS_ARCHIVE_BYTES {
         bail!(
-            "skills tree under {} encodes to {} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
+            "skills tree under {} encodes to {encoded} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
             home.display(),
-            encoded.len()
         );
     }
     Ok(archive)
@@ -223,12 +303,11 @@ pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
         bail!("skills tree has more than {MAX_SKILLS_FILES} files");
     }
     let archive = SkillsArchive { entries };
-    let encoded = archive.encode();
-    if encoded.len() > MAX_SKILLS_ARCHIVE_BYTES {
+    let encoded = archive.plain_len();
+    if encoded > MAX_SKILLS_ARCHIVE_BYTES {
         bail!(
-            "skills tree under {} encodes to {} bytes with managed skills, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
+            "skills tree under {} encodes to {encoded} bytes with managed skills, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
             home.display(),
-            encoded.len()
         );
     }
     Ok(archive)
@@ -691,9 +770,11 @@ mod tests {
             let archive = SkillsArchive {
                 entries: entries.clone(),
             };
-            let encoded = archive.encode();
-            assert!(encoded.len() <= MAX_SKILLS_ARCHIVE_BYTES);
-            assert_eq!(SkillsArchive::decode(&encoded).unwrap(), archive);
+            for format in FORMATS {
+                let encoded = archive.encode(format);
+                assert!(encoded.len() <= MAX_SKILLS_ARCHIVE_BYTES);
+                assert_eq!(SkillsArchive::decode(&encoded).unwrap(), archive);
+            }
         }
     }
 
@@ -762,23 +843,81 @@ mod tests {
         assert_eq!(sorted, archive.entries());
     }
 
+    const FORMATS: [SkillsArchiveFormat; 2] =
+        [SkillsArchiveFormat::Plain, SkillsArchiveFormat::Gzip];
+
+    /// `body` (an archive after its magic) as each format carries it,
+    /// written without the encoder so a hostile body can be tried.
+    fn carried(body: &[u8]) -> [Vec<u8>; 2] {
+        let plain = [PLAIN_MAGIC.as_slice(), body].concat();
+        let mut gzip =
+            flate2::write::GzEncoder::new(GZIP_MAGIC.to_vec(), flate2::Compression::default());
+        gzip.write_all(body).unwrap();
+        [plain, gzip.finish().unwrap()]
+    }
+
     #[test]
     fn encoding_roundtrips_and_rejects_tampering() {
+        let notes = b"notes on the audit ".repeat(1000);
         let original = archive(&[
             ("skills/review/SKILL.md", b"review"),
             ("skills/audit/SKILL.md", b"audit"),
+            ("skills/audit/notes.md", &notes),
         ]);
-        let decoded = SkillsArchive::decode(&original.encode()).unwrap();
-        assert_eq!(original, decoded);
-        assert_eq!(original.fingerprint(), decoded.fingerprint());
+        for (format, magic) in FORMATS.into_iter().zip([b"HELSKIL1", b"HELSKIL2"]) {
+            let encoded = original.encode(format);
+            assert!(encoded.starts_with(magic), "{format:?}");
+            let decoded = SkillsArchive::decode(&encoded).unwrap();
+            assert_eq!(original, decoded, "{format:?}");
+            assert_eq!(original.fingerprint(), decoded.fingerprint(), "{format:?}");
 
+            let mut truncated = encoded.clone();
+            truncated.pop();
+            assert!(SkillsArchive::decode(&truncated).is_err(), "{format:?}");
+            let mut trailing = encoded.clone();
+            trailing.push(0);
+            let error = SkillsArchive::decode(&trailing).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("trailing bytes"),
+                "{format:?}: {error:#}"
+            );
+        }
+        assert!(
+            original.encode(SkillsArchiveFormat::Gzip).len()
+                < original.encode(SkillsArchiveFormat::Plain).len()
+        );
         assert!(SkillsArchive::decode(b"NOTSKILL").is_err());
-        let mut truncated = original.encode();
-        truncated.pop();
-        assert!(SkillsArchive::decode(&truncated).is_err());
-        let mut trailing = original.encode();
-        trailing.push(0);
-        assert!(SkillsArchive::decode(&trailing).is_err());
+        assert!(SkillsArchive::decode(b"HELSKIL2 is not gzip").is_err());
+    }
+
+    /// A `HELSKIL1` archive exactly as releases before `HELSKIL2` wrote it.
+    /// It still decodes, and its fingerprint is still the SHA-256 of these
+    /// bytes, which is what those releases compare. Carried as `HELSKIL2`,
+    /// the same tree has the same fingerprint, so a controller and a worker
+    /// that use different formats still agree that a tree is in sync.
+    #[test]
+    fn an_archive_from_an_earlier_release_decodes_with_the_same_fingerprint() {
+        const FIXTURE: &[u8] = b"HELSKIL1\x02\x00\x00\x00\
+            \x15\x00\x00\x00skills/audit/SKILL.md\x05\x00\x00\x00\x00\x00\x00\x00audit\
+            \x16\x00\x00\x00skills/review/SKILL.md\x06\x00\x00\x00\x00\x00\x00\x00review";
+
+        let decoded = SkillsArchive::decode(FIXTURE).unwrap();
+
+        assert_eq!(
+            decoded,
+            archive(&[
+                ("skills/audit/SKILL.md", b"audit"),
+                ("skills/review/SKILL.md", b"review"),
+            ])
+        );
+        let earlier = lower_hex(Sha256::digest(FIXTURE));
+        assert_eq!(decoded.fingerprint(), earlier);
+        assert_eq!(decoded.encode(SkillsArchiveFormat::Plain), FIXTURE);
+        let compressed = decoded.encode(SkillsArchiveFormat::Gzip);
+        assert_eq!(
+            SkillsArchive::decode(&compressed).unwrap().fingerprint(),
+            earlier
+        );
     }
 
     #[test]
@@ -792,35 +931,29 @@ mod tests {
             "skills/",
             "",
         ] {
-            let hostile = archive(&[]);
-            let encoded = {
-                let mut out = Vec::new();
-                out.extend_from_slice(ARCHIVE_MAGIC);
-                out.extend_from_slice(&1u32.to_le_bytes());
-                out.extend_from_slice(&(path.len() as u32).to_le_bytes());
-                out.extend_from_slice(path.as_bytes());
-                out.extend_from_slice(&0u64.to_le_bytes());
-                let _ = hostile;
-                out
-            };
-            assert!(
-                SkillsArchive::decode(&encoded).is_err(),
-                "path {path:?} must be rejected"
-            );
+            let mut body = Vec::new();
+            body.extend_from_slice(&1u32.to_le_bytes());
+            body.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            body.extend_from_slice(path.as_bytes());
+            body.extend_from_slice(&0u64.to_le_bytes());
+            for encoded in carried(&body) {
+                assert!(
+                    SkillsArchive::decode(&encoded).is_err(),
+                    "path {path:?} must be rejected"
+                );
+            }
         }
 
-        let unsorted = {
-            let mut out = Vec::new();
-            out.extend_from_slice(ARCHIVE_MAGIC);
-            out.extend_from_slice(&2u32.to_le_bytes());
-            for path in ["skills/b", "skills/a"] {
-                out.extend_from_slice(&(path.len() as u32).to_le_bytes());
-                out.extend_from_slice(path.as_bytes());
-                out.extend_from_slice(&0u64.to_le_bytes());
-            }
-            out
-        };
-        assert!(SkillsArchive::decode(&unsorted).is_err());
+        let mut unsorted = Vec::new();
+        unsorted.extend_from_slice(&2u32.to_le_bytes());
+        for path in ["skills/b", "skills/a"] {
+            unsorted.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            unsorted.extend_from_slice(path.as_bytes());
+            unsorted.extend_from_slice(&0u64.to_le_bytes());
+        }
+        for encoded in carried(&unsorted) {
+            assert!(SkillsArchive::decode(&encoded).is_err());
+        }
     }
 
     #[test]
@@ -1158,7 +1291,7 @@ mod tests {
         let session = tempfile::tempdir().unwrap();
 
         let archive = collect_skills(HarnessKind::Claude, canonical.path()).unwrap();
-        let wire = archive.encode();
+        let wire = archive.encode(SkillsArchiveFormat::Gzip);
         let received = SkillsArchive::decode(&wire).unwrap();
         install_skills(HarnessKind::Claude, session.path(), &received).unwrap();
 

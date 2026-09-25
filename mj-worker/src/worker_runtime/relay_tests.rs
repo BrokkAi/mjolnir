@@ -395,36 +395,50 @@ fn skills_state_reports_an_empty_home_then_a_synced_tree() {
     assert_eq!(state.fingerprint, expected.fingerprint());
 }
 
+/// A worker installs a tree sent in either archive format: a current
+/// controller sends it compressed, and the uncompressed format is the one
+/// every earlier release wrote.
 #[test]
 fn install_skills_replaces_the_session_tree_and_reports_the_new_state() {
+    use mj_core::skills::SkillsArchiveFormat;
+
     let canonical = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(canonical.path().join("skills/review")).unwrap();
     std::fs::write(canonical.path().join("skills/review/SKILL.md"), b"v1").unwrap();
     let archive = mj_core::skills::collect_skills(HarnessKind::Codex, canonical.path()).unwrap();
 
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("skills/stale")).unwrap();
-    std::fs::write(home.path().join("skills/stale/SKILL.md"), b"old").unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
+    for format in [SkillsArchiveFormat::Plain, SkillsArchiveFormat::Gzip] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("skills/stale")).unwrap();
+        std::fs::write(home.path().join("skills/stale/SKILL.md"), b"old").unwrap();
+        let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &skills_install_request(&archive.encode()))
+        let state = skills_state_of(
+            unix::apply_credential_request(
+                &endpoint,
+                &skills_install_request(&archive.encode(format)),
+            )
             .unwrap(),
-    );
-    assert_eq!(state, archive.state());
-    assert_eq!(
-        std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
-        b"v1"
-    );
-    assert!(!home.path().join("skills/stale").exists());
+        );
+        assert_eq!(state, archive.state(), "{format:?}");
+        assert_eq!(
+            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
+            b"v1",
+            "{format:?}"
+        );
+        assert!(!home.path().join("skills/stale").exists(), "{format:?}");
 
-    let empty = mj_core::skills::SkillsArchive::default();
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &skills_install_request(&empty.encode()))
+        let empty = mj_core::skills::SkillsArchive::default();
+        let state = skills_state_of(
+            unix::apply_credential_request(
+                &endpoint,
+                &skills_install_request(&empty.encode(format)),
+            )
             .unwrap(),
-    );
-    assert!(!state.present);
-    assert!(!home.path().join("skills").exists());
+        );
+        assert!(!state.present, "{format:?}");
+        assert!(!home.path().join("skills").exists(), "{format:?}");
+    }
 }
 
 #[test]

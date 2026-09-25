@@ -416,7 +416,9 @@ pub(super) async fn reconcile_skills(
     if session == canonical_state {
         return Ok(false);
     }
-    let installed = client.install_skills(&canonical.encode()).await?;
+    let installed = client
+        .install_skills(&canonical.encode(mj_core::skills::SkillsArchiveFormat::Plain))
+        .await?;
     if installed != canonical_state {
         bail!(
             "session {} skills fingerprint {} does not match the canonical {} after install",
