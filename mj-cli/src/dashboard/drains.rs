@@ -213,9 +213,9 @@ impl DashboardContext {
             match apply_worker_poll_update(
                 &mut self.controller,
                 &mut self.dashboard,
+                &mut self.chats,
                 update,
-                &self.dashboard_io_tx,
-                &self.critical_operations,
+                Some((&self.dashboard_io_tx, &self.critical_operations)),
             ) {
                 Ok(true) => {
                     let _ = self.resource_triggers_tx.try_send(session_id.clone());
@@ -401,28 +401,7 @@ impl DashboardContext {
             dashboard,
             ..
         } = self;
-        for chat in chats.values_mut() {
-            let record = controller.state.sessions.get(chat.session_id());
-            chat.refresh_context(
-                &controller.config,
-                record,
-                record.map(|session| controller.state.project_identity_session(session)),
-            );
-            if dashboard.go_mode().is_some() {
-                chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
-            }
-            let count = dashboard.subagent_count_for(chat.session_id());
-            chat.set_subagent_count(count);
-            chat.set_subagents_enabled(record.is_some_and(|session| {
-                session_uses_mjolnir_subagents(
-                    session,
-                    controller.config.subagents.enabled,
-                    controller.state.is_subagent_session(&session.id),
-                )
-            }));
-            let working = dashboard.working_subagent_count_for(chat.session_id());
-            chat.set_subagent_working_count(working);
-        }
+        refresh_open_chats(chats, controller, dashboard);
     }
 
     pub(crate) fn drain_runtime_config(&mut self) {
@@ -672,6 +651,38 @@ impl DashboardContext {
             self.controller_changed = true;
             self.apply_dashboard_io_update(update);
         }
+    }
+}
+
+/// Hands every open conversation the controller's current config and its own
+/// session record, so its header names the session the way the Sessions row
+/// does (`listed_title`) and its other context matches the dashboard's.
+pub(crate) fn refresh_open_chats(
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    controller: &Controller,
+    dashboard: &DashboardState,
+) {
+    for chat in chats.values_mut() {
+        let record = controller.state.sessions.get(chat.session_id());
+        chat.refresh_context(
+            &controller.config,
+            record,
+            record.map(|session| controller.state.project_identity_session(session)),
+        );
+        if dashboard.go_mode().is_some() {
+            chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
+        }
+        let count = dashboard.subagent_count_for(chat.session_id());
+        chat.set_subagent_count(count);
+        chat.set_subagents_enabled(record.is_some_and(|session| {
+            session_uses_mjolnir_subagents(
+                session,
+                controller.config.subagents.enabled,
+                controller.state.is_subagent_session(&session.id),
+            )
+        }));
+        let working = dashboard.working_subagent_count_for(chat.session_id());
+        chat.set_subagent_working_count(working);
     }
 }
 

@@ -919,6 +919,7 @@ mod upgrade;
 pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
+pub(crate) use drains::refresh_open_chats;
 mod session_state;
 mod surface;
 
