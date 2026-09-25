@@ -680,7 +680,6 @@ pub(crate) fn refresh_open_chats(
         chat.set_subagents_enabled(record.is_some_and(|session| {
             session_uses_mjolnir_subagents(
                 session,
-                controller.config.subagents.enabled,
                 controller.state.is_subagent_session(&session.id),
             )
         }));
@@ -690,17 +689,79 @@ pub(crate) fn refresh_open_chats(
 }
 
 /// Whether a session was created with Mjolnir sub-agents, matching the
-/// worker launch rule: the session's own choice, else the global setting;
-/// never for a child, and only for harnesses that can receive the tools.
-fn session_uses_mjolnir_subagents(
-    session: &mj_core::state::SessionRecord,
-    global_enabled: bool,
-    is_child: bool,
-) -> bool {
-    session.mjolnir_subagents.unwrap_or(global_enabled)
+/// worker launch rule: the session's own choice, with `None` meaning native
+/// sub-agents; never for a child, and only for harnesses that can receive
+/// the tools.
+fn session_uses_mjolnir_subagents(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
+    session.mjolnir_subagents.unwrap_or(false)
         && !is_child
         && matches!(
             session.harness_kind,
             mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claude_session(choice: Option<bool>) -> mj_core::state::SessionRecord {
+        mj_core::state::SessionRecord {
+            target_runtime: None,
+            launch_base: None,
+            launch_branch: None,
+            publication: None,
+            build_cache: None,
+            container_workspace: None,
+            mjolnir_subagents: choice,
+            create_managed_worktree: None,
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+            archived: false,
+            container_cpus: None,
+            container_memory: None,
+            id: "s-1".into(),
+            title: "s-1".into(),
+            harness_kind: mj_core::config::HarnessKind::Claude,
+            last_profile: "claude-1".into(),
+            bundle_id: "hel".into(),
+            project_directory: None,
+            managed_worktree: None,
+            target_template_id: "podman".into(),
+            resource_allocation: None,
+            additional_mounts: Vec::new(),
+            state: mj_core::state::SessionState::Running,
+            target: None,
+            native_session_id: None,
+            acp_session_title: None,
+            session_title_override: None,
+            created_at: "2026-09-25T00:00:00Z".into(),
+            updated_at: "2026-09-25T00:00:00Z".into(),
+            viewed_through_event_ordinal: 0,
+            draft_input: String::new(),
+            last_error: None,
+            last_checkpoint_error: None,
+            checkpoint: None,
+        }
+    }
+
+    /// `None` means native sub-agents, same as `Some(false)`.
+    #[test]
+    fn none_means_native_subagents() {
+        assert!(!session_uses_mjolnir_subagents(
+            &claude_session(None),
+            false
+        ));
+        assert!(!session_uses_mjolnir_subagents(
+            &claude_session(Some(false)),
+            false
+        ));
+        assert!(session_uses_mjolnir_subagents(
+            &claude_session(Some(true)),
+            false
+        ));
+        assert!(!session_uses_mjolnir_subagents(
+            &claude_session(Some(true)),
+            true
+        ));
+    }
 }

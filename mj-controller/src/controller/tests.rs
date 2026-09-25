@@ -1434,7 +1434,14 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             "project",
             "podman",
             "durable target",
-            launch_options(Vec::new()),
+            SessionLaunchOptions {
+                // Set at creation, since a lifecycle transition does not own
+                // this column (see `update_lifecycle_fields`); this test
+                // reloads the controller before registering a child, and the
+                // child registration below needs the parent's own choice.
+                mjolnir_subagents: Some(true),
+                ..launch_options(Vec::new())
+            },
         )
         .unwrap();
     let runtime = crate::database::load_state().unwrap().sessions[&id]
@@ -1448,7 +1455,6 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     );
     let record = controller.state.sessions.get_mut(&id).unwrap();
     record.state = SessionState::Running;
-    record.mjolnir_subagents = Some(true);
     record.target = Some(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: targets::resource_name(&id).unwrap(),

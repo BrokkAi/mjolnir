@@ -331,6 +331,14 @@ pub fn stamp_reviewer(catalog: &mut CodexCatalog, reviewer: &str) {
     }
 }
 
+/// Whether a Codex catalog id names a GPT Luna model: the bare alias `luna`,
+/// or a full id such as `gpt-5.10-luna` or `GPT-5.9-Luna`. Case-insensitive;
+/// matches when any `- _ . /`-separated part of the id equals `luna`.
+pub fn is_luna_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id.split(['-', '_', '.', '/']).any(|part| part == "luna")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +549,16 @@ mod tests {
     fn guardian_reviewer_is_absent_when_no_model_is_a_flash_model() {
         let picked = guardian_review_model(["glm-5.3", "glm-5-turbo"].map(str::to_owned));
         assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn is_luna_model_matches_any_luna_id_case_insensitively() {
+        for id in ["gpt-5.6-luna", "gpt-5.10-luna", "luna", "GPT-5.9-Luna"] {
+            assert!(is_luna_model(id), "{id} should match");
+        }
+        for id in ["gpt-6-astra", "lunar-x", "deepseek-v4-flash"] {
+            assert!(!is_luna_model(id), "{id} should not match");
+        }
     }
 
     #[test]

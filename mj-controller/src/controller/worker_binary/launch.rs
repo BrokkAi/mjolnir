@@ -293,8 +293,7 @@ impl Controller {
             &target,
         )?;
         apply_jev_switch(&mut launch, self.config.jev.enabled);
-        launch.subagent_tools =
-            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        launch.subagent_tools = subagent_tools_enabled(session, subagent.is_some());
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         // Claude reads Mjolnir's delegation server from a configuration file in
@@ -453,16 +452,16 @@ pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
 }
 
 /// Whether this session gets Mjolnir's delegation tools in place of its
-/// harness's own. The session's stored choice governs and `None` follows the
-/// global `[subagents] enabled` setting, so a session created before the
-/// per-session choice existed behaves as it always did. A child never gets
-/// them, and only Claude and Codex can receive them at all.
+/// harness's own. The session's stored choice governs; `None` means native
+/// sub-agents, so a session created before the per-session choice existed (or
+/// through `mj new` with neither flag given) gets its harness's own
+/// sub-agents. A child never gets them, and only Claude and Codex can receive
+/// them at all.
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,
-    global_enabled: bool,
     is_child: bool,
 ) -> bool {
-    session.mjolnir_subagents.unwrap_or(global_enabled)
+    session.mjolnir_subagents.unwrap_or(false)
         && !is_child
         && matches!(
             session.harness_kind,

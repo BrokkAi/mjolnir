@@ -703,6 +703,28 @@ fn ready_view(model: &str) -> ManagedSessionView {
     }
 }
 
+/// The same ready view, but also offering the `fast-mode` selector Codex
+/// exposes, so a follow-up can turn it on.
+fn ready_view_offering_fast_mode(model: &str) -> ManagedSessionView {
+    let mut view = ready_view(model);
+    let option: agent_client_protocol::schema::v1::SessionConfigOption =
+        serde_json::from_value(serde_json::json!({
+            "id": "fast-mode",
+            "name": "Fast mode",
+            "type": "select",
+            "currentValue": "off",
+            "options": [{"value": "off", "name": "Off"}, {"value": "on", "name": "On"}],
+        }))
+        .expect("the fixture describes a select the schema accepts");
+    view.snapshot
+        .as_mut()
+        .expect("ready_view has a snapshot")
+        .operational
+        .config_options
+        .push(option);
+    view
+}
+
 struct FakeControl(FakeSession);
 
 impl SessionControlBackend for FakeControl {
@@ -1029,6 +1051,7 @@ async fn the_start_follow_up_configures_the_model_before_it_prompts() {
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 prompt: Some("add a README line".into()),
+                ..Default::default()
             },
         )
         .await
@@ -1058,6 +1081,99 @@ async fn the_start_follow_up_configures_the_model_before_it_prompts() {
 }
 
 #[tokio::test]
+async fn the_start_follow_up_turns_on_fast_mode_after_model_when_offered() {
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "session-1".into(),
+            accepted_ordinal: 12,
+            submitted: submitted_tx,
+            view: Some(ready_view_offering_fast_mode("gpt-5.10-luna")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+
+    backend
+        .start_followup(
+            "session-1".into(),
+            StartFollowup {
+                model: Some("gpt-5.10-luna".into()),
+                effort: None,
+                prompt: Some("add a README line".into()),
+                fast_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, first) = submitted.recv().await.unwrap();
+    assert_eq!(
+        first,
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "gpt-5.10-luna".into(),
+        }
+    );
+    let (_, second) = submitted.recv().await.unwrap();
+    assert_eq!(
+        second,
+        RelayCommand::SetConfig {
+            key: "fast-mode".into(),
+            value: "on".into(),
+        },
+        "fast mode must be turned on after the model, before the prompt"
+    );
+    let (_, third) = submitted.recv().await.unwrap();
+    assert!(matches!(third, RelayCommand::Prompt { .. }));
+}
+
+#[tokio::test]
+async fn the_start_follow_up_skips_fast_mode_silently_when_not_offered() {
+    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
+    let backend = ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "session-1".into(),
+            accepted_ordinal: 12,
+            submitted: submitted_tx,
+            // This agent offers a model but not fast mode.
+            view: Some(ready_view("gpt-5.10-luna")),
+        })),
+        running_states(),
+        Arc::new(NoExports),
+    );
+
+    backend
+        .start_followup(
+            "session-1".into(),
+            StartFollowup {
+                model: Some("gpt-5.10-luna".into()),
+                effort: None,
+                prompt: Some("add a README line".into()),
+                fast_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, first) = submitted.recv().await.unwrap();
+    assert_eq!(
+        first,
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "gpt-5.10-luna".into(),
+        }
+    );
+    // No fast-mode SetConfig: the option is not offered, so it is skipped
+    // silently and the prompt still goes out.
+    let (_, second) = submitted.recv().await.unwrap();
+    assert!(
+        matches!(second, RelayCommand::Prompt { .. }),
+        "a spawn must not fail or stall just because fast mode is unavailable"
+    );
+}
+
+#[tokio::test]
 async fn the_start_follow_up_refuses_a_model_the_agent_does_not_offer() {
     let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
     let backend = ApiBackend::new(
@@ -1078,6 +1194,7 @@ async fn the_start_follow_up_refuses_a_model_the_agent_does_not_offer() {
                 model: Some("no-such-model".into()),
                 effort: None,
                 prompt: Some("add a README line".into()),
+                ..Default::default()
             },
         )
         .await

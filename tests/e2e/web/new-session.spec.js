@@ -7,7 +7,6 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
-      subagents_enabled: true,
       profiles: [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }, { id: 'gamma', harness_kind: 'grok' }],
       targets: [
         { id: 'container', kind: 'podman', requires_project_directory: false, recent_project_directories: [] },
@@ -408,18 +407,19 @@ test('an existing linked checkout can explicitly create a managed worktree', asy
   expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: true, project_directory: '/work/linked' });
 });
 
-test('the sub-agent checkbox appears only for Claude and Codex and sends its choice', async ({ page }) => {
+test('the sub-agent checkbox appears only for Claude and Codex, starts unchecked, and sends its choice', async ({ page }) => {
   const state = await mount(page);
   await projectStep(page, 'container');
   await page.locator('#new-next').click();
   const checkbox = page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' });
-  await expect(checkbox).toBeChecked();
-  await checkbox.uncheck();
-  await expect(page.locator('#new-step')).toContainText('keeps the harness');
-  await refresh(page, state);
   await expect(checkbox).not.toBeChecked();
+  await expect(page.locator('#new-step')).toContainText('keeps the harness');
+  await checkbox.check();
+  await expect(page.locator('#new-step')).toContainText('share this session');
+  await refresh(page, state);
+  await expect(checkbox).toBeChecked();
   await page.locator('#new-next').click();
-  expect(state.actions.at(-1)).toMatchObject({ mjolnir_subagents: false });
+  expect(state.actions.at(-1)).toMatchObject({ mjolnir_subagents: true });
 });
 
 test('a harness that cannot receive Mjolnir sub-agents shows no checkbox and sends no choice', async ({ page }) => {

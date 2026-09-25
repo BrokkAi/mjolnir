@@ -77,12 +77,10 @@ impl ProfilesKey {
 
     /// Every profile a pass must discover. Any enabled profile can host a
     /// session and is therefore its own first candidate, so the union of
-    /// candidates over all parents is the enabled profiles. With the policy
-    /// disabled no parent is offered anything, so no harness is started.
+    /// candidates over all parents is the enabled profiles. Whether any
+    /// given session actually uses Mjolnir sub-agents is a per-session
+    /// choice, so every enabled profile is warmed regardless.
     fn warm_set(&self) -> Vec<String> {
-        if !self.subagents.enabled {
-            return Vec::new();
-        }
         self.profiles
             .iter()
             .filter(|(_, profile)| profile.enabled)
@@ -555,24 +553,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_warm_pass_probes_nothing_when_the_sub_agent_policy_is_disabled() {
+    async fn a_warm_pass_ignores_the_deprecated_subagent_enabled_flag() {
         let calls = calls();
         let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
         let mut config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        // A legacy config file can still set this; it must be inert, both for
+        // warming and for candidate lookup, since whether a session uses
+        // Mjolnir sub-agents is now a per-session choice.
         config.subagents.enabled = false;
 
         catalog.sync_now(&config).await;
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            0,
-            "no parent is offered anything, so no harness is started"
+            1,
+            "the deprecated global switch no longer suppresses warming"
         );
-        assert!(
+        assert_eq!(
             catalog
                 .candidates("parent")
-                .expect("a configuration is adopted")
-                .is_empty()
+                .expect("a configuration is adopted"),
+            vec![("parent".to_owned(), HarnessKind::Codex)],
+            "a parent may always delegate to itself"
         );
     }
 

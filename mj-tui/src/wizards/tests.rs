@@ -45,7 +45,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -801,7 +801,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            mjolnir_subagents: Some(false),
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
@@ -1100,7 +1100,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -1387,7 +1387,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 access: MountAccess::Ro,
             }],
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(true),
+                mjolnir_subagents: Some(false),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -3253,12 +3253,12 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
 }
 
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
-/// show the choice. The box follows the global `[subagents] enabled` setting.
+/// show the choice. The box starts unchecked: native sub-agents are the
+/// default.
 #[test]
 fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
     for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
-        let mut configuration = subagent_wizard_config();
-        configuration.subagents.enabled = true;
+        let configuration = subagent_wizard_config();
         let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
         dashboard.begin_new();
         let Mode::New(wizard) = &mut dashboard.mode else {
@@ -3268,8 +3268,8 @@ fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
         wizard.step = WizardStep::Review;
         wizard.project_directory = "/work/main".into();
         assert!(
-            wizard.mjolnir_subagents,
-            "the global setting is the default"
+            !wizard.mjolnir_subagents,
+            "native sub-agents are the default"
         );
 
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
@@ -3333,21 +3333,21 @@ fn new_session_wizard_sends_subagent_choice() {
     assert!(matches!(
         submit(0, false),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            mjolnir_subagents: Some(false),
             ..
         }
     ));
     assert!(matches!(
         submit(0, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            mjolnir_subagents: Some(true),
             ..
         }
     ));
     assert!(matches!(
         submit(1, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            mjolnir_subagents: Some(true),
             ..
         }
     ));

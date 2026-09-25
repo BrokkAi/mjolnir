@@ -115,6 +115,15 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
+    /// Use Mjolnir's own sub-agent tools instead of the harness's native
+    /// ones. Applies only to Claude and Codex sessions; other harnesses
+    /// always use their own. When both this and `--native-subagents` are
+    /// given, the last one wins.
+    #[arg(long, overrides_with = "native_subagents")]
+    mj_subagents: bool,
+    /// Use the harness's own native sub-agent tools (the default).
+    #[arg(long, overrides_with = "mj_subagents")]
+    native_subagents: bool,
     /// The first prompt. `-` reads it from standard input.
     prompt: Option<String>,
     /// Read the first prompt from this file instead.
@@ -598,7 +607,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         (None, None) => return Err(crate::workspace_required("mj new").await),
     };
     let request = StartSessionRequest {
-        mjolnir_subagents: None,
+        mjolnir_subagents: Some(args.mj_subagents),
         create_managed_worktree: None,
         launch_base: args.base.clone(),
         launch_branch: args.branch.clone(),
@@ -1487,6 +1496,36 @@ mod tests {
             panic!("expected the new command");
         };
         assert_eq!(args.base, None);
+    }
+
+    /// Native sub-agents are the default; `--mj-subagents` opts in, and when
+    /// both flags are given the last one wins.
+    #[test]
+    fn new_subagent_flags_default_to_native_and_the_last_flag_wins() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "mj",
+                "new",
+                "--profile",
+                "codex",
+                "--target",
+                "raw",
+                "--project-directory",
+                "/srv/project",
+            ];
+            argv.extend_from_slice(extra);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Some(Command::New(args)) = cli.command else {
+                panic!("expected the new command");
+            };
+            args.mj_subagents
+        };
+
+        assert!(!parse(&[]), "no flag means native sub-agents");
+        assert!(parse(&["--mj-subagents"]));
+        assert!(!parse(&["--native-subagents"]));
+        assert!(!parse(&["--mj-subagents", "--native-subagents"]));
+        assert!(parse(&["--native-subagents", "--mj-subagents"]));
     }
 
     /// A turn the worker failed for going quiet has to say why, where a script

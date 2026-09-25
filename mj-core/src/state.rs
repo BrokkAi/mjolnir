@@ -1235,8 +1235,8 @@ pub struct SessionRecord {
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationAssessment>,
-    /// None follows the global `[subagents] enabled` setting at launch time;
-    /// Some(true) and Some(false) are explicit per-session choices.
+    /// None means native sub-agents at launch time; Some(true) and
+    /// Some(false) are explicit per-session choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mjolnir_subagents: Option<bool>,
     pub target_template_id: String,

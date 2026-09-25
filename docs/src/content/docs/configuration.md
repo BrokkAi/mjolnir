@@ -421,12 +421,14 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude or Codex session can start child sessions, called sub-agents, through
-Mjolnir's `spawn` tool. This section says whether it may, how many at once, and
-which profiles the children may run on.
+Mjolnir's `spawn` tool. Whether a given session uses Mjolnir's sub-agents at
+all, instead of its harness's own, is a per-session choice: the checkbox in
+the TUI and web new-session forms, or `mj new --mj-subagents` /
+`--native-subagents` (native is the default). This section only sets how many
+sub-agents at once and which profiles the children may run on.
 
 ```toml
 [subagents]
-# enabled = true
 # max_concurrent = 6
 
 [subagents.eligible_profiles]
@@ -436,9 +438,11 @@ codex2 = true
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | When `false`, sessions get no sub-agent tools. |
 | `max_concurrent` | integer | no | `6` | Most sub-agents one session may have running at once; between `1` and `64`. |
 | `eligible_profiles` | table of booleans | no | empty | Profiles, by id, that any session's sub-agents may use. A session's sub-agents may always use the session's own profile, listed or not. A disabled profile is ignored, and `mj doctor` warns about it. An id that names no profile stops the configuration from loading. |
+
+A configuration file written before the per-session choice existed may still
+have an `enabled` key here. It is read and ignored, and a save drops it.
 
 A `spawn` call must name a model, or `current` for the parent session's own
 model. Unless the call also names a profile, Mjolnir runs the child on the

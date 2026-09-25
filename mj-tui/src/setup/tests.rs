@@ -13,7 +13,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
         ("continuation", "Enabled"),
         ("jev", "Enabled"),
-        ("subagents", "Enabled"),
         ("build_cache", "Enabled"),
         ("phone", "Enabled"),
         ("phone", "Detect Tailscale"),
@@ -2693,11 +2692,11 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
         row_summary(&[], key, &dialog.draft[key], &dialog.draft, None)
     };
     assert_eq!(summary(&dialog, "sessionwiki"), "Archives after 30 days");
-    assert_eq!(summary(&dialog, "subagents"), "On · up to 4");
+    assert_eq!(summary(&dialog, "subagents"), "Up to 4 at once");
 
     edit_field(&mut dialog, "subagents", "max_concurrent", "");
     dialog.apply_editor(true).unwrap();
-    assert_eq!(summary(&dialog, "subagents"), "On · up to 6");
+    assert_eq!(summary(&dialog, "subagents"), "Up to 6 at once");
 }
 
 /// A long save error is shown whole: the notice grows to fit it instead of

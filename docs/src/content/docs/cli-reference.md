@@ -177,7 +177,7 @@ mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
        [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
-       [--model <name>] [--effort <name>]
+       [--model <name>] [--effort <name>] [--mj-subagents | --native-subagents]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -212,6 +212,10 @@ with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
+- `mj new` starts with native sub-agents by default; `--mj-subagents` gives it
+  Mjolnir's own delegation tools instead, and `--native-subagents` states the
+  default explicitly. This applies only to Claude and Codex sessions; other
+  harnesses always use their own. When both are given, the last one wins.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.
