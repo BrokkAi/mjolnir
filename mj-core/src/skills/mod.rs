@@ -618,6 +618,10 @@ mod tests {
             HarnessKind::Claude.harness_owned_skill_paths(),
             &["skills/synced", "skills/.trash"]
         );
+        assert_eq!(
+            HarnessKind::Codex.harness_owned_skill_paths(),
+            &["skills/.system"]
+        );
     }
 
     #[test]
@@ -910,127 +914,169 @@ mod tests {
         );
     }
 
-    /// Claude Code's own synced skills, as it lays them out under a Claude
-    /// home: a `.bucket-…` marker and an `<org>_<user>` directory holding a
-    /// manifest and one directory per skill, plus the `.trash` directory it
-    /// moves removed skills into.
-    fn write_claude_code_synced_skills(home: &Path) {
-        write(home, "skills/synced/.bucket-org_user", b"");
-        write(home, "skills/synced/org_user/manifest.json", b"{}");
-        write(home, "skills/synced/org_user/docx/SKILL.md", b"docx");
-        write(
-            home,
-            "skills/synced/org_user/docx/ooxml/schema.xsd",
-            b"schema",
-        );
-        write(home, "skills/.trash/1789646711611/pdf/SKILL.md", b"old pdf");
+    /// Each harness's own skills, laid out as the harness writes them under
+    /// its home. Claude Code keeps a `.bucket-…` marker and an `<org>_<user>`
+    /// directory holding a manifest and one directory per skill it syncs from
+    /// claude.ai, plus the `.trash` directory it moves removed skills into. The
+    /// Codex CLI keeps its built-in skills in `.system`, beside a marker file.
+    fn harness_owned_skills(kind: HarnessKind) -> &'static [(&'static str, &'static [u8])] {
+        match kind {
+            HarnessKind::Claude => &[
+                ("skills/synced/.bucket-org_user", b""),
+                ("skills/synced/org_user/manifest.json", b"{}"),
+                ("skills/synced/org_user/docx/SKILL.md", b"docx"),
+                ("skills/synced/org_user/docx/ooxml/schema.xsd", b"schema"),
+                ("skills/.trash/1789646711611/pdf/SKILL.md", b"old pdf"),
+            ],
+            HarnessKind::Codex => &[
+                ("skills/.system/.codex-system-skills.marker", b"marker"),
+                ("skills/.system/imagegen/SKILL.md", b"imagegen"),
+                ("skills/.system/skill-creator/SKILL.md", b"creator"),
+            ],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+        }
+    }
+
+    /// Write [`harness_owned_skills`] into `home`, first checking that it puts
+    /// a file in every path the harness owns.
+    fn write_harness_owned_skills(kind: HarnessKind, home: &Path) {
+        let files = harness_owned_skills(kind);
+        for owned in kind.harness_owned_skill_paths() {
+            assert!(
+                files.iter().any(|(path, _)| within(path, owned)),
+                "no test file under {kind:?} {owned}"
+            );
+        }
+        for (path, bytes) in files {
+            write(home, path, bytes);
+        }
     }
 
     /// Claude Code provisions `skills/synced/` from the user's claude.ai
     /// account and re-syncs it on its own; on the launch host its Office
     /// schemas alone were 4.2 MB, enough to push the tree over the archive
-    /// limit. Mjolnir leaves it, and Claude Code's `.trash`, out of every
-    /// collection of a Claude home.
+    /// limit. The Codex CLI writes its built-in skills into `skills/.system/`
+    /// (about 600 KB on the launch host). Mjolnir leaves every such path out of
+    /// every collection of that harness's home.
     #[test]
-    fn claude_codes_own_synced_skills_are_left_out_of_collection() {
-        let home = tempfile::tempdir().unwrap();
-        write(home.path(), "skills/review/SKILL.md", b"review");
-        write_claude_code_synced_skills(home.path());
-
+    fn harness_owned_skills_are_left_out_of_collection() {
         let user = [SkillsEntry {
             path: "skills/review/SKILL.md".into(),
             bytes: b"review".to_vec(),
         }];
-        assert_eq!(
-            collect_skills(HarnessKind::Claude, home.path())
-                .unwrap()
-                .entries(),
-            user
-        );
-        assert_eq!(
-            collect_profile_skills(HarnessKind::Claude, home.path())
-                .unwrap()
-                .entries(),
-            user
-        );
-        let mut session = user.to_vec();
-        session.extend(managed_skills(HarnessKind::Claude));
-        session.sort_by(|left, right| left.path.cmp(&right.path));
-        assert_eq!(
-            session_skills(HarnessKind::Claude, home.path())
-                .unwrap()
-                .entries(),
-            session
-        );
+        for kind in HarnessKind::ALL {
+            let home = tempfile::tempdir().unwrap();
+            write(home.path(), "skills/review/SKILL.md", b"review");
+            write_harness_owned_skills(kind, home.path());
 
-        // The directories are Claude Code's, not a rule about the name: in
-        // another harness's home a skill called `synced` is the user's.
-        let codex = collect_skills(HarnessKind::Codex, home.path()).unwrap();
-        assert!(
-            codex
+            assert_eq!(
+                collect_skills(kind, home.path()).unwrap().entries(),
+                user,
+                "{kind:?}"
+            );
+            assert_eq!(
+                collect_profile_skills(kind, home.path()).unwrap().entries(),
+                user,
+                "{kind:?}"
+            );
+            let mut session = user.to_vec();
+            session.extend(managed_skills(kind));
+            session.sort_by(|left, right| left.path.cmp(&right.path));
+            assert_eq!(
+                session_skills(kind, home.path()).unwrap().entries(),
+                session,
+                "{kind:?}"
+            );
+        }
+
+        // The directories belong to one harness, not a rule about the name: in
+        // another harness's home a skill called `synced` or `.system` is the
+        // user's.
+        let home = tempfile::tempdir().unwrap();
+        write_harness_owned_skills(HarnessKind::Claude, home.path());
+        write_harness_owned_skills(HarnessKind::Codex, home.path());
+        let paths = |kind| {
+            collect_skills(kind, home.path())
+                .unwrap()
                 .entries()
                 .iter()
-                .any(|entry| entry.path == "skills/synced/org_user/docx/SKILL.md"),
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>()
+        };
+        let codex = paths(HarnessKind::Codex);
+        assert!(
+            codex.contains(&"skills/synced/org_user/docx/SKILL.md".to_owned()),
             "{codex:?}"
+        );
+        assert!(
+            !codex.iter().any(|path| within(path, "skills/.system")),
+            "{codex:?}"
+        );
+        let claude = paths(HarnessKind::Claude);
+        assert!(
+            claude.contains(&"skills/.system/imagegen/SKILL.md".to_owned()),
+            "{claude:?}"
+        );
+        assert!(
+            !claude.iter().any(|path| within(path, "skills/synced")),
+            "{claude:?}"
         );
     }
 
-    /// A session's Claude Code keeps its own synced skills under the session
-    /// home, and a copy that an earlier sync or launch put there cannot be
-    /// told apart from it. An install replaces only what Mjolnir owns, and
-    /// never writes into Claude Code's directories.
+    /// A session's harness keeps its own skills under the session home, and a
+    /// copy that an earlier sync or launch put there cannot be told apart from
+    /// it. An install replaces only what Mjolnir owns, and never writes into
+    /// the harness's directories.
     #[test]
-    fn install_leaves_claude_codes_synced_skills_in_place() {
-        let home = tempfile::tempdir().unwrap();
-        write(home.path(), "skills/old/SKILL.md", b"old");
-        write_claude_code_synced_skills(home.path());
+    fn install_leaves_harness_owned_skills_in_place() {
+        for kind in HarnessKind::ALL {
+            let home = tempfile::tempdir().unwrap();
+            write(home.path(), "skills/old/SKILL.md", b"old");
+            write_harness_owned_skills(kind, home.path());
+            let owned = harness_owned_skills(kind);
 
-        let pushed = archive(&[
-            ("skills/review/SKILL.md", b"review"),
-            ("skills/synced/org_user/docx/SKILL.md", b"pushed over"),
-        ]);
-        install_skills(HarnessKind::Claude, home.path(), &pushed).unwrap();
+            // An archive entry over one of the harness's files is ignored.
+            let mut pushed = vec![("skills/review/SKILL.md", &b"review"[..])];
+            pushed.extend(owned.iter().map(|(path, _)| (*path, &b"pushed over"[..])));
+            install_skills(kind, home.path(), &archive(&pushed)).unwrap();
 
-        assert_eq!(
-            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
-            b"review"
-        );
-        assert!(!home.path().join("skills/old").exists());
-        for (relative, bytes) in [
-            ("skills/synced/.bucket-org_user", &b""[..]),
-            ("skills/synced/org_user/manifest.json", b"{}"),
-            ("skills/synced/org_user/docx/SKILL.md", b"docx"),
-            ("skills/synced/org_user/docx/ooxml/schema.xsd", b"schema"),
-            ("skills/.trash/1789646711611/pdf/SKILL.md", b"old pdf"),
-        ] {
             assert_eq!(
-                std::fs::read(home.path().join(relative)).unwrap(),
-                bytes,
-                "{relative}"
+                std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
+                b"review",
+                "{kind:?}"
             );
-        }
-        assert!(!home.path().join("skills.hel-incoming").exists());
-        assert!(!home.path().join("skills.hel-retired").exists());
-        // The session reports what Mjolnir pushed, so the next reconcile
-        // finds nothing to do.
-        assert_eq!(
-            collect_skills(HarnessKind::Claude, home.path())
-                .unwrap()
-                .entries(),
-            [SkillsEntry {
-                path: "skills/review/SKILL.md".into(),
-                bytes: b"review".to_vec(),
-            }]
-        );
+            assert!(!home.path().join("skills/old").exists(), "{kind:?}");
+            for (relative, bytes) in owned {
+                assert_eq!(
+                    std::fs::read(home.path().join(relative)).unwrap(),
+                    *bytes,
+                    "{kind:?} {relative}"
+                );
+            }
+            assert!(!home.path().join("skills.hel-incoming").exists());
+            assert!(!home.path().join("skills.hel-retired").exists());
+            // The session reports what Mjolnir pushed, so the next reconcile
+            // finds nothing to do.
+            assert_eq!(
+                collect_skills(kind, home.path()).unwrap().entries(),
+                [SkillsEntry {
+                    path: "skills/review/SKILL.md".into(),
+                    bytes: b"review".to_vec(),
+                }],
+                "{kind:?}"
+            );
 
-        // Removing every Mjolnir skill still leaves Claude Code's own.
-        install_skills(HarnessKind::Claude, home.path(), &SkillsArchive::default()).unwrap();
-        assert!(!home.path().join("skills/review").exists());
-        assert_eq!(
-            std::fs::read(home.path().join("skills/synced/org_user/docx/SKILL.md")).unwrap(),
-            b"docx"
-        );
-        assert!(home.path().join("skills/.trash").exists());
+            // Removing every Mjolnir skill still leaves the harness's own.
+            install_skills(kind, home.path(), &SkillsArchive::default()).unwrap();
+            assert!(!home.path().join("skills/review").exists(), "{kind:?}");
+            for (relative, bytes) in owned {
+                assert_eq!(
+                    std::fs::read(home.path().join(relative)).unwrap(),
+                    *bytes,
+                    "{kind:?} {relative}"
+                );
+            }
+        }
     }
 
     #[test]

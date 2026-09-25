@@ -318,11 +318,18 @@ impl HarnessKind {
     ///
     /// Claude Code provisions `skills/synced/<org>_<user>/` from the user's
     /// claude.ai account and re-syncs it on its own; `skills/.trash/` is where
-    /// it moves skills it removed.
+    /// it moves skills it removed. The Codex CLI writes its built-in skills
+    /// into `skills/.system/`, with a `.codex-system-skills.marker` file there.
+    ///
+    /// Kimi, Grok and Muse keep none inside `skills/`. Kimi registers its
+    /// built-in skills in memory, Grok caches its bundled skills under
+    /// `bundled/skills/`, and Muse writes its own under its data directory
+    /// (`.data/muse/skills/` in a Mjolnir home).
     pub const fn harness_owned_skill_paths(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse => &[],
+            Self::Codex => &["skills/.system"],
+            Self::Kimi | Self::Grok | Self::Muse => &[],
         }
     }
 

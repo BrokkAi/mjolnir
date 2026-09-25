@@ -337,8 +337,9 @@ symbolic links:
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
 
-Claude Code's own `skills/synced/` and `skills/.trash/` directories are not
-copied; see [Skills synchronization](#skills-synchronization).
+Claude Code's own `skills/synced/` and `skills/.trash/` directories, and
+Codex's own `skills/.system/`, are not copied; see
+[Skills synchronization](#skills-synchronization).
 
 History, caches, SSH and GPG keys, shell dotfiles, cloud configuration, editor
 state, and package-registry credentials are not copied merely because they sit
@@ -375,11 +376,12 @@ home. Mjolnir treats the controller copy as authoritative and pushes it to live
 sessions on the same reconciliation cycle. This direction is deliberate: a
 session cannot overwrite the canonical skills tree on your machine.
 
-Claude Code also keeps skills of its own under `skills/`. It provisions
-`skills/synced/` from your claude.ai account and moves skills it removes into
-`skills/.trash/`. Both directories belong to Claude Code, which keeps them
-current in whatever home it runs from, including a session's home. Mjolnir does
-not stage, compare, or push them, and it never replaces or removes them in a
+Claude Code and Codex also keep skills of their own under `skills/`. Claude
+Code provisions `skills/synced/` from your claude.ai account and moves skills it
+removes into `skills/.trash/`. Codex writes its built-in skills into
+`skills/.system/`. These directories belong to the harness, which writes them
+in whatever home it runs from, including a session's home. Mjolnir does not
+stage, compare, or push them, and it never replaces or removes them in a
 session.
 
 The sync has protective limits:

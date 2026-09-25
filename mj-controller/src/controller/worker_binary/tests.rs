@@ -2806,45 +2806,70 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
 
 /// Claude Code provisions `skills/synced/` from the user's claude.ai account,
 /// and keeps `skills/.trash/`, in whatever home it runs from, the session's
-/// included. Launch leaves both to Claude Code rather than copying the
-/// user's 4 MB of them into every session.
+/// included; the Codex CLI does the same with its built-in skills in
+/// `skills/.system/`. Launch leaves these to the harness rather than copying
+/// them into every session (4 MB of them for Claude on the launch host).
 #[test]
-fn staging_leaves_claude_codes_synced_skills_to_claude_code() {
-    let home = tempfile::tempdir().unwrap();
-    for (relative, contents) in [
-        ("skills/review/SKILL.md", "review skill\n"),
-        ("skills/synced/.bucket-org_user", ""),
-        ("skills/synced/org_user/manifest.json", "{}"),
-        ("skills/synced/org_user/docx/SKILL.md", "docx\n"),
-        ("skills/.trash/1789646711611/pdf/SKILL.md", "old pdf\n"),
-    ] {
-        let path = home.path().join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
+fn staging_leaves_harness_owned_skills_to_the_harness() {
+    use mj_core::config::HarnessKind;
+    for kind in HarnessKind::ALL {
+        let owned: &[&str] = match kind {
+            HarnessKind::Claude => &[
+                "skills/synced/.bucket-org_user",
+                "skills/synced/org_user/manifest.json",
+                "skills/synced/org_user/docx/SKILL.md",
+                "skills/.trash/1789646711611/pdf/SKILL.md",
+            ],
+            HarnessKind::Codex => &[
+                "skills/.system/.codex-system-skills.marker",
+                "skills/.system/imagegen/SKILL.md",
+            ],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+        };
+        let home = tempfile::tempdir().unwrap();
+        for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
+            let path = home.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("{relative}\n")).unwrap();
+        }
+
+        let staged = tempfile::tempdir().unwrap();
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+
+        stage_profile(&profile, staged.path()).unwrap();
+        stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
+            "skills/review/SKILL.md\n",
+            "{kind:?}"
+        );
+        for path in kind.harness_owned_skill_paths() {
+            assert!(
+                owned
+                    .iter()
+                    .any(|relative| relative.starts_with(&format!("{path}/"))),
+                "no test file under {kind:?} {path}"
+            );
+            assert!(!staged.path().join(path).exists(), "{kind:?} {path}");
+        }
+        for relative in owned {
+            assert!(
+                !staged.path().join(relative).exists(),
+                "{kind:?} {relative}"
+            );
+        }
+        let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+        let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+        assert_eq!(installed, expected, "{kind:?}");
     }
-
-    let staged = tempfile::tempdir().unwrap();
-    let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Claude,
-        home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
-        context_window_bytes: None,
-        guardian_review_model: None,
-    };
-
-    stage_profile(&profile, staged.path()).unwrap();
-    stage_managed_skills(profile.kind, staged.path()).unwrap();
-
-    assert_eq!(
-        std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
-        "review skill\n"
-    );
-    assert!(!staged.path().join("skills/synced").exists());
-    assert!(!staged.path().join("skills/.trash").exists());
-    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
-    let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
-    assert_eq!(installed, expected);
 }
 
 /// Launch finding R4-8: a profile home linked `skills/tufte-viz` from

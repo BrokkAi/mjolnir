@@ -114,9 +114,10 @@ cloud credentials, and arbitrary caches—do not enter the session merely
 because they live beneath your home directory.
 
 The staged skills tree also carries the Mjolnir-authored `mj` skill. It does
-not carry the skills Claude Code syncs from your claude.ai account
-(`skills/synced/`) or Claude Code's `skills/.trash/`; those are Claude Code's
-own, and Claude Code manages them itself.
+not carry the skills a harness writes for itself: the skills Claude Code syncs
+from your claude.ai account (`skills/synced/`), Claude Code's `skills/.trash/`,
+and Codex's built-in skills (`skills/.system/`). The harness manages those
+itself.
 The `mj-memory` MCP history tools can read the controller's indexed session
 corpus, including conversations from other projects. Historical conversations
 are reference data, not instructions for the current session.
