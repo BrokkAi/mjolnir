@@ -575,6 +575,31 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
     assert_eq!(checks[3].status, CheckStatus::Ready);
 }
 
+/// Launch finding R5-3: doctor and `mj setup` gave a missing Docker the raw
+/// error chain ("run docker for check Docker daemon: No such file or
+/// directory (os error 2)"). They now say it is not installed and how to
+/// fix that.
+#[test]
+fn a_missing_docker_is_reported_as_not_installed() {
+    let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
+        std::io::ErrorKind::NotFound,
+    ))
+    .context("run docker for check Docker daemon"))]);
+
+    let check = local_docker_runtime_check(&executor);
+
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert_eq!(check.detail, "Docker is not installed on this host.");
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.starts_with("Install Docker")),
+        "{:?}",
+        check.remediation
+    );
+}
+
 #[test]
 fn docker_checks_probe_the_daemon_then_the_configured_image() {
     let executor = FakeExecutor::new([

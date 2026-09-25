@@ -279,6 +279,55 @@ fn docker_preflight_requires_a_reachable_linux_daemon() {
     assert!(!error.contains("user running Hel"), "{error}");
 }
 
+/// Launch finding R5-3: on a host without Docker, doctor and Setup said
+/// "Docker preflight failed: run `docker info` as the user running Mjolnir:
+/// run docker for check Docker daemon: No such file or directory (os error
+/// 2)". Each case now has one plain sentence: not installed (in the words
+/// the launch options use), not running, or not answering.
+#[test]
+fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
+    struct NoDocker;
+    impl CommandExecutor for NoDocker {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            Err(anyhow::Error::new(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )))
+            .with_context(|| format!("run {} for {}", command.program, command.purpose))
+        }
+    }
+    let error = verify_local_docker(&NoDocker).unwrap_err();
+    assert_eq!(error.to_string(), "Docker is not installed on this host.");
+    assert_eq!(
+        error.downcast_ref::<DockerUnavailable>(),
+        Some(&DockerUnavailable::NotInstalled)
+    );
+
+    let stopped = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 1,
+        stdout: vec![],
+        stderr: b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n".to_vec(),
+    }]);
+    let error = verify_local_docker(&stopped).unwrap_err().to_string();
+    assert!(
+        error.starts_with("Docker is installed, but its daemon is not running."),
+        "{error}"
+    );
+    assert!(error.contains("unix:///var/run/docker.sock"), "{error}");
+
+    let refused = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 1,
+        stdout: vec![],
+        stderr: b"permission denied while trying to connect to the Docker daemon socket\n".to_vec(),
+    }]);
+    let error = verify_local_docker(&refused).unwrap_err().to_string();
+    assert!(
+        error.starts_with(
+            "Docker did not answer its check on this host: `docker version` exited with status 1: permission denied"
+        ),
+        "{error}"
+    );
+}
+
 #[test]
 fn podman_preflight_rejects_unsupported_version_with_upgrade_remediation() {
     let executor =

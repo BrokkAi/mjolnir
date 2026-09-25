@@ -185,9 +185,8 @@ fn launch_target(
         .iter()
         .find(|host| host.target_ids.iter().any(|id| id == &target.id));
     let engine_failure = match engine {
-        Some(LocalEngineReadiness::NotInstalled) => Some(format!(
-            "{} is not installed on this host",
-            engine_name(&target.kind)
+        Some(LocalEngineReadiness::NotInstalled) => Some(crate::targets::engine_not_installed(
+            engine_name(&target.kind),
         )),
         Some(LocalEngineReadiness::NotReady) => Some(format!(
             "{} did not answer its check on this host; start it and try again",

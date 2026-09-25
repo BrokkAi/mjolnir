@@ -13,11 +13,11 @@ use crate::setup::{
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
-    ContainerTemplate as RuntimeContainerTemplate, PODMAN_DOCUMENTATION_URL, PodmanPostcondition,
-    ProcessExecutor, SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
-    failed_podman_postcondition, podman_probe_observation, run_setup_smoke_test, ssh_command,
-    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
-    verify_ssh_docker, verify_ssh_podman,
+    ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable, PODMAN_DOCUMENTATION_URL,
+    PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
+    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
+    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, TargetTemplate,
@@ -1103,12 +1103,20 @@ pub fn local_docker_runtime_check(executor: &impl CommandExecutor) -> DoctorChec
                 preflight.version
             ),
         ),
-        Err(error) => DoctorCheck::fixable(
-            "runtime.docker",
-            "Docker",
-            format!("{error:#}"),
-            "Install and start Docker, then make sure `docker info` succeeds as the user running mj.",
-        ),
+        Err(error) => match error.downcast_ref::<DockerUnavailable>() {
+            Some(problem) => DoctorCheck::fixable(
+                "runtime.docker",
+                "Docker",
+                problem.to_string(),
+                problem.remediation(),
+            ),
+            None => DoctorCheck::fixable(
+                "runtime.docker",
+                "Docker",
+                format!("{error:#}"),
+                "Install and start Docker, then make sure `docker info` succeeds as the user running mj.",
+            ),
+        },
     }
 }
 

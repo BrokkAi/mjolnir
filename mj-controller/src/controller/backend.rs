@@ -498,11 +498,17 @@ pub(super) fn verify_target(
             }),
         TargetTemplate::LocalDocker { .. } => targets::verify_local_docker(executor)
             .map(|_| ())
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "local Docker is not ready. Start Docker or fix the problem below, then Retry launch: {error:#}"
-                )
-            }),
+            .map_err(
+                |error| match error.downcast_ref::<targets::DockerUnavailable>() {
+                    // Leads with the sentence the launch options use, so a
+                    // missing Docker reads "not installed" in the wizard's
+                    // row too (launch finding R5-3).
+                    Some(problem) => anyhow::anyhow!("{problem} {}", problem.launch_remedy()),
+                    None => anyhow::anyhow!(
+                        "local Docker is not ready. Start Docker or fix the problem below, then Retry launch: {error:#}"
+                    ),
+                },
+            ),
         TargetTemplate::SshPodman { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
             targets::verify_ssh_podman(&ssh, executor)

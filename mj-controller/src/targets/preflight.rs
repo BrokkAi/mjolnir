@@ -125,6 +125,101 @@ pub fn verify_ssh_docker(
     })
 }
 
+/// How the launch options, the session wizard, doctor and Setup say that a
+/// local container engine's command is not on this host.
+pub fn engine_not_installed(engine: &str) -> String {
+    format!("{engine} is not installed on this host")
+}
+
+/// Why local Docker cannot run sessions: one sentence per case, where the
+/// raw error chain said "run docker for check Docker daemon: No such file or
+/// directory (os error 2)" (launch finding R5-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerUnavailable {
+    /// `docker` is not on PATH.
+    NotInstalled,
+    /// The CLI ran but found no daemon to talk to.
+    NotRunning { reported: String },
+    /// The CLI ran and failed for another reason, such as a socket the user
+    /// may not open.
+    NotAnswering { status: i32, reported: String },
+}
+
+impl DockerUnavailable {
+    /// What to do before a launch can use Docker.
+    pub fn launch_remedy(&self) -> &'static str {
+        match self {
+            Self::NotInstalled => "Install Docker or choose another target, then Retry launch.",
+            Self::NotRunning { .. } => "Start Docker, then Retry launch.",
+            Self::NotAnswering { .. } => "Fix what it reports, then Retry launch.",
+        }
+    }
+
+    /// What doctor and Setup advise.
+    pub fn remediation(&self) -> String {
+        match self {
+            Self::NotInstalled => {
+                format!("Install Docker ({DOCKER_DOCUMENTATION_URL}), or use another target.")
+            }
+            Self::NotRunning { .. } => {
+                "Start Docker, then make sure `docker info` succeeds as the user running Mjolnir."
+                    .to_owned()
+            }
+            Self::NotAnswering { .. } => format!(
+                "Make sure `docker info` succeeds as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}."
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for DockerUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInstalled => write!(formatter, "{}.", engine_not_installed("Docker")),
+            Self::NotRunning { reported } => {
+                write!(
+                    formatter,
+                    "Docker is installed, but its daemon is not running."
+                )?;
+                if !reported.is_empty() {
+                    write!(formatter, " `docker version` said: {reported}")?;
+                }
+                Ok(())
+            }
+            Self::NotAnswering { status, reported } => {
+                write!(
+                    formatter,
+                    "Docker did not answer its check on this host: `docker version` exited with status {status}"
+                )?;
+                if !reported.is_empty() {
+                    write!(formatter, ": {reported}")?;
+                }
+                write!(
+                    formatter,
+                    ". Run `docker info` as the user running Mjolnir to see why."
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DockerUnavailable {}
+
+/// Whether the Docker CLI's own words say it found no daemon to talk to.
+fn docker_daemon_not_running(reported: &str) -> bool {
+    reported.contains("Cannot connect to the Docker daemon")
+        || reported.contains("Is the docker daemon running")
+}
+
+/// Whether a command could not start because its program is not on PATH.
+fn is_missing_program(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 pub(super) fn verify_docker(
     ssh: Option<&SshTarget>,
     executor: &impl CommandExecutor,
@@ -139,15 +234,38 @@ pub(super) fn verify_docker(
         Some(ssh) => command_over_ssh(command, ssh),
         None => command,
     };
-    let output = executor
-        .execute(&command)
-        .context("Docker preflight failed: run `docker info` as the user running Mjolnir")?;
-    ensure!(
-        output.status == 0,
-        "Docker preflight failed: `docker version` exited with status {}: {}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+    let output = match executor.execute(&command) {
+        Ok(output) => output,
+        // Over SSH a missing program would be `ssh` itself, which the SSH
+        // checks report; only a local one means Docker is not installed.
+        // The cause stays in the chain for callers that classify it.
+        Err(error) if ssh.is_none() && is_missing_program(&error) => {
+            return Err(error.context(DockerUnavailable::NotInstalled));
+        }
+        Err(error) => {
+            return Err(error.context(
+                "Docker preflight failed: run `docker info` as the user running Mjolnir",
+            ));
+        }
+    };
+    if output.status != 0 {
+        let reported = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if ssh.is_none() {
+            let problem = if docker_daemon_not_running(&reported) {
+                DockerUnavailable::NotRunning { reported }
+            } else {
+                DockerUnavailable::NotAnswering {
+                    status: output.status,
+                    reported,
+                }
+            };
+            return Err(problem.into());
+        }
+        bail!(
+            "Docker preflight failed: `docker version` exited with status {}: {reported}. Run `docker info` as the user running Mjolnir. See {DOCKER_DOCUMENTATION_URL}.",
+            output.status
+        );
+    }
     let reported = String::from_utf8_lossy(&output.stdout);
     let mut fields = reported.split_whitespace();
     let version = fields.next().unwrap_or_default();
@@ -464,12 +582,7 @@ pub(super) fn execute_podman_probe(
 /// words, else the whole error chain, whose outer layer ("run podman for
 /// check Podman version") says nothing on its own.
 fn probe_run_reason(error: &anyhow::Error) -> String {
-    let missing = error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    });
-    if missing {
+    if is_missing_program(error) {
         "`podman` is not installed or not on PATH".to_owned()
     } else {
         format!("{error:#}")

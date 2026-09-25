@@ -1025,3 +1025,33 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
         None
     );
 }
+
+/// Launch finding R5-3: the session wizard said "local Docker is not ready.
+/// Start Docker or fix the proble…" for an engine that is not installed. Its
+/// check now leads with the words the launch options use.
+#[test]
+fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
+    let template = TargetTemplate::LocalDocker {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "example.invalid/dev:latest".into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let error = preflight_target(&template, &NoDockerExecutor)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "Docker is not installed on this host. Install Docker or choose another target, then Retry launch."
+    );
+    assert_eq!(
+        local_engine_readiness("local-docker", &NoDockerExecutor),
+        Some(LocalEngineReadiness::NotInstalled)
+    );
+}
