@@ -108,10 +108,13 @@ home from a harness-specific allowlist:
 | Kimi Code | Authentication, config, device ID, instructions, MCP config, skills, agents, and plugins |
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
 
-Symbolic links encountered while copying an allowlisted profile entry are
-skipped. Files outside the allowlist—such as general shell state, unrelated
-cloud credentials, and arbitrary caches—do not enter the session merely
-because they live beneath your home directory.
+Symbolic links inside an allowlisted profile entry are followed: the session
+receives the contents of the file or directory a link points to, even when the
+target is outside the harness home. Check where your profile's links point
+before you use it with a target. A link whose target is missing is skipped.
+Files outside the allowlist—such as general shell state, unrelated cloud
+credentials, and arbitrary caches—do not enter the session merely because they
+live beneath your home directory.
 
 The staged skills tree also carries the Mjolnir-authored `mj` skill. It does
 not carry the skills a harness writes for itself: the skills Claude Code syncs

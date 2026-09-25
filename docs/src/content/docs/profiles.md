@@ -326,8 +326,7 @@ valid only for Claude profiles.
 ## What enters a managed target
 
 Mjolnir does not copy an entire home directory. When it stages a profile into a
-container, remote host, or instance, it copies only this allowlist and skips
-symbolic links:
+container, remote host, or instance, it copies only this allowlist:
 
 | Harness | Staged home entries |
 | --- | --- |
@@ -336,6 +335,11 @@ symbolic links:
 | Kimi Code | `credentials/`, `config.toml`, `device_id`, `AGENTS.md`, `SYSTEM.md`, `mcp.json`, `skills/`, `agents/`, `plugins/` |
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
+
+Staging follows symbolic links: a linked file or directory is copied with the
+contents of its target, even when the target is outside the harness home. A link
+whose target is missing is skipped with a warning, and a link back into a
+directory already being copied is skipped, so a loop is copied once.
 
 Claude Code's own `skills/synced/` and `skills/.trash/` directories, and
 Codex's own `skills/.system/`, are not copied; see
@@ -384,12 +388,31 @@ in whatever home it runs from, including a session's home. Mjolnir does not
 stage, compare, or push them, and it never replaces or removes them in a
 session.
 
-The sync has protective limits:
+For a session with its own profile home, the sync reads the controller-side
+`skills/` the way launch staging copies it. It follows symbolic links, leaves out
+a link whose target is missing, and reads a directory that links back into
+itself once, so a linked skill is part of both the staged and the synced tree.
+For a session that runs from your own harness home, both sides of the
+comparison leave symbolic links out.
 
-- 4 MiB maximum encoded skills archive;
-- 1 MiB maximum per file;
-- 1024 files maximum; and
-- no symbolic-link traversal.
+The sync has these limits:
+
+- **1 MiB per file** (`MAX_SKILLS_FILE_BYTES`). A larger file, or one that
+  cannot be read, is left out of the sync, and the rest of the tree still
+  syncs. The daemon and each session's worker log a warning that names the file
+  the first time they skip it, and log later skips only at debug level. Launch
+  staging has no file size limit, so a new session starts with the file; the
+  next push of a changed tree removes it from the session.
+- **4 MiB per tree** (`MAX_SKILLS_ARCHIVE_BYTES`), counting file contents,
+  paths, and a few bytes per file. The whole tree travels as one archive,
+  base64-encoded, in a single 8 MiB relay frame. Base64 makes 4 MiB about
+  5.3 MiB, which leaves room in the frame for the rest of the message.
+- **1024 files per tree** (`MAX_SKILLS_FILES`).
+
+Directories a harness keeps for itself do not count toward these limits. A
+tree over 4 MiB or 1024 files is not trimmed: reconciliation fails for every
+session of that profile, credential sync included, until the tree is back
+within the limits.
 
 ### Managed skills
 
