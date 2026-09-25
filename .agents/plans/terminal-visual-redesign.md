@@ -18,6 +18,8 @@ Make the terminal interface feel like one carefully designed workspace: a quiet 
 - [x] (2026-09-25) User subsequently requested a PR, review, fixes, and merge when green. Created `codex/terminal-visual-redesign`, integrated current master, and opened PR #1148.
 - [x] (2026-09-25) Independent production and test reviews found one monochrome focus regression. Fixed permanent Create/New emphasis so it remains distinguishable from keyboard focus; added a rendered Up/Right/Enter regression.
 - [x] (2026-09-25) Validated the review fix: 789 terminal UI tests, 11 PTY tests after integrating master, formatting, and all-target clippy pass. Merge is authorized after the final checks on [PR #1148](https://github.com/BrokkAi/mjolnir/pull/1148) pass; GitHub records that gate and the merge outcome.
+- [x] (2026-09-25) CI exposed one Settings-description assertion that joined backdrop cells into a wrapped modal paragraph when colors were enabled. Reproduced the failure and fixed the test to inspect the registered modal surface while still requiring the whole description. Integrated the concurrent Targets-menu changes from master.
+- [x] (2026-09-25) Complete `NO_COLOR= cargo test -- --quiet` workspace run passed, including 790 terminal UI tests, 11 PTY tests, and documentation tests. Final all-target clippy, formatting, and diff checks also passed. CI correction is ready for the final PR check gate.
 
 ## Surprises & Discoveries
 
@@ -28,6 +30,8 @@ The first full test run passed 600 chat tests and found four assertions tied to 
 The final broad run passed all crate unit tests, but two PTY tests exposed synchronization concerns. A PTY is a simulated terminal backed by an operating-system process. Ratatui writes only changed cells, so a visible “New workspace” label arrived as `New`, a cursor-position sequence, and `workspace`; searching raw bytes could not find it. The create-session test advanced from database admission and later timed out on quit. Both pass after reconstructing the screen, waiting for complete visible wizard headings, and observing wizard closure before the next action. This does not establish a production shutdown defect; no lifecycle code changed. The raw stream remains available for terminal-mode assertions. A parser regression covers split cursor sequences and UTF-8, retained cells, and erasure across more than 64KB of input.
 
 PR review found that `active_control()` and `focus_control()` intentionally share bold reverse styling in monochrome. Permanently styling Create/New as active therefore made two action buttons appear focused after keyboard focus moved to Open. Restrict that permanent primary accent to color themes; monochrome continues to reserve bold emphasis for the focused or armed action. The regression exercises the real dashboard and verifies both rendered focus and the action activated by Enter.
+
+Linux and macOS CI both failed the existing Continuation description assertion. The rendered description was complete, but flattening whole terminal rows inserted background navigation text between its wrapped lines. The host's nonempty `NO_COLOR` had hidden that assumption in local checks. Reproducing with `NO_COLOR=` exposed it; cropping actual buffer cells to the registered `ModalBody` surface fixed the assertion without changing production rendering or weakening its full-sentence check. Subsequent workspace validation explicitly enables colors to match CI.
 
 ## Decision Log
 
@@ -54,6 +58,8 @@ Implemented a complete terminal styling pass while preserving the existing pane 
 The capture fixture now renders an attached conversation with real messages and a draft, making future visual review useful. All four SVGs were regenerated and visually inspected. PTY tests now observe screen cells, so cosmetic redraw changes no longer invalidate their synchronization. Runtime session and shutdown behavior was not changed.
 
 Subsequent PR review fixed monochrome Create/Open focus ambiguity. Independent review found no further actionable regressions. The merged upstream PTY fixture and all terminal UI tests pass, including the new rendered focus transition, and all-target clippy passes on the reviewed source.
+
+The final integrated source also passes a complete color-enabled workspace test run. CI's Settings-description failure was an assertion mixing modal and backdrop cells; the corrected assertion still requires the complete visible description. The PR tracks final platform checks and the authorized merge after they pass.
 
 ## Context and Orientation
 
