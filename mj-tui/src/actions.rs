@@ -717,8 +717,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::CloseWorkspace,
-        label: "Close workspace…",
-        description: "Confirm stopping workspace sessions, preserving history, and discarding drafts.",
+        label: "Delete workspace…",
+        description: "Confirm suspending workspace sessions, preserving history, and discarding drafts.",
         scope: Scope::Global,
         pane_keys: &[],
         action: Some(KeyAction::CloseWorkspace),

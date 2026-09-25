@@ -45,26 +45,6 @@ pub(super) fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
     }
 }
 
-/// The workspace's active session ids, oldest first, so force deletion
-/// destroys them in a deterministic order and partial failures name what is
-/// left.
-pub(super) fn active_sessions_for_force_destruction(
-    controller: &Controller,
-    workspace_id: &str,
-) -> Vec<String> {
-    let mut sessions: Vec<&SessionRecord> = controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session.workspace_id == workspace_id && session.state.is_active())
-        .collect();
-    sessions.sort_by(|a, b| a.compare_by_creation(b));
-    sessions
-        .into_iter()
-        .map(|session| session.id.clone())
-        .collect()
-}
-
 pub(super) fn install_renamed_controller(state: &RuntimeState, controller: Controller) {
     *state
         .controller

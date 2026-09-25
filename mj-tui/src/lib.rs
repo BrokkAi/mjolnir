@@ -533,11 +533,6 @@ pub enum DashboardAction {
         generation: u64,
         workspace_id: String,
     },
-    DeleteWorkspace {
-        generation: u64,
-        workspace_id: String,
-        force: bool,
-    },
     RecoverWorkspaceDraft {
         generation: u64,
         draft_id: String,

@@ -48,7 +48,8 @@ pub(super) async fn handle_action(
         }
         DaemonAction::ListWorkspaces => {
             state.prune_dead_clients();
-            let workspaces = blocking(crate::database::list_workspaces).await?;
+            state.refresh_workspaces().await?;
+            let workspaces = state.workspaces().borrow().clone();
             Ok(DaemonReply::Workspaces(
                 workspaces
                     .into_iter()
@@ -84,12 +85,7 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::DeleteWorkspace { workspace_id } => {
-            ensure!(
-                !state.workspace_has_active_resume(&workspace_id),
-                "workspace has a session resume in progress"
-            );
-            blocking(move || crate::database::delete_workspace(&workspace_id)).await?;
-            refresh_runtime_workspaces(state).await?;
+            state.close_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::Attach { client_id, pid } => {
@@ -565,10 +561,6 @@ pub(super) async fn handle_action(
             state
                 .force_destroy_session(session_id, branch_disposition(delete_branch))
                 .await?;
-            Ok(DaemonReply::Done)
-        }
-        DaemonAction::ForceDeleteWorkspace { workspace_id } => {
-            state.force_delete_workspace(workspace_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::CancelLifecycle { session_id } => {

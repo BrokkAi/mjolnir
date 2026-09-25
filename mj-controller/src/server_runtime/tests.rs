@@ -1510,12 +1510,10 @@ fn correlated_prompt_reply_waits_for_relay_submission_without_delaying_legacy_ad
     assert_eq!(rx.try_recv().unwrap(), ActionOutcome::accepted());
 }
 
-/// Finding G-2: `mj new` puts a session in `default` without any dashboard
-/// having listed that workspace, and the daemon's published workspace list
-/// can predate the session. The browser draws its tabs from the snapshot's
-/// workspaces, so every workspace a session is in has to be there.
+/// A stopped history retains its old workspace id after deletion. Only the
+/// daemon's published workspace list determines browser tabs.
 #[test]
-fn every_workspace_holding_a_session_is_listed_even_if_the_workspace_list_omits_it() {
+fn historical_sessions_do_not_restore_missing_workspace_tabs() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut listed = phone_session("in-listed", 0);
     listed.workspace_id = "workspace-1".into();
@@ -1561,7 +1559,8 @@ fn every_workspace_holding_a_session_is_listed_even_if_the_workspace_list_omits_
         .collect();
     assert_eq!(
         listed,
-        [("workspace-1", "Mjolnir"), ("default", "default")],
-        "the listed workspace keeps its place and name; the session's own follows"
+        [("workspace-1", "Mjolnir")],
+        "only published workspaces become tabs"
     );
+    assert_eq!(snapshot.sessions.len(), 2, "history remains discoverable");
 }

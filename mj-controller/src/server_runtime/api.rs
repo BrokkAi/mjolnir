@@ -85,10 +85,11 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
-    /// Hand a changed workspace list to everything reading the daemon's, the
-    /// same republication the daemon's own workspace actions perform. A
-    /// backend built without a daemon has no one to publish to.
-    fn republish_workspaces(&self, _workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {}
+    /// Refresh the daemon's shared workspace feed before a new workspace is
+    /// returned to callers. Test backends without a daemon have no feed.
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Whether the index is stale enough that a query should ask for a sync.
     fn wiki_sync_is_stale(&self) -> bool {
@@ -165,8 +166,8 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move { self.suspend_session(session_id).await })
     }
 
-    fn republish_workspaces(&self, workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {
-        RuntimeState::publish_workspaces(self, workspaces);
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
     fn wiki_sync_is_stale(&self) -> bool {
@@ -1669,9 +1670,7 @@ impl SubagentBackend for ApiBackend {
                 crate::database::create_or_get_workspace(&name)
             })
             .await??;
-            let workspaces =
-                tokio::task::spawn_blocking(crate::database::list_workspaces).await??;
-            self.exports.republish_workspaces(workspaces);
+            self.exports.refresh_workspaces().await?;
             Ok(workspace)
         })
     }

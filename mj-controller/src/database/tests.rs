@@ -3221,7 +3221,7 @@ fn workspace_pane_sizes_survive_rename_and_cascade_through_both_deletions() {
         },
     )
     .unwrap();
-    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    close_workspace_at(&database, &force_deleted.id).unwrap();
     assert_eq!(
         workspace_pane_size_row_count(&database, &force_deleted.id),
         0
@@ -3384,7 +3384,7 @@ fn workspace_layouts_are_isolated_between_workspaces() {
 }
 
 #[test]
-fn workspace_layouts_cascade_through_both_deletions() {
+fn workspace_layouts_cascade_through_workspace_removal() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let deleted = create_workspace_at(&database, "Deleted").unwrap();
@@ -3394,7 +3394,7 @@ fn workspace_layouts_cascade_through_both_deletions() {
 
     let force_deleted = create_workspace_at(&database, "Force").unwrap();
     save_workspace_layout_to(&database, &force_deleted.id, &split_layout("c", "d")).unwrap();
-    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    close_workspace_at(&database, &force_deleted.id).unwrap();
     assert_eq!(workspace_layout_row_count(&database, &force_deleted.id), 0);
 }
 
@@ -3530,7 +3530,7 @@ fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
 }
 
 #[test]
-fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
+fn close_workspace_drops_drafts_and_preserves_stopped_histories() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Force").unwrap();
@@ -3558,7 +3558,7 @@ fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
     )
     .unwrap();
 
-    force_delete_workspace_at(&database, &workspace.id).unwrap();
+    close_workspace_at(&database, &workspace.id).unwrap();
 
     assert!(
         list_detached_drafts_at(&database, &workspace.id)
@@ -3598,7 +3598,7 @@ fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
 }
 
 #[test]
-fn force_delete_workspace_refuses_remaining_active_sessions() {
+fn close_workspace_refuses_remaining_active_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Active").unwrap();
@@ -3616,7 +3616,7 @@ fn force_delete_workspace_refuses_remaining_active_sessions() {
     )
     .unwrap();
 
-    let error = force_delete_workspace_at(&database, &workspace.id).unwrap_err();
+    let error = close_workspace_at(&database, &workspace.id).unwrap_err();
     assert!(
         error.to_string().contains("1 active sessions remain"),
         "{error:#}"

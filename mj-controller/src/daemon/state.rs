@@ -58,6 +58,7 @@ impl RuntimeState {
             sessions: Mutex::new(BTreeMap::new()),
             revisions,
             workspaces_tx,
+            workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
             lifecycle: Mutex::new(BTreeMap::new()),
             workspace_closes: Mutex::new(BTreeMap::new()),
@@ -625,12 +626,21 @@ impl RuntimeState {
             })?
     }
 
-    /// Hand a changed workspace list to the terminal clients and the web
-    /// viewer. The daemon's workspace actions call it, and so does the API's
-    /// create route through `ExportRuntime::republish_workspaces`.
+    /// Hand a changed workspace list to the terminal clients and the web viewer.
     pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
         self.publish_revision();
+    }
+
+    pub(crate) async fn refresh_workspaces(&self) -> Result<()> {
+        // Keep the read and publication together: a delayed read must not
+        // publish an older list after a newer removal has been published.
+        let _refresh = self.workspace_refresh.lock().await;
+        let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
+            .await
+            .context("daemon workspace refresh task panicked")??;
+        self.publish_workspaces(workspaces);
+        Ok(())
     }
 
     /// Queue one piece of startup work for a session, starting the drain task

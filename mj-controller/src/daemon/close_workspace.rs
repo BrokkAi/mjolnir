@@ -139,7 +139,7 @@ impl RuntimeState {
         );
         ensure!(
             !cancelled.load(Ordering::Acquire),
-            "Workspace close cancelled; workspace and drafts retained. Completed stops were not undone."
+            "Workspace deletion cancelled; workspace and drafts retained. Completed suspensions were not undone."
         );
         // A resumed session may still have its old workspace id in storage.
         // Exclude admission until the deletion transaction has committed.

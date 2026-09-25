@@ -17,7 +17,7 @@ pub async fn run_server(
     profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
-    let mut phone_workspaces = workspace_updates.borrow_and_update().clone();
+    workspace_updates.borrow_and_update();
     let mut quotas = std::collections::BTreeMap::new();
     let subagent_quota_reports = Arc::new(std::sync::Mutex::new(quotas.clone()));
     let (quota_profiles_tx, mut quota_updates_rx) = spawn_quota_refresher();
@@ -60,7 +60,7 @@ pub async fn run_server(
         crate::pollers::spawn_dashboard_capacity_poller();
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(viewer_snapshot(
         &controller,
-        &phone_workspaces,
+        &workspace_updates.borrow().clone(),
         &quotas,
         &PhoneSessionViews {
             native_agents: &native_agents,
@@ -284,7 +284,7 @@ pub async fn run_server(
                     .collect();
                 let snapshot = viewer_snapshot(
                     &controller,
-                    &phone_workspaces,
+                    &workspace_updates.borrow().clone(),
                     &quotas,
                     &PhoneSessionViews {
                         native_agents: &native_agents,
@@ -422,7 +422,7 @@ pub async fn run_server(
                         );
                         break;
                     }
-                    phone_workspaces = workspace_updates.borrow_and_update().clone();
+                    workspace_updates.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!(revision);
                 }
@@ -1388,8 +1388,9 @@ pub async fn run_server(
                     let action_id = next_action_id;
                     if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
-                        let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
-                            phone_workspaces[0].id.clone()
+                        let workspaces = workspace_updates.borrow().clone();
+                        let workspace_id = if workspace_id.is_empty() && workspaces.len() == 1 {
+                            workspaces[0].id.clone()
                         } else {
                             workspace_id.clone()
                         };

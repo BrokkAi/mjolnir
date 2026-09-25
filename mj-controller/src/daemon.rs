@@ -112,6 +112,7 @@ pub struct RuntimeState {
     sessions: Mutex<BTreeMap<String, RuntimeSessionView>>,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
+    workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
