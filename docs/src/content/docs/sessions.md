@@ -185,10 +185,15 @@ confirmation shows the copy's timestamp and explains that newer work may be lost
 The daemon verifies the selected recovery copy again before releasing the environment.
 
 **Destroy session…** is a separate irreversible action in both terminal and web
-interfaces. It removes the environment, managed checkout, recovery archive, and
-session record. New managed clones have no branch in the source repository; their
-branches survive only in a published remote or the recovery archive. Older linked
-worktrees keep their managed branch by default and offer a choice to delete it.
+interfaces. It removes the environment, managed checkout, and recovery archive,
+so work that was not pushed or exported is lost. The conversation is archived,
+not deleted: `mj sessions --session <id>` then lists the session as `archived`,
+and `mj resume --wiki <id>` starts a new session from its conversation (see
+[Search and restore archived sessions](#search-and-restore-archived-sessions)).
+New managed clones have no branch
+in the source repository; their branches survive only in a published remote or
+the recovery archive. Older linked worktrees keep their managed branch by default
+and offer a choice to delete it.
 
 **Interrupt turn** leaves the environment available for further prompts.
 **Close pane** only dismisses a viewer; it does not interrupt or suspend a session.
