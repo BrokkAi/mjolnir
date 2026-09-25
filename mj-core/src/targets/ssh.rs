@@ -390,7 +390,7 @@ pub fn ssh_directory_exists(
                 "remote directory check failed with status {status}: {}",
                 stderr.trim()
             );
-            Err(match host_key_refusal(&stderr) {
+            Err(match host_key_refusal(&stderr, &ssh.ssh_args) {
                 Some(refusal) => error.context(refusal),
                 None => error,
             })
@@ -404,18 +404,109 @@ pub fn ssh_directory_exists(
 /// OpenSSH's wording is the only signal: "Host key verification failed." ends
 /// both an unknown key under strict checking and a key that changed. The
 /// sentence quotes that line and names no host, so it may reach any client;
-/// the full ssh text stays on the error chain for the daemon log.
-fn host_key_refusal(stderr: &str) -> Option<crate::refusal::Refusal> {
+/// the full ssh text stays on the error chain for the daemon log. It names
+/// the known_hosts file the machine's ssh options name (launch finding R6-5).
+fn host_key_refusal(stderr: &str, ssh_args: &[String]) -> Option<crate::refusal::Refusal> {
     if !stderr.contains("Host key verification failed") {
         return None;
     }
+    let known_hosts = KnownHostsFile::from_ssh_args(ssh_args);
+    let file = known_hosts.phrase();
     Some(crate::refusal::Refusal::precondition(
         if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-            "ssh reported \"Host key verification failed\": the machine's host key is not the one saved in ~/.ssh/known_hosts. If you expected the change, remove the old entry with `ssh-keygen -R` and the host name, add the new key, and try again."
+            let keygen = match known_hosts.first_named() {
+                Some(path) => format!("`ssh-keygen -f {path} -R`"),
+                None => "`ssh-keygen -R`".to_owned(),
+            };
+            format!(
+                "ssh reported \"Host key verification failed\": the machine's host key is not the one saved in {file}. If you expected the change, remove the old entry with {keygen} and the host name, add the new key, and try again."
+            )
         } else {
-            "ssh reported \"Host key verification failed\": the machine's host key is not in ~/.ssh/known_hosts, and its ssh options require a known key. Add the host key (for example with `ssh-keyscan`, after checking the fingerprint), or put `-o StrictHostKeyChecking=accept-new` in the machine's extra_args, and try again."
+            format!(
+                "ssh reported \"Host key verification failed\": the machine's host key is not in {file}, and its ssh options require a known key. Add the host key (for example with `ssh-keyscan`, after checking the fingerprint), or put `-o StrictHostKeyChecking=accept-new` in the machine's extra_args, and try again."
+            )
         },
     ))
+}
+
+/// The known_hosts file ssh checks a host key against, as far as the options
+/// on its command line tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KnownHostsFile {
+    /// No option names one, so ssh uses its default.
+    Default,
+    /// `-o UserKnownHostsFile=` names this file, or these files separated
+    /// by spaces.
+    Named(String),
+    /// A config file given with `-F` may name any file, or the option names
+    /// no usable file.
+    Unknown,
+}
+
+impl KnownHostsFile {
+    /// Read `ssh`'s arguments the way OpenSSH does: the first
+    /// `UserKnownHostsFile` given with `-o` wins, the keyword is matched
+    /// without regard to case, and its value follows `=` or a space.
+    fn from_ssh_args(args: &[String]) -> Self {
+        let mut config_file = false;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let option = match arg.as_str() {
+                "-o" => args.next().map(String::as_str),
+                other => other.strip_prefix("-o"),
+            };
+            if arg.starts_with("-F") {
+                config_file = true;
+            }
+            let Some(value) = option.and_then(|option| option_value(option, "UserKnownHostsFile"))
+            else {
+                continue;
+            };
+            let value = value.trim_matches('"').trim();
+            return if value.is_empty() || value.eq_ignore_ascii_case("none") {
+                Self::Unknown
+            } else {
+                Self::Named(value.to_owned())
+            };
+        }
+        if config_file {
+            Self::Unknown
+        } else {
+            Self::Default
+        }
+    }
+
+    /// The file as a refusal names it.
+    fn phrase(&self) -> String {
+        match self {
+            Self::Default => "~/.ssh/known_hosts".to_owned(),
+            Self::Named(paths) => paths.split_whitespace().collect::<Vec<_>>().join(" or "),
+            Self::Unknown => "the known_hosts file ssh uses".to_owned(),
+        }
+    }
+
+    /// The first file an option names, which is the one ssh adds keys to.
+    fn first_named(&self) -> Option<&str> {
+        match self {
+            Self::Named(paths) => paths.split_whitespace().next(),
+            Self::Default | Self::Unknown => None,
+        }
+    }
+}
+
+/// The value of `keyword` in one ssh option (`Keyword=value`,
+/// `Keyword value`, or `Keyword = value`), or `None` for another keyword.
+fn option_value<'a>(option: &'a str, keyword: &str) -> Option<&'a str> {
+    let option = option.trim_start();
+    let end = option
+        .find(|character: char| character == '=' || character.is_whitespace())
+        .unwrap_or(option.len());
+    let (name, rest) = option.split_at(end);
+    if !name.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    Some(rest.strip_prefix('=').unwrap_or(rest).trim())
 }
 
 /// Verify that a bare-SSH project path exists and has a committed Git HEAD.

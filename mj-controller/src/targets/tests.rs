@@ -2829,6 +2829,85 @@ fn a_host_key_refusal_at_the_remote_directory_check_tells_the_caller_what_to_do(
     assert!(mj_core::refusal::Refusal::of(&other).is_none(), "{other:#}");
 }
 
+/// Launch finding R6-5: the host-key refusal said the key "is not in
+/// ~/.ssh/known_hosts" when the machine's extra_args pointed ssh at another
+/// file with `UserKnownHostsFile` (cli/006). It now names the file the
+/// options name, and says "the known_hosts file ssh uses" when a config file
+/// of the machine's own may name one.
+#[test]
+fn a_host_key_refusal_names_the_known_hosts_file_ssh_was_told_to_use() {
+    const UNKNOWN: &str = "No ED25519 host key is known for 203.0.113.9 and you have requested strict checking.\r\nHost key verification failed.\r\n";
+    const CHANGED: &str = "@@@@@@@@\r\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\nHost key verification failed.\r\n";
+    let refusal = |extra_args: &[&str], stderr: &str| {
+        let mut target = ssh();
+        target.ssh_args = extra_args
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .chain(target.ssh_args)
+            .collect();
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status: 255,
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        }]);
+        let error = validate_bare_project_directory(&target, Path::new("/srv/project"), &executor)
+            .unwrap_err();
+        mj_core::refusal::Refusal::of(&error)
+            .expect("a host-key refusal reaches the caller")
+            .message()
+            .to_owned()
+    };
+
+    // Nothing in the options names a file, so ssh uses its default.
+    let message = refusal(&[], UNKNOWN);
+    assert!(message.contains("not in ~/.ssh/known_hosts"), "{message}");
+
+    for args in [
+        &[
+            "-o",
+            "UserKnownHostsFile=/lab/r6-known_hosts",
+            "-o",
+            "StrictHostKeyChecking=yes",
+        ][..],
+        &["-oUserKnownHostsFile=/lab/r6-known_hosts"][..],
+        &["-o", "userknownhostsfile /lab/r6-known_hosts"][..],
+    ] {
+        let message = refusal(args, UNKNOWN);
+        assert!(
+            message.contains("not in /lab/r6-known_hosts"),
+            "{args:?}: {message}"
+        );
+        assert!(
+            !message.contains("~/.ssh/known_hosts"),
+            "{args:?}: {message}"
+        );
+        let message = refusal(args, CHANGED);
+        assert!(
+            message.contains("saved in /lab/r6-known_hosts"),
+            "{args:?}: {message}"
+        );
+        assert!(
+            message.contains("`ssh-keygen -f /lab/r6-known_hosts -R`"),
+            "{args:?}: {message}"
+        );
+    }
+
+    // Several files: ssh reads them all and adds keys to the first.
+    let several = ["-o", "UserKnownHostsFile=/lab/a /lab/b"];
+    let message = refusal(&several, UNKNOWN);
+    assert!(message.contains("not in /lab/a or /lab/b"), "{message}");
+    let message = refusal(&several, CHANGED);
+    assert!(message.contains("`ssh-keygen -f /lab/a -R`"), "{message}");
+
+    // A config file of the machine's own may name any file.
+    let message = refusal(&["-F", "/lab/ssh_config"], UNKNOWN);
+    assert!(
+        message.contains("not in the known_hosts file ssh uses"),
+        "{message}"
+    );
+    assert!(!message.contains("~/.ssh/known_hosts"), "{message}");
+}
+
 #[test]
 fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
     let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
