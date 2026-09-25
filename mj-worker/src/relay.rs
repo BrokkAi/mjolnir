@@ -1056,11 +1056,13 @@ impl DurableRelay {
     }
 
     /// Whether agent output arriving now belongs to no turn: no prompt runs,
-    /// no harness turn is open, and the session is still being set up. The
-    /// Claude adapter reports a resumed session's Auto mode fallback as agent
-    /// text while the session loads and its model is applied (R8-4).
+    /// no harness turn is open, and the session is either still being set up
+    /// or answering a configuration request. The Claude adapter reports its
+    /// Auto mode fallback as agent text at both times: while a resumed
+    /// session loads and its model is applied (R8-4), and while it answers a
+    /// live model change (R4-2, R8-5).
     fn output_outside_any_turn(&self) -> bool {
-        self.session_setup
+        (self.session_setup || self.configuration_request_in_flight())
             && self.snapshot.active_prompt.is_none()
             && self.snapshot.harness_turn.is_none()
     }
