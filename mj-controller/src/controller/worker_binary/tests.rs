@@ -2397,9 +2397,7 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         Some(Path::new("models.json")),
         "Codex reads the staged catalog as a top-level key"
     );
-    // The staged copy is what the session runs from, so a session on a
-    // local bare target must not use the profile home directly.
-    assert!(super::super::requires_private_profile_home(&profile));
+    // The staged copy is what the session runs from, on every target.
     assert!(
         !home.path().join("models.json").exists(),
         "the user's own profile home stays untouched"
@@ -2647,7 +2645,6 @@ fn a_native_codex_profile_gets_no_generated_catalog() {
         std::fs::read_to_string(staged.path().join("config.toml")).unwrap(),
         "model = \"gpt-5.5\"\n"
     );
-    assert!(!super::super::requires_private_profile_home(&profile));
 }
 
 #[test]

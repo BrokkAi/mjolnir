@@ -1432,7 +1432,6 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     );
 }
 
-#[cfg(target_os = "macos")]
 fn claude_config_with_home<const N: usize>(
     home: &std::path::Path,
     targets: [(&str, TargetTemplate); N],
@@ -1459,63 +1458,16 @@ fn claude_config_with_home<const N: usize>(
     }
 }
 
-/// A home Mjolnir cannot point the harness at must be reported, not used
-/// silently. Only macOS has such a case today, so only macOS asserts it.
-#[cfg(target_os = "macos")]
+/// A local session runs from a staged copy of whatever home the profile names,
+/// on macOS as elsewhere, so a Claude home other than `~/.claude` is used as
+/// configured and is not reported.
 #[test]
-fn doctor_reports_a_claude_home_macos_cannot_scope() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("claude-work");
-    std::fs::create_dir_all(&home).unwrap();
-    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
-
-    let executor = FakeExecutor::new([]);
-    let checks = harness_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert!(
-        checks[0]
-            .detail
-            .contains("is ignored by a session on this machine")
-            && checks[0].detail.contains("CLAUDE_CONFIG_DIR"),
-        "{}",
-        checks[0].detail
-    );
-    let default_home = dirs::home_dir().unwrap().join(".claude");
-    assert!(
-        checks[0]
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains(&default_home.to_string_lossy().into_owned()),
-        "{:?}",
-        checks[0].remediation
-    );
-}
-
-/// The variable still scopes a home on a container or SSH target, so a profile
-/// that only runs there is correct as configured and must not be told to
-/// repoint its home at `~/.claude`.
-#[cfg(target_os = "macos")]
-#[test]
-fn doctor_accepts_a_scoped_claude_home_used_only_off_this_machine() {
+fn doctor_accepts_a_claude_home_other_than_the_default_on_this_machine() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("claude-work");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join(".credentials.json"), b"{}").unwrap();
-    let config = claude_config_with_home(
-        &home,
-        [(
-            "builder",
-            serde_json::from_value(serde_json::json!({
-                "kind": "ssh-bare",
-                "host": "builder",
-                "permissions": "guardian",
-            }))
-            .unwrap(),
-        )],
-    );
+    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
 
     let executor = FakeExecutor::new([]);
     let checks = harness_checks(Ok(&config), &executor);

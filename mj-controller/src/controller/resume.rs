@@ -445,9 +445,8 @@ pub(super) enum WorkerRootReset {
     /// live daemon, clear relay state, unlink the installed worker files, and
     /// remove the previous per-session profile home. Runs on every locator.
     InPlace {
-        /// The profile home to delete, or `None` when the session ran straight
-        /// out of the user's own profile directory.
-        previous_profile_root: Option<String>,
+        /// The per-session profile root the replaced harness ran from.
+        previous_profile_root: String,
     },
 }
 
@@ -602,7 +601,7 @@ impl Controller {
                         targets::in_place_worker_reset_plan(
                             &backend,
                             session_id,
-                            previous_profile_root.as_deref(),
+                            previous_profile_root,
                         )?,
                     )?;
                 }

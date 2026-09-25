@@ -206,12 +206,15 @@ pub fn clear_relay_state_plan(
 pub fn in_place_worker_reset_plan(
     locator: &TargetLocator,
     session_id: &str,
-    previous_profile_root: Option<&str>,
+    previous_profile_root: &str,
 ) -> Result<CommandSpec> {
     verify_locator(locator, session_id)?;
     let session_worker_root = worker_root(locator, session_id)?;
-    let mut script = format!(
-        "{}\nrm -rf -- {} {}\nrm -f -- {} {} {}\n",
+    // A root that is a link left for a session an earlier release started
+    // (`controller::local_profile_homes`) is unlinked, never followed: the path
+    // carries no trailing slash, so `rm` removes the link itself.
+    let script = format!(
+        "{}\nrm -rf -- {} {}\nrm -f -- {} {} {}\nrm -rf -- {}\nmkdir -p -- {}\n",
         stop_worker_daemon_script(&session_worker_root),
         posix_quote(&format!(
             "{session_worker_root}/{}",
@@ -224,14 +227,9 @@ pub fn in_place_worker_reset_plan(
         posix_quote(&format!("{session_worker_root}/hel")),
         posix_quote(&format!("{session_worker_root}/launch.json")),
         posix_quote(&format!("{session_worker_root}/ownership.json")),
+        posix_quote(previous_profile_root.trim_end_matches('/')),
+        posix_quote(&session_worker_root),
     );
-    if let Some(root) = previous_profile_root {
-        script.push_str(&format!("rm -rf -- {}\n", posix_quote(root)));
-    }
-    script.push_str(&format!(
-        "mkdir -p -- {}\n",
-        posix_quote(&session_worker_root)
-    ));
     Ok(
         locator_command(locator, vec!["sh".into(), "-c".into(), script])
             .purpose("reset the worker root for an in-place harness replacement")

@@ -63,6 +63,17 @@ pub(super) async fn run_daemon_runtime(
     crate::controller::reconcile_managed_checkpoint_archives()?;
 
     let controller = Controller::load()?;
+    // A local session an earlier release started from a profile home keeps
+    // running from it until it is next staged. The link has to be in place
+    // before any launch configuration is refreshed or any credential sync runs.
+    {
+        let state = controller.state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::controller::local_profile_homes::link_profile_homes_of_earlier_sessions(&state)
+        })
+        .await
+        .context("earlier sessions' profile home link task failed")?;
+    }
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .await
         .context("bind Mjolnir daemon loopback endpoint")?;

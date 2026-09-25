@@ -3419,7 +3419,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
             worker_root: local_root.clone(),
         },
         SESSION,
-        Some(&format!("{local_root}/profile")),
+        &format!("{local_root}/profile"),
     )
     .unwrap();
     assert_eq!(
@@ -3456,7 +3456,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
             workspace: format!(".local/share/hel/workspaces/{SESSION}"),
         },
         SESSION,
-        Some(&format!(".local/share/hel/profiles/{SESSION}")),
+        &format!(".local/share/hel/profiles/{SESSION}"),
     )
     .unwrap();
     assert_eq!(remote.program, "ssh");
@@ -3482,7 +3482,7 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
             workspace_storage: Default::default(),
         },
         SESSION,
-        Some(&format!("/var/lib/hel/profiles/{SESSION}")),
+        &format!("/var/lib/hel/profiles/{SESSION}"),
     )
     .unwrap();
     assert_eq!(container.program, "podman");
@@ -3496,32 +3496,48 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         container_script.contains(&format!("rm -rf -- '/var/lib/hel/profiles/{SESSION}'")),
         "{container_script}"
     );
+}
 
-    // A profile home the session does not own is never removed.
-    let shared = in_place_worker_reset_plan(
+/// A session an earlier release started from a profile home has a link where
+/// its staged home would be. Replacing its harness in place removes the link
+/// and never the profile home it points at.
+#[cfg(unix)]
+#[test]
+fn in_place_reset_unlinks_a_linked_profile_home_without_following_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile_home = directory.path().join(".codex");
+    std::fs::create_dir_all(profile_home.join("sessions")).unwrap();
+    std::fs::write(profile_home.join("auth.json"), "{}").unwrap();
+    let worker_root = directory.path().join("workers").join(SESSION);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::os::unix::fs::symlink(&profile_home, worker_root.join("profile")).unwrap();
+    let worker_root = worker_root.to_string_lossy().into_owned();
+
+    let reset = in_place_worker_reset_plan(
         &TargetLocator::LocalBare {
-            worker_root: local_root.clone(),
+            worker_root: worker_root.clone(),
         },
         SESSION,
-        None,
+        &format!("{worker_root}/profile"),
     )
     .unwrap();
-    let shared_script = &shared.args[1];
+    let output = ProcessExecutor.execute(&reset).unwrap();
+
     assert_eq!(
-        shared_script.matches("rm -rf --").count(),
-        1,
-        "only the relay state is removed: {shared_script}"
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        shared_script.contains(&format!("mkdir -p -- '{local_root}'")),
-        "{shared_script}"
-    );
+    assert!(std::fs::symlink_metadata(format!("{worker_root}/profile")).is_err());
+    assert!(profile_home.join("auth.json").is_file());
+    assert!(profile_home.join("sessions").is_dir());
 }
 
 /// Which profile directory belongs to one session, and so may be deleted when
-/// its harness is replaced in place.
+/// its harness is replaced in place. Every session owns one, on every target.
 #[test]
-fn removable_profile_root_names_only_per_session_profile_directories() {
+fn removable_profile_root_names_a_per_session_profile_directory_for_every_harness() {
     use crate::controller::removable_profile_root;
     use mj_core::config::{HarnessKind, HarnessProfile};
 
@@ -3543,38 +3559,27 @@ fn removable_profile_root_names_only_per_session_profile_directories() {
         workspace_storage: Default::default(),
     };
 
-    // Claude runs from a staged private copy under the worker root wherever
-    // CLAUDE_CONFIG_DIR is what points it there. On macOS the variable scopes
-    // nothing, so the session uses the user's own home and has no per-session
-    // profile directory to delete.
-    let claude = removable_profile_root(
-        &local,
-        SESSION,
-        &profile(HarnessKind::Claude, "/home/dev/.claude"),
-    );
-    if cfg!(target_os = "macos") {
-        assert_eq!(claude, None);
-    } else {
-        assert_eq!(claude, Some(format!("{worker_root}/profile")));
+    // Every harness but Muse runs from a staged copy under the worker root on
+    // this machine, macOS included, and never from the profile home itself.
+    for (kind, home) in [
+        (HarnessKind::Claude, "/home/dev/.claude"),
+        (HarnessKind::Codex, "/home/dev/.codex"),
+        (HarnessKind::Kimi, "/home/dev/.kimi-code"),
+        (HarnessKind::Grok, "/home/dev/.grok"),
+    ] {
+        assert_eq!(
+            removable_profile_root(&local, SESSION, &profile(kind, home)),
+            format!("{worker_root}/profile"),
+            "{kind:?}"
+        );
     }
-    // A plain Codex profile reads and writes the user's own home, which is not
-    // the session's to delete.
-    assert_eq!(
-        removable_profile_root(
-            &local,
-            SESSION,
-            &profile(HarnessKind::Codex, "/home/dev/.codex")
-        ),
-        None
-    );
     // Muse owns a per-session root under the data directory, and the whole
     // root is removable, not just the `muse` directory inside it.
     let muse = removable_profile_root(
         &local,
         SESSION,
         &profile(HarnessKind::Muse, "/home/dev/.muse"),
-    )
-    .expect("Muse stages a per-session root even on a local bare target");
+    );
     assert_eq!(
         muse,
         mj_core::config::data_dir()
@@ -3588,20 +3593,19 @@ fn removable_profile_root_names_only_per_session_profile_directories() {
     for kind in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Muse] {
         assert_eq!(
             removable_profile_root(&container, SESSION, &profile(kind, "/home/dev/.codex")),
-            Some(format!("/var/lib/hel/profiles/{SESSION}")),
+            format!("/var/lib/hel/profiles/{SESSION}"),
             "{kind:?} stages its own profile home inside a container"
         );
     }
 }
 
-/// Installing a staged profile copies it over `target_profile_home`, so a
-/// session that does not own that home must not stage anything into it: the
-/// files would land on the user's own harness configuration, and teardown,
-/// which removes only what `removable_profile_root` names, would leave them
-/// there. The two decisions are one function so they cannot drift apart.
+/// Installing a staged profile copies it over `target_profile_home`, so that
+/// home must never be the profile home itself: the files would land on the
+/// user's own harness configuration, and teardown, which removes only what
+/// `removable_profile_root` names, would leave them there.
 #[test]
-fn a_session_owns_a_profile_home_exactly_when_it_is_not_the_user_s_own() {
-    use crate::controller::{session_owns_profile_home, target_profile_home_for_test};
+fn a_session_never_runs_from_the_profile_home_itself() {
+    use crate::controller::target_profile_home_for_test;
     use mj_core::config::{HarnessKind, HarnessProfile};
 
     let profile = |kind: HarnessKind, home: &str| HarnessProfile {
@@ -3625,17 +3629,12 @@ fn a_session_owns_a_profile_home_exactly_when_it_is_not_the_user_s_own() {
         for (kind, home) in [
             (HarnessKind::Claude, "/home/dev/.claude"),
             (HarnessKind::Codex, "/home/dev/.codex"),
+            (HarnessKind::Kimi, "/home/dev/.kimi-code"),
+            (HarnessKind::Grok, "/home/dev/.grok"),
             (HarnessKind::Muse, "/home/dev/.config/muse"),
         ] {
-            let profile = profile(kind, home);
-            let owns = session_owns_profile_home(locator, SESSION, &profile);
-            let target = target_profile_home_for_test(locator, SESSION, &profile);
-            assert_eq!(
-                owns,
-                target != home,
-                "{kind:?} on {}: owns={owns} but target home is {target}",
-                locator.kind_name()
-            );
+            let target = target_profile_home_for_test(locator, SESSION, &profile(kind, home));
+            assert_ne!(target, home, "{kind:?} on {}", locator.kind_name());
         }
     }
 }

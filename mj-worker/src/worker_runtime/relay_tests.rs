@@ -740,11 +740,9 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     config.harness = mj_core::config::HarnessKind::Muse;
     config.environment.clear();
     config.harness_home = "profiles/session/muse".into();
-    config.harness.configure_home_environment(
-        Path::new("profiles/session/muse"),
-        mj_core::config::HarnessHost::Other,
-        &mut config.environment,
-    );
+    config
+        .harness
+        .configure_home_environment(Path::new("profiles/session/muse"), &mut config.environment);
     resolve_relative_harness_home(&mut config, Path::new("/home/remote"));
     let endpoint = credential_endpoint(&config).unwrap();
     assert_eq!(
@@ -790,8 +788,9 @@ fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
     let mut config = launch_config("/profile");
     config.harness = HarnessKind::Claude;
     config.harness_home = "/home/user/.claude".into();
-    // Claude on macOS is launched with no CLAUDE_CONFIG_DIR at all, so the
-    // stated home is the only thing that can locate its credentials.
+    // The stated home is authoritative even for a launch environment that
+    // carries no home variable, as a Claude session on macOS had before every
+    // local session ran from a staged home.
     config.environment.clear();
 
     let endpoint = credential_endpoint(&config).unwrap();

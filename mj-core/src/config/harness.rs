@@ -19,9 +19,9 @@ pub enum HarnessKind {
     Muse,
 }
 
-/// The operating system of the machine a harness process will run on, as far
-/// as harness home scoping is concerned. It is not always this machine: the
-/// controller composes a launch environment for its target.
+/// The operating system of the machine a harness's own CLI runs on, as far as
+/// where that harness keeps its login is concerned. See
+/// [`HarnessKind::keeps_login_in_home`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessHost {
     MacOs,
@@ -185,16 +185,16 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
 }
 
 impl HarnessKind {
-    /// Translate a harness home into its process environment. Muse's config
-    /// directory must be named `muse`, as required by the XDG directory layout.
+    /// Point this harness at `home` through its home variable. Muse's config
+    /// directory must be named `muse`, as required by the XDG directory layout,
+    /// so Muse is given the parent, with its session data beside it.
     ///
-    /// `host` is the machine that will run the harness, because a harness home
-    /// is not scopable by environment on every operating system; see
-    /// [`HarnessKind::scopes_home_with_environment`].
+    /// Every session and every configuration probe runs from a home Mjolnir
+    /// staged for it, on every target and every operating system, so this
+    /// always sets the variable.
     pub fn configure_home_environment(
         self,
         home: &Path,
-        host: HarnessHost,
         environment: &mut BTreeMap<String, String>,
     ) {
         let config_root = if self == Self::Muse {
@@ -206,25 +206,43 @@ impl HarnessKind {
         } else {
             home
         };
-        if !self.scopes_home_with_environment(host) {
-            return;
-        }
         environment.insert(
             self.home_env().into(),
             config_root.to_string_lossy().into_owned(),
         );
     }
 
-    /// Whether [`HarnessKind::home_env`] actually scopes this harness's
-    /// configuration on `host`.
+    /// Point this harness's own CLI at a profile's configured home, for the
+    /// commands that act on the person's own login rather than on a session:
+    /// `mj login`, `claude setup-token`, and quota probes.
+    ///
+    /// `host` is the machine that runs the command. Where the login does not
+    /// live in the home ([`HarnessKind::keeps_login_in_home`]), the variable is
+    /// left unset, so the command finds the login and the settings the person
+    /// signed in with. Setting it there could only move the command off those
+    /// settings.
+    pub fn configure_profile_home_environment(
+        self,
+        home: &Path,
+        host: HarnessHost,
+        environment: &mut BTreeMap<String, String>,
+    ) {
+        if self.keeps_login_in_home(host) {
+            self.configure_home_environment(home, environment);
+        }
+    }
+
+    /// Whether this harness keeps its login inside its home on `host`, so that
+    /// pointing [`HarnessKind::home_env`] at a home selects that home's login.
     ///
     /// Claude Code on macOS keeps every profile's OAuth credentials in one
     /// Keychain item, `Claude Code-credentials`, whatever `CLAUDE_CONFIG_DIR`
-    /// says (anthropics/claude-code#20553). The variable isolates nothing
-    /// there: it only moves Claude off the settings, history and MCP servers
-    /// the person actually logged in with, while the credentials stay shared.
-    /// Mjolnir leaves it unset on macOS and lets Claude use its own home.
-    pub const fn scopes_home_with_environment(self, host: HarnessHost) -> bool {
+    /// says (anthropics/claude-code#20553). A Claude home there holds
+    /// settings, history and MCP servers, but not the login. A session still
+    /// runs from its own staged home there; only the commands that act on the
+    /// person's own home leave the variable unset
+    /// ([`HarnessKind::configure_profile_home_environment`]).
+    pub const fn keeps_login_in_home(self, host: HarnessHost) -> bool {
         !matches!((self, host), (Self::Claude, HarnessHost::MacOs))
     }
 

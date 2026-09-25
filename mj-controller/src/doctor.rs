@@ -20,8 +20,7 @@ use crate::targets::{
     verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
-    Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, TargetTemplate,
-    config_path,
+    Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
 };
 use mj_core::credentials::login_command;
 
@@ -582,7 +581,7 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .profiles
         .iter()
         .map(|(id, profile)| {
-            let mut check = harness_profile_check(config, id, profile, executor);
+            let mut check = harness_profile_check(id, profile, executor);
             check.detail = format!("{} {}", profile_summary(config, id, profile), check.detail);
             check
         })
@@ -591,7 +590,6 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
 
 /// The readiness of one profile: its home, and whether it can authenticate.
 fn harness_profile_check(
-    config: &Config,
     id: &str,
     profile: &HarnessProfile,
     executor: &impl CommandExecutor,
@@ -602,25 +600,6 @@ fn harness_profile_check(
             format!("harness.{id}"),
             title,
             "Profile is disabled; home and authentication checks were skipped.",
-        );
-    }
-    if let Some(default_home) = unscopable_home_is_ignored(config, profile) {
-        return DoctorCheck::fixable(
-            format!("harness.{id}"),
-            title,
-            format!(
-                "{} is ignored by a session on this machine: {} on macOS reads {} \
-                         whatever {} says",
-                profile.home.display(),
-                profile.kind.display_name(),
-                default_home.display(),
-                profile.kind.home_env(),
-            ),
-            format!(
-                "Set this profile's home to {}, or use it only on container and SSH \
-                         targets, where the home is still scoped.",
-                default_home.display()
-            ),
         );
     }
     if !profile.home.is_dir() {
@@ -703,34 +682,6 @@ fn profile_quota_source(profile: &HarnessProfile) -> String {
         },
         kind => format!("quota as {} reports it", kind.display_name()),
     }
-}
-
-/// The harness's own default home, for a profile whose configured home this
-/// machine cannot scope, and `None` when the home is honored as configured.
-///
-/// Claude Code on macOS is the only such case today: Mjolnir sets no
-/// `CLAUDE_CONFIG_DIR` there, so a profile pointing anywhere but Claude's own
-/// home would be silently unused. Saying so is better than letting the session
-/// run against a home nobody configured.
-fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Option<PathBuf> {
-    if profile
-        .kind
-        .scopes_home_with_environment(HarnessHost::current())
-    {
-        return None;
-    }
-    // The variable still scopes a home on a container or SSH target, so a
-    // profile that can only run there is configured correctly and must not be
-    // told to collapse the separation its sessions rely on.
-    if !config
-        .targets
-        .values()
-        .any(|target| matches!(target, TargetTemplate::LocalBare))
-    {
-        return None;
-    }
-    let default_home = dirs::home_dir()?.join(profile.kind.default_home_leaf());
-    (profile.home != default_home).then_some(default_home)
 }
 
 /// The sub-agent policy in one line, then a warning for each profile that is

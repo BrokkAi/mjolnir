@@ -104,11 +104,10 @@ pub(super) fn configure_kimi_project_memory_mcp(
     })
 }
 
-/// Claude reads MCP servers from its private profile rather than ACP. Parent
-/// sessions always use an isolated staged profile, including on local bare
+/// Claude reads MCP servers from its private profile rather than ACP. Every
+/// session runs from an isolated staged profile, including on local bare
 /// targets, so this never modifies the user's source profile. A child gets the
-/// same server in its `child` role, which serves only `handback`; registration
-/// gives a Claude child the tool only when it owns its home.
+/// same server in its `child` role, which serves only `handback`.
 pub(super) fn configure_claude_subagent_mcp(
     profile_stage: &Path,
     worker_root: &str,
@@ -225,20 +224,4 @@ pub(super) fn edit_staged_json_object(
 
 pub(super) fn mj_worker_socket_name() -> &'static str {
     "subagents.sock"
-}
-
-pub(super) fn directory_has_files(path: &Path) -> Result<bool> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_file() || (metadata.is_dir() && directory_has_files(&entry.path())?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

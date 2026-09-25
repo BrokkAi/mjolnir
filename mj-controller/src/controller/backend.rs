@@ -270,30 +270,6 @@ impl Controller {
             .context("reconnect plan is empty")
     }
 
-    /// Whether this session's harness home belongs to the session rather than
-    /// to the user, resolved from the session record.
-    ///
-    /// The stored locator is not the backend locator the decision is made
-    /// against, and only this module can build one, so callers elsewhere ask
-    /// here instead of restating the conversion.
-    pub(crate) fn session_owns_profile_home(&self, session_id: &str) -> Result<bool> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let profile = self
-            .config
-            .profiles
-            .get(&session.last_profile)
-            .with_context(|| format!("unknown profile {}", session.last_profile))?;
-        let locator = session.target.as_ref().context("session has no target")?;
-        let backend = backend_locator(locator, session, &self.config)?;
-        Ok(crate::controller::session_owns_profile_home(
-            &backend, session_id, profile,
-        ))
-    }
-
     pub fn resource_probe(&self, session_id: &str) -> Result<targets::SessionResourceProbe> {
         let session = self
             .state

@@ -150,9 +150,8 @@ enum Links {
 /// Snapshot the synced skills trees of one home. A home without any synced
 /// directory collects as an empty archive, which compares equal to a session
 /// in the same state. Symlinks inside the tree are skipped: this is how a
-/// worker reads its session's home, and how the sync reads a home a session
-/// runs out of directly. [`collect_profile_skills`] reads a home that launch
-/// staging copies instead.
+/// worker reads its session's staged home. [`collect_profile_skills`] reads
+/// the profile home that launch staging copies from instead.
 ///
 /// Both leave out the paths the harness maintains itself
 /// ([`HarnessKind::harness_owned_skill_paths`]), such as the skills Claude

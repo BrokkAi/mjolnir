@@ -350,6 +350,17 @@ pub(super) fn install_worker_files(
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             if profile_stage.is_dir() {
+                // A staged home that is a link to a profile home, left for a
+                // session an earlier release started there, is replaced by a
+                // directory of its own. Copying through it would write this
+                // stage over the person's own configuration.
+                if std::fs::symlink_metadata(profile_home)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    std::fs::remove_file(profile_home).with_context(|| {
+                        format!("unlink the earlier session's profile home link {profile_home}")
+                    })?;
+                }
                 std::fs::create_dir_all(profile_home).context("create isolated local profile")?;
                 for entry in std::fs::read_dir(profile_stage)? {
                     let entry = entry?;

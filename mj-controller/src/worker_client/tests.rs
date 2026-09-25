@@ -725,7 +725,6 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
-        owns_profile_home: true,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
 
@@ -805,10 +804,7 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
     assert_eq!(clipped.events.last().unwrap().ordinal, 2);
 }
 
-fn skills_sync_target(
-    profile_home: &std::path::Path,
-    owns_profile_home: bool,
-) -> CredentialSyncTarget {
+fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
     CredentialSyncTarget {
         session_id: SESSION_ID.into(),
         profile_id: "work".into(),
@@ -816,35 +812,19 @@ fn skills_sync_target(
         profile_home: profile_home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
-        owns_profile_home,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
 }
 
+/// Every session runs from a staged home of its own, so every session is
+/// pushed the managed skills along with the profile's own.
 #[test]
-fn a_session_that_does_not_own_its_profile_home_is_pushed_only_the_user_tree() {
-    // The profile home here is the user's own harness home. Installing
-    // Mjolnir's managed skills into it would leave them there for good.
+fn every_session_is_pushed_the_managed_skills_too() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
 
-    let archive = canonical_session_skills(&skills_sync_target(home.path(), false)).unwrap();
-    let paths = archive
-        .entries()
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(paths, vec!["skills/review/SKILL.md"]);
-}
-
-#[test]
-fn a_session_that_owns_its_profile_home_is_pushed_the_managed_skills_too() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
-    std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
-
-    let target = skills_sync_target(home.path(), true);
+    let target = skills_sync_target(home.path());
     let archive = canonical_session_skills(&target).unwrap();
     assert_eq!(
         archive,

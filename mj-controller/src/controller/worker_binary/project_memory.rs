@@ -142,16 +142,3 @@ pub(super) fn stage_memory_replica(
     copy_profile_entry(&canonical, &profile_stage.join(replica))?;
     copy_profile_entry(&canonical, &profile_stage.join(baseline))
 }
-
-pub(super) fn seed_local_memory_replica(memory: &ProjectMemoryLaunchConfig) -> Result<()> {
-    let canonical = canonical_memory_root(&memory.project_key);
-    std::fs::create_dir_all(&canonical)?;
-    let canonical_has_files = directory_has_files(&canonical)?;
-    let replica_has_files = directory_has_files(&memory.root)?;
-    match (canonical_has_files, replica_has_files) {
-        (false, true) => copy_profile_entry(&memory.root, &canonical),
-        (true, false) => copy_profile_entry(&canonical, &memory.root),
-        _ => Ok(()),
-    }?;
-    copy_profile_entry(&canonical, &memory.baseline_root)
-}

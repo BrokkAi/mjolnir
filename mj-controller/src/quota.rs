@@ -69,7 +69,7 @@ impl QuotaRefreshRequest {
         cwd: std::path::PathBuf,
     ) -> Self {
         let mut environment = profile.environment.clone();
-        profile.kind.configure_home_environment(
+        profile.kind.configure_profile_home_environment(
             &profile.home,
             mj_core::config::HarnessHost::current(),
             &mut environment,

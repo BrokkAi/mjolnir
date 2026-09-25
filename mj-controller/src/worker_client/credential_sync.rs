@@ -216,21 +216,13 @@ pub(super) async fn reconcile_profile(
     outcomes.into_values().collect()
 }
 
-/// The skills tree this session should converge to.
-///
-/// A session that owns its profile home also gets Mjolnir's managed skills,
-/// exactly as launch staging writes them. A session that runs out of the
-/// user's own harness home gets the user's tree alone, so a sync never
-/// installs Mjolnir-authored files into that home.
+/// The skills tree this session should converge to: the profile's own skills
+/// plus Mjolnir's managed skills, exactly as launch staging writes them into
+/// the session's staged home.
 pub(super) fn canonical_session_skills(
     target: &CredentialSyncTarget,
 ) -> Result<mj_core::skills::SkillsArchive> {
-    let collect = if target.owns_profile_home {
-        mj_core::skills::session_skills
-    } else {
-        mj_core::skills::collect_skills
-    };
-    collect(target.harness, &target.profile_home).with_context(|| {
+    mj_core::skills::session_skills(target.harness, &target.profile_home).with_context(|| {
         format!(
             "collect canonical skills for profile {} from {}",
             target.profile_id,

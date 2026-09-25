@@ -564,11 +564,6 @@ pub struct CredentialSyncTarget {
     pub authenticates_with_api_key: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
-    /// True when the session's harness home belongs to the session rather than
-    /// to the user. Mjolnir's managed skills are merged into the pushed skills
-    /// tree only then; pushing them anywhere else would install them into the
-    /// user's own harness home.
-    pub owns_profile_home: bool,
     /// Reconnect command for the session's worker proxy.
     pub spec: CommandSpec,
 }

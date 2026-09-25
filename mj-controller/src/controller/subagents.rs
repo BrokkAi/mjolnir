@@ -158,15 +158,7 @@ impl Controller {
             last_checkpoint_error: None,
             checkpoint: None,
         };
-        let handback_tool = child_gets_handback_tool(
-            profile,
-            &child_id,
-            &super::backend::backend_locator(
-                session.target.as_ref().expect("child target set above"),
-                &session,
-                &self.config,
-            )?,
-        );
+        let handback_tool = child_gets_handback_tool(profile.kind);
         // The first prompt names the tool only when the child will have it.
         let initial_prompt = if handback_tool {
             format!(
@@ -319,21 +311,10 @@ fn borrowed_locator(
 }
 
 /// Whether a child can be given the `handback` tool. Codex takes Mjolnir's MCP
-/// servers over ACP; Claude reads them from a staged profile, so a Claude child
-/// needs a harness home of its own. Other harnesses keep reporting through
-/// their last message.
-fn child_gets_handback_tool(
-    profile: &mj_core::config::HarnessProfile,
-    child_id: &str,
-    locator: &crate::targets::TargetLocator,
-) -> bool {
-    match profile.kind {
-        HarnessKind::Codex => true,
-        HarnessKind::Claude => {
-            crate::controller::session_owns_profile_home(locator, child_id, profile)
-        }
-        _ => false,
-    }
+/// servers over ACP; Claude reads them from its staged profile, which every
+/// session has. Other harnesses keep reporting through their last message.
+fn child_gets_handback_tool(harness: HarnessKind) -> bool {
+    matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
 }
 
 /// A parent may delegate to Mjolnir children only if its own stored choice

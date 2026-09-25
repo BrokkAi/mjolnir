@@ -5,6 +5,7 @@ mod cache_host;
 pub(crate) mod checkpoint;
 mod git_cache;
 mod lifecycle;
+pub mod local_profile_homes;
 mod mbx;
 pub mod move_session;
 mod network_git;
@@ -1206,53 +1207,12 @@ fn finish_config_map_rename<T>(
     Ok(())
 }
 
-/// Whether this profile must run from a private staged copy of its home even on
-/// a local bare target, where a session would otherwise use the profile home
-/// directly.
-///
-/// A Codex profile with a custom model provider qualifies: Mjolnir generates the
-/// provider's model catalog for each launch and points the staged `config.toml`
-/// at it, and it must never write either into the user's own profile home.
-pub(crate) fn requires_private_profile_home(profile: &mj_core::config::HarnessProfile) -> bool {
-    profile.codex_provider().ok().flatten().is_some()
-}
-
-/// Whether this session's harness home belongs to the session rather than to
-/// the profile.
-///
-/// Only such a session has anywhere to stage files into. Staging when this is
-/// false would copy the daemon's staged profile straight over the user's own
-/// harness configuration, and nothing would ever remove it again: teardown
-/// removes what [`removable_profile_root`] names, which is nothing here.
-pub(crate) fn session_owns_profile_home(
-    locator: &targets::TargetLocator,
-    session_id: &str,
-    profile: &mj_core::config::HarnessProfile,
-) -> bool {
-    removable_profile_root(locator, session_id, profile).is_some()
-}
-
-/// Whether a Claude session on a local bare target runs from a private staged
-/// home. It can only do so where `CLAUDE_CONFIG_DIR` is what points Claude at
-/// that home; on macOS the variable scopes nothing, so a private copy would be
-/// a home Claude never reads. See
-/// [`HarnessKind::scopes_home_with_environment`](mj_core::config::HarnessKind::scopes_home_with_environment).
-fn claude_takes_a_private_home(
-    profile: &mj_core::config::HarnessProfile,
-    locator: &targets::TargetLocator,
-) -> bool {
-    profile.kind == mj_core::config::HarnessKind::Claude
-        && profile
-            .kind
-            .scopes_home_with_environment(locator.harness_host())
-}
-
 /// Where this session's harness reads and writes its profile inside the target.
 ///
-/// Every case but one is the per-session root `removable_profile_root` names; a
-/// profile that runs straight out of the user's own home has no per-session root
-/// and uses that home. Muse keeps its state in a `muse` subdirectory of the
-/// root, because its ACP adapter owns the directory it is given.
+/// This is the per-session root [`removable_profile_root`] names, on every
+/// target: a session always runs from a staged copy of its profile, never from
+/// the profile home itself. Muse keeps its state in a `muse` subdirectory of
+/// the root, because its ACP adapter owns the directory it is given.
 #[cfg(test)]
 pub(crate) fn target_profile_home_for_test(
     locator: &targets::TargetLocator,
@@ -1267,8 +1227,7 @@ fn target_profile_home(
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
-    let root = removable_profile_root(locator, session_id, profile)
-        .unwrap_or_else(|| profile.home.to_string_lossy().into_owned());
+    let root = removable_profile_root(locator, session_id, profile);
     if profile.kind == mj_core::config::HarnessKind::Muse {
         PathBuf::from(root)
             .join("muse")
@@ -1279,8 +1238,8 @@ fn target_profile_home(
     }
 }
 
-/// The per-session profile directory an in-place harness replacement may delete,
-/// or `None` when the session runs straight out of the user's own profile home.
+/// The per-session profile directory a session's harness home lives in, which
+/// the session owns and an in-place harness replacement or teardown may delete.
 ///
 /// This is the root that [`target_profile_home`] derives its answer from, not
 /// that answer itself: a Muse session's home is a `muse` subdirectory of a
@@ -1289,43 +1248,38 @@ pub(super) fn removable_profile_root(
     locator: &targets::TargetLocator,
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
-) -> Option<String> {
+) -> String {
     match locator {
-        targets::TargetLocator::LocalBare { worker_root } => {
-            if profile.kind == mj_core::config::HarnessKind::Muse {
-                Some(
-                    mj_core::config::data_dir()
-                        .join("profiles")
-                        .join(session_id)
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            } else if claude_takes_a_private_home(profile, locator)
-                || requires_private_profile_home(profile)
-            {
-                Some(
-                    Path::new(worker_root)
-                        .join("profile")
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            } else {
-                // The session reads and writes the user's own profile home.
-                // Nothing here belongs to the session, so nothing is removed.
-                None
-            }
+        targets::TargetLocator::LocalBare { .. }
+            if profile.kind == mj_core::config::HarnessKind::Muse =>
+        {
+            local_muse_profile_root(session_id)
+                .to_string_lossy()
+                .into_owned()
         }
+        targets::TargetLocator::LocalBare { worker_root } => Path::new(worker_root)
+            .join("profile")
+            .to_string_lossy()
+            .into_owned(),
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. } => {
-            Some(format!("/var/lib/hel/profiles/{session_id}"))
+            format!("/var/lib/hel/profiles/{session_id}")
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            Some(format!(".local/share/hel/profiles/{session_id}"))
+            format!(".local/share/hel/profiles/{session_id}")
         }
     }
+}
+
+/// Where a Muse session on this machine keeps its per-session profile root,
+/// which lies under the data directory rather than the worker root.
+pub(crate) fn local_muse_profile_root(session_id: &str) -> PathBuf {
+    mj_core::config::data_dir()
+        .join("profiles")
+        .join(session_id)
 }
 
 /// Resolve the login home on the machine that owns an editable path.

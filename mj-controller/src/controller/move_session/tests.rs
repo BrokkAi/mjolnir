@@ -1696,25 +1696,17 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         fs::read(checkout.join("untracked.txt")).unwrap(),
         b"agent work"
     );
-    // A Claude session only owns a staged profile home where CLAUDE_CONFIG_DIR
-    // can point it at one. On macOS it reads Claude's own home instead, so the
-    // worker root has no per-session profile for the move to replace.
-    if cfg!(target_os = "macos") {
-        assert!(
-            worker_root.join("profile").join("source-only.txt").exists(),
-            "a session that owns no staged profile home must not have one removed"
-        );
-    } else {
-        assert!(
-            !worker_root.join("profile").join("source-only.txt").exists(),
-            "the previous profile home must be gone"
-        );
-        assert_eq!(
-            fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
-            br#"{"profile":"destination"}"#,
-            "the destination profile must be staged in its place"
-        );
-    }
+    // Every local session owns a staged profile home, macOS included, so the
+    // move replaces it.
+    assert!(
+        !worker_root.join("profile").join("source-only.txt").exists(),
+        "the previous profile home must be gone"
+    );
+    assert_eq!(
+        fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
+        br#"{"profile":"destination"}"#,
+        "the destination profile must be staged in its place"
+    );
     assert!(destination_home.join("settings.json").is_file());
     let ownership: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("ownership.json")).unwrap()).unwrap();
@@ -1756,8 +1748,8 @@ fn fake_worker_dispatcher() -> PathBuf {
     mj_core::test_hooks::fake_worker_dispatcher()
 }
 
-/// A profile whose home is the user's own directory has nothing the session
-/// owns inside the target, so an in-place swap must not delete it.
+/// An in-place swap removes the session's staged home and never the profile
+/// home it was staged from, which other sessions and the user share.
 #[cfg(unix)]
 #[test]
 fn in_place_move_never_removes_a_shared_local_profile_home() {
@@ -1773,8 +1765,8 @@ fn in_place_move_never_removes_a_shared_local_profile_home() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    // Codex without a custom model provider reads and writes the user's own
-    // profile home on a LocalBare target.
+    // A plain Codex profile, which ran straight out of the user's own profile
+    // home on a LocalBare target before every local session was staged.
     let InPlaceFixture {
         _directory,
         worker_root,

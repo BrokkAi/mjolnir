@@ -336,7 +336,7 @@ fn stopped_session_visibility_defaults_off_and_uses_the_advanced_section() {
 fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
     let home = Path::new("/private/session/muse");
     let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
-    HarnessKind::Muse.configure_home_environment(home, HarnessHost::Other, &mut environment);
+    HarnessKind::Muse.configure_home_environment(home, &mut environment);
     assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
     assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
     assert_eq!(
@@ -553,28 +553,45 @@ fn harness_profiles_reject_the_removed_executable_override() {
     assert!(error.to_string().contains("unknown field `executable`"));
 }
 
+/// A session or probe runs from a home Mjolnir staged for it, so every harness
+/// is pointed at that home, macOS included.
 #[test]
-fn claude_takes_no_home_variable_on_macos_and_keeps_one_elsewhere() {
-    let home = Path::new("/private/session/profile");
-
-    let mut mac = BTreeMap::new();
-    HarnessKind::Claude.configure_home_environment(home, HarnessHost::MacOs, &mut mac);
-    assert!(
-        mac.is_empty(),
-        "CLAUDE_CONFIG_DIR scopes nothing on macOS, so nothing may be set: {mac:?}"
-    );
-
-    let mut linux = BTreeMap::new();
-    HarnessKind::Claude.configure_home_environment(home, HarnessHost::Other, &mut linux);
-    assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
-}
-
-#[test]
-fn every_harness_but_claude_scopes_its_home_on_macos() {
+fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
         let home = Path::new("/private/session/muse");
-        kind.configure_home_environment(home, HarnessHost::MacOs, &mut environment);
+        kind.configure_home_environment(home, &mut environment);
+        assert!(environment.contains_key(kind.home_env()), "{kind:?}");
+        assert_eq!(
+            kind.home_from_environment(&environment[kind.home_env()]),
+            home,
+            "{kind:?}"
+        );
+    }
+}
+
+/// Commands that act on the person's own profile home leave Claude's variable
+/// unset on macOS, where the login lives in the Keychain, and set it
+/// everywhere else.
+#[test]
+fn only_claude_on_macos_keeps_its_own_home_for_profile_commands() {
+    let home = Path::new("/home/me/.claude-work");
+
+    let mut mac = BTreeMap::new();
+    HarnessKind::Claude.configure_profile_home_environment(home, HarnessHost::MacOs, &mut mac);
+    assert!(mac.is_empty(), "{mac:?}");
+
+    let mut linux = BTreeMap::new();
+    HarnessKind::Claude.configure_profile_home_environment(home, HarnessHost::Other, &mut linux);
+    assert_eq!(linux["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
+
+    for kind in HarnessKind::ALL {
+        let mut environment = BTreeMap::new();
+        kind.configure_profile_home_environment(
+            Path::new("/home/me/muse"),
+            HarnessHost::MacOs,
+            &mut environment,
+        );
         assert_eq!(
             environment.contains_key(kind.home_env()),
             kind != HarnessKind::Claude,

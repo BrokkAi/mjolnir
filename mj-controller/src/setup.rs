@@ -414,10 +414,10 @@ fn harness_is_authenticated_with(
     if kind != HarnessKind::Claude {
         return false;
     }
-    // Where `CLAUDE_CONFIG_DIR` does not scope the home, every Claude profile
-    // shares the one Keychain item, so asking the CLI about a scoped home
-    // would only report the default profile's state again.
-    if is_default_home || !kind.scopes_home_with_environment(HarnessHost::current()) {
+    // Where the login does not live in the home, every Claude profile shares
+    // the one Keychain item, so asking the CLI about a scoped home would only
+    // report the default profile's state again.
+    if is_default_home || !kind.keeps_login_in_home(HarnessHost::current()) {
         return claude_keychain_reports_authenticated(executor);
     }
     claude_cli_reports_authenticated(home, executor)
