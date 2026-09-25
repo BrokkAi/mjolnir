@@ -1269,9 +1269,11 @@ fn push_workspace_list(message: &mut String, workspaces: Option<&[(String, u64)]
     message.push_str("\nCreate one with `mj workspaces create NAME`.");
 }
 
-fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
-    let base = std::env::current_dir()
-        .context("read current directory for workspace name")?
+/// The name plain `mj` gives the workspace it creates in `directory`: the
+/// folder's own name. `mj go` looks for a workspace by this name, so the two
+/// commands share one workspace per folder.
+fn workspace_name_for_directory(directory: &std::path::Path) -> String {
+    directory
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
@@ -1279,7 +1281,13 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
         .trim()
         .chars()
         .take(64)
-        .collect::<String>();
+        .collect::<String>()
+}
+
+fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
+    let base = workspace_name_for_directory(
+        &std::env::current_dir().context("read current directory for workspace name")?,
+    );
     // The store keeps the name `default` for sessions made before a
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
