@@ -186,6 +186,38 @@ pub(super) fn load_stopped_subagents_from(
         .collect()
 }
 
+/// Forget the stopped sub-agents whose note the parent's relay has taken.
+/// Only the named children go, so a child listed after the note was built
+/// waits for the next one.
+pub fn clear_stopped_subagents(
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<()> {
+    let parent_session_id = parent_session_id.to_owned();
+    let child_session_ids = child_session_ids.to_vec();
+    submit_database_write("clear_stopped_subagents", move |_| {
+        clear_stopped_subagents_from(&database_path(), &parent_session_id, &child_session_ids)
+    })
+}
+
+pub(super) fn clear_stopped_subagents_from(
+    path: &Path,
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for child_session_id in child_session_ids {
+        tx.execute(
+            "DELETE FROM stopped_subagents
+             WHERE parent_session_id = ?1 AND child_session_id = ?2",
+            params![parent_session_id, child_session_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Everything recorded about one child's report. A child with nothing
 /// recorded yet reads as the empty report.
 pub fn load_subagent_report(child_session_id: &str) -> Result<mj_core::subagent::SubagentReport> {

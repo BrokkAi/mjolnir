@@ -5324,6 +5324,35 @@ fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
     );
 }
 
+/// Once the parent's relay has taken the note, only the children it named
+/// are forgotten: one listed after the note was built waits for the next.
+#[test]
+fn delivering_the_note_clears_only_the_sub_agents_it_named() {
+    use mj_core::subagent::StoppedSubagent;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, _child) = subagent_pair(&path);
+    let stopped = |id: &str| StoppedSubagent {
+        child_session_id: id.into(),
+        title: id.into(),
+        task: None,
+        handed_back: false,
+    };
+    record_stopped_subagents_to(&path, &parent.id, &[stopped("a"), stopped("b")]).unwrap();
+    clear_stopped_subagents_from(&path, &parent.id, &["a".to_owned()]).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id).unwrap(),
+        [stopped("b")]
+    );
+    clear_stopped_subagents_from(&path, &parent.id, &["b".to_owned(), "c".to_owned()]).unwrap();
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The ordinal of the parent's newest prompt is recorded only for a sub-agent
 /// child, and a late write for an older prompt never moves it back.
 #[test]

@@ -670,6 +670,95 @@ pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<St
     Some(format!("{}…", kept.trim_end()))
 }
 
+/// The tag of the hidden block that tells a resumed parent's model which
+/// sub-agents its suspend stopped. It is a reserved `mj-` block, so
+/// [`crate::relay::strip_hidden_prompt_context`] removes it wherever a harness
+/// copied the prompt into text a person sees.
+pub const STOPPED_SUBAGENTS_TAG: &str = "mj-stopped-subagents";
+
+/// The hidden context the first prompt after a parent resumes carries when
+/// its suspend stopped sub-agents: one line per child, then what the model
+/// should do about them. `None` when nothing was stopped.
+#[must_use]
+pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let total = stopped.len();
+    let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
+    let mut lines = vec![
+        format!("<{STOPPED_SUBAGENTS_TAG}>"),
+        format!(
+            "Mjolnir stopped {} when this session was suspended:",
+            crate::text::counted(total, "sub-agent", "sub-agents")
+        ),
+    ];
+    for child in stopped {
+        let task = child
+            .task
+            .as_deref()
+            .map(|task| format!(", task: {task}"))
+            .unwrap_or_default();
+        let handed_back = if child.handed_back {
+            "had handed back"
+        } else {
+            "had not handed back"
+        };
+        lines.push(format!(
+            "- \"{}\" (child_session_id {}){task}; {handed_back}",
+            child.title, child.child_session_id
+        ));
+    }
+    lines.push(
+        match (total, not_handed_back) {
+            (1, 1) => "Its work was not handed back; spawn it again if you still need it.",
+            (1, _) => "It had handed back its report before it was stopped.",
+            (_, 0) => "Each had handed back its report before it was stopped.",
+            (total, count) if total == count => {
+                "Their work was not handed back; spawn them again if you still need it."
+            }
+            _ => {
+                "The work of those that had not handed back was lost; spawn them again if you still need it."
+            }
+        }
+        .to_owned(),
+    );
+    lines.push(
+        "A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it."
+            .to_owned(),
+    );
+    lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
+    Some(lines.join("\n"))
+}
+
+/// The conversation line a person sees when a parent whose suspend stopped
+/// sub-agents resumes. `None` when nothing was stopped.
+#[must_use]
+pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let children = stopped
+        .iter()
+        .map(|child| {
+            format!(
+                "\"{}\" ({})",
+                child.title,
+                if child.handed_back {
+                    "had handed back"
+                } else {
+                    "had not handed back"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Suspend stopped {}: {children}.",
+        crate::text::counted(stopped.len(), "sub-agent", "sub-agents")
+    ))
+}
+
 /// What a person is told before a suspend stops sub-agents that have not
 /// handed back their reports. `None` when every child had handed back: those
 /// are stopped without a word, since their reports already reached the parent.
@@ -1170,6 +1259,62 @@ mod tests {
         let cut = task_summary(&long, None).unwrap();
         assert_eq!(cut.chars().count(), STOPPED_TASK_CHARS);
         assert!(cut.ends_with("word…"), "{cut}");
+    }
+
+    fn stopped(title: &str, task: Option<&str>, handed_back: bool) -> StoppedSubagent {
+        StoppedSubagent {
+            child_session_id: format!("id-{title}"),
+            title: title.into(),
+            task: task.map(str::to_owned),
+            handed_back,
+        }
+    }
+
+    #[test]
+    fn the_resume_note_names_each_stopped_child_and_what_to_do_about_it() {
+        assert_eq!(stopped_subagents_prompt_context(&[]), None);
+        assert_eq!(stopped_subagents_notice(&[]), None);
+
+        let lost = [
+            stopped("Fix the parser", Some("Fix the off-by-one."), false),
+            stopped("Review the docs", None, false),
+        ];
+        assert_eq!(
+            stopped_subagents_prompt_context(&lost).unwrap(),
+            "<mj-stopped-subagents>\n\
+             Mjolnir stopped 2 sub-agents when this session was suspended:\n\
+             - \"Fix the parser\" (child_session_id id-Fix the parser), task: Fix the off-by-one.; had not handed back\n\
+             - \"Review the docs\" (child_session_id id-Review the docs); had not handed back\n\
+             Their work was not handed back; spawn them again if you still need it.\n\
+             A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it.\n\
+             </mj-stopped-subagents>"
+        );
+        assert_eq!(
+            stopped_subagents_notice(&lost).unwrap(),
+            "Suspend stopped 2 sub-agents: \"Fix the parser\" (had not handed back), \
+             \"Review the docs\" (had not handed back)."
+        );
+
+        let one = stopped_subagents_prompt_context(&lost[..1]).unwrap();
+        assert!(
+            one.contains("Mjolnir stopped 1 sub-agent when")
+                && one.contains("Its work was not handed back; spawn it again"),
+            "{one}"
+        );
+        let mixed = [lost[0].clone(), stopped("Done", None, true)];
+        let note = stopped_subagents_prompt_context(&mixed).unwrap();
+        assert!(note.contains("\"Done\" (child_session_id id-Done); had handed back"));
+        assert!(note.contains("The work of those that had not handed back was lost"));
+        let finished = stopped_subagents_prompt_context(&mixed[1..]).unwrap();
+        assert!(
+            finished.contains("It had handed back its report"),
+            "{finished}"
+        );
+        // A reserved block, so it never shows in a harness's own copy of the prompt.
+        assert_eq!(
+            crate::relay::strip_hidden_prompt_context(&format!("{note}\nuser text")),
+            "user text"
+        );
     }
 
     #[test]
