@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::actions::{Availability, CommandId, spec};
 use crate::tile_layout::PaneId;
-use crate::{DashboardAction, DashboardState, Focus};
+use crate::{DashboardAction, DashboardState, Focus, SupportPane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceControl {
@@ -20,6 +20,8 @@ pub(crate) enum SurfaceControl {
     /// The close chip on one conversation pane's title row.
     ClosePane(PaneId),
     PaneMenu(PaneId),
+    /// A support pane's title, which opens the menu that hangs from it.
+    PaneTitleMenu(SupportPane),
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -156,6 +158,10 @@ impl DashboardState {
                     self.begin_pane_menu(pane);
                     DashboardAction::None
                 }
+                SurfaceControl::PaneTitleMenu(pane) => {
+                    self.begin_support_pane_menu(pane);
+                    DashboardAction::None
+                }
                 SurfaceControl::PanePin(pane) => {
                     if let Some(id) = self.pane_session(pane).map(str::to_owned) {
                         self.toggle_session_pin(id)
@@ -185,6 +191,33 @@ impl DashboardState {
         }
         result.consumed.then_some(DashboardAction::None)
     }
+}
+
+/// The text of a support pane's title: its name, and the dropdown mark when
+/// the title opens a menu.
+pub(crate) fn pane_title_label(name: &str, menu: bool) -> String {
+    if menu {
+        format!(" {name} {} ", theme::glyphs().dropdown)
+    } else {
+        format!(" {name} ")
+    }
+}
+
+/// Registers a support pane's title, drawn at `area`, as the button that
+/// opens its menu, and says whether the pointer is holding it down so the
+/// title can be drawn pressed.
+pub(crate) fn register_pane_title_menu(
+    dashboard: &DashboardState,
+    pane: SupportPane,
+    area: Rect,
+) -> bool {
+    if area.width == 0 || area.height == 0 {
+        return false;
+    }
+    let control = SurfaceControl::PaneTitleMenu(pane);
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    form.is_armed(control)
 }
 
 /// Draws the pinned three-cell workspace manager control. It is registered in

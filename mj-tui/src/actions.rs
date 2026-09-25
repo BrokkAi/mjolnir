@@ -73,6 +73,7 @@ pub enum CommandId {
     CycleFocusReverse,
     CycleFocusedPaneSize,
     TogglePanePreset,
+    ProfilesMenu,
     Workspaces,
     FocusWorkspaces,
     SelectWorkspacePrevious,
@@ -1120,6 +1121,20 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_rank: 3,
         available: support_pane_focused,
     },
+    // The Profiles title is itself a button that opens this menu; `.` is the
+    // same menu from the keyboard, as `.` is the row menu on Sessions.
+    CommandSpec {
+        id: CommandId::ProfilesMenu,
+        label: "Profiles pane menu",
+        description: "Open the menu under the Profiles title: refresh targets and quotas, or open the profile settings. Clicking the title opens it too.",
+        scope: Scope::Quota,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('.'), ".")],
+        action: None,
+        footer: footer_word!("menu"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
     CommandSpec {
         id: CommandId::TogglePanePreset,
         label: "Pane preset",
@@ -1328,6 +1343,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 const PALETTE_HIDDEN: &[CommandId] = &[
     CommandId::Palette,         // already open when the list is drawn
     CommandId::SwitchWorkspace, // the numbered keys act on the visible tab strip
+    CommandId::ProfilesMenu,    // the Profiles title opens it, and it lists two palette commands
 ];
 
 /// How many commands the palette remembers under its Recent heading.
@@ -1791,6 +1807,10 @@ impl DashboardState {
             }
             CommandId::CycleFocusedPaneSize => {
                 self.cycle_focused_pane_size();
+                DashboardAction::None
+            }
+            CommandId::ProfilesMenu => {
+                self.begin_support_pane_menu(crate::SupportPane::Quota);
                 DashboardAction::None
             }
             CommandId::TogglePanePreset => {

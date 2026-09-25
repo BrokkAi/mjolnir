@@ -576,7 +576,10 @@ pub(crate) fn render_quotas(
             .map(|refreshed| format!("refreshed {}", refresh_age(now, refreshed)))
             .unwrap_or_else(|| "not refreshed".to_string())
     };
-    let label = " Profiles ";
+    // On the combined surface (`size` is set) the title opens the pane's
+    // menu, and says so with a dropdown mark.
+    let label = crate::surface_controls::pane_title_label("Profiles", size.is_some());
+    let label_width = Line::raw(label.as_str()).width();
     let title_budget = size.map_or_else(
         || area.width.saturating_sub(2),
         |_| {
@@ -586,14 +589,31 @@ pub(crate) fn render_quotas(
             )
         },
     );
-    let status_budget = usize::from(title_budget).saturating_sub(label.chars().count());
+    let status_budget = usize::from(title_budget).saturating_sub(label_width);
     let status = truncate_to_cells(
         &format!("({refresh_status}) "),
         status_budget,
         Truncate::SUMMARY,
     );
+    let pressed = size.is_some()
+        && crate::surface_controls::register_pane_title_menu(
+            dashboard,
+            SupportPane::Quota,
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                u16::try_from(label_width)
+                    .unwrap_or(u16::MAX)
+                    .min(title_budget),
+                area.height.min(1),
+            ),
+        );
     let title = Line::from(vec![
-        Span::raw(label),
+        if pressed {
+            Span::styled(label, theme::selection(true))
+        } else {
+            Span::raw(label)
+        },
         Span::styled(status, Style::default().fg(theme::palette().muted)),
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;

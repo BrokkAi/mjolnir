@@ -478,6 +478,10 @@ The dashboard asks every configured profile for current capacity and refreshes
 profiles independently, so a slow provider does not delay the others. Press
 `prefix+shift+r` to refresh Targets and Profiles immediately.
 
+The pane's title, `Profiles ▾`, opens a small menu. Click it, or press `.`
+while the pane has focus. **Refresh** runs the same refresh as
+`prefix+shift+r`, and **Settings…** opens the Agent Profiles page of Settings.
+
 | Harness | Quota source shown by Mjolnir |
 | --- | --- |
 | Codex | Provider usage windows and reset times. For a custom provider, the provider's own windows when it publishes them. |

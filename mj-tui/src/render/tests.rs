@@ -3858,7 +3858,7 @@ fn quota_render_includes_errors_and_refresh_age_in_title() {
         .collect::<String>();
     assert!(rendered.contains("unavailable"));
     assert!(!rendered.contains("offline"));
-    assert!(rendered.contains("Profiles (refreshed"));
+    assert!(rendered.contains("Profiles ▾ (refreshed"));
     assert!(!rendered.contains("Refreshed"));
     assert!(!rendered.contains("Access"));
     assert!(!rendered.contains("agent-full-access"));
@@ -4194,7 +4194,7 @@ fn the_profiles_pane_is_titled_profiles_and_its_first_column_has_no_heading() {
     let area = dashboard.pane_areas.expect("pane areas")[2];
 
     let title = &lines[usize::from(area.y)];
-    assert!(title.contains("╭ Profiles "), "{title:?}");
+    assert!(title.contains("╭ Profiles ▾ "), "{title:?}");
     assert!(
         !lines.iter().any(|line| line.contains("Quota")),
         "{lines:#?}"
