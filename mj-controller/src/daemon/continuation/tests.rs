@@ -650,6 +650,366 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
     }
 }
 
+/// The first decision recorded for session "one", with its technical detail,
+/// which a listing leaves out.
+fn technical(dir: &std::path::Path) -> mj_core::jev::Decision {
+    let id = mj_core::jev::read(dir, "one", None).unwrap().decisions[0]
+        .id
+        .clone();
+    mj_core::jev::read(dir, "one", Some(&id))
+        .unwrap()
+        .decisions
+        .remove(0)
+}
+
+/// `view(id, true)` after the harness started a turn on its own at ordinal 10
+/// and ended it at 12 with `reply`.
+fn self_started(id: &str, reply: &str) -> ManagedSessionView {
+    let mut v = view(id, true);
+    let s = v.snapshot.as_mut().unwrap();
+    s.materialized.transcript.push(Arc::new(TranscriptItem {
+        stable_id: format!("{}10", mj_core::transcript::HARNESS_TURN_ITEM_PREFIX),
+        position: 10,
+        latest_content_event_ordinal: None,
+        created_at_ms: 10,
+        last_changed_at_ms: 10,
+        body: TranscriptBody::System {
+            text: mj_core::transcript::HARNESS_TURN_TEXT.into(),
+        },
+    }));
+    s.materialized.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "agent:self-started".into(),
+        position: 11,
+        latest_content_event_ordinal: Some(11),
+        created_at_ms: 11,
+        last_changed_at_ms: 11,
+        body: TranscriptBody::Agent {
+            chunks: vec![json!({"content":{"type":"text","text":reply}})],
+            streaming: false,
+        },
+    }));
+    s.window = ProjectionWindow::of(&s.materialized);
+    let turn_id = mj_core::continuation::harness_turn_id(10);
+    s.operational.continuation.completed_command_id = Some(turn_id.clone());
+    s.operational.continuation.harness_turn = Some(mj_core::continuation::HarnessCompletion {
+        id: turn_id,
+        start_position: 10,
+        settled_ordinal: 12,
+        settled_at_ms: 12,
+    });
+    v
+}
+
+#[tokio::test]
+async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itself() {
+    for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, 22] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+        let environment = Environment {
+            log: Some(log),
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            live: Arc::new(|| ["one".into()].into()),
+            review: Arc::new(|_, _| {}),
+            profile: Arc::new(|_| Some("test".into())),
+            quota: Arc::new(|_, view| Box::pin(async move { Ok(recovery_for(&view, None)) })),
+        };
+        let (calls, mut checks) = mpsc::unbounded_channel();
+        let classifier: Classifier = Arc::new(move |evidence, _| {
+            calls.send(evidence.quota_message.clone()).unwrap();
+            Box::pin(async move {
+                Ok(ContinuationVerdict {
+                    quota_limit: 0.99,
+                    unfinished: 1.0,
+                    no_input_needed: 1.0,
+                })
+            })
+        });
+        let cancellation = CancellationToken::new();
+        let (mut updates, task) = spawn_in(
+            environment,
+            remote.updates,
+            cancellation.clone(),
+            classifier,
+        );
+        let mut before = view("one", true);
+        let mut after = self_started("one", "You've hit your session limit · resets 1:40pm");
+        for v in [&mut before, &mut after] {
+            v.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .relay_protocol_version = Some(protocol);
+        }
+        remote
+            .publisher
+            .publish("one".into(), before)
+            .await
+            .unwrap();
+        receive(&mut updates).await;
+        remote.publisher.publish("one".into(), after).await.unwrap();
+        receive(&mut updates).await;
+        if protocol < ENDED_TURN_PROTOCOL {
+            // An older worker's state is read as it always was.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), checks.recv())
+                    .await
+                    .is_err()
+            );
+        } else {
+            let message = tokio::time::timeout(Duration::from_secs(3), checks.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(message.unwrap().contains("hit your session limit"));
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit {
+                command_id,
+                command,
+                reply,
+                ..
+            } = request
+            else {
+                panic!("expected quota scheduling");
+            };
+            assert_eq!(command_id, "quota-schedule-12");
+            assert!(
+                matches!(command, RelayCommand::SetQuotaRecovery { recovery: Some(ref r), .. }
+                if r.completed_command_id == mj_core::continuation::harness_turn_id(10))
+            );
+            reply
+                .send(Err("end isolated scheduling probe".into()))
+                .unwrap();
+            let decision = technical(log_dir.path());
+            assert_eq!(decision.technical.unwrap()["turn"], "self-started");
+        }
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() {
+    let mut remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
+    let environment = Environment {
+        log: Some(log),
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        live: Arc::new(|| ["one".into()].into()),
+        review: Arc::new(|_, _| {}),
+        profile: Arc::new(|_| Some("test".into())),
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+    };
+    let (calls, mut checks) = mpsc::unbounded_channel();
+    let classifier: Classifier = Arc::new(move |_, _| {
+        calls.send(()).unwrap();
+        Box::pin(async {
+            Ok(ContinuationVerdict {
+                quota_limit: 0.0,
+                unfinished: 0.99,
+                no_input_needed: 0.99,
+            })
+        })
+    });
+    let cancellation = CancellationToken::new();
+    let (mut updates, task) = spawn_in(
+        environment,
+        remote.updates,
+        cancellation.clone(),
+        classifier,
+    );
+    remote
+        .publisher
+        .publish("one".into(), view("one", false))
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    let mut busy = view("one", true);
+    busy.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .background_commands
+        .push(mj_core::relay::BackgroundCommand {
+            id: "claude:0".into(),
+            started_at_ms: 1,
+            command: "sleep infinity".into(),
+            can_stop: true,
+        });
+    remote.publisher.publish("one".into(), busy).await.unwrap();
+    receive(&mut updates).await;
+    tokio::time::timeout(Duration::from_secs(3), checks.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    receive(&mut updates).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
+            .await
+            .is_err(),
+        "a busy session is not nudged"
+    );
+    let decision = technical(log_dir.path());
+    assert_eq!(decision.status, "deferred");
+    assert_eq!(decision.technical.unwrap()["deferred_by"], "background");
+
+    remote
+        .publisher
+        .publish("one".into(), view("one", true))
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    tokio::time::timeout(Duration::from_secs(3), checks.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+        panic!("expected continuation prompt");
+    };
+    assert!(matches!(
+        command,
+        RelayCommand::ContinueAuthorizedWork { attempt: 1, .. }
+    ));
+    reply
+        .send(Err("end isolated continuation probe".into()))
+        .unwrap();
+    for _ in 0..20 {
+        if mj_core::jev::read(log_dir.path(), "one", None)
+            .unwrap()
+            .decisions
+            .len()
+            == 2
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let decisions = mj_core::jev::read(log_dir.path(), "one", None)
+        .unwrap()
+        .decisions;
+    assert!(decisions.iter().any(|d| {
+        mj_core::jev::read(log_dir.path(), "one", Some(&d.id))
+            .unwrap()
+            .decisions[0]
+            .technical
+            .as_ref()
+            .is_some_and(|t| t["trigger"] == "driver-stopped")
+    }));
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_alone() {
+    for reason in ["usage", "budget"] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let environment = Environment {
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(|_| true),
+            live: Arc::new(|| ["one".into()].into()),
+            review: Arc::new(|_, _| {}),
+            profile: Arc::new(|_| Some("test".into())),
+            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
+        };
+        let classifier: Classifier = Arc::new(|_, _| {
+            Box::pin(async { panic!("durable recovery must not be reclassified") })
+        });
+        let cancellation = CancellationToken::new();
+        let (mut updates, task) = spawn_in(
+            environment,
+            remote.updates,
+            cancellation.clone(),
+            classifier,
+        );
+        let mut recovered = view("one", true);
+        let recovery = recovery_for(&recovered, Some(mj_core::clock::epoch_millis() - 1));
+        let operational = &mut recovered.snapshot.as_mut().unwrap().operational;
+        operational.continuation.quota_recovery = Some(recovery);
+        operational.goal.capability = Some(mj_core::goal::GoalCapability {
+            version: 1,
+            control_method: "_session/goal".into(),
+            actions: vec!["resume".into()],
+        });
+        operational.goal.snapshot = Some(mj_core::goal::GoalSnapshot {
+            objective: "Finish the campaign".into(),
+            status: "limited".into(),
+            created_at: Some(100_000),
+            control_method: Some("_session/goal".into()),
+            details: [("limitReason".to_owned(), json!(reason))].into(),
+        });
+        remote
+            .publisher
+            .publish("one".into(), recovered)
+            .await
+            .unwrap();
+        receive(&mut updates).await;
+        if reason == "budget" {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
+                    .await
+                    .is_err(),
+                "only the user may continue a goal whose budget is spent"
+            );
+        } else {
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit {
+                command_id,
+                command,
+                reply,
+                ..
+            } = request
+            else {
+                panic!("expected goal resume");
+            };
+            assert_eq!(command_id, "quota-goal-resume-3");
+            assert!(matches!(
+                command,
+                RelayCommand::GoalControl {
+                    action: mj_core::goal::GoalControlAction::Resume
+                }
+            ));
+            reply.send(Err("end isolated resume probe".into())).unwrap();
+        }
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
 #[test]
 fn distant_quota_reset_records_the_wait_instead_of_scheduling_one() {
     let now = 1_700_000_000_000;

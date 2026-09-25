@@ -464,6 +464,35 @@ pub fn has_work_in_flight(facts: &ActivityFacts) -> bool {
         || facts.background_work_known == Some(false)
 }
 
+/// Whether a prompt could start now: no turn, tool, queued command, user
+/// shell, checkpoint barrier or goal question in the way.
+///
+/// Background commands and agents do not block it; whether they will move
+/// the session on is [`driver_present`]'s question.
+#[must_use]
+pub fn can_submit(facts: &ActivityFacts) -> bool {
+    facts.execution == RelayExecutionState::Idle
+        && facts.prompt_started_at_ms.is_none()
+        && facts.harness_turn_started_at_ms.is_none()
+        && facts.tools_in_flight.is_empty()
+        && facts.queued_commands == 0
+        && facts.active_user_shells == 0
+        && !facts.checkpoint_barrier
+        && !facts.checkpoint_only
+        && facts.acp_ready != Some(false)
+        && !facts.goal_pending_resume
+        && !facts.goal_decision
+}
+
+/// Whether something other than Mjolnir will move the session on: a turn, an
+/// active goal, an armed retry, or background work that Jev has not judged
+/// idle. A `sleep infinity` counts only until that judgment, unlike in
+/// [`has_work_in_flight`], which asks whether killing the worker loses work.
+#[must_use]
+pub fn driver_present(facts: &ActivityFacts) -> bool {
+    classify(facts).has_work_in_flight()
+}
+
 /// Whether nothing at all is happening, including no checkpoint barrier.
 ///
 /// A held barrier is the one reason this refuses that is not itself work: a

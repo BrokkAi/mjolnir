@@ -478,6 +478,35 @@ impl DurableRelay {
                 )));
             }
         }
+        if let RelayCommand::GoalControl { action } = &command
+            && mj_core::continuation::is_quota_goal_resume(command_id)
+        {
+            let valid = *action == mj_core::goal::GoalControlAction::Resume
+                && self.snapshot.goal.resumable_after_quota()
+                && mj_core::activity::can_submit(&self.activity_facts())
+                && self
+                    .snapshot
+                    .continuation
+                    .quota_recovery
+                    .as_ref()
+                    .is_some_and(|r| {
+                        !r.submitted
+                            && r.retry_at_ms
+                                .is_some_and(|deadline| deadline <= epoch_millis())
+                            && self.quota_recovery_admissible(
+                                &r.user_command_id,
+                                &r.completed_command_id,
+                            )
+                    });
+            if !valid {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "quota goal resume is not due or its goal changed",
+                    false,
+                    None,
+                )));
+            }
+        }
         if let RelayCommand::ResumeAfterQuota {
             expected,
             completed_command_id,
@@ -495,6 +524,7 @@ impl DurableRelay {
                             && r.completed_command_id == *completed_command_id
                             && r.retry_at_ms
                                 .is_some_and(|deadline| deadline <= epoch_millis())
+                            && mj_core::activity::can_submit(&self.activity_facts())
                             && self
                                 .quota_recovery_admissible(&r.user_command_id, completed_command_id)
                     });
@@ -516,27 +546,20 @@ impl DurableRelay {
         {
             let state = &self.snapshot.continuation;
             let facts = self.activity_facts();
-            let planning = self.verdict_harness.is_some_and(|harness| {
-                mj_core::acp::AcpSessionFacts::from_operational(
-                    harness,
-                    &self.snapshot.config,
-                    &self.snapshot.config_options,
-                    self.snapshot.modes.as_ref(),
-                )
-                .plan_mode_active()
-            });
-            if planning
-                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
+            // A background command that Jev judged idle does not hold this
+            // back, and plan mode does not either: the prompt cannot get past
+            // plan approval, and Jev already weighs whether input is needed.
+            if state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
+                || self.snapshot.goal.budget_limited()
                 || !state.eligible()
                 || state.user_command_id.as_ref() != Some(user_command_id)
                 || state.completed_command_id.as_ref() != Some(completed_command_id)
                 || *attempt != state.attempts + 1
                 || self.snapshot.latest_ordinal != expected.ordinal
                 || self.snapshot.latest_digest != expected.digest
-                || !mj_core::activity::is_quiet(&facts)
-                || facts.background_commands != 0
+                || !mj_core::activity::can_submit(&facts)
+                || mj_core::activity::driver_present(&facts)
                 || !self.snapshot.queued_prompts.is_empty()
-                || self.snapshot.goal.active()
                 || self.pending_close_barrier_id().is_some()
             {
                 return Ok(Err(relay_protocol_error(
@@ -1199,25 +1222,16 @@ impl DurableRelay {
             .min_by_key(|(_, accepted)| *accepted)
     }
 
+    /// Whether a quota recovery for this completion may be recorded. A turn,
+    /// background work, a goal or plan mode does not prevent that, since none
+    /// gets past the limit; resuming also needs `can_submit`.
     fn quota_recovery_admissible(&self, user: &str, completed: &str) -> bool {
         let c = &self.snapshot.continuation;
-        let planning = self.verdict_harness.is_some_and(|harness| {
-            mj_core::acp::AcpSessionFacts::from_operational(
-                harness,
-                &self.snapshot.config,
-                &self.snapshot.config_options,
-                self.snapshot.modes.as_ref(),
-            )
-            .plan_mode_active()
-        });
-        !planning
-            && !c.quota_suppressed
+        !c.quota_suppressed
+            && !self.snapshot.goal.budget_limited()
             && c.user_command_id.as_deref() == Some(user)
             && c.completed_command_id.as_deref() == Some(completed)
-            && mj_core::activity::is_quiet(&self.activity_facts())
-            && self.activity_facts().background_commands == 0
             && self.snapshot.queued_prompts.is_empty()
-            && !self.snapshot.goal.active()
             && self.pending_close_barrier_id().is_none()
     }
 

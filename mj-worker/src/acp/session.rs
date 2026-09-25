@@ -1188,7 +1188,8 @@ pub(super) async fn serve_session(
                             }
                             Some(CommandRequest::GoalControl { request_id, action }) => {
                                 if goal::prepare_control(spec, events, &mut goal_question, config_recovery.is_some(), &request_id, action).await? {
-                                    goal_controls.start(connection, &session_id, request_id, action);
+                                    let expected = goal::control_identity(spec, &request_id);
+                                    goal_controls.start(connection, &session_id, request_id, action, expected);
                                 }
                             }
                             Some(CommandRequest::ClearContext { request_id }) |
@@ -1302,7 +1303,8 @@ pub(super) async fn serve_session(
                 )
                 .await?
                 {
-                    goal_controls.start(connection, &session_id, request_id, action);
+                    let expected = goal::control_identity(spec, &request_id);
+                    goal_controls.start(connection, &session_id, request_id, action, expected);
                 }
             }
             CommandRequest::SetConfig {

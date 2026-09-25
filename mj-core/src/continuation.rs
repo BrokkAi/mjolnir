@@ -44,7 +44,42 @@ pub struct ContinuationState {
     pub quota_suppressed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_recovery: Option<QuotaRecovery>,
+    /// Start ordinal of the turn the harness has open on its own, while no
+    /// prompt of ours was in flight when it began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomous_turn_started: Option<u64>,
+    /// The self-started turn that `completed_command_id` names, once it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_turn: Option<HarnessCompletion>,
 }
+
+/// A turn the harness started and ended on its own. It stands in for a
+/// completed command so the same checks and guards apply to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessCompletion {
+    /// `harness-turn-<start ordinal>`; see [`harness_turn_id`].
+    pub id: String,
+    /// Ordinal of the start event, which is also the transcript position of
+    /// the turn's marker.
+    pub start_position: u64,
+    pub settled_ordinal: u64,
+    pub settled_at_ms: i64,
+}
+
+pub fn harness_turn_id(start_ordinal: u64) -> String {
+    format!("harness-turn-{start_ordinal}")
+}
+
+/// Id prefix of the goal resume Mjolnir submits when a quota recovery comes
+/// due for a goal the usage limit stopped. The command is an ordinary
+/// `GoalControl { Resume }`; the prefix is what makes the relay guard it as a
+/// quota recovery and send the goal's identity with it.
+pub const QUOTA_GOAL_RESUME_PREFIX: &str = "quota-goal-resume-";
+
+pub fn is_quota_goal_resume(command_id: &str) -> bool {
+    command_id.starts_with(QUOTA_GOAL_RESUME_PREFIX)
+}
+
 impl ContinuationState {
     pub fn eligible(&self) -> bool {
         self.user_command_id.is_some()
