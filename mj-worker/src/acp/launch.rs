@@ -220,7 +220,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     {
         let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
         servers.push(McpServer::Stdio(
-            McpServerStdio::new("mj-agents", worker).args(vec![
+            McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(vec![
                 "worker".into(),
                 "subagent-mcp".into(),
                 "--socket".into(),

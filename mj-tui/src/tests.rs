@@ -5126,6 +5126,80 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
     );
 }
 
+/// Launch finding R11-1: a Claude sub-agent sat on a permission question in
+/// the Sub-agents view while its parent's row read only "Working" with no
+/// attention mark, so nobody knew to look. A child's question marks its parent
+/// the way the parent's own question would: the row's symbol, the attention
+/// queue and a notification, and the row says whose question it is.
+#[test]
+fn a_subagent_question_marks_its_parent_for_attention() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    dashboard
+        .state
+        .sessions
+        .get_mut("child-session")
+        .unwrap()
+        .acp_session_title = Some("Answer project codename".into());
+    set_working(&mut dashboard, &parent);
+    set_working(&mut dashboard, "child-session");
+    dashboard.set_current_session(None);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+    assert!(dashboard.notification_events(0).is_empty());
+
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
+    assert_eq!(
+        dashboard
+            .attention_queue()
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [parent.as_str()],
+        "the queue lists top-level rows, so it leads to the parent"
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("ACP pretty name"))
+        .expect("the parent's row is drawn");
+    assert!(
+        lines[row].contains(&format!(
+            "{} ACP pretty name",
+            mj_chat::theme::glyphs().waiting
+        )),
+        "{}",
+        lines[row]
+    );
+    assert!(
+        lines[row + 1].contains("Sub-agent question"),
+        "{}",
+        lines[row + 1]
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(due[0].level, AttentionLevel::Waiting);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
+
+    // Answering the child's question clears the parent's mark.
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .clear();
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+}
+
 #[test]
 fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
     let mut dashboard = dashboard_with_session(running_session());

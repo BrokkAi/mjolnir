@@ -279,6 +279,10 @@ impl SubagentRecord {
     }
 }
 
+/// The name a worker's sub-agent MCP server is registered under in every
+/// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
+pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent delegates;
 /// a child only hands its report back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +299,24 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => "parent",
             Self::Child => "child",
+        }
+    }
+
+    /// The tools this role's server lists, in the order it lists them. A
+    /// harness that asks before an MCP tool is allowed exactly these.
+    #[must_use]
+    pub fn tool_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Parent => &[
+                "list_profiles",
+                "spawn",
+                "list_agents",
+                "send_input",
+                "wait",
+                "interrupt",
+                "close",
+            ],
+            Self::Child => &["handback"],
         }
     }
 }

@@ -160,6 +160,15 @@ impl DashboardState {
                         .map(str::to_owned)
                 })
                 .or_else(|| {
+                    self.subagent_question(session_id).map(|(child, question)| {
+                        format!(
+                            "Sub-agent \"{}\": {}",
+                            child.listed_title(),
+                            question.message
+                        )
+                    })
+                })
+                .or_else(|| {
                     detail
                         .and_then(|detail| detail.last_agent_message.as_deref())
                         .filter(|text| !text.trim().is_empty())

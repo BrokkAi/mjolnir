@@ -358,7 +358,9 @@ Mjolnir then adds its own files to the staged home:
 - the managed `mj` skill (see [Managed skills](#managed-skills));
 - the session's replica of its project memory, under `projects/`;
 - for a Claude session with Mjolnir sub-agents, or a Claude sub-agent, the
-  `mj-agents` MCP server in `.claude.json`;
+  `mj-agents` MCP server in `.claude.json`, and an allow rule in
+  `settings.json` for each of its tools, so Claude never asks before a
+  sub-agent hands back its report or a parent starts or waits for one;
 - for a Codex profile with a custom provider, the generated `models.json` and
   the `config.toml` line that points at it;
 - for Kimi Code on a target other than this machine, the `mj-memory` MCP server

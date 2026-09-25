@@ -570,6 +570,11 @@ pub(crate) fn session_activity_line(
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
+    } else if attention == AttentionLevel::Waiting {
+        // Waiting with no question or review of its own: one of its Mjolnir
+        // sub-agents is waiting on a question (see
+        // `DashboardState::attention_level`).
+        "Sub-agent question".to_owned()
     } else if detail.is_some_and(|detail| {
         matches!(
             detail.activity.state().last_known(),

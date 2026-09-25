@@ -4658,3 +4658,84 @@ fn the_staged_claude_profile_names_the_sub_agent_role() {
         assert_eq!(args[args.len() - 2..], ["--role", role.id()], "{args:?}");
     }
 }
+
+/// Launch finding R11-1: a Claude child on a model without Auto mode ran in
+/// Accept edits, and Claude asked a person before it would run the child's own
+/// `handback`, so the child could not report without one. The staged settings
+/// allow every tool the role's `mj-agents` server lists, whatever the mode, and
+/// keep the person's own settings and rules.
+#[test]
+fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
+    use mj_core::subagent::SubagentMcpRole;
+
+    let allowed = |stage: &Path| -> (serde_json::Value, Vec<String>) {
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(stage.join("settings.json")).unwrap()).unwrap();
+        let allow = settings["permissions"]["allow"]
+            .as_array()
+            .expect("the staged settings have an allow list")
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect();
+        (settings, allow)
+    };
+
+    // A child's only tool is handback.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    let (settings, allow) = allowed(stage.path());
+    assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+    assert_eq!(
+        settings["permissions"]["deny"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(settings["model"], "opus");
+
+    // A profile with no settings file gets one.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
+
+    // A parent delegates without asking; a rule the person already has is
+    // kept once, in its place.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent).unwrap();
+    let (_, allow) = allowed(stage.path());
+    assert_eq!(allow[0], "mcp__mj-agents__wait");
+    assert_eq!(
+        allow
+            .iter()
+            .filter(|rule| *rule == "mcp__mj-agents__wait")
+            .count(),
+        1,
+        "{allow:?}"
+    );
+    for tool in [
+        "list_profiles",
+        "spawn",
+        "list_agents",
+        "send_input",
+        "wait",
+        "interrupt",
+        "close",
+    ] {
+        assert!(
+            allow.contains(&format!("mcp__mj-agents__{tool}")),
+            "{tool}: {allow:?}"
+        );
+    }
+    assert!(
+        !allow.iter().any(|rule| rule.ends_with("__handback")),
+        "a parent has no handback: {allow:?}"
+    );
+}

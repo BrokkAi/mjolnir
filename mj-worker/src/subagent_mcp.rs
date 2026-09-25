@@ -212,7 +212,7 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
-            name: "mj-agents",
+            name: mj_core::subagent::SUBAGENT_MCP_SERVER,
             instructions,
             tools,
             dispatch: crate::mcp_stdio::Dispatch::Concurrent,
@@ -721,6 +721,27 @@ mod tests {
                 .iter()
                 .all(|tool| tool["name"] != "handback"),
             "a parent has no report to hand back"
+        );
+    }
+
+    /// A Claude profile is staged with an allow rule for each tool in
+    /// `tool_names`, so a tool listed here and missing there would make Claude
+    /// ask a person before running it (R11-1).
+    #[test]
+    fn each_role_lists_exactly_the_tools_its_harness_is_allowed() {
+        let names = |tools: Vec<Value>| {
+            tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(tool_definitions(None)),
+            SubagentMcpRole::Parent.tool_names()
+        );
+        assert_eq!(
+            names(child_tool_definitions()),
+            SubagentMcpRole::Child.tool_names()
         );
     }
 
