@@ -791,7 +791,7 @@ pub async fn run_server(
                             .profiles
                             .get(&result.profile_id)
                             .map(|profile| profile.kind);
-                        if let Some(notice) = credential_sync_notices.notice(&result, harness) {
+                        if let Some(notice) = credential_sync_notices.notice(&result, harness, &controller.state) {
                             eprintln!("Mjolnir: {notice}");
                         }
                     }

@@ -821,7 +821,10 @@ fn a_healthy_credential_cycle_stays_out_of_the_ui() {
         failure: None,
         outcomes: Vec::new(),
     };
-    assert_eq!(CredentialSyncNotices::default().notice(&result, None), None);
+    assert_eq!(
+        CredentialSyncNotices::default().notice(&result, None, &State::default()),
+        None
+    );
 }
 
 #[test]
@@ -887,7 +890,7 @@ fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
         }],
     };
-    let notice = notices.notice(&pushed, None).unwrap();
+    let notice = notices.notice(&pushed, None, &State::default()).unwrap();
     assert!(notice.contains("were pushed"), "{notice}");
     assert!(notice.contains("mj login --profile work"), "{notice}");
 
@@ -899,11 +902,16 @@ fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
         outcomes: Vec::new(),
         ..pushed
     };
-    let notice = notices.notice(&nothing_to_push, None).unwrap();
+    let notice = notices
+        .notice(&nothing_to_push, None, &State::default())
+        .unwrap();
     assert!(notice.contains("nothing fresher"), "{notice}");
     assert!(notice.contains("mj login --profile work"), "{notice}");
     // The per-session cooldown upstream limits these; the dedup must not.
-    assert_eq!(notices.notice(&nothing_to_push, None), Some(notice));
+    assert_eq!(
+        notices.notice(&nothing_to_push, None, &State::default()),
+        Some(notice)
+    );
 }
 
 #[test]
@@ -922,7 +930,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     };
 
     let claude = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Claude))
+        .notice(&result, Some(HarnessKind::Claude), &State::default())
         .unwrap();
     assert!(
         claude.ends_with(
@@ -933,7 +941,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
 
     // Only Claude can rotate ahead of expiry this way.
     let codex = CredentialSyncNotices::default()
-        .notice(&result, Some(HarnessKind::Codex))
+        .notice(&result, Some(HarnessKind::Codex), &State::default())
         .unwrap();
     assert!(
         codex.ends_with("Run `mj login --profile claude-max`."),
@@ -949,7 +957,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         ..result
     };
     let claude_failure = CredentialSyncNotices::default()
-        .notice(&failed, Some(HarnessKind::Claude))
+        .notice(&failed, Some(HarnessKind::Claude), &State::default())
         .unwrap();
     assert!(
         claude_failure.contains("--setup-token`."),
@@ -974,7 +982,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         }],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("returned no response"), "{notice}");
     assert!(notice.contains("were pushed"), "{notice}");
@@ -995,7 +1003,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         outcomes: Vec::new(),
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("reconciliation failed"), "{notice}");
     assert!(notice.contains("credential file is unreadable"), "{notice}");
@@ -1016,7 +1024,7 @@ fn a_failed_credential_sync_is_reported() {
         }],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(notice.contains("worker proxy disconnected"), "{notice}");
 }
@@ -1038,17 +1046,30 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
 
     assert!(
         notices
-            .notice(&failed("worker proxy disconnected"), None)
+            .notice(
+                &failed("worker proxy disconnected"),
+                None,
+                &State::default()
+            )
             .is_some()
     );
     assert_eq!(
-        notices.notice(&failed("worker proxy disconnected"), None),
+        notices.notice(
+            &failed("worker proxy disconnected"),
+            None,
+            &State::default()
+        ),
         None
     );
 
-    let changed = notices.notice(&failed("container is gone"), None).unwrap();
+    let changed = notices
+        .notice(&failed("container is gone"), None, &State::default())
+        .unwrap();
     assert!(changed.contains("container is gone"), "{changed}");
-    assert_eq!(notices.notice(&failed("container is gone"), None), None);
+    assert_eq!(
+        notices.notice(&failed("container is gone"), None, &State::default()),
+        None
+    );
 
     // A clean cycle forgets the failure, so a recurrence is reported again.
     let healthy = CredentialSyncResult {
@@ -1060,8 +1081,12 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
         }],
     };
-    assert_eq!(notices.notice(&healthy, None), None);
-    assert!(notices.notice(&failed("container is gone"), None).is_some());
+    assert_eq!(notices.notice(&healthy, None, &State::default()), None);
+    assert!(
+        notices
+            .notice(&failed("container is gone"), None, &State::default())
+            .is_some()
+    );
 }
 
 #[test]
@@ -1076,12 +1101,24 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
     };
     let mut notices = CredentialSyncNotices::default();
 
-    let notice = notices.notice(&failed("work"), None).unwrap();
+    let notice = notices
+        .notice(&failed("work"), None, &State::default())
+        .unwrap();
     assert!(notice.contains("profile work"), "{notice}");
-    assert_eq!(notices.notice(&failed("work"), None), None);
+    assert_eq!(
+        notices.notice(&failed("work"), None, &State::default()),
+        None
+    );
     // Another profile failing the same way is its own key.
-    assert!(notices.notice(&failed("personal"), None).is_some());
-    assert_eq!(notices.notice(&failed("work"), None), None);
+    assert!(
+        notices
+            .notice(&failed("personal"), None, &State::default())
+            .is_some()
+    );
+    assert_eq!(
+        notices.notice(&failed("work"), None, &State::default()),
+        None
+    );
 }
 
 #[test]
@@ -1111,7 +1148,7 @@ fn skills_and_github_syncs_speak_while_harness_credentials_stay_out_of_the_notic
         ],
     };
     let notice = CredentialSyncNotices::default()
-        .notice(&result, None)
+        .notice(&result, None, &State::default())
         .unwrap();
     assert!(!notice.contains("harness credentials"), "{notice}");
     assert!(
@@ -1565,4 +1602,88 @@ fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
         }),
         None,
     ));
+}
+
+/// R8-3: every credential-sync notice named its session by short id ("Session
+/// 790051c5 returned no response; ...", tmux/047). A notice names a session
+/// the way the session list does, and by short id only when it has no title
+/// or its record is gone (the R5-4/R5-5 rule).
+#[test]
+fn credential_sync_notices_name_the_session_by_its_listed_title() {
+    use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
+
+    let session_id = "790051c5fe0447276d78ee1e5548bd4e";
+    let mut state = State::default();
+    let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
+    session.acp_session_title = Some("claude-a".into());
+    state.sessions.insert(session_id.into(), session);
+
+    let triggered =
+        |reason: CredentialSyncReason,
+         failure: Option<&str>,
+         outcome: Option<Result<Vec<CredentialSyncAction>, String>>| CredentialSyncResult {
+            profile_id: "claude".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: session_id.into(),
+                reason,
+            }),
+            failure: failure.map(str::to_owned),
+            outcomes: outcome
+                .map(|outcome| {
+                    vec![CredentialSyncOutcome {
+                        session_id: session_id.into(),
+                        outcome,
+                    }]
+                })
+                .unwrap_or_default(),
+        };
+    let results = [
+        triggered(
+            CredentialSyncReason::AuthenticationFailure,
+            Some("credential file is unreadable"),
+            None,
+        ),
+        triggered(
+            CredentialSyncReason::EmptyPromptResponse,
+            Some("credential file is unreadable"),
+            None,
+        ),
+        triggered(
+            CredentialSyncReason::AuthenticationFailure,
+            None,
+            Some(Ok(vec![CredentialSyncAction::Pushed])),
+        ),
+        triggered(CredentialSyncReason::AuthenticationFailure, None, None),
+        triggered(
+            CredentialSyncReason::EmptyPromptResponse,
+            None,
+            Some(Ok(vec![CredentialSyncAction::Pushed])),
+        ),
+        triggered(CredentialSyncReason::EmptyPromptResponse, None, None),
+        CredentialSyncResult {
+            profile_id: "claude".into(),
+            trigger: None,
+            failure: None,
+            outcomes: vec![CredentialSyncOutcome {
+                session_id: session_id.into(),
+                outcome: Err("worker proxy disconnected".into()),
+            }],
+        },
+    ];
+    for result in &results {
+        let notice = CredentialSyncNotices::default()
+            .notice(result, None, &state)
+            .unwrap();
+        assert!(notice.contains("claude-a"), "{notice}");
+        assert!(!notice.contains("790051c5"), "{notice}");
+    }
+
+    // A session whose record is gone is still named, by its short id.
+    let notice = CredentialSyncNotices::default()
+        .notice(&results[5], None, &State::default())
+        .unwrap();
+    assert!(
+        notice.starts_with("Session 790051c5 returned no response"),
+        "{notice}"
+    );
 }

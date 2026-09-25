@@ -1623,15 +1623,9 @@ impl DashboardContext {
     }
 }
 
-/// How a notice names a session: the title the session list shows
-/// (`listed_title`, which includes the title it was created with), or its
-/// short id when it has no title or its record is gone (launch findings B-3
-/// and R5-5).
+/// How a notice names a session; see [`State::session_notice_name`].
 pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
-    match state.sessions.get(session_id) {
-        Some(session) if session.listed_title() != session.id => session.listed_title().to_owned(),
-        _ => short_id(session_id).to_owned(),
-    }
+    state.session_notice_name(session_id)
 }
 
 /// How a lifecycle's completion notice names its session. The daemon's
