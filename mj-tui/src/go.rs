@@ -475,7 +475,7 @@ mod tests {
         assert!(rendered.contains("Working: /actual/checkout"));
         assert!(rendered.contains("branch: feature-x"));
         assert!(rendered.contains(" Menu "));
-        for visible in ["Workspaces", "Targets", "Quota", "b panes"] {
+        for visible in ["Workspaces", "Targets", "Profiles", "b panes"] {
             assert!(
                 rendered.contains(visible),
                 "missing dashboard detail: {visible}"

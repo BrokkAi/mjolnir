@@ -120,7 +120,7 @@ impl Scope {
             Self::Sessions => "Sessions pane",
             Self::Session => "Selected session",
             Self::Targets => "Targets pane",
-            Self::Quota => "Quota pane",
+            Self::Quota => "Profiles pane",
             Self::Setup => "First-run settings",
         }
     }
@@ -402,7 +402,7 @@ fn support_pane_focused(dashboard: &DashboardState) -> Availability {
     if dashboard.focus().support_pane().is_some() {
         Availability::Ready
     } else {
-        Availability::Blocked("select Sessions, Targets, or Quota first")
+        Availability::Blocked("select Sessions, Targets, or Profiles first")
     }
 }
 

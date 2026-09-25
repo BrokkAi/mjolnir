@@ -224,7 +224,7 @@ def probe_target_config_id(lab: Any, tmux: Any, evidence: Any) -> None:
     )
     tmux.send_key("Escape")
     _wait(tmux, "Sessions", "dashboard after target cancellation")
-    # Target actions returns focus to Targets.  Advance through Quota to the
+    # Target actions returns focus to Targets.  Advance through Profiles to the
     # initial Sessions stop for the next independent probe.
     tmux.send_key("Tab")
     tmux.send_key("Tab")

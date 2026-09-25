@@ -1337,7 +1337,7 @@ fn dashboard_replaces_too_short_layout_with_required_height() {
     assert!(rendered.contains('▁'));
     assert!(rendered.contains('▪'));
     assert!(rendered.contains('□'));
-    assert!(rendered.contains("Quota"));
+    assert!(rendered.contains("Profiles"));
 }
 
 #[test]
@@ -1625,7 +1625,7 @@ fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     );
 }
 
-/// A-11: Enter on the Quota pane opens the profile-ID rename, so the hint
+/// A-11: Enter on the Profiles pane opens the profile-ID rename, so the hint
 /// says rename rather than promising a profile editor.
 #[test]
 fn the_quota_footer_says_enter_renames_the_profile() {
@@ -1997,16 +1997,16 @@ fn minimizing_the_support_panes_gives_their_rows_to_the_transcript() {
 
     // Every row the tables and the Sessions pane give up lands in the
     // transcript; the composer and footer are untouched.
-    let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
-        + (band(&before, "Quota", "q detach") - band(&after, "Quota", "q detach"));
+    let tables_freed = (band(&before, "Targets", "Profiles") - band(&after, "Targets", "Profiles"))
+        + (band(&before, "Profiles", "q detach") - band(&after, "Profiles", "q detach"));
     let sessions_freed = 0;
     let transcript_gain = band(&after, "Conversation", "No conversation open")
         - band(&before, "Conversation", "No conversation open");
     assert!(tables_freed > 0, "the tables gave up nothing");
     assert_eq!(transcript_gain, tables_freed + sessions_freed);
     // Each minimized pane really is one row.
-    assert_eq!(band(&after, "Targets", "Quota"), 1);
-    assert_eq!(band(&after, "Quota", "q detach"), 1);
+    assert_eq!(band(&after, "Targets", "Profiles"), 1);
+    assert_eq!(band(&after, "Profiles", "q detach"), 1);
 }
 
 fn now_seconds() -> u64 {
@@ -2486,7 +2486,7 @@ fn a_short_terminal_keeps_every_minimized_title_and_control() {
             && lines[usize::from(pane.y)].contains('▪')
             && lines[usize::from(pane.y)].contains('□')
     );
-    for visible in ["Targets", "Quota"] {
+    for visible in ["Targets", "Profiles"] {
         assert!(
             lines.iter().any(|line| line.contains(visible)),
             "{visible} should remain visible: {lines:?}"
@@ -2594,7 +2594,7 @@ fn a_short_portrait_terminal_keeps_the_list_and_support_summaries() {
     assert_eq!(panes[0].bottom(), panes[2].bottom());
     assert_eq!(panes[1].x, panes[0].right());
     assert_eq!(panes[1].width, 60);
-    for visible in ["Tar", "Quo"] {
+    for visible in ["Tar", "Pro"] {
         assert!(
             lines.iter().any(|line| line.contains(visible)),
             "{visible} should remain: {lines:?}"
@@ -2618,8 +2618,8 @@ fn the_minimized_rows_report_cpu_and_weekly_percent_used() {
     assert!(targets.contains("local 42%"), "{targets:?}");
     let quota = lines
         .iter()
-        .find(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     // The open pane prints the remaining percentage; so does this row.
     assert!(quota.contains("claude-1 63%"), "{quota:?}");
     // Each minimized pane is exactly one row.
@@ -2633,7 +2633,7 @@ fn the_minimized_rows_report_cpu_and_weekly_percent_used() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("─ Quota ──"))
+            .filter(|line| line.contains("─ Profiles ──"))
             .count(),
         1
     );
@@ -2707,8 +2707,8 @@ fn an_exhausted_quota_reads_zero_in_the_minimized_row() {
 
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     assert!(quota.contains("claude-1 0%"), "{quota:?}");
     assert!(!quota.contains("claude-1 100%"), "{quota:?}");
 }
@@ -2751,8 +2751,8 @@ fn the_minimized_rows_stay_explicit_about_readings_they_do_not_have() {
     // A quota that failed to refresh.
     let quota = drawn(&mut dashboard, 120, 44)
         .into_iter()
-        .find(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     assert!(quota.contains("claude-1 unavailable"), "{quota:?}");
 }
 
@@ -2847,8 +2847,8 @@ fn the_minimized_rows_keep_the_pane_rule_and_colour_by_headroom() {
 
     let quota_row = lines
         .iter()
-        .position(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .position(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     assert!(
         lines[quota_row].contains("claude-1 63%, codex-1 10%"),
         "the row reads the remaining percentage the open pane prints: {:?}",
@@ -2884,8 +2884,8 @@ fn a_usage_priced_profile_is_absent_from_the_minimized_row() {
     let row = |dashboard: &mut DashboardState| {
         drawn(dashboard, 160, 44)
             .into_iter()
-            .find(|line| line.contains("─ Quota ──"))
-            .expect("the minimized Quota row")
+            .find(|line| line.contains("─ Profiles ──"))
+            .expect("the minimized Profiles row")
     };
 
     dashboard.apply_quota(api_quota("api-priced"));
@@ -2910,8 +2910,8 @@ fn the_minimized_row_pairs_the_weekly_and_five_hour_figures() {
 
     let quota = drawn(&mut dashboard, 160, 44)
         .into_iter()
-        .find(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     assert!(quota.contains("claude-1 96%/40%"), "{quota:?}");
     assert!(quota.contains("codex-1 100%,"), "{quota:?}");
     assert!(!quota.contains("100%/"), "{quota:?}");
@@ -2939,8 +2939,8 @@ fn the_paired_reading_takes_the_colour_of_the_tighter_window() {
     let lines = buffer_lines(buffer);
     let row = lines
         .iter()
-        .position(|line| line.contains("─ Quota ──"))
-        .expect("the minimized Quota row");
+        .position(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
     let colour_of = |needle: &str| {
         let column = cell_column(&lines[row], needle);
         buffer[(column, row as u16)].fg
@@ -3354,7 +3354,7 @@ fn selected_transcript_tail_adapts_to_a_constrained_terminal() {
         .collect::<String>();
     assert!(rendered.contains("Sessions"));
     assert!(rendered.contains("Targets"));
-    assert!(rendered.contains("Quota"));
+    assert!(rendered.contains("Profiles"));
 }
 
 #[test]
@@ -3680,7 +3680,7 @@ fn focused_panes_use_accented_rounded_borders_without_focus_title_text() {
     assert!(rendered.contains("Targets"));
     assert!(!rendered.contains("[focused]"));
 
-    for (focus, rounded) in [(Focus::Quota, "╭ Quota"), (Focus::Targets, "╭ Targets")] {
+    for (focus, rounded) in [(Focus::Quota, "╭ Profiles"), (Focus::Targets, "╭ Targets")] {
         dashboard.focus = focus;
         terminal
             .draw(|frame| render(frame, &mut dashboard))
@@ -3858,7 +3858,7 @@ fn quota_render_includes_errors_and_refresh_age_in_title() {
         .collect::<String>();
     assert!(rendered.contains("unavailable"));
     assert!(!rendered.contains("offline"));
-    assert!(rendered.contains("Quota (refreshed"));
+    assert!(rendered.contains("Profiles (refreshed"));
     assert!(!rendered.contains("Refreshed"));
     assert!(!rendered.contains("Access"));
     assert!(!rendered.contains("agent-full-access"));
@@ -4176,6 +4176,45 @@ fn quota_render_uses_weekly_five_hour_and_reset_columns() {
     assert_eq!(weekly_reset, weekly_percent + 3 + 1);
     assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
     assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
+}
+
+/// User request 2026-09-25: the pane that lists the profiles is titled
+/// Profiles, and its first column has no heading of its own, because the
+/// title already says what the rows are. The heading cell is blank, but the
+/// column keeps the width the heading gave it, so a short profile ID does not
+/// pull the other columns left.
+#[test]
+fn the_profiles_pane_is_titled_profiles_and_its_first_column_has_no_heading() {
+    let mut config = config();
+    let profile = config.profiles.remove("codex-1").expect("fixture profile");
+    config.profiles.clear();
+    config.profiles.insert("cx".into(), profile);
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    let lines = drawn(&mut dashboard, 140, 40);
+    let area = dashboard.pane_areas.expect("pane areas")[2];
+
+    let title = &lines[usize::from(area.y)];
+    assert!(title.contains("╭ Profiles "), "{title:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("Quota")),
+        "{lines:#?}"
+    );
+
+    let header = &lines[usize::from(area.y) + 1];
+    assert!(header.contains("Harness"), "{header:?}");
+    assert!(!header.contains("Profile"), "{header:?}");
+    // Border, the two-cell selection marker, then the first column: the
+    // seven cells "Profile" took, and its two-cell gap.
+    assert_eq!(
+        cell_column(header, "Harness"),
+        area.x + 1 + 2 + 7 + 2,
+        "{header:?}"
+    );
+    let row = lines
+        .iter()
+        .find(|line| line.contains(" cx "))
+        .expect("the profile row");
+    assert_eq!(cell_column(row, "Codex"), cell_column(header, "Harness"));
 }
 
 #[test]

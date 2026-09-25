@@ -163,13 +163,13 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
 
     # Collapse support panes using their existing title controls before the
     # width-boundary checks; the combined surface requires 80 columns.
-    for title in ("Targets", "Quota"):
+    for title in ("Targets", "Profiles"):
         screen = tmux.wait_for(title)
         row, line = next((row, line) for row, line in enumerate(screen.splitlines())
                          if title in line and "▁" in line)
         tmux.mouse_click(line.rindex("▁"), row)
         tmux.wait_until(lambda: "Host / fleet" not in tmux.capture() if title == "Targets"
-                        else "Profile  Harness" not in tmux.capture(), title + " minimized")
+                        else "Harness" not in tmux.capture(), title + " minimized")
 
     for width, height in ((59, 18), (70, 18), (80, 18), (140, 40), (200, 60)):
         tmux.resize(width, height)

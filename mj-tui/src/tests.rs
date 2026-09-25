@@ -485,7 +485,7 @@ fn alt_z_on_prompt_explains_that_prompt_is_not_resizable() {
     chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.notice().as_deref(),
-        Some("Select Sessions, Targets, or Quota before cycling the pane size.")
+        Some("Select Sessions, Targets, or Profiles before cycling the pane size.")
     );
     assert_eq!(dashboard.focus, Focus::Prompt);
 }

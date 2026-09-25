@@ -6,7 +6,7 @@ description: Configure Codex (including custom model providers), Claude Code, Ki
 A profile connects Mjolnir to one installed coding-agent harness and one account.
 Create multiple profiles for multiple accounts, even when they use the same
 harness. Every new or resumed session chooses a profile; the profile ID is also
-the row shown in the dashboard's Quota pane.
+the row shown in the dashboard's Profiles pane.
 
 Profiles point at controller-side harness homes. They do not pin a model or
 reasoning effort. Choose those per session with `/model` and `/effort`, so the
@@ -472,11 +472,11 @@ leased for the complete ACP process lifetime—including busy turns that last
 hours—and are garbage-collected only after the final user exits. For custom
 container images, see [Custom images](/custom-images/).
 
-## Quota pane
+## Profiles pane
 
 The dashboard asks every configured profile for current capacity and refreshes
 profiles independently, so a slow provider does not delay the others. Press
-`prefix+shift+r` to refresh Targets and Quota immediately.
+`prefix+shift+r` to refresh Targets and Profiles immediately.
 
 | Harness | Quota source shown by Mjolnir |
 | --- | --- |

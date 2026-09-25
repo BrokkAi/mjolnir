@@ -67,7 +67,7 @@ pub(crate) fn minimized_targets_line(
     summary_row("Targets", &readings, width, focused)
 }
 
-/// One row summarising every profile's quota, for the minimized Quota pane.
+/// One row summarising every profile's quota, for the minimized Profiles pane.
 ///
 /// The figures are percentages *remaining*, which is the number the full
 /// pane's bar prints beside itself: an exhausted profile reads 0% in both. A
@@ -132,7 +132,7 @@ pub(crate) fn minimized_quota_line(
             })
         })
         .collect::<Vec<_>>();
-    summary_row("Quota", &readings, width, focused)
+    summary_row("Profiles", &readings, width, focused)
 }
 
 /// A minimized pane's single row, drawn as the pane's own title so it keeps
@@ -146,7 +146,7 @@ pub(crate) fn summary_row(
 ) -> Line<'static> {
     // A minimized pane is still a pane, so its one row opens the way a
     // bordered one does and the rule carries on between the label and the
-    // readings: `─ Quota ── claude-1 63% ────`.
+    // readings: `─ Profiles ── claude-1 63% ────`.
     let (opening, divider) = ("─ ", " ── ");
     let mut spans = vec![Span::raw(format!("{opening}{label}{divider}"))];
     let mut used = opening.chars().count() + label.chars().count() + divider.chars().count();
@@ -504,6 +504,8 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
 
 pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
     [
+        // The heading is no longer drawn (see `render_quotas`), but the
+        // column keeps the width it gave, so the table does not shift.
         quota_column_width(
             "Profile",
             rows.iter()
@@ -537,7 +539,7 @@ pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
     ]
 }
 
-/// Width needed to draw the complete Quota table, including its
+/// Width needed to draw the complete Profiles table, including its
 /// inter-column spacing, border, and always-present selection marker.
 pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
     let now = SystemTime::now()
@@ -574,7 +576,7 @@ pub(crate) fn render_quotas(
             .map(|refreshed| format!("refreshed {}", refresh_age(now, refreshed)))
             .unwrap_or_else(|| "not refreshed".to_string())
     };
-    let label = " Quota ";
+    let label = " Profiles ";
     let title_budget = size.map_or_else(
         || area.width.saturating_sub(2),
         |_| {
@@ -608,8 +610,10 @@ pub(crate) fn render_quotas(
     });
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
         .column_spacing(0)
+        // The pane's own title already says these rows are profiles, so the
+        // first column has no heading; it keeps the width the heading gave it.
         .header(
-            Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
+            Row::new(["", "Harness", "Weekly", "Resets", "5H", "Resets"])
                 .style(theme::muted().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(if quotas_focused {

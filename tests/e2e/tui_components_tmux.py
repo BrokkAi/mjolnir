@@ -499,11 +499,11 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
             lines = tmux.capture().splitlines()
             sessions = next((line for line in lines if "▁" in line), "")
             targets = next((line for line in lines if " Targets " in line), "")
-            quota = next((line for line in lines if " Quota " in line), "")
+            quota = next((line for line in lines if " Profiles " in line), "")
             return (
                 sessions.find("╮") == sidebar_width - 1
                 and targets.find("╭ Targets ") == support_x
-                and quota.find("╭ Quota ") == support_x
+                and quota.find("╭ Profiles ") == support_x
             )
 
         tmux.wait_until(positioned, f"support panes relayout with {label} sidebar")
@@ -511,8 +511,8 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         evidence.event(
             f"sidebar-relayout-{label}",
             f"click Sessions {glyph} at fixed 80x40",
-            f"Targets and Quota begin at column {support_x}",
-            f"Targets and Quota begin at column {support_x}",
+            f"Targets and Profiles begin at column {support_x}",
+            f"Targets and Profiles begin at column {support_x}",
             evidence.capture(f"sidebar-relayout-{label}", screen),
         )
 
