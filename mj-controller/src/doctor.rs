@@ -192,23 +192,34 @@ pub fn run_with_config_path(
     checks.push(harness_discovery_check(config, executor));
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_eligibility_checks(config));
-    checks.extend(podman_checks(config, executor, options.smoke));
-    checks.extend(docker_checks(config, executor, options.smoke));
-    checks.extend(ssh_bare_checks(config, executor));
-    checks.extend(ssh_podman_checks(config, executor, options.smoke));
-    checks.extend(ssh_docker_checks(config, executor, options.smoke));
-    checks.extend(build_cache_checks(config, executor));
-    checks.extend(aws_checks(config, executor));
-    checks.extend(worker_binary_checks(config));
-    checks.push(daemon_build_check());
-    checks.extend(worker_freshness_checks(config));
-    checks.extend(review_residue_checks(config));
-    checks.push(apple_container_check(
+    let podman = podman_checks(config, executor, options.smoke);
+    let docker = docker_checks(config, executor, options.smoke);
+    let apple_container = apple_container_check(
         &apple_platform,
         executor,
         options.smoke,
         apple_container_image(config),
-    ));
+    );
+    let offered = config.map(|config| {
+        offered_targets(
+            config,
+            podman.iter().chain(&docker).chain([&apple_container]),
+        )
+    });
+    let offered = offered.as_ref().map_err(|gap| *gap);
+    checks.extend(podman);
+    checks.extend(docker);
+    checks.extend(ssh_bare_checks(config, executor));
+    checks.extend(ssh_podman_checks(config, executor, options.smoke));
+    checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(build_cache_checks(offered, executor));
+    checks.extend(aws_checks(config, executor));
+    checks.extend(worker_binary_checks(offered));
+    checks.push(daemon_build_check());
+    checks.extend(worker_freshness_checks(offered));
+    checks.extend(review_residue_checks(config));
+    // Reported last, where it has always been.
+    checks.push(apple_container);
     checks
 }
 
@@ -2236,6 +2247,35 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
         .into();
     let modified = std::fs::metadata(path)?.modified()?;
     Ok(modified > started)
+}
+
+/// The targets the build-cache and worker-binary checks cover: every target
+/// the user configured, plus each standard local target
+/// ([`Config::with_local_targets`]) whose engine check in `engine_checks`
+/// passed. That is the set a new session can use. With no target blocks in
+/// config.toml, the built-in `podman` target on a host with working Podman
+/// still needs a worker (launch finding R5-2). A standard target whose
+/// engine is unavailable is shown as unavailable and needs none.
+fn offered_targets<'a>(
+    config: &Config,
+    engine_checks: impl IntoIterator<Item = &'a DoctorCheck>,
+) -> Config {
+    let ready = engine_checks
+        .into_iter()
+        .filter(|check| check.status == CheckStatus::Ready)
+        .map(|check| check.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let engine_ready = |target_id: &str| match target_id {
+        "podman" => ready.contains("runtime.podman"),
+        "docker" => ready.contains("runtime.docker"),
+        "apple-container" => ready.contains("runtime.apple-container"),
+        _ => true,
+    };
+    let mut offered = config.clone().with_local_targets();
+    offered
+        .targets
+        .retain(|id, _| config.configures_target(id) || engine_ready(id));
+    offered
 }
 
 fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {

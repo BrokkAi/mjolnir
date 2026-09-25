@@ -1251,6 +1251,64 @@ fn ssh_bare_checks_are_skipped_without_a_valid_config() {
     assert!(executor.commands.borrow().is_empty());
 }
 
+/// With no target blocks in config.toml, the dashboard still offers the
+/// built-in `podman` target, and doctor's engine and image checks cover it;
+/// the worker-binary checks said "No container target is configured" and the
+/// freshness check for Linux targets was missing (launch finding R5-2). A
+/// built-in target whose engine is unavailable needs no worker.
+#[test]
+fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
+    let engines = [
+        DoctorCheck::ready(
+            "runtime.podman",
+            "Rootless Podman",
+            "Podman 5.7.0 has a valid rootless UID map.",
+        ),
+        DoctorCheck::unsupported(
+            "runtime.docker",
+            "Docker",
+            "Docker is not available, so the built-in `docker` target is marked unavailable.",
+        ),
+    ];
+
+    let offered = offered_targets(&Config::default(), &engines);
+
+    let ids = worker_binary_checks(Ok(&offered))
+        .into_iter()
+        .map(|check| check.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["worker.podman"]);
+    assert_eq!(
+        container_worker_architectures(Ok(&offered)),
+        [normalized_worker_architecture(std::env::consts::ARCH)]
+    );
+}
+
+/// A target the user configured is checked whatever its engine's state, as
+/// before.
+#[test]
+fn worker_checks_keep_a_configured_target_whose_engine_is_unavailable() {
+    let config = config_with([(
+        "pd",
+        TargetTemplate::LocalPodman {
+            container: container("example.test/own:latest"),
+        },
+    )]);
+    let engines = [DoctorCheck::unsupported(
+        "runtime.podman",
+        "Rootless Podman",
+        "Podman is not installed.",
+    )];
+
+    let offered = offered_targets(&config, &engines);
+
+    let ids = worker_binary_checks(Ok(&offered))
+        .into_iter()
+        .map(|check| check.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["worker.pd"]);
+}
+
 #[test]
 fn worker_check_for_an_ssh_podman_target_without_platform_is_unsupported() {
     let config = config_with([(
