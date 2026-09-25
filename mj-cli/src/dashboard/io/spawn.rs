@@ -491,6 +491,29 @@ pub(crate) fn review_settings_choices(
     }
 }
 
+/// Look for the coding agents installed on this machine, the same way Detect
+/// profiles does, so the Get started panel of a dashboard with no agent
+/// profile can say whether any was found.
+pub(crate) fn spawn_installed_agent_discovery(
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_cancellable_io(
+        tracker,
+        "looking for installed coding agents",
+        updates,
+        move |cancelled| {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+            Ok(mj_controller::setup::discover_profiles(&executor)
+                .into_iter()
+                .map(|home| home.kind)
+                .collect::<Vec<_>>())
+        },
+        DashboardIoUpdate::InstalledAgents,
+    )
+}
+
 pub(crate) fn spawn_setup_discovery(
     generation: u64,
     scope: DetectScope,

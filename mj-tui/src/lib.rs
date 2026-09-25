@@ -748,6 +748,11 @@ pub struct DashboardState {
     pub(crate) state: State,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
+    /// The coding agents a look at this machine found, for the Get started
+    /// panel a dashboard without an agent profile shows. `None` until a look
+    /// has answered, so the panel claims nothing about the machine before it
+    /// knows.
+    pub(crate) installed_agents: Option<Vec<HarnessKind>>,
     pub(crate) session_details: BTreeMap<String, SessionDetail>,
     /// Sessions whose relay worker the controller currently cannot reach. Their
     /// summary band renders red so an unreachable target is obvious at a glance.
@@ -1034,6 +1039,7 @@ impl DashboardState {
             state,
             quotas,
             quota_refreshing: BTreeSet::new(),
+            installed_agents: None,
             session_details: BTreeMap::new(),
             unreachable_sessions: BTreeSet::new(),
             session_reviews: BTreeMap::new(),

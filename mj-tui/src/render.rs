@@ -270,39 +270,104 @@ pub(crate) fn render_terminal_too_small(
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
+/// The quickstart section for a machine with no coding agent installed.
+const NO_AGENT_HELP_URL: &str =
+    "https://mjolnir.brokk.ai/quickstart/#if-no-coding-agent-is-installed";
+
 fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
-    let missing = [
-        (
-            dashboard.config.enabled_profiles().next().is_none(),
-            "an enabled agent profile",
-        ),
-        (dashboard.config.targets.is_empty(), "a target template"),
-    ]
-    .into_iter()
-    .filter_map(|(missing, label)| missing.then_some(label))
-    .collect::<Vec<_>>()
-    .join(", ");
+    let settings_key = dashboard.first_key_label(crate::CommandId::OpenConfig);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Make room for your next idea.",
+            theme::title(true),
+        )),
+        Line::raw(""),
+    ];
+    if dashboard.config.enabled_profiles().next().is_none() {
+        lines.extend(
+            onboarding_agent_lines(
+                &dashboard.config,
+                dashboard.installed_agents.as_deref(),
+                settings_key.as_deref(),
+            )
+            .into_iter()
+            .map(Line::raw),
+        );
+    }
+    if dashboard.config.targets.is_empty() {
+        lines.push(Line::raw(format!(
+            "No target is set up yet. {} to add one.",
+            open_settings(settings_key.as_deref())
+        )));
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Make room for your next idea.",
-                theme::title(true),
-            )),
-            Line::raw(""),
-            Line::raw(format!("Settings can create {missing} from this machine.")),
-            Line::raw(match dashboard.first_key_label(crate::CommandId::OpenConfig) {
-                Some(key) => format!(
-                    "Press {key} for Settings to add accounts or connections. Local runtimes are checked automatically."
-                ),
-                None => "Open Settings to add accounts or connections. Local runtimes are checked automatically."
-                    .to_owned(),
-            }),
-        ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(theme::panel(false).title(format!(" {} Get started ", theme::glyphs().spark))),
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(theme::panel(false).title(format!(" {} Get started ", theme::glyphs().spark))),
         area,
     );
+}
+
+/// "Press ctrl+b s for Settings", or the palette route when no key opens
+/// Settings.
+fn open_settings(settings_key: Option<&str>) -> String {
+    match settings_key {
+        Some(key) => format!("Press {key} for Settings"),
+        None => "Open Settings from the command palette".to_owned(),
+    }
+}
+
+/// What the Get started panel says about agent profiles when none is
+/// enabled. It states only what is known: the look for installed agents
+/// decides between "none was found" and naming what was found, and before
+/// that look answers the panel says nothing about the machine (launch finding
+/// R13-4).
+fn onboarding_agent_lines(
+    config: &mj_core::config::Config,
+    installed: Option<&[mj_core::config::HarnessKind]>,
+    settings_key: Option<&str>,
+) -> Vec<String> {
+    let settings = open_settings(settings_key);
+    if !config.profiles.is_empty() {
+        return vec![
+            "Every agent profile is turned off.".to_owned(),
+            format!("{settings} to turn one on."),
+        ];
+    }
+    match installed {
+        None => vec![
+            "No agent profile is set up yet.".to_owned(),
+            format!("{settings} to add one."),
+        ],
+        Some([]) => vec![
+            "No coding agent was found on this machine.".to_owned(),
+            format!(
+                "Install {}, and sign in to it once.",
+                mj_core::config::HarnessKind::every_display_name_or()
+            ),
+            match settings_key {
+                Some(key) => format!("Then press {key} for Settings and choose Detect profiles."),
+                None => "Then open Settings from the command palette and choose Detect profiles."
+                    .to_owned(),
+            },
+            format!("How to install one: {NO_AGENT_HELP_URL}"),
+        ],
+        Some(found) => vec![
+            format!(
+                "Found on this machine: {}.",
+                found
+                    .iter()
+                    .map(|kind| kind.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            format!(
+                "{settings} and choose Detect profiles to add {}.",
+                if found.len() == 1 { "it" } else { "them" }
+            ),
+        ],
+    }
 }
 
 #[cfg(test)]

@@ -224,6 +224,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<mj_tui::SetupDetection, String>,
     },
+    /// The coding agents installed on this machine, for the Get started
+    /// panel of a dashboard with no agent profile.
+    InstalledAgents(std::result::Result<Vec<mj_core::config::HarnessKind>, String>),
     BuildCachePreviewed {
         generation: u64,
         key: serde_json::Value,
@@ -1088,6 +1091,12 @@ impl DashboardContext {
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }
+            DashboardIoUpdate::InstalledAgents(result) => match result {
+                Ok(agents) => self.dashboard.set_installed_agents(agents),
+                // The panel then keeps saying only that no profile is set
+                // up, which stays true.
+                Err(error) => tracing::warn!(%error, "could not look for installed coding agents"),
+            },
             DashboardIoUpdate::SetupSaved { generation, result } => {
                 let result = result.map(Config::with_local_targets);
                 if let Ok(config) = &result {

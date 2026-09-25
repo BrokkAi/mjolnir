@@ -1638,6 +1638,20 @@ impl DashboardContext {
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();
         context.request_quota_refresh();
+        // Without an agent profile the dashboard opens on the Get started
+        // panel, which says what a look at this machine found.
+        if context
+            .controller
+            .config
+            .enabled_profiles()
+            .next()
+            .is_none()
+        {
+            io::spawn_installed_agent_discovery(
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         Ok(Some(context))
     }
 }
