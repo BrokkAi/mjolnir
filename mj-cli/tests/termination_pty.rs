@@ -381,10 +381,13 @@ image = "ubuntu:24.04"
             .environment
             .insert("PATH".into(), tools.to_string_lossy().into_owned());
         config.targets.clear();
-        config.targets.insert(
-            "localhost".into(),
-            mj_core::config::TargetTemplate::LocalBare,
-        );
+        // Exercise target selection even when the host has no container engines.
+        // With just one usable target, the wizard correctly skips that step.
+        for id in ["localhost", "localhost-alternative"] {
+            config
+                .targets
+                .insert(id.into(), mj_core::config::TargetTemplate::LocalBare);
+        }
         config.save_to(&path).unwrap();
     }
     let seeded_workspace = pending_session.then(|| {
