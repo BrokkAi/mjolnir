@@ -417,7 +417,7 @@ pub(super) async fn reconcile_skills(
         return Ok(false);
     }
     let installed = client
-        .install_skills(&canonical.encode(mj_core::skills::SkillsArchiveFormat::Plain))
+        .install_skills(&canonical.encode(mj_core::skills::SkillsArchiveFormat::Gzip))
         .await?;
     if installed != canonical_state {
         bail!(

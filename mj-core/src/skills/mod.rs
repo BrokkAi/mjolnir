@@ -23,13 +23,22 @@ mod managed;
 pub use managed::managed_skills;
 
 /// Skills archives travel base64-encoded inside an 8 MiB relay frame. The cap
-/// keeps the encoded payload, envelope, and a credential payload comfortably
-/// inside one frame each way.
+/// applies to the archive as it is sent, so to the compressed size of a
+/// `HELSKIL2` archive, and keeps the encoded payload, envelope, and a
+/// credential payload comfortably inside one frame each way.
 pub const MAX_SKILLS_ARCHIVE_BYTES: usize = 4 * 1024 * 1024;
-/// A single skill file above this is almost certainly a checked-in binary,
-/// not a skill.
+/// A single skill file whose compressed size is above this is almost
+/// certainly a checked-in binary, not a skill. The size is measured by
+/// compressing the file alone. A file of at most this many bytes fits without
+/// being measured, and a text file of several megabytes compresses well under
+/// it.
 pub const MAX_SKILLS_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SKILLS_FILES: usize = 1024;
+/// The uncompressed size of a whole skills tree, as its `HELSKIL1` encoding.
+/// Real skills reach the compressed archive limit long before this one. It
+/// stops a small compressed archive from inflating into more memory than a
+/// worker should spend, and a file larger than this is never read.
+pub const MAX_SKILLS_TREE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An archive whose entries are stored as they are.
 const PLAIN_MAGIC: &[u8; 8] = b"HELSKIL1";
@@ -39,13 +48,77 @@ const GZIP_MAGIC: &[u8; 8] = b"HELSKIL2";
 
 /// How an archive is written for the wire. Both formats carry the same
 /// entries, and an archive's fingerprint does not depend on which one carries
-/// it.
+/// it. Each format has its own size limits, applied when a tree is collected
+/// for it and again when an archive is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillsArchiveFormat {
-    /// `HELSKIL1`: every file stored as it is.
+    /// `HELSKIL1`: every file stored as it is. The per-file and per-archive
+    /// limits apply to raw sizes.
     Plain,
     /// `HELSKIL2`: the `HELSKIL1` body, gzip-compressed at the default level.
+    /// The per-file and per-archive limits apply to compressed sizes.
     Gzip,
+}
+
+impl SkillsArchiveFormat {
+    /// Why a file of `len` bytes cannot travel in this format, judged before
+    /// reading it.
+    fn size_problem(self, len: u64) -> Option<String> {
+        match self {
+            Self::Plain => (len > MAX_SKILLS_FILE_BYTES).then(|| {
+                format!(
+                    "is {len} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit of an uncompressed skills archive"
+                )
+            }),
+            Self::Gzip => (len > MAX_SKILLS_TREE_BYTES).then(|| {
+                format!(
+                    "is {len} bytes, above the {MAX_SKILLS_TREE_BYTES} byte limit for a whole uncompressed skills tree"
+                )
+            }),
+        }
+    }
+
+    /// Why a file holding `bytes` cannot travel in this format.
+    fn content_problem(self, bytes: &[u8]) -> Option<String> {
+        let len = bytes.len() as u64;
+        if let Some(problem) = self.size_problem(len) {
+            return Some(problem);
+        }
+        if self == Self::Plain || len <= MAX_SKILLS_FILE_BYTES {
+            return None;
+        }
+        let compressed = gzip_len(|encoder| encoder.write_all(bytes));
+        (compressed > MAX_SKILLS_FILE_BYTES).then(|| {
+            format!(
+                "is {len} bytes and compresses to {compressed} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit"
+            )
+        })
+    }
+}
+
+/// Bytes gzip writes, at the archive's level, for what `write` puts into it.
+fn gzip_len(
+    write: impl FnOnce(&mut flate2::write::GzEncoder<ByteCount>) -> std::io::Result<()>,
+) -> u64 {
+    let mut encoder = flate2::write::GzEncoder::new(ByteCount(0), Compression::default());
+    write(&mut encoder)
+        .and_then(|()| encoder.finish())
+        .expect("counting bytes cannot fail")
+        .0
+}
+
+/// A writer that keeps only the number of bytes written to it.
+struct ByteCount(u64);
+
+impl Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Non-secret metadata about one copy of a skills tree. Fingerprints compare
@@ -125,6 +198,36 @@ impl SkillsArchive {
                 .sum::<usize>()
     }
 
+    /// Fail unless this archive can travel in `format`. `tree` names the tree
+    /// in the error.
+    fn ensure_fits(&self, format: SkillsArchiveFormat, tree: &str) -> Result<()> {
+        let plain = self.plain_len();
+        match format {
+            SkillsArchiveFormat::Plain => {
+                if plain > MAX_SKILLS_ARCHIVE_BYTES {
+                    bail!(
+                        "{tree} encodes to {plain} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit of an uncompressed skills archive"
+                    );
+                }
+            }
+            SkillsArchiveFormat::Gzip => {
+                if plain as u64 > MAX_SKILLS_TREE_BYTES {
+                    bail!(
+                        "{tree} is {plain} bytes uncompressed, above the {MAX_SKILLS_TREE_BYTES} byte limit"
+                    );
+                }
+                let compressed =
+                    GZIP_MAGIC.len() as u64 + gzip_len(|encoder| self.write_body(encoder));
+                if compressed > MAX_SKILLS_ARCHIVE_BYTES as u64 {
+                    bail!(
+                        "{tree} compresses to {compressed} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Everything an archive holds after its magic: the entry count, then
     /// each entry's path and contents, each preceded by its length.
     fn write_body(&self, out: &mut impl Write) -> std::io::Result<()> {
@@ -152,17 +255,17 @@ impl SkillsArchive {
         let mut cursor = Cursor(bytes);
         let magic = cursor.take(PLAIN_MAGIC.len())?;
         if magic == PLAIN_MAGIC {
-            Self::decode_body(cursor.rest())
+            Self::decode_body(cursor.rest(), SkillsArchiveFormat::Plain)
         } else if magic == GZIP_MAGIC {
-            // Inflated, the archive has the limit a `HELSKIL1` archive has.
-            let limit = MAX_SKILLS_ARCHIVE_BYTES - PLAIN_MAGIC.len();
-            Self::decode_body(&inflate(cursor.rest(), limit as u64)?)
+            let limit = MAX_SKILLS_TREE_BYTES - PLAIN_MAGIC.len() as u64;
+            Self::decode_body(&inflate(cursor.rest(), limit)?, SkillsArchiveFormat::Gzip)
         } else {
             bail!("skills archive has a bad magic header");
         }
     }
 
-    fn decode_body(body: &[u8]) -> Result<Self> {
+    /// Parse the body of an archive that arrived in `format`.
+    fn decode_body(body: &[u8], format: SkillsArchiveFormat) -> Result<Self> {
         let mut cursor = Cursor(body);
         let count = cursor.u32()? as usize;
         if count > MAX_SKILLS_FILES {
@@ -183,7 +286,10 @@ impl SkillsArchive {
             }
             let data_len = usize::try_from(cursor.u64()?)
                 .map_err(|_| anyhow::anyhow!("skills archive entry length overflows usize"))?;
-            if data_len as u64 > MAX_SKILLS_FILE_BYTES {
+            // The per-file limit of a compressed archive is on each file's
+            // compressed size, which only compressing the file again could
+            // check. Its entries are bounded by the inflated size instead.
+            if format == SkillsArchiveFormat::Plain && data_len as u64 > MAX_SKILLS_FILE_BYTES {
                 bail!(
                     "skills archive entry {path} is {data_len} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit"
                 );
@@ -238,8 +344,10 @@ enum Links {
 /// ([`HarnessKind::harness_owned_skill_paths`]), such as the skills Claude
 /// Code syncs from the user's claude.ai account: the harness keeps its own
 /// copy current in every home, so Mjolnir neither compares nor copies it.
+///
+/// The tree is collected for the compressed format a current worker reads.
 pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
-    collect(kind, home, Links::Skip)
+    collect(kind, home, Links::Skip, SkillsArchiveFormat::Gzip)
 }
 
 /// Snapshot a profile home's synced skills trees the way launch staging copies
@@ -247,10 +355,28 @@ pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
 /// directory that links back into itself. A session whose home was staged
 /// from this profile then fingerprints the same as this archive.
 pub fn collect_profile_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
-    collect(kind, home, Links::Follow)
+    collect(kind, home, Links::Follow, SkillsArchiveFormat::Gzip)
 }
 
-fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive> {
+fn collect(
+    kind: HarnessKind,
+    home: &Path,
+    links: Links,
+    format: SkillsArchiveFormat,
+) -> Result<SkillsArchive> {
+    let archive = collect_files(kind, home, links, format)?;
+    archive.ensure_fits(format, &format!("skills tree under {}", home.display()))?;
+    Ok(archive)
+}
+
+/// Every file of the synced trees that can travel in `format` on its own,
+/// without the limits on the whole archive.
+fn collect_files(
+    kind: HarnessKind,
+    home: &Path,
+    links: Links,
+    format: SkillsArchiveFormat,
+) -> Result<SkillsArchive> {
     let mut entries = Vec::new();
     for dir in kind.synced_skill_dirs() {
         let root = home.join(dir);
@@ -259,21 +385,14 @@ fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive
         }
         let walk = Walk {
             links,
+            format,
             harness_owned: kind.harness_owned_skill_paths(),
         };
         collect_tree(&root, dir, &mut entries, walk, &[])
             .with_context(|| format!("collect skills from {}", root.display()))?;
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let archive = SkillsArchive { entries };
-    let encoded = archive.plain_len();
-    if encoded > MAX_SKILLS_ARCHIVE_BYTES {
-        bail!(
-            "skills tree under {} encodes to {encoded} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
-            home.display(),
-        );
-    }
-    Ok(archive)
+    Ok(SkillsArchive { entries })
 }
 
 /// The skills tree a session gets: the user's own skills from `home`, plus the
@@ -284,7 +403,8 @@ fn collect(kind: HarnessKind, home: &Path, links: Links) -> Result<SkillsArchive
 /// credential-sync push both compute the tree this way; if they disagreed, the
 /// first reconciliation after launch would wipe whatever the other installed.
 pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
-    let collected = collect_profile_skills(kind, home)?;
+    let format = SkillsArchiveFormat::Gzip;
+    let collected = collect_files(kind, home, Links::Follow, format)?;
     let mut entries = collected.entries;
     for entry in managed_skills(kind) {
         match entries.binary_search_by(|existing| existing.path.cmp(&entry.path)) {
@@ -303,13 +423,10 @@ pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
         bail!("skills tree has more than {MAX_SKILLS_FILES} files");
     }
     let archive = SkillsArchive { entries };
-    let encoded = archive.plain_len();
-    if encoded > MAX_SKILLS_ARCHIVE_BYTES {
-        bail!(
-            "skills tree under {} encodes to {encoded} bytes with managed skills, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
-            home.display(),
-        );
-    }
+    archive.ensure_fits(
+        format,
+        &format!("skills tree under {} with managed skills", home.display()),
+    )?;
     Ok(archive)
 }
 
@@ -317,6 +434,8 @@ pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
 #[derive(Debug, Clone, Copy)]
 struct Walk {
     links: Links,
+    /// The format the tree is collected for, which decides the per-file limit.
+    format: SkillsArchiveFormat,
     /// Home-relative paths the harness maintains itself; the walk leaves them
     /// out ([`HarnessKind::harness_owned_skill_paths`]).
     harness_owned: &'static [&'static str],
@@ -383,14 +502,8 @@ fn collect_tree(
         // syncing. Both sides of the sync skip it the same way, so their
         // fingerprints still agree. A session keeps the copy staging gave it
         // until a later push rebuilds the tree from the archive without it.
-        if metadata.len() > MAX_SKILLS_FILE_BYTES {
-            skip_skill_file(
-                &path,
-                &format!(
-                    "is {} bytes, above the {MAX_SKILLS_FILE_BYTES} byte limit",
-                    metadata.len()
-                ),
-            );
+        if let Some(problem) = walk.format.size_problem(metadata.len()) {
+            skip_skill_file(&path, &problem);
             continue;
         }
         let bytes = match std::fs::read(&path) {
@@ -400,6 +513,10 @@ fn collect_tree(
                 continue;
             }
         };
+        if let Some(problem) = walk.format.content_problem(&bytes) {
+            skip_skill_file(&path, &problem);
+            continue;
+        }
         entries.push(SkillsEntry {
             path: relative,
             bytes,
@@ -962,33 +1079,167 @@ mod tests {
         assert!(SkillsArchive::decode(&oversized).is_err());
     }
 
+    /// `len` bytes that gzip cannot shrink.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        getrandom::fill(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// `len` bytes of generated HTML, text that compresses well.
+    fn html(len: usize) -> Vec<u8> {
+        let mut page = b"<!doctype html>\n<table>\n".to_vec();
+        let mut row = 0u64;
+        while page.len() < len {
+            page.extend_from_slice(
+                format!(
+                    "<tr><td class=\"month\">{}-{:02}</td><td class=\"count\">{}.{}</td></tr>\n",
+                    1749 + row / 12,
+                    row % 12 + 1,
+                    row * 7919 % 300,
+                    row % 10
+                )
+                .as_bytes(),
+            );
+            row += 1;
+        }
+        page.truncate(len);
+        page
+    }
+
+    fn paths(archive: &SkillsArchive) -> Vec<&str> {
+        archive
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect()
+    }
+
     /// Launch finding R4-8: one 2.2 MB demo file under a skill made every
-    /// worker fail `skills_state` once a minute. The file is skipped and the
-    /// rest of the tree still collects.
+    /// worker fail `skills_state` once a minute. A file that stays above the
+    /// limit once compressed is skipped, reported, and the rest of the tree
+    /// still collects.
     #[test]
-    fn an_oversized_skill_file_is_skipped_rather_than_failing_the_tree() {
+    fn an_incompressible_file_over_the_limit_is_skipped_rather_than_failing_the_tree() {
         let home = tempfile::tempdir().unwrap();
         write(home.path(), "skills/viz/SKILL.md", b"viz");
         write(
             home.path(),
-            "skills/viz/demos/large.html",
-            &vec![b'x'; usize::try_from(MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+            "skills/viz/demos/large.bin",
+            &incompressible(1_200_000),
         );
 
         let archive = collect_skills(HarnessKind::Claude, home.path()).unwrap();
 
-        let paths = archive
-            .entries()
-            .iter()
-            .map(|entry| entry.path.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(paths, vec!["skills/viz/SKILL.md"]);
+        assert_eq!(paths(&archive), vec!["skills/viz/SKILL.md"]);
+        assert!(
+            !first_report_of_skipped_skill(&home.path().join("skills/viz/demos/large.bin")),
+            "collection reports the file it leaves out"
+        );
         // The next poll collects the same tree, so the fingerprint is stable.
         assert_eq!(
             collect_skills(HarnessKind::Claude, home.path())
                 .unwrap()
                 .fingerprint(),
             archive.fingerprint()
+        );
+    }
+
+    /// An HTML page the size of the R4-8 demo file, 2,208,818 bytes, is well
+    /// under the per-file limit once compressed.
+    #[test]
+    fn a_large_file_that_compresses_under_the_limit_is_collected() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/viz/SKILL.md", b"viz");
+        let page = html(2_208_818);
+        write(home.path(), "skills/viz/demos/sunspot-pretty.html", &page);
+
+        let archive = collect_skills(HarnessKind::Claude, home.path()).unwrap();
+
+        assert_eq!(
+            paths(&archive),
+            vec![
+                "skills/viz/SKILL.md",
+                "skills/viz/demos/sunspot-pretty.html"
+            ]
+        );
+        let session = session_skills(HarnessKind::Claude, home.path()).unwrap();
+        assert!(session.entries().iter().any(|entry| entry.bytes == page));
+        let wire = session.encode(SkillsArchiveFormat::Gzip);
+        assert!(wire.len() <= MAX_SKILLS_ARCHIVE_BYTES);
+        assert_eq!(SkillsArchive::decode(&wire).unwrap(), session);
+    }
+
+    /// The tree limit counts compressed bytes: 6 MB of text fits.
+    #[test]
+    fn a_tree_over_the_limit_raw_but_under_it_compressed_is_collected() {
+        let home = tempfile::tempdir().unwrap();
+        for index in 0..6 {
+            write(
+                home.path(),
+                &format!("skills/viz/demos/page-{index}.html"),
+                &html(1_000_000),
+            );
+        }
+
+        let archive = session_skills(HarnessKind::Claude, home.path()).unwrap();
+
+        assert!(archive.encode(SkillsArchiveFormat::Plain).len() > 6_000_000);
+        let wire = archive.encode(SkillsArchiveFormat::Gzip);
+        assert!(wire.len() <= MAX_SKILLS_ARCHIVE_BYTES);
+        assert_eq!(SkillsArchive::decode(&wire).unwrap(), archive);
+        assert_eq!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .entries()
+                .len(),
+            6
+        );
+    }
+
+    /// Five files of 1 MiB that do not compress are 5 MiB on the wire, which
+    /// is still too much for one archive. The tree is not trimmed.
+    #[test]
+    fn an_incompressible_tree_over_the_limit_still_fails() {
+        let home = tempfile::tempdir().unwrap();
+        for index in 0..5 {
+            write(
+                home.path(),
+                &format!("skills/blobs/blob-{index}"),
+                &incompressible(usize::try_from(MAX_SKILLS_FILE_BYTES).unwrap()),
+            );
+        }
+
+        for error in [
+            collect_skills(HarnessKind::Claude, home.path()).unwrap_err(),
+            session_skills(HarnessKind::Claude, home.path()).unwrap_err(),
+        ] {
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!("above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit")),
+                "{message}"
+            );
+        }
+    }
+
+    /// A compressed archive small enough for the wire can still inflate to
+    /// far more; the reader stops at the uncompressed tree limit.
+    #[test]
+    fn decode_refuses_an_archive_that_inflates_past_the_tree_limit() {
+        let mut bomb =
+            flate2::write::GzEncoder::new(GZIP_MAGIC.to_vec(), flate2::Compression::fast());
+        let zeros = vec![0u8; 1024 * 1024];
+        for _ in 0..=MAX_SKILLS_TREE_BYTES / (1024 * 1024) {
+            bomb.write_all(&zeros).unwrap();
+        }
+        let bomb = bomb.finish().unwrap();
+        assert!(bomb.len() <= MAX_SKILLS_ARCHIVE_BYTES);
+
+        let error = SkillsArchive::decode(&bomb).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("inflates to more than"),
+            "{error:#}"
         );
     }
 

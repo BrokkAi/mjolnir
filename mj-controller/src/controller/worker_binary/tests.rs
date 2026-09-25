@@ -2873,7 +2873,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
 /// through the link; the session's worker then failed every skills poll on the
 /// large file, and the sync's own copy of the home did not read through the
 /// link at all. Stage and sync now agree, so the first sync neither fails nor
-/// removes the linked skill.
+/// removes the linked skill. A large file that compresses under the per-file
+/// limit is part of both trees; one that does not is left out of both.
 #[cfg(unix)]
 #[test]
 fn staging_and_sync_agree_on_linked_and_oversized_skills() {
@@ -2881,10 +2882,14 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     std::fs::create_dir_all(outside.path().join("viz/demos")).unwrap();
     std::fs::write(outside.path().join("viz/SKILL.md"), "viz skill\n").unwrap();
     std::fs::write(
-        outside.path().join("viz/demos/large.html"),
-        vec![b'x'; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+        outside.path().join("viz/demos/sunspot-pretty.html"),
+        "<tr><td>1749-01</td><td>96.7</td></tr>\n".repeat(60_000),
     )
     .unwrap();
+    let mut incompressible =
+        vec![0; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 200_000];
+    getrandom::fill(&mut incompressible).unwrap();
+    std::fs::write(outside.path().join("viz/demos/large.bin"), incompressible).unwrap();
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review skill\n").unwrap();
@@ -2914,10 +2919,17 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         "the linked skill is part of the canonical tree"
     );
     assert!(
+        expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/demos/sunspot-pretty.html"),
+        "the large page compresses under the limit and is part of both sides"
+    );
+    assert!(
         !expected
             .entries()
             .iter()
-            .any(|entry| entry.path == "skills/viz/demos/large.html"),
+            .any(|entry| entry.path == "skills/viz/demos/large.bin"),
         "the oversized file is left out of both sides"
     );
 }
