@@ -1116,8 +1116,8 @@ fn a_conversion_preview_reports_a_managed_worktree_as_not_retained() {
 }
 
 #[test]
-fn a_conversion_preview_refuses_a_dirty_submodule() {
-    let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+fn a_conversion_preview_refuses_a_dirty_submodule_but_not_an_unregistered_gitlink() {
+    let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     let submodule = committed_repository();
     test_git(
         checkout.path(),
@@ -1130,6 +1130,19 @@ fn a_conversion_preview_refuses_a_dirty_submodule() {
             "sub",
         ],
     );
+    // A nested repository committed without `git submodule add` leaves a
+    // gitlink that `.gitmodules` does not register.
+    let nested = committed_repository();
+    let nested_head = test_git(nested.path(), &["rev-parse", "HEAD"]);
+    test_git(
+        checkout.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{nested_head},vendor/nested"),
+        ],
+    );
     test_git(checkout.path(), &["commit", "-m", "add submodule"]);
     std::fs::write(checkout.path().join("sub/nested/file.txt"), "dirty\n").unwrap();
     let config = resume_compatibility_config();
@@ -1139,9 +1152,15 @@ fn a_conversion_preview_refuses_a_dirty_submodule() {
     let error = raw_conversion_preview(&session, &conversion, &ProcessExecutor).unwrap_err();
 
     assert!(
-        format!("{error:#}").contains("dirty submodule"),
+        format!("{error:#}").contains("submodule sub has uncommitted changes"),
         "{error:#}"
     );
+    test_git(
+        &checkout.path().join("sub"),
+        &["checkout", "--", "nested/file.txt"],
+    );
+    raw_conversion_preview(&session, &conversion, &FixtureRemoteExecutor { remote })
+        .expect("an unregistered gitlink never blocks the move");
 }
 #[test]
 fn a_raw_checkout_on_an_ssh_host_cannot_convert() {

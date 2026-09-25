@@ -1887,6 +1887,47 @@ fn a_checkpoint_excludes_everything_the_reviewer_owns() {
     );
 }
 
+/// R18: a checkout that records a nested repository as a bare gitlink, with
+/// no `.gitmodules` entry, could not be suspended: the submodule check failed
+/// on a gitlink Git has no URL for. The gitlink is now recorded as the
+/// commit it points to.
+#[test]
+fn a_gitlink_without_a_gitmodules_entry_does_not_block_the_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let nested = repository.join("vendor/tool");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    git(
+        &nested,
+        &[
+            "-c",
+            "user.email=hel@example.test",
+            "-c",
+            "user.name=Hel Test",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "tool",
+        ],
+    );
+    let head = git(&nested, &["rev-parse", "HEAD"]);
+    git(
+        &repository,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},vendor/tool"),
+        ],
+    );
+    git(&repository, &["commit", "-q", "-m", "record the tool"]);
+
+    export_checkpoint(&spec).expect("an unregistered gitlink is recorded, not refused");
+}
+
 #[test]
 fn raw_project_export_keeps_git_metadata_without_git_contents() {
     let temp = tempfile::tempdir().unwrap();
