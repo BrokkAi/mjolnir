@@ -34,9 +34,12 @@ pub(super) async fn restore_plan_execution_mode(
         permission_sent.await.unwrap_or(false),
         "Claude's plan permission response could not be delivered"
     );
+    // Only Claude's plan approval leads here, and nothing may stand in for
+    // bypassPermissions.
     enforce_execution_mode(
         connection,
         &session_id,
+        HarnessKind::Claude,
         "bypassPermissions",
         &mut state.config_options,
         &mut state.modes,

@@ -330,20 +330,9 @@ pub(super) async fn serve_session(
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
-    //
     let enforcement = spec.harness.execution_enforcement(spec.execution_policy);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        enforce_execution_mode(
-            connection,
-            &session_id,
-            desired_mode,
-            &mut config_options,
-            &mut modes,
-        )
-        .await?;
-    }
     // Grok Build publishes model selection through its legacy catalogue. Keep
     // any standard selectors it also returns while projecting model/effort
     // into the shape the rest of Hel reads.
@@ -351,7 +340,13 @@ pub(super) async fn serve_session(
         grok::merge_config_options(&mut config_options, state);
     }
     // Model selection can replace the effort catalogue. Both must be
-    // restored before SessionConfigured releases queued prompts.
+    // restored before SessionConfigured releases queued prompts. They are
+    // restored before the execution mode, because a harness judges a mode
+    // against the model the session runs: the Claude adapter answers Auto on
+    // a model without it with Accept edits. On `session/new` that adapter
+    // describes its default model until a model is selected, whatever model
+    // Claude Code started on, so a mode asked for first was judged against
+    // the wrong model and Claude Code refused it (R8-2).
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
     {
         let accepted = spec
@@ -427,16 +422,61 @@ pub(super) async fn serve_session(
                 "kept the bridge's value after clear because the reported value could not be restored"
             );
         }
-        if let Some(mode) = &reset.mode {
-            enforce_execution_mode(
-                connection,
-                &session_id,
-                mode,
-                &mut config_options,
-                &mut modes,
+    }
+    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+        let enforced = enforce_execution_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            desired_mode,
+            &mut config_options,
+            &mut modes,
+        )
+        .await;
+        if let Err(error) = enforced {
+            // A new session the harness refuses the mode for keeps the
+            // harness's own mode rather than failing the worker, which left a
+            // resumed session suspended on every retry (R8-2). A reloaded
+            // session still fails: it has history, opened in this mode before.
+            let Some(refusal) = (!resumed).then(|| mode_refusal(&error)).flatten() else {
+                return Err(error);
+            };
+            tracing::warn!(
+                harness = ?spec.harness,
+                mode = desired_mode,
+                error = format!("{error:#}"),
+                "the harness refused the execution mode for a new session"
+            );
+            emit_runtime_event(
+                events,
+                RuntimeEvent::Warning {
+                    message: refused_mode_warning(
+                        spec.harness,
+                        desired_mode,
+                        &refusal,
+                        modes.as_ref(),
+                        &config_options,
+                    ),
+                },
             )
             .await?;
         }
+    }
+    if let Some(mode) = spec
+        .clear_context_request
+        .as_ref()
+        .or(spec.context_restore.as_ref())
+        .and_then(|reset| reset.mode.as_ref())
+    {
+        enforce_execution_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            mode,
+            &mut config_options,
+            &mut modes,
+        )
+        .await?;
     }
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
