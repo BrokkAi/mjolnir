@@ -665,7 +665,7 @@ pub(crate) fn merged_resume_rows(
         rows.push(ResumeRow {
             key: ResumeRowKey::Hel(session.id.clone()),
             profile_id: session.last_profile.clone(),
-            title: session.display_title().to_owned(),
+            title: session.listed_title().to_owned(),
             origin: session.project_target(config, &session.target_template_id),
             details,
             last_activity_ms,
@@ -933,7 +933,7 @@ impl DashboardState {
                 ResumeRow {
                     key: ResumeRowKey::Live(session.id.clone()),
                     profile_id: session.last_profile.clone(),
-                    title: session.display_title().to_owned(),
+                    title: session.listed_title().to_owned(),
                     origin: workspace.to_owned(),
                     details: format!(
                         "{}{}",

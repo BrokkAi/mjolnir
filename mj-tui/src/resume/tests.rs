@@ -720,6 +720,55 @@ fn the_destroy_button_replaces_the_d_key() {
     assert_eq!(confirm.session_name.as_deref(), Some("ACP pretty name"));
 }
 
+/// Launch finding R6-4: the Mjolnir tab listed a suspended session its
+/// harness had not named by its id (tmux/022), while the Destroy dialog and
+/// the notices called it "project via fake". The Mjolnir and Live tabs now
+/// list the title every other listing uses.
+#[test]
+fn a_session_its_harness_has_not_named_is_listed_by_its_created_title() {
+    let unnamed = |mut session: SessionRecord, id: &str, title: &str| {
+        session.id = id.into();
+        session.title = title.into();
+        session.acp_session_title = None;
+        session.session_title_override = None;
+        session.native_session_id = None;
+        session
+    };
+    let stopped = unnamed(
+        stopped_session(),
+        "f20058f83046cc4943a71686253e3661",
+        "project via fake",
+    );
+    let running = unnamed(
+        running_session(),
+        "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "sibling via fake",
+    );
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped, running]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    assert_eq!(titles(&rows(&dashboard)), ["sibling via fake"]);
+    let live = drawn(&mut dashboard, 140, 40);
+    let row = live
+        .iter()
+        .find(|line| line.contains("sibling via fake"))
+        .unwrap_or_else(|| panic!("no Live row names the session:\n{}", live.join("\n")));
+    assert!(!row.contains("0a1b2c3d4e5f"), "{row}");
+
+    switch_to_hel(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["project via fake"]);
+    let hel = drawn(&mut dashboard, 140, 40);
+    let row = hel
+        .iter()
+        .find(|line| line.contains("project via fake"))
+        .unwrap_or_else(|| panic!("no Mjolnir row names the session:\n{}", hel.join("\n")));
+    assert!(!row.contains("f20058f83046"), "{row}");
+}
+
 /// The active tab is highlighted whether or not the strip has focus, so
 /// the current tab is visible at a glance.
 #[test]
