@@ -16,7 +16,7 @@ use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, PromptRequest, PromptResponse, PushedBranch, ResumeSessionRequest,
     ResumeSessionResponse, SessionListResponse, StartSessionRequest, StartSessionResponse,
-    TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
+    SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -541,22 +541,37 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
+    /// Ask the daemon to suspend a session. The answer says how many
+    /// sub-agents the suspend stops, and warns when some of them have not
+    /// handed back. An older daemon answers with no body, which reads as a
+    /// suspend that stops none.
     pub(crate) async fn suspend(
         &self,
         session_id: &str,
         acknowledge_unpublished_work: bool,
-    ) -> Result<()> {
-        self.send(
-            self.http
-                .post(self.url(&format!("/sessions/{session_id}/suspend")))
-                .json(&serde_json::json!({
-                    "acknowledge_active_subagents": true,
-                    "acknowledge_unpublished_work": acknowledge_unpublished_work,
-                }))
-                .timeout(REQUEST_TIMEOUT),
-        )
-        .await
-        .map(|_| ())
+    ) -> Result<SuspendSessionResponse> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/suspend")))
+                    .json(&serde_json::json!({
+                        // An older daemon refuses to suspend a parent with
+                        // active sub-agents without this; a current one
+                        // ignores it.
+                        "acknowledge_active_subagents": true,
+                        "acknowledge_unpublished_work": acknowledge_unpublished_work,
+                    }))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        let body = response.bytes().await.context("read the suspend answer")?;
+        if body.is_empty() {
+            return Ok(SuspendSessionResponse {
+                session_id: session_id.to_owned(),
+                ..SuspendSessionResponse::default()
+            });
+        }
+        serde_json::from_slice(&body).context("read the suspend answer")
     }
 
     pub(crate) async fn destroy(&self, session_id: &str, delete_branch: bool) -> Result<()> {
@@ -929,6 +944,66 @@ mod tests {
             format!("{error:#}").contains("concurrent action limit"),
             "unexpected error: {error:#}"
         );
+    }
+
+    /// A suspend answers with how many sub-agents it stops and a warning for
+    /// the ones still at work. An older daemon answers with no body, which
+    /// reads as no warning; it still gets the acknowledgement it requires.
+    #[tokio::test]
+    async fn a_suspend_reads_the_sub_agent_warning_and_an_empty_answer_as_none() {
+        let answers = Arc::new(Mutex::new(vec![
+            String::new(),
+            serde_json::json!({
+                "session_id": "session-1",
+                "stopped_subagents": 2,
+                "subagents_not_handed_back": 1,
+                "warning": "1 sub-agent has not handed back; suspending stops it",
+            })
+            .to_string(),
+        ]));
+        let bodies: Seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions/{session_id}/suspend",
+                axum::routing::post(
+                    |State((answers, bodies)): State<(Arc<Mutex<Vec<String>>>, Seen)>,
+                     body: String| async move {
+                        bodies.lock().unwrap().push(body);
+                        (StatusCode::ACCEPTED, answers.lock().unwrap().pop().unwrap())
+                    },
+                ),
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let mut response = next.run(request).await;
+                    response
+                        .headers_mut()
+                        .insert(API_VERSION_HEADER, "1".parse().unwrap());
+                    response
+                },
+            ))
+            .with_state((answers, bodies.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = ApiClient::new(url, "secret-token".into()).unwrap();
+
+        let warned = client.suspend("session-1", false).await.unwrap();
+        assert_eq!(warned.stopped_subagents, 2);
+        assert_eq!(warned.subagents_not_handed_back, 1);
+        assert_eq!(
+            warned.warning.as_deref(),
+            Some("1 sub-agent has not handed back; suspending stops it")
+        );
+        let older = client.suspend("session-1", true).await.unwrap();
+        assert_eq!(older.session_id, "session-1");
+        assert_eq!(older.warning, None);
+        for body in bodies.lock().unwrap().iter() {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(body["acknowledge_active_subagents"], true, "{body}");
+        }
     }
 
     #[tokio::test]

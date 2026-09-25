@@ -6397,13 +6397,17 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'suspend') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
-    const activeChildren = (session?.subagent_session_ids || [])
+    // A suspend stops the sub-agents without a checkpoint. Only the ones
+    // still at their task lose anything; an idle one has handed back.
+    const workingChildren = (session?.subagent_session_ids || [])
       .map(id => snapshot.sessions.find(item => item.id === id))
-      .filter(child => child && ['live', 'starting', 'suspending'].includes(child.lifecycle));
+      .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
+      .length;
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
       + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
-      + (activeChildren.length ? `\n\nThis also suspends ${activeChildren.length} active sub-agent(s) first.` : '');
+      + (workingChildren === 1 ? '\n\n1 sub-agent has not handed back; suspending stops it.' : '')
+      + (workingChildren > 1 ? `\n\n${workingChildren} sub-agents have not handed back; suspending stops them.` : '');
     if (!confirm(question)) return false;
   }
   if (dataset.action === 'destroy') {

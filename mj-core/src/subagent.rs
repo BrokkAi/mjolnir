@@ -670,6 +670,20 @@ pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<St
     Some(format!("{}…", kept.trim_end()))
 }
 
+/// What a person is told before a suspend stops sub-agents that have not
+/// handed back their reports. `None` when every child had handed back: those
+/// are stopped without a word, since their reports already reached the parent.
+#[must_use]
+pub fn suspend_warning(not_handed_back: usize) -> Option<String> {
+    match not_handed_back {
+        0 => None,
+        1 => Some("1 sub-agent has not handed back; suspending stops it".to_owned()),
+        count => Some(format!(
+            "{count} sub-agents have not handed back; suspending stops them"
+        )),
+    }
+}
+
 /// Whether a child had handed back its report for the parent's newest task:
 /// it is not working, a finished turn answers the parent's newest prompt, and
 /// that answer is final. The answer is the report the child handed back, or,
@@ -1156,6 +1170,19 @@ mod tests {
         let cut = task_summary(&long, None).unwrap();
         assert_eq!(cut.chars().count(), STOPPED_TASK_CHARS);
         assert!(cut.ends_with("word…"), "{cut}");
+    }
+
+    #[test]
+    fn the_suspend_warning_counts_only_children_that_have_not_handed_back() {
+        assert_eq!(suspend_warning(0), None);
+        assert_eq!(
+            suspend_warning(1).as_deref(),
+            Some("1 sub-agent has not handed back; suspending stops it")
+        );
+        assert_eq!(
+            suspend_warning(3).as_deref(),
+            Some("3 sub-agents have not handed back; suspending stops them")
+        );
     }
 
     #[test]

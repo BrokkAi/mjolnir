@@ -194,4 +194,4 @@ See [Security boundaries](/security/) for the full trust model,
 and [Troubleshooting](/troubleshooting/) when the viewer remains loopback-only
 or the desktop shell cannot open.
 
-**Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and active sub-agents. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session, environment, and recovery archive; keeping its branch does not preserve environment-only work. Closing a browser pane or tab leaves sessions running.
+**Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and about sub-agents still at work, which suspending stops. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session, environment, and recovery archive; keeping its branch does not preserve environment-only work. Closing a browser pane or tab leaves sessions running.

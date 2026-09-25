@@ -636,7 +636,7 @@ fn closing_workspace_confirms_counts_and_supports_cancellation_while_busy() {
     dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
     let rendered = draw_manager(&dashboard).join("\n");
     // Launch finding R5-10: the counts agree with their nouns, not "(s)".
-    assert!(rendered.contains("Suspend 2 sessions,"), "{rendered}");
+    assert!(rendered.contains("Suspend 2 sessions and"), "{rendered}");
     assert!(rendered.contains("Resumable histories"));
     assert!(rendered.contains("Discard 0 saved drafts"), "{rendered}");
     assert!(!rendered.contains("(s)"), "{rendered}");

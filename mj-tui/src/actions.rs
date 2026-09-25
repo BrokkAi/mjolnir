@@ -1597,22 +1597,13 @@ impl DashboardState {
             CommandId::CloseWorkspace => self.begin_workspace_command(true),
             CommandId::SuspendSession => {
                 if let Some(session) = self.selected_session() {
-                    let active_children = self
-                        .state
-                        .subagents
-                        .values()
-                        .filter(|r| r.parent_session_id == session.id)
-                        .filter(|r| {
-                            self.state
-                                .sessions
-                                .get(&r.child_session_id)
-                                .is_some_and(|s| s.state.is_active())
-                        })
-                        .count();
+                    // A suspend stops the sub-agents without a checkpoint.
+                    // Only the ones still at their task lose anything.
+                    let children_not_handed_back = self.subagents_not_handed_back(&session.id);
                     let interrupting =
                         self.attention_level(&session.id) == crate::AttentionLevel::Working;
                     let unverified_clone = session.publication_state().is_some();
-                    if !interrupting && active_children == 0 && !unverified_clone {
+                    if !interrupting && children_not_handed_back == 0 && !unverified_clone {
                         return DashboardAction::Suspend {
                             session_id: session.id.clone(),
                             acknowledge_unpublished_work: false,
@@ -1621,7 +1612,7 @@ impl DashboardState {
                     self.mode = crate::Mode::Confirm(
                         ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session.id.clone(),
-                            active_children,
+                            children_not_handed_back,
                             interrupting,
                             unverified_clone,
                         })

@@ -1036,16 +1036,24 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
-    ApiClient::connect()
+    let accepted = ApiClient::connect()
         .await?
         .suspend(session, args.acknowledge_unpublished_work)
         .await
         .map_err(name_suspend_flags)?;
     if args.json {
-        print_json(
-            &serde_json::json!({"session_id": session, "accepted": true, "operation": "suspend"}),
-        )
+        print_json(&serde_json::json!({
+            "session_id": session,
+            "accepted": true,
+            "operation": "suspend",
+            "stopped_subagents": accepted.stopped_subagents,
+            "subagents_not_handed_back": accepted.subagents_not_handed_back,
+            "warning": accepted.warning,
+        }))
     } else {
+        if let Some(warning) = &accepted.warning {
+            eprintln!("warning: {warning}");
+        }
         println!("suspension accepted for {session}");
         println!("`mj wait --session {session}` returns once the session is suspended");
         Ok(())

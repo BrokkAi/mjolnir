@@ -5233,32 +5233,37 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
 }
 
+/// A suspend stops the parent's sub-agents without a checkpoint of their own.
+/// It asks first only when one of them is still at its task, and says that
+/// suspending stops it; an idle child has handed back and stops silently.
 #[test]
-fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let mut child = running_session();
-    child.id = "child".into();
-    dashboard.state.subagents.insert(
-        child.id.clone(),
-        mj_core::subagent::SubagentRecord {
-            child_session_id: child.id.clone(),
-            parent_session_id: "session-1".into(),
-            task_name: "child task".into(),
-            profile_id: child.last_profile.clone(),
-            model: None,
-            effort: None,
-            working_directory: Default::default(),
-            initial_prompt: "inspect".into(),
-            request_key: "request".into(),
-            created_at: child.created_at.clone(),
-            noticed_turn: None,
-            handback_tool: false,
-        },
-    );
-    dashboard.state.sessions.insert(child.id.clone(), child);
-    assert_eq!(dashboard.attention_level("session-1"), AttentionLevel::Idle);
+fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    // A raw project has no clone whose publication needs confirming.
+    dashboard
+        .state
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .project_directory = Some("/srv/project".into());
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     assert_eq!(
-        chord(&mut dashboard, CommandId::SuspendSession),
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::Suspend {
+            session_id: parent.clone(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(matches!(
@@ -5266,12 +5271,20 @@ fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
         Mode::Confirm(dialog) if matches!(
             dialog.confirmation,
             crate::dialogs::Confirmation::SuspendSession {
-                active_children: 1,
+                children_not_handed_back: 1,
                 interrupting: false,
                 ..
             }
         )
     ));
+    let dialog = drawn(&mut dashboard, 120, 40).join(
+        "
+",
+    );
+    assert!(
+        dialog.contains("1 sub-agent has not handed back; suspending stops it."),
+        "{dialog}"
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None

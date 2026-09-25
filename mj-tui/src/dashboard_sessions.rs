@@ -599,6 +599,24 @@ impl DashboardState {
         }
     }
 
+    /// How many of this parent's Mjolnir sub-agents are still working or
+    /// waiting on a question. That is what the dashboard can see of a child
+    /// that has not handed back its report; a child that finished its turn is
+    /// taken to have handed it back.
+    pub(crate) fn subagents_not_handed_back(&self, parent_id: &str) -> usize {
+        self.state
+            .subagents
+            .values()
+            .filter(|record| record.parent_session_id == parent_id)
+            .filter(|record| {
+                matches!(
+                    self.own_attention_level(&record.child_session_id),
+                    AttentionLevel::Working | AttentionLevel::Waiting
+                )
+            })
+            .count()
+    }
+
     /// The first of this parent's Mjolnir sub-agents that is waiting on a
     /// question, with that question.
     pub(crate) fn subagent_question(

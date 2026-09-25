@@ -600,12 +600,15 @@ async fn suspend_session(client: &ApiClient, session_id: &str, timing: ExitTimin
     }
     // Unpublished Git work is never acknowledged on a person's behalf: the
     // daemon refuses, and the session stays live for a person to publish it.
-    client.suspend(session_id, false).await.with_context(|| {
+    let accepted = client.suspend(session_id, false).await.with_context(|| {
         format!(
             "suspend session {session_id}; it was left {}, and `mj suspend --session {session_id}` retries",
             session.state
         )
     })?;
+    if let Some(warning) = &accepted.warning {
+        tracing::warn!(%session_id, warning, "suspending a session that has sub-agents at work");
+    }
     let progress = Progress::since(&session);
     watch(client, session_id, timing, timing.finish, "suspend", |session| {
         let Some(session) = session else {

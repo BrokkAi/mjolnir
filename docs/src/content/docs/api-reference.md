@@ -502,15 +502,32 @@ POST /api/v1/sessions/{session_id}/destroy
 POST /api/v1/sessions/{session_id}/interrupt-turn
 ```
 
-These endpoints answer `202` with no content when accepted. Acceptance is not
+These endpoints answer `202` when accepted. Destroy and interrupt turn answer
+with no content; suspend answers with the body below. Acceptance is not
 completion: inspect the session's lifecycle and error, or use `mj wait` for
 suspension. An idle conversation alone says nothing about lifecycle completion.
 
-Suspend saves a verified recovery copy before releasing the environment. With
-active sub-agents, supply `{"acknowledge_active_subagents": true}` to suspend them
-first. For an independent clone whose publication is unverified, also supply
-`{"acknowledge_unpublished_work": true}` after reviewing the warning. A failed suspension reports its error and preserves recoverable resources;
-it never silently switches to destruction.
+Suspend saves a verified recovery copy before releasing the environment. It
+stops the session's active Mjolnir sub-agents first, without a recovery copy of
+their own, and suspends the session alone. A sub-agent that has not handed back
+its report loses the work it has not reported. The answer says how many
+sub-agents the suspend stops and warns about those:
+
+```json
+{
+  "session_id": "0123abcd…",
+  "stopped_subagents": 2,
+  "subagents_not_handed_back": 1,
+  "warning": "1 sub-agent has not handed back; suspending stops it"
+}
+```
+
+`warning` is left out when every stopped sub-agent had handed back. The
+`acknowledge_active_subagents` field that older clients send is accepted and
+ignored. For an independent clone whose publication is unverified, supply
+`{"acknowledge_unpublished_work": true}` after reviewing the warning. A failed
+suspension reports its error and preserves recoverable resources; it never
+silently switches to destruction.
 
 Destroy permanently removes the environment, recovery archive, and session
 record, including sub-agents. The optional `{"delete_branch": true}` body applies
