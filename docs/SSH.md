@@ -41,9 +41,10 @@ own message. A master exits 60 seconds after its last session closes, so
 `ssh` processes can outlive the daemon by that long.
 
 The control sockets live in `$XDG_RUNTIME_DIR/mjolnir/<instance>/` when that
-variable is set (`default` for the default instance), and in
-`<data dir>/ssh/` otherwise. Each instance has its own directory, so two
-daemons never share a master. A socket is named `<hash>-<shard>`, where the
+variable is set, and in `<data dir>/ssh/` otherwise. `<instance>` is
+`default` for the default instance, the name for `--instance`, and a
+16-character hash of the data directory when only `MJ_DATA_DIR` is set.
+Each instance has its own directory, so two daemons never share a master. A socket is named `<hash>-<shard>`, where the
 hash covers the destination and your `extra_args`, and the shard number counts
 the masters for that host from 0. A `<hash>-<shard>.lock` file beside each
 socket makes processes of the same instance (for example the old and new

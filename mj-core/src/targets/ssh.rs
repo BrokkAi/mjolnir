@@ -183,7 +183,7 @@ fn sharing_override() -> Option<SshSharingForTest> {
 /// The directory holding this instance's control sockets, or `None` when
 /// sharing is off.
 ///
-/// `$XDG_RUNTIME_DIR/mjolnir/<instance>` is preferred because it is short,
+/// `$XDG_RUNTIME_DIR/mjolnir/<identity>` is preferred because it is short,
 /// per-user, and on tmpfs; the instance's data directory is the fallback.
 /// Each instance gets its own directory because each daemon counts only its
 /// own sessions: two daemons sharing masters would together exceed the
@@ -202,9 +202,14 @@ fn control_socket_dir() -> Option<PathBuf> {
         if sharing_disabled(std::env::var_os(CONTROL_MASTER_ENV).as_deref()) {
             return None;
         }
+        let data_dir_override = crate::config::env_override_os("DATA_DIR").map(PathBuf::from);
+        let identity = control_dir_identity(
+            crate::config::instance_name().as_deref(),
+            data_dir_override.as_deref(),
+        );
         prepare_control_dir(default_control_dir(
             std::env::var_os("XDG_RUNTIME_DIR"),
-            crate::config::instance_name(),
+            &identity,
         ))
     })
     .clone()
@@ -212,14 +217,30 @@ fn control_socket_dir() -> Option<PathBuf> {
 
 /// Where an instance keeps its sockets when no test pins the directory.
 #[cfg(unix)]
-fn default_control_dir(runtime: Option<std::ffi::OsString>, instance: Option<String>) -> PathBuf {
+fn default_control_dir(runtime: Option<std::ffi::OsString>, identity: &str) -> PathBuf {
     match runtime {
-        Some(runtime) if !runtime.is_empty() => PathBuf::from(runtime)
-            .join("mjolnir")
-            .join(instance.as_deref().unwrap_or("default")),
+        Some(runtime) if !runtime.is_empty() => {
+            PathBuf::from(runtime).join("mjolnir").join(identity)
+        }
         // The data directory is already specific to the instance.
         _ => crate::config::data_dir().join("ssh"),
     }
+}
+
+/// The name of this instance's directory under `$XDG_RUNTIME_DIR/mjolnir`:
+/// the identity [`crate::config::instance_identity`] stamps on the
+/// instance's workers. A named instance uses its name, and a data-directory
+/// override (`MJ_DATA_DIR`, as every end-to-end lab sets) uses the
+/// fingerprint of that directory, so neither shares the default instance's
+/// masters or sweeps its lock files. The default instance keeps `default`,
+/// where its sockets have always been.
+#[cfg(unix)]
+fn control_dir_identity(instance: Option<&str>, data_dir_override: Option<&Path>) -> String {
+    if instance.is_none() && data_dir_override.is_none() {
+        return "default".to_owned();
+    }
+    let data_dir = data_dir_override.map_or_else(crate::config::data_dir, Path::to_path_buf);
+    crate::config::instance_identity_for(instance, &data_dir)
 }
 
 /// Create the socket directory 0700 and reject one whose sockets would not fit
@@ -1908,12 +1929,44 @@ mod tests {
     fn control_sockets_live_in_a_directory_per_instance() {
         let runtime = Some(std::ffi::OsString::from("/run/user/1000"));
         assert_eq!(
-            default_control_dir(runtime.clone(), Some("hel2".to_owned())),
+            default_control_dir(runtime.clone(), &control_dir_identity(Some("hel2"), None)),
             PathBuf::from("/run/user/1000/mjolnir/hel2")
         );
         assert_eq!(
-            default_control_dir(runtime, None),
+            default_control_dir(runtime, &control_dir_identity(None, None)),
             PathBuf::from("/run/user/1000/mjolnir/default")
+        );
+    }
+
+    /// A daemon isolated only by `MJ_DATA_DIR` (every luna lab) is another
+    /// instance, so it must not share the default instance's masters or
+    /// sweep its lock files (launch finding R5-1). Its directory is named by
+    /// the same fingerprint `instance_identity` stamps on its workers.
+    #[test]
+    #[cfg(unix)]
+    fn a_data_directory_override_gets_its_own_socket_directory() {
+        let runtime = Some(std::ffi::OsString::from("/run/user/1000"));
+        let lab = Path::new("/tmp/lab-a/data");
+        let other_lab = Path::new("/tmp/lab-b/data");
+        let lab_dir = default_control_dir(runtime.clone(), &control_dir_identity(None, Some(lab)));
+        assert_ne!(lab_dir, PathBuf::from("/run/user/1000/mjolnir/default"));
+        assert_eq!(
+            lab_dir,
+            PathBuf::from("/run/user/1000/mjolnir")
+                .join(crate::config::instance_identity_for(None, lab))
+        );
+        assert_ne!(
+            lab_dir,
+            default_control_dir(
+                runtime.clone(),
+                &control_dir_identity(None, Some(other_lab))
+            )
+        );
+        // A named instance keeps its name whatever its data directory, as
+        // `instance_identity` does.
+        assert_eq!(
+            default_control_dir(runtime, &control_dir_identity(Some("hel2"), Some(lab))),
+            PathBuf::from("/run/user/1000/mjolnir/hel2")
         );
     }
 
