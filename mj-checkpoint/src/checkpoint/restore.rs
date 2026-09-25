@@ -88,6 +88,7 @@ pub fn restore_checkpoint_with_native_state(
             image_store.restore_artifact(relative_path, archive.payload(descriptor)?)?;
         }
     }
+    restore_subagent_reports(&archive, &spec.workspace_root)?;
     for queued in &seed.queued_prompts {
         let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
             .content
@@ -120,7 +121,9 @@ pub fn restore_checkpoint_with_native_state(
             let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
                 continue;
             };
-            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR) {
+            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
+                || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
+            {
                 continue;
             }
             let native_data = archive.payload(descriptor)?;
@@ -392,6 +395,36 @@ pub(super) fn restored_native_artifact_bytes(
 /// follows links and reports a dangling symlink as missing, so the destination
 /// is inspected with `symlink_metadata` and, on Unix, opened with `O_NOFOLLOW`
 /// so the check cannot be raced.
+/// Put a checkpoint's sub-agent report files back beside the repositories,
+/// whether or not the harness's own history is restored: the parent reads
+/// them with its own tools. A file already there is newer than the archive's
+/// copy and is kept.
+fn restore_subagent_reports(
+    archive: &crate::archive::VerifiedArchive,
+    workspace_root: &Path,
+) -> Result<()> {
+    for descriptor in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
+            continue;
+        };
+        let Ok(report) = relative_path.strip_prefix(mj_core::subagent::ARCHIVE_REPORT_DIR) else {
+            continue;
+        };
+        let relative = Path::new(mj_core::subagent::REPORT_ROOT_DIR).join(report);
+        validate_relative_path(&relative)?;
+        if fs::symlink_metadata(workspace_root.join(&relative)).is_ok() {
+            continue;
+        }
+        write_private_file(
+            workspace_root,
+            &relative,
+            archive.payload(descriptor)?,
+            0o600,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_private_file(
     root: &Path,
     relative: &Path,

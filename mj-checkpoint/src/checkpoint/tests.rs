@@ -1403,6 +1403,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         &spec.session,
         &spec.relay_root,
         &spec.harness_home,
+        &spec.workspace_root,
         false,
         &NoNativeCheckpointState,
     )
@@ -1446,6 +1447,7 @@ fn checkpoint_collects_memory_from_a_legacy_worker_launch_config() {
         &spec.session,
         &spec.relay_root,
         &spec.harness_home,
+        &spec.workspace_root,
         false,
         &NoNativeCheckpointState,
     )
@@ -2793,4 +2795,121 @@ fn parallel_repository_collection_preserves_manifest_order() {
         .map(|repository| repository.metadata.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(repository_ids, ["app", "worker"]);
+}
+
+/// A child's report files sit beside the repositories, outside all of them, so
+/// no repository capture sees them. The checkpoint carries them itself and puts
+/// them back even when the harness history is not restored.
+#[test]
+fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let reports = spec
+        .workspace_root
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1");
+    fs::create_dir_all(reports.join("logs")).unwrap();
+    fs::write(reports.join("findings.md"), b"full findings").unwrap();
+    fs::write(reports.join("logs/test.log"), b"test output").unwrap();
+    export_checkpoint(&spec).unwrap();
+    assert_eq!(
+        read_archive_verified(&spec.output_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+    );
+
+    let restored_workspace = temp.path().join("restored-workspace");
+    fs::create_dir_all(&restored_workspace).unwrap();
+    // A file already on the target is newer than the archive's copy.
+    let kept = restored_workspace
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1/findings.md");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, b"newer findings").unwrap();
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: spec.output_path.clone(),
+            workspace_root: restored_workspace.clone(),
+            relay_root: temp.path().join("restored-report-relay"),
+            harness_home: temp.path().join("restored-report-harness"),
+            restore_repositories: false,
+            restore_native: false,
+            discard_queued_prompts: false,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored = restored_workspace
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1");
+    assert_eq!(
+        fs::read(restored.join("logs/test.log")).unwrap(),
+        b"test output"
+    );
+    assert_eq!(
+        fs::read(restored.join("findings.md")).unwrap(),
+        b"newer findings"
+    );
+}
+
+#[test]
+fn subagent_reports_past_the_limit_keep_the_newest_files() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(
+        super::capture::collect_subagent_reports(temp.path())
+            .unwrap()
+            .is_empty(),
+        "no report directory, nothing to carry"
+    );
+    let reports = temp
+        .path()
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("c");
+    fs::create_dir_all(&reports).unwrap();
+    let half = (super::capture::MAX_SUBAGENT_REPORT_BYTES / 2 + 1) as usize;
+    let old = reports.join("old.log");
+    fs::write(&old, vec![b'o'; half]).unwrap();
+    File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    fs::write(reports.join("new.log"), vec![b'n'; half]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&old, reports.join("link.log")).unwrap();
+    let artifacts = super::capture::collect_subagent_reports(temp.path()).unwrap();
+    let paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [Path::new(mj_core::subagent::ARCHIVE_REPORT_DIR).join("c/new.log")]
+    );
+}
+
+#[test]
+fn a_report_written_after_the_prestage_changes_the_source_fingerprint() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = temp.path().join("harness");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&harness).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+    let before = super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap();
+    assert_eq!(
+        before,
+        super::capture::native_source_fingerprint(&harness).unwrap(),
+        "without reports the fingerprint is the harness home's own"
+    );
+    let reports = workspace.join(mj_core::subagent::REPORT_ROOT_DIR).join("c");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(reports.join("r.md"), b"report").unwrap();
+    assert_ne!(
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap(),
+        before
+    );
 }

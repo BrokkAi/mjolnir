@@ -236,6 +236,7 @@ mod tests {
             action: SubagentToolAction::WaitAgents {
                 child_session_ids: vec!["child-1".into(), "child-2".into()],
                 timeout_seconds: Some(45),
+                return_when: Default::default(),
             },
         };
         let mut body = serde_json::to_vec(&request).unwrap();

@@ -250,8 +250,9 @@ impl Controller {
         match self.worker_placement(session_id) {
             Ok((backend, worker_root)) => {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                let prepared =
-                    self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
+                let prepared = self
+                    .prepare_worker_files(session_id, &backend, &worker_root, syncing)
+                    .and_then(|()| self.prepare_subagent_report_dir(session_id, &backend, syncing));
                 let result = match prepared {
                     Ok(()) => {
                         // Held across the harness startup wait, which is the

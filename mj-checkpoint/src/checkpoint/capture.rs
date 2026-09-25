@@ -31,7 +31,8 @@ pub fn capture_checkpoint_with_native_state(
     resolved.stage_path = resolve_target_path(&resolved.stage_path)?;
     validate_capture_spec(&resolved)?;
 
-    let source_fingerprint_before = native_source_fingerprint(&resolved.harness_home)?;
+    let source_fingerprint_before =
+        checkpoint_source_fingerprint(&resolved.harness_home, &resolved.workspace_root)?;
     if resolved.refresh_existing && resolved.stage_path.is_dir() {
         if let Some(captured) =
             refresh_checkpoint_stage(&resolved, &source_fingerprint_before, git)?
@@ -50,6 +51,7 @@ pub fn capture_checkpoint_with_native_state(
         &resolved.session,
         &resolved.relay_root,
         &resolved.harness_home,
+        &resolved.workspace_root,
         resolved.allow_empty_native,
         native_state,
     )?;
@@ -91,7 +93,8 @@ pub fn capture_checkpoint_with_native_state(
         });
     }
     let staged_repositories = write_staged_repositories(temporary.path(), repositories)?;
-    let source_fingerprint_after = native_source_fingerprint(&resolved.harness_home)?;
+    let source_fingerprint_after =
+        checkpoint_source_fingerprint(&resolved.harness_home, &resolved.workspace_root)?;
     let manifest = CheckpointStageManifest {
         protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
         session: resolved.session,
@@ -147,7 +150,8 @@ pub(super) fn refresh_checkpoint_stage(
     let repositories =
         collect_checkpoint_repositories(&spec.workspace_root, &spec.repositories, git)?;
     let repository_bytes = checkpoint_repository_bytes(&repositories)?;
-    let source_fingerprint_after = native_source_fingerprint(&spec.harness_home)?;
+    let source_fingerprint_after =
+        checkpoint_source_fingerprint(&spec.harness_home, &spec.workspace_root)?;
     if source_fingerprint_after != source_fingerprint_before {
         return Ok(None);
     }
@@ -249,6 +253,87 @@ pub(super) fn native_source_fingerprint(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     fingerprint_tree(root, root, &mut digest)?;
     Ok(lower_hex(digest.finalize()))
+}
+
+/// What a prestaged generation's native artifacts were read from: the harness
+/// home and, when there is one, the sub-agent report directory. A report
+/// written after the prestage makes the prestage stale, like a harness file.
+/// Without a report directory it is the harness home's own fingerprint.
+pub(super) fn checkpoint_source_fingerprint(
+    harness_home: &Path,
+    workspace_root: &Path,
+) -> Result<String> {
+    let reports = workspace_root.join(mj_core::subagent::REPORT_ROOT_DIR);
+    if !fs::symlink_metadata(&reports).is_ok_and(|metadata| metadata.is_dir()) {
+        return native_source_fingerprint(harness_home);
+    }
+    let mut digest = Sha256::new();
+    fingerprint_tree(harness_home, harness_home, &mut digest)?;
+    digest.update(b"\0sub-agent reports\0");
+    fingerprint_tree(&reports, &reports, &mut digest)?;
+    Ok(lower_hex(digest.finalize()))
+}
+
+/// The most sub-agent report bytes one checkpoint carries. Reports are the
+/// details a child's short handback points to, so a checkpoint keeps the
+/// newest files up to this bound rather than failing over them.
+pub(super) const MAX_SUBAGENT_REPORT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The regular files under `<workspace_root>/.mj-agents`, as native artifacts
+/// under [`mj_core::subagent::ARCHIVE_REPORT_DIR`]. The directory sits beside
+/// the repositories, outside all of them, so no repository capture sees it.
+/// Symbolic links are skipped: a report is a file its child wrote.
+pub(super) fn collect_subagent_reports(workspace_root: &Path) -> Result<Vec<NativeArtifact>> {
+    let root = workspace_root.join(mj_core::subagent::REPORT_ROOT_DIR);
+    if !fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.is_dir()) {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("scan sub-agent reports {}", directory.display()))?
+        {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                files.push((modified, metadata.len(), entry.path()));
+            }
+        }
+    }
+    // Newest first, so the bound drops the oldest reports.
+    files.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.2.cmp(&right.2)));
+    let mut total = 0_u64;
+    let mut artifacts = Vec::new();
+    let mut skipped = 0_usize;
+    for (_, size, path) in files {
+        if total.saturating_add(size) > MAX_SUBAGENT_REPORT_BYTES {
+            skipped += 1;
+            continue;
+        }
+        let data =
+            fs::read(&path).with_context(|| format!("read sub-agent report {}", path.display()))?;
+        total += data.len() as u64;
+        let relative = path
+            .strip_prefix(&root)
+            .context("sub-agent report escaped its directory")?;
+        artifacts.push(NativeArtifact {
+            relative_path: Path::new(mj_core::subagent::ARCHIVE_REPORT_DIR).join(relative),
+            data,
+            mode: 0o600,
+        });
+    }
+    if skipped > 0 {
+        // This runs on the target, where standard error is the only log.
+        eprintln!(
+            "sub-agent reports exceed the {MAX_SUBAGENT_REPORT_BYTES}-byte checkpoint limit; \
+             the oldest {skipped} were left out"
+        );
+    }
+    Ok(artifacts)
 }
 
 pub(super) fn fingerprint_tree(root: &Path, path: &Path, digest: &mut Sha256) -> Result<()> {
@@ -501,6 +586,7 @@ pub fn export_checkpoint_with_native_state(
         &spec.session,
         &relay_root,
         &harness_home,
+        &workspace_root,
         !prompted,
         native_state,
     )?;
@@ -628,6 +714,7 @@ pub(super) fn collect_checkpoint_native_artifacts(
     session: &SessionManifest,
     relay_root: &Path,
     harness_home: &Path,
+    workspace_root: &Path,
     allow_empty: bool,
     native_state: &dyn NativeCheckpointState,
 ) -> Result<Vec<NativeArtifact>> {
@@ -651,6 +738,7 @@ pub(super) fn collect_checkpoint_native_artifacts(
     };
     artifacts.extend(native_state.collect(session, harness_home)?);
     artifacts.extend(mj_core::attachment::AttachmentStore::worker(relay_root).archive_artifacts()?);
+    artifacts.extend(collect_subagent_reports(workspace_root)?);
     let launch_path = relay_root.join("launch.json");
     match read_project_memory_checkpoint_endpoint(&launch_path) {
         Ok(launch) => {
