@@ -197,6 +197,9 @@ struct FakeManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
     publisher: crate::session_manager::RemoteSessionPublisher,
+    /// Refusals the next captures answer with, in order, the way a lease
+    /// the recovery copy holds refuses a reviewer action.
+    capture_refusals: std::collections::VecDeque<String>,
     _shutdown: crate::session_manager::SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
@@ -219,6 +222,7 @@ impl FakeManager {
             control: channels.control,
             requests: channels.requests,
             publisher: channels.publisher,
+            capture_refusals: std::collections::VecDeque::new(),
             _shutdown: channels.shutdown,
             _targets: channels.targets,
         };
@@ -241,6 +245,10 @@ impl FakeManager {
         manager
     }
 
+    fn refuse_next_capture(&mut self, reason: &str) {
+        self.capture_refusals.push_back(reason.to_owned());
+    }
+
     /// The next request the host makes, or a failure if it makes none.
     async fn next(&mut self) -> RemoteSessionRequest {
         tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
@@ -250,7 +258,8 @@ impl FakeManager {
     }
 
     /// Answers reviewer actions until one matches `wanted`, which is then
-    /// returned unanswered for the test to answer itself.
+    /// returned unanswered for the test to answer itself. A capture is
+    /// refused first while [`Self::refuse_next_capture`] has queued one.
     async fn next_reviewer(
         &mut self,
         wanted: impl Fn(&Option<String>, &ReviewerAction) -> bool,
@@ -267,6 +276,12 @@ impl FakeManager {
                     reply,
                     ..
                 } => {
+                    if matches!(action, ReviewerAction::CaptureDelta { .. })
+                        && let Some(refusal) = self.capture_refusals.pop_front()
+                    {
+                        let _ = reply.send(Err(refusal));
+                        continue;
+                    }
                     if wanted(&role, &action) {
                         return (role, action, reply);
                     }
@@ -632,8 +647,8 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
         .await;
     assert_eq!(
         environment.background_waits(),
-        0,
-        "the capture comes before the reviewer choice"
+        1,
+        "the capture waited for background work, and no reviewer choice has"
     );
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
         repositories: vec![mj_core::relay::RepoDelta {
@@ -662,8 +677,8 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
     ));
     assert_eq!(
         environment.background_waits(),
-        2,
-        "the retry waited for background work first"
+        3,
+        "after the capture's wait, the refused choice and its retry each waited"
     );
     assert!(
         host.view(session)
@@ -714,7 +729,11 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
     })
     .await
     .expect("the refused review releases prompts");
-    assert_eq!(environment.background_waits(), 1);
+    assert_eq!(
+        environment.background_waits(),
+        2,
+        "one wait before the capture and one before the only choice"
+    );
     host.shutdown().await.unwrap();
 }
 
@@ -1046,6 +1065,75 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
     })
     .await
     .expect("the review releases the session's prompts");
+}
+
+/// The capture is a reviewer action too, so the recovery copy's lease can
+/// refuse it as it refuses the reviewer choice (R4-9). Preparation then had
+/// no capture and went on to choose a reviewer, so a turn that changed
+/// nothing still waited through an Auto choice before "Nothing to review"
+/// (I2-10). The capture now waits for background work and tries again.
+#[tokio::test]
+async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_reviewer() {
+    let session = session_id("capturewait0");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    manager.refuse_next_capture("session is reserved for a lifecycle operation");
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
+
+    finish_a_turn(&manager, &host).await;
+
+    // The fake refused the first capture. This is the retry, and nothing has
+    // chosen a reviewer yet: a choice would hang and never capture again.
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    assert_eq!(
+        environment.background_waits(),
+        2,
+        "each capture waited for background work first"
+    );
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: std::path::PathBuf::from("/workspace/app"),
+            baseline_tree: Some("reviewed-tree".to_owned()),
+            current_tree: "reviewed-tree".to_owned(),
+            patch: String::new(),
+            diffstat: "0 files changed".to_owned(),
+            changed_lines: 0,
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::AdvanceBaseline { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::BaselineAdvanced));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the review records its outcome in the conversation");
+    assert_eq!(notice, "Nothing to review: the turn changed no files");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) || host.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the review releases the session's prompts");
+    host.shutdown().await.unwrap();
 }
 
 /// A prompt that landed before the admission hold is reflected by the

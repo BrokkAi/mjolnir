@@ -165,17 +165,36 @@ pub(super) async fn prepare(
             .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
             .map_err(StartRefusal)?
     };
+    // The capture and the reviewer choice share one bound on waiting for
+    // background work.
+    let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
     // Capture what the turn changed before choosing a reviewer. Choosing one
     // can take minutes (an Auto choice asks each candidate profile), and a
-    // turn that changed nothing needs no reviewer at all (I2-10). A capture
-    // that fails here is left to the review, which captures again and reports
-    // the failure the way it always has.
-    let captured = match handle
-        .reviewer(ReviewerAction::CaptureDelta {
-            baselines: state.baselines.clone(),
-        })
+    // turn that changed nothing needs no reviewer at all (I2-10). The capture
+    // is a reviewer action, so it waits for the recovery copy the same way
+    // the choice does. A capture that fails for any other reason is left to
+    // the review, which captures again and reports the failure the way it
+    // always has.
+    let captured = {
+        let handle = &handle;
+        let baselines = &state.baselines;
+        after_background_work(
+            environment,
+            session_id,
+            deadline,
+            &cancelled,
+            move || async move {
+                handle
+                    .reviewer(ReviewerAction::CaptureDelta {
+                        baselines: baselines.clone(),
+                    })
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            },
+        )
         .await
-    {
+    };
+    let captured = match captured {
         Ok(ReviewerOutcome::Delta { repositories }) => Some(repositories),
         _ => None,
     };
@@ -196,10 +215,11 @@ pub(super) async fn prepare(
             captured,
         });
     }
-    let reviewer =
-        resolve_after_background_work(environment, &handle, session_id, config, &cancelled)
-            .await
-            .map_err(StartRefusal)?;
+    let reviewer = after_background_work(environment, session_id, deadline, &cancelled, || {
+        environment.resolve(handle.clone(), config.clone(), cancelled.clone())
+    })
+    .await
+    .map_err(StartRefusal)?;
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return Err(StartRefusal("review preparation cancelled".into()));
     }
@@ -282,21 +302,25 @@ pub(super) fn preempted_by_lifecycle(reason: &str) -> bool {
         || reason.contains("cancelled for session lifecycle change")
 }
 
-/// Chooses the reviewer once no background work holds the session.
+/// Runs one step of review preparation once no background work holds the
+/// session.
 ///
 /// A finished turn also starts the automatic recovery copy, and its lease
-/// cancels the reviewer actions the choice makes (R4-9). The review waits for
-/// that copy and tries again instead of giving up, until
-/// [`BACKGROUND_WORK_WAIT`] has passed. The copy is not held back for the
-/// review: it protects the work, and it takes seconds.
-async fn resolve_after_background_work(
+/// refuses or cancels the reviewer actions preparation makes: the capture
+/// and the reviewer choice (R4-9). The step waits for that copy and tries
+/// again instead of giving up, until `deadline`. The copy is not held back
+/// for the review: it protects the work, and it takes seconds.
+async fn after_background_work<T, Step, Attempt>(
     environment: &Arc<dyn ReviewEnvironment>,
-    handle: &ManagedSessionHandle,
     session_id: &str,
-    config: ReviewConfig,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
-) -> Result<mj_core::review::settings::ResolvedReviewSettings, String> {
-    let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
+    deadline: tokio::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+    mut step: Step,
+) -> Result<T, String>
+where
+    Step: FnMut() -> Attempt,
+    Attempt: std::future::Future<Output = Result<T, String>>,
+{
     let mut attempt = 0_u32;
     loop {
         if attempt > 0 {
@@ -306,10 +330,7 @@ async fn resolve_after_background_work(
         environment
             .background_work_settled(session_id, deadline)
             .await;
-        let resolved = environment
-            .resolve(handle.clone(), config.clone(), cancelled.clone())
-            .await;
-        match resolved {
+        match step().await {
             Err(reason)
                 if preempted_by_lifecycle(&reason)
                     && tokio::time::Instant::now() < deadline
@@ -322,7 +343,7 @@ async fn resolve_after_background_work(
                     "turn review waits for another operation on the session"
                 );
             }
-            resolved => return resolved,
+            outcome => return outcome,
         }
     }
 }
