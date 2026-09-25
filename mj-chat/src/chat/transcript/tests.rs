@@ -3863,3 +3863,112 @@ fn the_ascii_symbol_set_reaches_the_transcript_role_marks_and_timestamps() {
         );
     }
 }
+
+/// One item of R10's session D, as its store held it.
+fn session_d_item(value: serde_json::Value) -> Arc<TranscriptItem> {
+    Arc::new(serde_json::from_value(value).unwrap())
+}
+
+/// Session D's `sleep 60` tool call with `status`, last changed at
+/// `last_changed_at_ms`.
+fn session_d_sleep(status: &str, last_changed_at_ms: i64) -> Arc<TranscriptItem> {
+    session_d_item(serde_json::json!({
+        "stable_id": "tool:exec-7ee05740-cd4d-46f7-acda-c5154d550799",
+        "position": 27,
+        "created_at_ms": 1_790_343_723_040_i64,
+        "last_changed_at_ms": last_changed_at_ms,
+        "body": {"kind": "tool", "call": {
+            "toolCallId": "exec-7ee05740-cd4d-46f7-acda-c5154d550799",
+            "title": "sleep 60", "kind": "execute", "status": status,
+            "rawInput": {"command": "sleep 60"}
+        }}
+    }))
+}
+
+/// R10-1, replayed in the order session D's journal recorded it. Esc ended
+/// the turn (the "Interrupted" marker, ordinal 35) while the `sleep 60`
+/// Codex had started kept running, because Codex owns that process; 48 s
+/// later the command's completion arrived (ordinal 45) and the row turned
+/// from "running" into "✓ Tool · done", as if the interrupted turn had
+/// finished the work.
+#[test]
+fn a_tool_that_ends_after_its_turn_was_interrupted_is_not_shown_as_done() {
+    let prompt = session_d_item(serde_json::json!({
+        "stable_id": "user:prompt-7b3aba1e44a67b21c81f588fb67efd01",
+        "position": 9,
+        "created_at_ms": 1_790_343_719_503_i64,
+        "last_changed_at_ms": 1_790_343_719_503_i64,
+        "body": {"kind": "user", "content": [
+            {"type": "text", "text": "Run the shell command sleep 60 and then say done."}
+        ]}
+    }));
+    let listing = session_d_item(serde_json::json!({
+        "stable_id": "tool:exec-listing",
+        "position": 20,
+        "created_at_ms": 1_790_343_721_000_i64,
+        "last_changed_at_ms": 1_790_343_721_500_i64,
+        "body": {"kind": "tool", "call": {
+            "toolCallId": "exec-listing", "title": "ls", "kind": "execute",
+            "status": "completed", "rawInput": {"command": "ls"}
+        }}
+    }));
+    let interrupted = session_d_item(serde_json::json!({
+        "stable_id": "system:turn-interrupted:prompt-7b3aba1e44a67b21c81f588fb67efd01",
+        "position": 35,
+        "created_at_ms": 1_790_343_735_122_i64,
+        "last_changed_at_ms": 1_790_343_735_122_i64,
+        "body": {"kind": "system", "text": "Interrupted"}
+    }));
+    let tool_rows = |chat: &mut ChatState| {
+        transcript_text(chat, 80)
+            .into_iter()
+            .filter(|line| line.contains("Tool"))
+            .collect::<Vec<_>>()
+    };
+
+    // Ordinal 44: the turn has ended and the command is still running.
+    let mut session = MaterializedSession::empty("session-d");
+    session.applied_event_ordinal = 44;
+    session.transcript = vec![
+        prompt,
+        listing,
+        session_d_sleep("in_progress", 1_790_343_723_040),
+        interrupted,
+    ];
+    let mut chat = ChatState::from_materialized(&session, &[], &[]);
+    let rows = tool_rows(&mut chat);
+    assert!(
+        rows.iter().any(|row| row.contains("Tool · running")),
+        "{rows:#?}"
+    );
+
+    // Ordinal 45: the command ends on its own.
+    session.applied_event_ordinal = 45;
+    session.transcript[2] = session_d_sleep("completed", 1_790_343_782_961);
+    chat.apply_materialized(&session, &[], &[]);
+    let rows = tool_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Tool · ended after interrupt")),
+        "{rows:#?}"
+    );
+    // The command that finished before the interruption is still done.
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("Tool · done"))
+            .count(),
+        1,
+        "{rows:#?}"
+    );
+    // The web viewer's rows come from the same entries.
+    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
+    let labels = browser
+        .entries
+        .iter()
+        .map(|entry| entry.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.contains(&"Tool · ended after interrupt") && labels.contains(&"Tool · done"),
+        "{labels:#?}"
+    );
+}

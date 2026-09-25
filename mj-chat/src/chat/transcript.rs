@@ -210,7 +210,7 @@ impl TranscriptSnapshot {
                 }
             })
             .collect::<Vec<_>>();
-        suppress_duplicate_standalone_terminal_output(&mut entries);
+        apply_entry_list_rules(&mut entries);
         Self::from_entries_at(entries, session.applied_event_ordinal)
     }
 
@@ -722,7 +722,7 @@ impl ChatState {
         let shift = prefix.len();
         let tail = std::mem::replace(&mut self.entries, prefix);
         self.entries.extend(tail);
-        suppress_duplicate_standalone_terminal_output(&mut self.entries);
+        apply_entry_list_rules(&mut self.entries);
         self.unconverted_prefix = 0;
         self.prefix_seam = None;
         if let TranscriptAnchor::Row { entry, row } = self.anchor {

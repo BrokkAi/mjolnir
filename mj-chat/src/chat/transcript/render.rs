@@ -440,8 +440,21 @@ fn role_glyph(entry: &ChatEntry) -> &'static str {
         ChatRole::Plan => glyphs.role_plan,
         ChatRole::PlanProposal => glyphs.role_plan_proposal,
         ChatRole::System => glyphs.rule,
-        ChatRole::Tool => tool_presentation(entry.tool_status.unwrap_or(ToolStatus::Pending)).0,
+        ChatRole::Tool => tool_row_presentation(entry).0,
     }
+}
+
+/// A tool row's status mark, label and header style. A call that ended after
+/// its turn was interrupted says so instead of "done" (R10-1).
+fn tool_row_presentation(entry: &ChatEntry) -> (&'static str, &'static str, Style) {
+    if entry.ended_after_interrupt {
+        return (
+            theme::glyphs().stopped,
+            TOOL_ENDED_AFTER_INTERRUPT,
+            Style::default().fg(theme::palette().muted),
+        );
+    }
+    tool_presentation(entry.tool_status.unwrap_or(ToolStatus::Pending))
 }
 
 pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
@@ -480,7 +493,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         }
         ChatRole::Tool => {
             let status = entry.tool_status.unwrap_or(ToolStatus::Pending);
-            let (_glyph, label, style) = tool_presentation(status);
+            let (_glyph, label, style) = tool_row_presentation(entry);
             let body_style = match status {
                 ToolStatus::Pending | ToolStatus::Completed => {
                     Style::default().fg(theme::palette().muted)
