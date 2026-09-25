@@ -452,6 +452,16 @@ profile counts as 100% left, and a profile with no quota report comes last. On
 a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
 where its quota comes from and whether other sessions' sub-agents may use it.
 
+A sub-agent ends its task by handing its report back to the session that
+started it. Suspending that session stops its sub-agents and removes them,
+without a recovery copy of their own; only the parent session is saved.
+Mjolnir warns when a sub-agent has not handed back yet, because the work it
+has not reported is lost. Each stopped sub-agent's conversation stays
+searchable through SessionWiki (`mj sessions --session <id>`). When the parent
+resumes, its agent is told which sub-agents were stopped and whether each had
+handed back, so it can start them again if it still needs their work. See
+[Sessions](/sessions/#sub-agents-and-suspend).
+
 ## Profiles `[profiles.<id>]`
 
 Each profile names one harness installation or account on the controller:

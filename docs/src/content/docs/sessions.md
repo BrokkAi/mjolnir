@@ -172,17 +172,46 @@ Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and veri
 
 Select a live session, press `prefix+:`, and choose **Suspend session**. Suspending a session:
 
-1. Freezes dispatch at a safe boundary.
-2. Captures and verifies a current recovery archive.
-3. Terminates the owning process group or remote worker.
-4. Retires the session's managed clone, container, or instance only after the worker has stopped.
-5. Leaves the session record and verified archive available to resume.
+1. Stops its Mjolnir sub-agents, if it has any (see below).
+2. Freezes dispatch at a safe boundary.
+3. Captures and verifies a current recovery archive.
+4. Terminates the owning process group or remote worker.
+5. Retires the session's managed clone, container, or instance only after the worker has stopped.
+6. Leaves the session record and verified archive available to resume.
 
 If checkpoint creation or verification fails, suspension refuses teardown and
 reports the failure. Retry suspension after resolving it. When a recovery copy
 exists, the terminal also offers **Discard changes since checkpoint…**. A second
 confirmation shows the copy's timestamp and explains that newer work may be lost.
 The daemon verifies the selected recovery copy again before releasing the environment.
+Discarding changes stops the session's sub-agents the same way.
+
+### Sub-agents and suspend
+
+A session that uses Mjolnir's sub-agents gets each child's work back as the
+report the child hands back. Suspending the session suspends only the session
+itself:
+
+- Each active sub-agent is stopped and removed, without a recovery copy of its
+  own. Its conversation is put into SessionWiki first, so
+  `mj sessions --session <child-id>` still finds it.
+- A sub-agent that already handed back its report is stopped without a
+  warning, since its report already reached the session.
+- When a sub-agent has not handed back yet, Mjolnir says so: "2 sub-agents
+  have not handed back; suspending stops them". The terminal and the web
+  viewer ask for confirmation first when they can see a sub-agent still at
+  work. `mj suspend` prints the warning when the suspend is accepted, and the
+  API returns it in its answer.
+- A sub-agent that cannot be stopped normally, for example because its target
+  cannot be reached, is removed anyway. It never makes the session's suspend
+  fail.
+
+When the session resumes, one line in its conversation lists the sub-agents
+the suspend stopped, and its agent is told on its first prompt: which
+sub-agents were stopped, what each was working on, whether each had handed
+back, and that the work not handed back was lost. The agent can start them
+again with `spawn` if it still needs that work. The agent is told once; if the
+session is suspended again before its next prompt, it is not told again.
 
 **Destroy session…** is a separate irreversible action in both terminal and web
 interfaces. It removes the environment, managed checkout, and recovery archive,
