@@ -1331,6 +1331,46 @@ async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wa
     assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
+/// Launch finding R5-8: a prompt to a session in the `error` state was
+/// refused with "this session cannot take a prompt right now", which reads
+/// as "try again". It now says the session failed, why, and the two ways
+/// out.
+#[tokio::test]
+async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        let session = &mut snapshot.sessions[0];
+        session.state = "error".into();
+        session.lifecycle = ViewerLifecycleCategory::Failed;
+        session.has_error = true;
+        session.launch_error = Some("worker bootstrap failed: operation cancelled".into());
+        session.capabilities.prompt = false;
+        session.capabilities.resume = true;
+        session.capabilities.destroy = true;
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"are you there"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await.to_string();
+    assert!(!body.contains("right now"), "{body}");
+    assert!(body.contains("this session failed"), "{body}");
+    assert!(
+        body.contains("worker bootstrap failed: operation cancelled"),
+        "{body}"
+    );
+    assert!(body.contains("mj resume --session session-1"), "{body}");
+    assert!(body.contains("mj destroy --session session-1"), "{body}");
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
