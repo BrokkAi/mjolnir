@@ -95,6 +95,8 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_identity: Option<String>,
     /// Unique intent for a user-requested Resume/Restart; recovery preserves it in the relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_resume_request: Option<String>,

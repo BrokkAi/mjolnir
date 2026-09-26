@@ -251,6 +251,8 @@ mod discovery;
 #[cfg(unix)]
 pub(crate) mod harness;
 #[cfg(unix)]
+mod runtime_identity;
+#[cfg(unix)]
 pub use discovery::discover_profile_config;
 #[cfg(not(unix))]
 pub async fn discover_profile_config(

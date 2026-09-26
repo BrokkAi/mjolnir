@@ -215,6 +215,74 @@ The same object, plus `last_turn_outcome` when a prompt has finished on it:
 or `interrupted` with a `message`. The list route omits the field: it is built
 from the dashboard projection, which carries no turn identity.
 
+### Resolved harness runtime
+
+`GET /api/v1/sessions/{session_id}` also returns `runtime` after ACP
+initialization, even if no task prompt was submitted. The session list omits
+this field. The latest receipt remains readable after the worker stops. Each
+initialization also creates a durable `runtime_resolved` event in the public
+event feed; use those events to retain every run across restart, resume, and
+worker replacement. Earlier receipts are never rewritten. Before initialization
+there is no receipt; during recovery the latest receipt may describe the prior
+process, so receipt lookup alone is not permission to dispatch work.
+
+```json
+{
+  "runtime": {
+    "id": "mj-runtime-v1:<sha256>",
+    "harness": "codex",
+    "platform": "linux-x86_64",
+    "provenance": "target_installation",
+    "components": [
+      { "name": "acp_bridge", "version": "1.13.3", "sha256": "<sha256>" },
+      { "name": "provider_cli", "version": "0.156.1", "sha256": "<sha256>" }
+    ],
+    "unavailable_reason": null,
+    "event_ordinal": 7,
+    "observed_at_ms": 1788000000000
+  }
+}
+```
+
+The example abbreviates the components. Treat `id` as an opaque comparison ID.
+It covers the harness, target OS/architecture, provenance, inspected component
+versions/content digests, and the ACP-reported agent name/version. Managed bare
+workers report `managed_installation`: the leased installation manifest and
+contents participate. Container/ambient workers report `target_installation`:
+Mjolnir inspects the selected bridge and provider on that target, without using
+the controller's release pins. For npm runtimes, digests include the containing
+`node_modules` tree so hoisted provider binaries and dependencies participate;
+changing other packages in that tree can also change the identity. Codex requires
+an explicit `CODEX_PATH`; Claude includes its provider SDK. Muse includes its
+provider executable and target installation metadata. Unmanaged Kimi/Grok and
+custom wrappers without sufficient metadata report `id: null` and an explicit
+`unavailable_reason`. Individual unknown component versions/digests are `null`.
+
+This compares inspected runtime installations, not model/effort choices, system
+libraries, the OS image, credentials, or behavior of a remote provider service.
+It is not image or worker provenance, and it does not attest against outside
+processes modifying an installation behind Mjolnir's back. Runtime upgrades
+managed by Mjolnir replace workers only through the existing idle admission
+policy. Receipts publish no installation paths, harness homes, credentials, or
+private environment values.
+
+To require a saved identity, create a session with
+`"expected_runtime_identity": "mj-runtime-v1:<sha256>"`. Obtain the first identity
+by creating an unconstrained session **without `prompt`**, awaiting readiness,
+and fetching its receipt. Save its non-null `runtime.id`, then supply that value
+on later launches. Matching installations can accept prompts. A mismatch or
+unknown identity fails visibly before loading a native session or accepting a
+prompt, including after resume/replacement; the durable constraint is checked
+again under the worker's command admission lock. Discovery followed by an
+upgrade cannot silently authorize a different runtime. Busy accepted work is
+never cancelled to satisfy a new selection.
+
+A saved runtime that is no longer installed is refused; this option does not
+reinstall retired versions. Discover the current identity and explicitly select
+it for a new session. Omitting the constraint preserves normal upgrade behavior.
+The database migration refuses older daemons that cannot enforce the constraint
+or interpret retained runtime events; normal startup performs the upgrade.
+
 ### List launch options
 
 ```text

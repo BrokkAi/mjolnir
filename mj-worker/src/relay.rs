@@ -99,6 +99,8 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    runtime_selection: Option<mj_core::harness_runtime::RuntimeIdentity>,
+    expected_runtime_identity: Option<String>,
     /// A bridge has connected and its session is not open yet: the load or
     /// new-session request and the model and mode applied after it. Output
     /// in this window answers no prompt (R8-4). Never recovered from the
@@ -383,6 +385,8 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: None,
             acp_ready: false,
+            runtime_selection: None,
+            expected_runtime_identity: None,
             session_setup: false,
             checkpoint_only,
             steering_supported: None,
@@ -722,6 +726,37 @@ impl DurableRelay {
     /// Choose whether agent output with no prompt in flight opens a turn.
     pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
         self.harness_turns = policy;
+    }
+
+    pub fn configure_runtime_identity(
+        &mut self,
+        selection: mj_core::harness_runtime::RuntimeIdentity,
+        expected: Option<String>,
+    ) {
+        self.runtime_selection = Some(selection);
+        self.expected_runtime_identity = expected;
+    }
+
+    pub fn initialized_runtime_identity(
+        &self,
+        agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
+    ) -> Result<Option<mj_core::harness_runtime::RuntimeIdentity>> {
+        self.runtime_selection
+            .clone()
+            .map(|identity| identity.with_reported_agent(agent_info))
+            .transpose()
+    }
+
+    pub(crate) fn verify_runtime_identity(&self) -> Result<()> {
+        if let Some(expected) = &self.expected_runtime_identity {
+            let receipt = self
+                .snapshot
+                .runtime
+                .as_ref()
+                .context("runtime identity is not yet available")?;
+            receipt.identity.require(expected)?;
+        }
+        Ok(())
     }
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {

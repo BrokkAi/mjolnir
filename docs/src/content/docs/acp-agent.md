@@ -20,7 +20,7 @@ Point the program's agent command at `mj acp`:
 
 ```text
 mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
-       [--on-exit keep|suspend|destroy]
+       [--expected-runtime-identity <id>] [--on-exit keep|suspend|destroy]
 ```
 
 | Flag | Meaning |
@@ -29,6 +29,7 @@ mj acp --workspace <name> [--profile <id>] [--target <id>] [--bundle <id>]
 | `--profile <id>` | The [profile](/profiles/) whose account and harness run the session. Omitted follows your saved default. |
 | `--target <id>` | The [target](/targets/) the session runs on: this machine, a container, an SSH host, or an EC2 instance. Omitted follows your saved default. |
 | `--bundle <id>` | The [bundle](/workspaces-bundles/) to provision on a managed target. Without one, the working directory the client submits becomes the project, which is what a local target needs. |
+| `--expected-runtime-identity <id>` | Require a saved target runtime identity before loading the harness session or accepting work. A changed or unknown runtime fails visibly. |
 | `--on-exit <policy>` | What happens to the sessions this process created when it exits: `keep` (the default), `suspend`, or `destroy`. See [When the program exits](#when-the-program-exits). |
 
 `--workspace` is required. The other flags are optional, and an omitted one
@@ -63,6 +64,14 @@ ID, usable with the HTTP session endpoint to read the retained `checkout`
 selection. Ownership and `--on-exit` also apply to sessions whose preparation is
 still running or failed; creating a session through HTTP does not let another
 adapter attach to it.
+
+To constrain the runtime, add `--expected-runtime-identity <saved-runtime-id>`.
+For initial discovery, omit the constraint, call `session/new` without sending a
+prompt, and read `runtime` through `GET /api/v1/sessions/{session_id}` using the
+returned Mjolnir session ID. Save a non-null `runtime.id` for later launches.
+Mismatch errors retain the session ID and the same ownership/exit policy.
+See [resolved harness runtime](/api-reference/#resolved-harness-runtime) for
+comparison scope, unknown installations, retained history, and upgrade behavior.
 
 ## What a session becomes
 

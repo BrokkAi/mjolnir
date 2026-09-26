@@ -363,6 +363,7 @@ fn validate_action_against(
             launch_base: _,
             launch_branch: _,
             checkout: _,
+            expected_runtime_identity: _,
             mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {

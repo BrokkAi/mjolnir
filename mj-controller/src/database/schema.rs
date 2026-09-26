@@ -647,6 +647,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: older daemons cannot enforce the runtime constraint or read
+    // the new runtime receipt stored in relay/API events.
+    if version < 55 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "expected_runtime_identity",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE schema_compatibility SET minimum_compatible_version = 55 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (55, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 55;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -870,8 +893,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 54 adds exact checkout preparation.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 54;
+    /// `SCHEMA_VERSION`. Migration 55 adds runtime identity constraints.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 55;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

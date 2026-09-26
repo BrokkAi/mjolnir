@@ -199,6 +199,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1455,5 +1456,49 @@ async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_an
             && refusals[0].contains("default"),
         "{}",
         refusals[0]
+    );
+}
+
+#[tokio::test]
+async fn runtime_identity_mismatch_stops_before_session_load_or_goal_recovery() {
+    use mj_core::harness_runtime::*;
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("identity.py");
+    std::fs::write(&script, r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    with open('methods.txt', 'a') as log: log.write(request.get('method', '') + '\n')
+    if request.get('method') == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{'loadSession':True}}}), flush=True)
+    elif 'id' in request:
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32603,'message':'must not load or prompt'}}), flush=True)
+"#).unwrap();
+    let mut identity = RuntimeIdentity {
+        id: None,
+        harness: HarnessKind::Kimi,
+        platform: "target".into(),
+        provenance: RuntimeProvenance::TargetInstallation,
+        components: vec![],
+        unavailable_reason: None,
+    };
+    identity.refresh_id().unwrap();
+    let mut spec = launch(temp.path(), script, AcceptedSessionConfig::default());
+    spec.runtime_constraint = Some((identity, "stale-selection".into()));
+    let (_requests, request_rx) = mpsc::channel(4);
+    let (events, _event_rx) = mpsc::channel(64);
+    let error = tokio::time::timeout(Duration::from_secs(10), run(spec, request_rx, events))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("runtime identity mismatch"),
+        "{error:#}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("methods.txt"))
+            .unwrap()
+            .trim(),
+        "initialize"
     );
 }

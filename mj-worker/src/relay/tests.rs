@@ -5204,6 +5204,7 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
             protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
             capabilities: Box::default(),
             agent_info: None,
+            runtime: None,
         })
         .unwrap();
     relay
@@ -5326,4 +5327,129 @@ fn text_that_answers_a_model_change_is_its_own_notice_and_leaves_the_reply_alone
         )),
         "{transcript:#?}"
     );
+}
+
+fn selected_runtime(version: &str) -> mj_core::harness_runtime::RuntimeIdentity {
+    use mj_core::harness_runtime::*;
+    let mut identity = RuntimeIdentity {
+        id: None,
+        harness: mj_core::config::HarnessKind::Codex,
+        platform: "test-target".into(),
+        provenance: RuntimeProvenance::TargetInstallation,
+        components: vec![RuntimeComponent {
+            name: "provider".into(),
+            version: Some(version.into()),
+            sha256: None,
+        }],
+        unavailable_reason: None,
+    };
+    identity.refresh_id().unwrap();
+    identity
+}
+
+fn initialize_runtime(relay: &mut DurableRelay) {
+    let runtime = relay.initialized_runtime_identity(None).unwrap();
+    relay
+        .record_observation(RelayObservation::AgentInitialized {
+            protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
+            capabilities: Box::default(),
+            agent_info: None,
+            runtime,
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+}
+
+#[test]
+fn runtime_identity_admission_rejects_stale_discovery_and_retains_receipts_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.configure_runtime_identity(selected_runtime("first"), None);
+    initialize_runtime(&mut relay);
+    let original = relay.operational_state().runtime.unwrap();
+    let expected = original.identity.id.clone().unwrap();
+    relay.configure_runtime_identity(selected_runtime("first"), Some(expected.clone()));
+    submit_relay(&mut relay, "matching", prompt("first task"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    drop(relay);
+
+    let mut recovered = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        recovered.operational_state().runtime,
+        Some(original.clone())
+    );
+    recovered.configure_runtime_identity(selected_runtime("upgraded"), Some(expected));
+    let request = || {
+        relay_request(
+            "submit",
+            RelayRequest::Submit {
+                command_id: "later-task".into(),
+                command: prompt("must not run"),
+            },
+        )
+    };
+    assert!(
+        matches!(
+            recovered.handle(request()).body,
+            RelayResponseBody::Error { .. }
+        ),
+        "a retained receipt does not prove new-process readiness"
+    );
+    initialize_runtime(&mut recovered);
+    let error = recovered.verify_runtime_identity().unwrap_err().to_string();
+    assert!(error.contains("mismatch"), "{error}");
+    assert!(matches!(
+        recovered.handle(request()).body,
+        RelayResponseBody::Error { .. }
+    ));
+    assert!(recovered.claim_pending_commands(true).is_err());
+    let receipts: Vec<_> = recovered
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.observation {
+            RelayObservation::AgentInitialized {
+                runtime: Some(runtime),
+                ..
+            } => Some(runtime),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0], original.identity);
+    assert_ne!(receipts[0].id, receipts[1].id);
+    assert!(!observations(&recovered).iter().any(|observation| matches!(observation, RelayObservation::CommandQueued {command_id, ..} if command_id == "later-task")));
+}
+
+#[test]
+fn runtime_identity_unknown_is_allowed_only_without_a_constraint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let mut unknown = selected_runtime("unknown");
+    unknown.unavailable_reason = Some("custom image has no provider metadata".into());
+    unknown.refresh_id().unwrap();
+    relay.configure_runtime_identity(unknown.clone(), Some("saved-runtime".into()));
+    initialize_runtime(&mut relay);
+    assert!(
+        relay
+            .verify_runtime_identity()
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable")
+    );
+    let response = relay.handle(relay_request(
+        "submit",
+        RelayRequest::Submit {
+            command_id: "unknown".into(),
+            command: prompt("work"),
+        },
+    ));
+    assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+    relay.configure_runtime_identity(unknown, None);
+    submit_relay(&mut relay, "unconstrained", prompt("work"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 }

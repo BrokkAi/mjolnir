@@ -168,6 +168,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
