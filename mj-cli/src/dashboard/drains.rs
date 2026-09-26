@@ -489,6 +489,7 @@ impl DashboardContext {
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
         self.dashboard.set_state(self.controller.state.clone());
+        self.finish_sessions_stopped_by_suspend();
         self.reconcile_question_drafts();
         self.refresh_chat_context();
         self.controller_changed = true;

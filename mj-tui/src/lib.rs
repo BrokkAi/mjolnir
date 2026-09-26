@@ -963,6 +963,9 @@ pub struct DashboardState {
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
     /// read-only because there is no worker to attach to.
     pub(crate) stopped_subagents: BTreeMap<String, stopped_subagents::StoppedSubagentPane>,
+    /// Sub-agents whose records left because their parent's suspend stopped
+    /// them, for the host to let their conversations go.
+    stopped_by_suspend: StoppedBySuspend,
     /// Dashboard-only state retained while the user switches tabs.
     workspace_views: BTreeMap<String, WorkspaceViewState>,
     /// A pane-size update from the controller may not overwrite a local edit
@@ -1028,6 +1031,7 @@ mod pane_controls;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
+pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
 mod stopped_subagents;
 
@@ -1131,6 +1135,7 @@ impl DashboardState {
             subagent_parent_id: None,
             native_agents: BTreeMap::new(),
             stopped_subagents: BTreeMap::new(),
+            stopped_by_suspend: StoppedBySuspend::default(),
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_layouts_modified: BTreeSet::new(),

@@ -588,6 +588,7 @@ impl DashboardState {
     }
 
     pub fn set_state(&mut self, mut state: State) {
+        let stopped_by_suspend = self.subagents_stopped_by_suspend(&state);
         for (id, pane) in &self.native_agents {
             if state.sessions.contains_key(&pane.agent.owner_session_id)
                 && let Some(row) = self.state.sessions.get(id)
@@ -628,6 +629,7 @@ impl DashboardState {
         // After the projection, so the rows see the records the dashboard does.
         self.rebuild_resume_rows();
         self.clamp_selections();
+        self.leave_subagents_stopped_by_suspend(stopped_by_suspend);
     }
 
     /// Replace the daemon's complete durable Move projection. Active intents

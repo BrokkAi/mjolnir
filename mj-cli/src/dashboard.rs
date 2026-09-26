@@ -1213,6 +1213,25 @@ impl DashboardContext {
         self.begin_shutdown(true);
     }
 
+    /// Lets go of the conversations of sub-agents that their parent's
+    /// suspend stopped (R15-1). Their records are gone, so there is no draft
+    /// or read position to save, and trying would only report an unknown
+    /// session. The dashboard has already put the view back on the parent,
+    /// whose conversation opens in their place.
+    pub(crate) fn finish_sessions_stopped_by_suspend(&mut self) {
+        let stopped = self.dashboard.take_stopped_by_suspend();
+        for session_id in &stopped.sessions {
+            self.cancel_chat_open_for(session_id);
+            self.chats.remove(session_id);
+            self.transcript_positions.remove(session_id);
+            self.question_drafts.remove(session_id);
+            self.composer_drafts.discard(session_id);
+        }
+        if let Some(parent_id) = stopped.reopen {
+            self.open_chat_session(&parent_id);
+        }
+    }
+
     /// A removed workspace's composers must not be saved back on tab switch.
     pub(crate) fn discard_workspace_composers(&mut self, workspace_id: &str) {
         let sessions = self

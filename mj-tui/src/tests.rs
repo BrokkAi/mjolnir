@@ -5395,3 +5395,92 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
         }
     );
 }
+
+/// The records a snapshot brings once the parent's suspend has stopped its
+/// one sub-agent: the parent is closing and the child is gone.
+fn stopped_by_the_parents_suspend(
+    dashboard: &DashboardState,
+    parent: &str,
+) -> mj_core::state::State {
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut(parent).unwrap().state = SessionState::Closing;
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    state
+}
+
+/// R15-1: a suspend stopped the sub-agent whose conversation was open in its
+/// parent's Sub-agents view. The view fell to "No sessions yet" and the
+/// footer said "Could not save draft and read status for <child>: unknown
+/// session". It goes back to the parent's scope with the parent selected,
+/// and says what happened.
+#[test]
+fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+    dashboard.set_current_session(Some("child-session"));
+    assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+    let title = dashboard.state.sessions["child-session"]
+        .listed_title()
+        .to_owned();
+
+    dashboard.set_state(stopped_by_the_parents_suspend(&dashboard, &parent));
+
+    assert_eq!(dashboard.subagent_parent_id(), None);
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
+    assert_eq!(
+        dashboard.notice(),
+        Some(format!("Sub-agent \"{title}\" was stopped by the suspend"))
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::render::render_sessions(frame, frame.area(), &dashboard);
+        })
+        .unwrap();
+    let rows = terminal.backend().to_string();
+    assert!(!rows.contains("No sessions yet"), "{rows}");
+}
+
+/// The host lets the stopped sub-agent's conversation go without saving a
+/// draft for a session that no longer exists, and opens the parent's.
+#[test]
+fn the_host_learns_which_conversations_a_suspend_took_away() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+
+    dashboard.set_state(stopped_by_the_parents_suspend(&dashboard, &parent));
+
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend {
+            sessions: vec!["child-session".into()],
+            reopen: Some(parent.clone()),
+        }
+    );
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend::default()
+    );
+}
+
+/// A sub-agent that leaves while its parent runs on, as a destroy removes
+/// one, was not stopped by a suspend: the view and the footer stay as they
+/// were.
+#[test]
+fn a_sub_agent_removed_while_its_parent_runs_is_not_reported_as_suspended() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+    let mut state = dashboard.state.clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+
+    dashboard.set_state(state);
+
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.notice(), None);
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend::default()
+    );
+}
