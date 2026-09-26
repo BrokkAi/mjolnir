@@ -102,6 +102,18 @@ requires it.
 
 Build for correctness and general use.
 
+Concurrency: make races structurally impossible, the way Cliff Click would,
+instead of patching each one as it appears. One owner decides each fact; every
+reader asks that owner rather than recomputing the fact from its own copy of
+the inputs. Two predicates for the same question ("is this session busy") are a
+bug even while they agree. Prefer a single state machine with explicit
+transitions over independent flags that must be kept consistent, and a single
+serialized decision point over checks that run on different snapshots. Acquire
+resources after the decision that needs them, release them on every exit path,
+and make every retry loop carry a backoff or a state change that ends it.
+When you find a race, fix the ownership so the race cannot be expressed, and say
+so in the commit body; a patch that narrows the window is not a fix.
+
 A narrow fallback usually indicates a design problem. Find the source of the
 problem and correct the root cause, even when the correction affects a larger
 area. Report the failure; do not paper over it with a second path that hides
