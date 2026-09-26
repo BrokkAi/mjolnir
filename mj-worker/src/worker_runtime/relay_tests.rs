@@ -68,6 +68,14 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     }
 }
 
+fn stub_runtime_bridge(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("stub-bridge");
+    std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
     let repository = temp.path().join("repository");
     std::fs::create_dir(&repository).unwrap();
@@ -5011,6 +5019,7 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
 
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
     config.cwd = temp.path().to_owned();
+    config.bridge_command = stub_runtime_bridge(temp.path());
     config.environment.insert(
         "CODEX_CONFIG".into(),
         r#"{"default_permissions":"project","tui":"never"}"#.into(),
@@ -5042,6 +5051,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
     let root = temp.path().join("relay");
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
     config.cwd = temp.path().to_owned();
+    config.bridge_command = stub_runtime_bridge(temp.path());
     config.excluded_environment = vec!["CODEX_API_KEY".into(), "OPENAI_API_KEY".into()];
     // As a target setting would put it there, past the controller.
     config
