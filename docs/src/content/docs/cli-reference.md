@@ -317,20 +317,24 @@ without a recovery copy of their own, and only the session is suspended. When
 some of them have not handed back their reports, `mj suspend` prints a warning
 on standard error, such as `warning: 2 sub-agents have not handed back;
 suspending stops them`. With `--json` the answer carries `stopped_subagents`,
-`subagents_not_handed_back`, and `warning` (`null` when there is none). When the
+`subagents_not_handed_back`, and `warning` (omitted when there is none). When the
 session resumes, its agent is told which sub-agents were stopped. For an
 independent clone whose work may be unpublished,
 pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
 still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
 keeps the session available for another prompt.
 
-`mj destroy` permanently removes the session, environment, and recovery archive.
+`mj destroy` permanently removes the live session record, environment, and
+recovery archive. Its conversation is indexed in SessionWiki first:
+`mj sessions --session <id>` can find the archived conversation, and
+`mj resume --wiki <id>` starts a new session from it. That restores conversation
+context, not the deleted checkout or unexported files.
 New managed clones have no branch in the source repository. For older linked
 worktree sessions, the managed branch remains unless `--delete-branch` is
 specified. `mj close` was removed: use `mj suspend` to keep the session, or `mj destroy` to
 remove it (this replaces `mj close --force`). `mj cancel-turn` was removed too;
-use `mj interrupt-turn`. Both old names now fail with clap's `unrecognized
-subcommand` error.
+use `mj interrupt-turn`. Both old names fail with a notice naming their
+replacement and perform no lifecycle action.
 
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;

@@ -7,8 +7,9 @@ Mjolnir gives coding agents the ability to execute commands. Its security model
 is therefore a set of explicit boundaries, not a promise that agent-generated
 commands are harmless.
 
-The central rule is simple: **bare runtimes preserve approvals; isolated
-runtimes run unrestricted.** A disposable boundary limits damage to the
+**Bare runtimes preserve approvals where the harness supports them; isolated
+runtimes run unrestricted.** Muse always runs unrestricted, including on bare
+targets. A disposable boundary limits damage to the
 runtime, but it does not prevent the agent or its model provider from reading
 data and credentials intentionally placed inside that boundary.
 
@@ -20,13 +21,13 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| Jev turn classifier | After a minute of silence in a turn, and after a reply ends: up to 1 KiB of your latest prompt, up to 2 KiB of the latest assistant text, a size-limited transcript summary, tool titles (up to 128 bytes each), the harness name, and counts of background and queued commands. | The public Cloudflare proxy `mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards it to TypeSafe (`api.typesafe.ai`). With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, it goes straight to `api.typesafe.ai` with your key. | `[jev] enabled = false`, or **Setup → Privacy → Jev (hosted service)**. A blank key does not disable it; it falls back to the proxy. |
-| Automatic continuation | When a reply ends and the agent may have stopped early: your messages since the last context reset and recent assistant replies. Tool history is not sent. | The same proxy (`/v2/continuation-verdict`), or `api.typesafe.ai` with your key. | `[continuation] enabled = false` or `[jev] enabled = false` in `config.toml`, or clear **Enabled** under **Setup → Continuation**. |
+| Jev turn classifier | After a minute of silence in a turn, and after a reply ends: up to 1 KiB of your latest prompt, up to 2 KiB of the latest assistant text, a size-limited transcript summary, tool titles (up to 128 bytes each), the harness name, and counts of background and queued commands. | The public Cloudflare proxy `mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards it to TypeSafe (`api.typesafe.ai`). With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, it goes straight to `api.typesafe.ai` with your key. | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. A blank key does not disable it; it falls back to the proxy. |
+| Automatic continuation | When a reply ends and the agent may have stopped early: your messages since the last context reset and recent assistant replies. Tool history is not sent. | The same proxy (`/v2/continuation-verdict`), or `api.typesafe.ai` with your key. | `[continuation] enabled = false` or `[jev] enabled = false` in `config.toml`, or clear **Enabled** under **Settings → Continuation**. |
 | Semantic help search | While you type in the help filter, 200 ms after the last key: the filter text and the text of every help row. | The same proxy (`/v1/help-search`), or `api.typesafe.ai` with your key. | `[jev] enabled = false`. It runs only while the help filter has text. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
 One switch stops every Jev request: set `enabled = false` under `[jev]` in
-`config.toml`, or clear **Setup → Privacy → Jev (hosted service)**. Then
+`config.toml`, or clear **Settings → Privacy → Jev (hosted service)**. Then
 nothing in the first three rows leaves the machine from the dashboard or
 from sessions started afterwards. Workers read the switch when they start,
 so a session that was already running keeps sending turn text until you
@@ -107,6 +108,7 @@ home from a harness-specific allowlist:
 | Claude Code | Authentication and account config, settings, `CLAUDE.md`, skills, and plugins |
 | Kimi Code | Authentication, config, device ID, instructions, MCP config, skills, agents, and plugins |
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
+| Muse Code | Authentication, settings, trust configuration, instructions, skills, and rules |
 
 Symbolic links inside an allowlisted profile entry are followed: the session
 receives the contents of the file or directory a link points to, even when the
@@ -211,7 +213,6 @@ HTTPS, and expire after 30 days without authenticated requests by default.
 Authenticated requests renew new phone-login cookies while preserving the viewer
 identity. Desktop bootstrap cookies and cookies issued by older builds retain
 their original expiry; sign in again to opt an older phone cookie into renewal.
-A zero configured cookie lifetime still produces a browser-session cookie.
 
 The six-digit code is intentionally convenient rather than high entropy. Five
 wrong codes lock the login endpoint. Repeated lockouts back off from 30 seconds

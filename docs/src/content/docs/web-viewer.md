@@ -45,7 +45,7 @@ The viewer can:
   sessions the index returned in the order it ranked them, and it is closed and
   reads **Indexing…** until the first index build finishes;
 - prepare and confirm a move to another compatible target or profile while
-  keeping the same logical session; and
+  keeping the same logical session;
 - refresh target capacity and profile quota; and
 - keep a per-browser draft for the active conversation.
 
@@ -56,8 +56,9 @@ preserved, including while a history request is still loading.
 
 The terminal owns the richer launch workflow. Use it when you need per-session
 CPU or memory sizing, attached-directory setup, or quick bundle creation. The
-viewer also omits native-session import, force destruction, and configuration or
-secret editing.
+viewer also omits native-session import, **Discard changes since checkpoint**,
+and configuration or secret editing. Explicit **Destroy session** is available
+with confirmation.
 
 ### Move confirmation
 
@@ -194,4 +195,4 @@ See [Security boundaries](/security/) for the full trust model,
 and [Troubleshooting](/troubleshooting/) when the viewer remains loopback-only
 or the desktop shell cannot open.
 
-**Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and about sub-agents still at work, which suspending stops. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session, environment, and recovery archive; keeping its branch does not preserve environment-only work. Closing a browser pane or tab leaves sessions running.
+**Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and about sub-agents still at work, which suspending stops. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session record, environment, and recovery archive after indexing the conversation in SessionWiki. The archived conversation can seed a new session, but cannot recover deleted workspace files. Closing a browser pane or tab leaves sessions running.

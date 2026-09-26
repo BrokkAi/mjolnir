@@ -28,7 +28,7 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 
 A failure takes precedence over an unreachable worker, which takes precedence over a request for input, which takes precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
 
-With the ASCII symbol set (**Setup → Advanced → Symbols**, or automatically on
+With the ASCII symbol set (**Settings → Advanced → Symbols**, or automatically on
 a terminal without UTF-8) the same states read `*` working, `!` waiting, `+`
 unread, `-` idle, `.` unknown, `?` unreachable, `x` failed, `^` starting, `~`
 resuming, `<>` moving, `#` checkpointing, `v` suspending, `=` suspended, and `X`
@@ -448,7 +448,7 @@ session is kept before Mjolnir's own copy is removed:
 archive_after_days = 30
 ```
 
-The Setup screen's SessionWiki page shows how much disk your sessions use and,
+The Settings screen's SessionWiki page shows how much disk your sessions use and,
 while you type a value for **Archive after (days)**, an estimate of what that
 value would reclaim. The estimate covers checkpoints and image attachments, and
 it counts every aged suspended session whether or not the index has caught up
@@ -597,14 +597,14 @@ Continue with [durability and recovery](/durability/) for the archive guarantees
 
 Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
 
-This is enabled by default. Uncheck **Enabled** under **Setup → Continuation** to disable it, or set:
+This is enabled by default. Uncheck **Enabled** under **Settings → Continuation** to disable it, or set:
 
 ```toml
 [continuation]
 enabled = false
 ```
 
-Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Setup reads **Off · Jev is off (Privacy)**.
+Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Settings reads **Off · Jev is off (Privacy)**.
 
 The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
 

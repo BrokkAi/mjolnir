@@ -5,7 +5,8 @@
 Mjolnir (`mj`) runs Claude Code, Codex, Kimi Code, Grok Build, and Muse Code
 sessions side by side, on your laptop, in containers, over SSH, or on EC2, and
 keeps them running after you close the terminal. You can move a session to
-another account, another harness, or another machine without starting over.
+another account, another harness, or a compatible target without starting over.
+Bare SSH sessions stay on their original host.
 
 By default Mjolnir sends recent prompt and reply text, and help-search text, to TypeSafe's hosted Jev classifier through a public proxy, and `[jev] enabled = false` in `config.toml` stops all of it ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
@@ -38,7 +39,7 @@ away.
   that owns its prompt queue and event journal. Detach, close the terminal, or
   restart the daemon; the agent keeps working and you reattach where you
   left off.
-- **Run anywhere.** Use a local worktree, a Docker, Podman, or Apple container,
+- **Run anywhere.** Use a local checkout or isolated clone, a Docker, Podman, or Apple container,
   any Linux host over SSH, or an EC2 instance provisioned from a launch
   template. Remote hosts need no resident daemon; Mjolnir uploads a worker on
   demand.
@@ -47,14 +48,16 @@ away.
   EC2. Checkpoints are verified before anything is torn down.
 - **See every account's quota.** Keep multiple named profiles per harness and
   watch remaining subscription quota and target capacity in one view.
-- **Shared project memory.** Agents share synchronized project memory across
-  sessions, harnesses, and targets, so what one session learns the next one
-  knows.
+- **Shared project memory.** Supported harnesses share synchronized project
+  memory across sessions and targets. Muse currently cannot receive the
+  injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
 - **Adversarial review.** Turn it on and an independent reviewer, on a different
   provider when one is available, checks each turn's work and reports
   actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
   checkpoint, move, and restore together.
+- **Agent and editor integration.** Drive sessions through `mj new`, `mj prompt`,
+  and `mj wait`, the HTTP API, or `mj acp` for stdio ACP clients.
 - **Terminal, web, and desktop.** A full terminal dashboard, plus a
   privacy-first web viewer you can reach from your phone over Tailscale, and a
   desktop app. All three share the same live sessions.
@@ -119,6 +122,8 @@ session end to end.
   [configuration](https://mjolnir.brokk.ai/configuration/),
   [CLI reference](https://mjolnir.brokk.ai/cli-reference/), and
   [security](https://mjolnir.brokk.ai/security/).
+- [HTTP API](https://mjolnir.brokk.ai/api-reference/) and
+  [ACP agent](https://mjolnir.brokk.ai/acp-agent/): automate managed sessions.
 
 The documentation site source lives in [docs/](docs/README.md). Looking for the
 previous generation? See [Mjolnir 1.x](https://github.com/BrokkAi/mjolnir/releases/tag/v1.17.0).

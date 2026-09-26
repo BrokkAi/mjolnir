@@ -1,17 +1,18 @@
 # SSH machines: bare and container runtimes
 
 An SSH machine is a remote host under `[machines.<id>]` with `kind = "ssh"`.
-Two runtimes can run on it:
+Three runtimes can run on it:
 
 - `bare` — uses an existing Git project directory on the remote machine.
-  When that path is the repository's primary checkout, Mjolnir creates a
-  session-specific clone under `.mj/clones/<session-id>` in that repository
-  and runs the harness there.
-- `podman` (or `docker`) — starts a rootless container on the remote machine
+  **Create isolated checkout** chooses a session-specific clone under
+  `.mj/clones/<session-id>` instead of using the selected directory directly.
+- `podman` — starts a rootless container on the remote machine
   (the same model as on this machine, just reached over SSH) and runs the
   session inside it.
+- `docker` — uses the remote host's Linux Docker daemon; see
+  [Docker for Mjolnir](DOCKER.md).
 
-Both shell out to the local `ssh` CLI rather than using an SSH library.
+All three shell out to the local `ssh` CLI rather than using an SSH library.
 
 ## Sharing connections per host
 
@@ -135,8 +136,8 @@ to opening masters, and to every command when sharing is off.
   checked the key's fingerprint.
 - For a bare runtime: **an existing remote Git project with a valid `HEAD`.** The
   SSH user must be able to create `.mj/clones/` below the
-  repository. If you select its primary checkout, that checkout must be fully
-  clean, including staged, unstaged, and untracked files.
+  repository when **Create isolated checkout** is selected. Uncommitted changes
+  in the source are not copied into that clone.
 - For a Podman runtime: **rootless Podman on the remote host**, meeting the same
   postconditions Mjolnir expects locally. See [Podman for Mjolnir](PODMAN.md) — the
   remote host needs Podman 4.3 or newer and the same rootless
@@ -162,6 +163,10 @@ A `bare` runtime on the machine also takes:
 | --- | --- | --- |
 | `permissions` | no | `guardian` (the default) preserves configured harness approvals; `yolo` runs unconstrained. |
 
+Guardian approvals are supported by Codex, Claude Code, and Grok Build. Kimi
+and Muse do not provide them; Muse always runs unconstrained, regardless of
+this setting.
+
 ```toml
 [machines.builder]
 kind = "ssh"
@@ -180,11 +185,12 @@ The new-session wizard asks for an existing absolute Git directory on the SSH
 host. Mjolnir validates that path remotely; it does not clone a configured
 bundle into it.
 
-If the path belongs to the repository's primary checkout, Mjolnir creates an
-independent clone at `<repository>/.mj/clones/<session-id>` on the default
-branch. Changes in the source checkout stay there. If you
-select an existing linked worktree, Mjolnir uses that checkout directly instead
-of creating another one.
+**Create isolated checkout** defaults on for a primary checkout and off for
+an existing linked worktree; you can change either choice in the final review.
+When checked, Mjolnir creates an independent clone at
+`<repository>/.mj/clones/<session-id>` on the default branch. Changes in the
+source checkout stay there. When unchecked, the session uses the selected
+checkout directly.
 
 Because the session works in a checkout that belongs to the host, it stays
 there: `mj move` and `mj resume` refuse a target on another machine

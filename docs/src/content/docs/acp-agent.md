@@ -40,8 +40,7 @@ mj acp --workspace editor
 mj acp --workspace editor --profile codex-work --target builder --bundle product
 ```
 
-The command is hidden from `mj --help` because a person does not run it; a
-program does. It connects to your daemon and starts it if it is not running, so
+The command is listed in `mj --help`. It connects to your daemon and starts it if it is not running, so
 the first session may take a moment while the daemon comes up. `mj api-info`
 reports the daemon it reached.
 
@@ -123,7 +122,7 @@ finished, refused, failed, cancelled, or cut off when the pipe closed.
 | --- | --- | --- |
 | `keep` (default) | exactly as it was, live on its target | a program whose sessions a person follows up on |
 | `suspend` | checkpointed, with its worker and target released; `mj resume --session <id>` brings it back | a scheduler that wants its runs kept but not running |
-| `destroy` | removed, with its workspace and recovery archive; the branch is kept | a one-shot scheduler that takes its answer from the turn |
+| `destroy` | environment and recovery archive removed; conversation indexed in SessionWiki; legacy source branch kept | a one-shot scheduler that takes its answer from the turn |
 
 A one-shot scheduler — one that starts `mj acp` for a single prompt, reads the
 answer, and exits — should use `destroy`, or `suspend` if a person may want to

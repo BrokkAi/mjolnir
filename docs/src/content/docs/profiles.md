@@ -20,7 +20,7 @@ available choices can come from the provider's current catalog.
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `~/.claude` | `.credentials.json` | yes |
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
-| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | yes |
+| Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 
 There are five harness kinds. A Codex profile can also authenticate with an API
 key against a model provider other than OpenAI; see
@@ -35,9 +35,10 @@ that copy. See [What a session's staged home holds](#what-a-sessions-staged-home
 conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
-Kimi Code does not expose a guardian approval mode. Mjolnir warns before using
-it on a `bare` runtime on this machine, or on a `bare` runtime on an SSH
-machine configured with `permissions = "guardian"`. Container runtimes and EC2
+Kimi Code and Muse Code do not expose a guardian approval mode. Mjolnir warns
+before using either on a raw target. Muse always runs unconstrained, regardless
+of the target's configured policy; see [Harness limitations](#harness-limitations).
+Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
 boundary. See
 [Targets](/targets/) and [Security boundaries](/security/).
@@ -109,9 +110,9 @@ What changes for such a profile:
 - **Quota** is reported for Z.ai (`api.z.ai`) and Zhipu (`open.bigmodel.cn`)
   hosts, which publish the Coding Plan windows. Any other provider reports that
   quota is unavailable for it; the profile still runs sessions.
-- **Not a utility model.** Mjolnir's own inference, such as compacting a
-  transcript for a handoff, uses chat completions, which these profiles cannot
-  serve. Keep an OpenAI Codex or other profile configured for that work.
+- **Utility inference depends on the provider.** Z.ai profiles cannot supply
+  Mjolnir's own transcript compaction. DeepSeek profiles can, using their
+  chat-completions endpoint; see [Durability and recovery](/durability/).
 
 ### Providers that serve a plain model list
 

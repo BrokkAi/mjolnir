@@ -73,6 +73,8 @@ The only accepted top-level keys are:
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
+| `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
+| `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
@@ -82,7 +84,7 @@ The only accepted top-level keys are:
 | `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
 | `build_cache` | table | no | default `[build_cache]` values | Global switch for the shared mbx build cache. |
 
-The terminal Setup screen groups the prefix key, `sessions_side`, `spinner`,
+The terminal Settings screen groups the prefix key, `sessions_side`, `spinner`,
 and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
@@ -122,7 +124,7 @@ session_order = "project"
 | `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
 | `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
 
-The terminal Setup screen edits these settings under **Advanced**. Detailed
+The terminal Settings screen edits these settings under **Advanced**. Detailed
 clocks do not change how sessions run: the normal `Running` status continues
 across the originating turn and its background work.
 
@@ -132,7 +134,7 @@ The optional `[keys]` table rebinds the prefix key and every command it
 drives. Mjolnir follows tmux's model, described in [Terminal
 surface](/terminal-surface/#prefix-key): press the prefix, release it, then
 press a second key. An edit here takes effect the next time the daemon reloads
-the file, within about a second. The terminal Setup screen exposes the prefix
+the file, within about a second. The terminal Settings screen exposes the prefix
 under **Interface**; edit the command bindings by hand.
 
 ```toml
@@ -282,7 +284,7 @@ title = true
 | `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
 | `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |
 
-The terminal Setup screen edits these settings under **Notifications**.
+The terminal Settings screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 
@@ -345,8 +347,8 @@ quick tier runs one general reviewer and validates reported findings. Extended
 review may add intent analysis, a supervisor, and specialist lanes. See
 [Independent turn review](/turn-review/).
 
-In the terminal, these review fields are edited inside **Setup** so one Save or
-Cancel applies to the entire configuration draft. Setup can discover the
+In the terminal, these review fields are edited inside **Settings** so one Save or
+Cancel applies to the entire configuration draft. Settings can discover the
 selected review profile's supported model and effort choices and filters the
 profile list to compatible reviewer profiles.
 
@@ -378,7 +380,24 @@ With `enabled = false`:
 
 Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
-is **Setup → Privacy → Jev (hosted service)**.
+is **Settings → Privacy → Jev (hosted service)**.
+
+## Automatic continuation `[continuation]`
+
+```toml
+[continuation]
+enabled = false
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Allows Jev to check ended turns and continue work already requested by the user. Requires `[jev] enabled = true`. |
+
+There are at most three automatic continuations between user messages. New
+input or an interrupt cancels a pending check; continuation never supplies
+missing approval or answers a question. See [Automatic
+continuation](/sessions/#automatic-continuation) for background work, goals,
+quota recovery, and the text sent to the classifier.
 
 ## Session index `[sessionwiki]`
 
@@ -462,6 +481,22 @@ resumes, its agent is told which sub-agents were stopped and whether each had
 handed back, so it can start them again if it still needs their work. See
 [Sessions](/sessions/#sub-agents-and-suspend).
 
+## Shared build cache `[build_cache]`
+
+```toml
+[build_cache]
+enabled = false
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `true` | Global switch for the mbx build cache used by supported container sessions. `false` disables it on every machine. |
+
+When enabled, each machine's settings and filesystem decide whether its cache
+can be used. Configure its directory and size under
+[`machines.<id>.build_cache`](#build-cache-machinesidbuild_cache), rather than
+under a runtime. See [Container targets](/containers/) for cache prerequisites.
+
 ## Profiles `[profiles.<id>]`
 
 Each profile names one harness installation or account on the controller:
@@ -490,11 +525,13 @@ home = "/home/me/.codex-work"
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-`KIMI_CODE_HOME`, and `GROK_HOME` respectively.
+`KIMI_CODE_HOME`, `GROK_HOME`, and Muse's `XDG_CONFIG_HOME`. Muse also reserves
+`XDG_DATA_HOME`, and its `home` must end in `/muse`.
 
-Profiles do not select target-side executables. Raw SSH and EC2 workers resolve
-an exact pinned runtime from their managed cache, while local and container
-targets use their target runtime. `mj login` invokes the harness's canonical
+Profiles do not select target-side executables. All bare workers, including
+localhost, SSH, and EC2, resolve an exact pinned runtime from their managed
+cache. Containers use their image-provided runtime or the documented installer
+fallback. `mj login` invokes the harness's canonical
 controller-side command from `PATH`.
 
 Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
@@ -685,8 +722,9 @@ permissions = "guardian"
 | `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables approval and sandbox checks. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
 
 The new-session wizard asks for an existing absolute Git project directory on
-the runtime's machine. On `local` the harness retains its configured approval
-behavior because there is no container or instance boundary. On an SSH machine
+the runtime's machine. On `local` supported harnesses retain configured
+approvals because there is no container or instance boundary. Muse always runs
+unconstrained; see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
 the wizard separately asks for an existing absolute remote Git directory; when
 **Create isolated checkout** is checked on the final review, the new checkout is
 created below the repository's own `.mj/clones/` tree. A bare runtime on an
@@ -716,7 +754,7 @@ target values become container environment variables.
 Pull-policy behavior:
 
 - `auto` starts from an existing image and pulls only when absent. The daemon
-  refreshes eligible moving tags for Podman and Docker in the background.
+  refreshes eligible moving tags for Podman, Docker, and Apple Container in the background.
   Versioned tags, digest references, and local images remain pinned or cached.
   Apple Container resolves `auto` during provisioning.
 - `always` and `newer` request a launch-time refresh; Docker treats `newer` like
@@ -885,6 +923,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_BIFROST_BIN` | Path or command name for the review analyzer. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
+| `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
 | `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
 | `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started. For development checkouts. |
 | `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
@@ -924,9 +963,10 @@ The platform data directory, or `MJ_DATA_DIR`, contains operational state:
 - `sessions/` for recovery archives;
 - `projects/<project-key>/memory/` for canonical project memory;
 - `logs/` and `daemon.log` for logs;
-- `daemon.json` for daemon discovery; and
-- `viewer/` and `diagnostics/` for viewer security material and diagnostic
-  reports.
+- `daemon.json` for daemon discovery;
+- `api-token`, `phone-cookie-key`, and `phone-cookie-revocations.json` for API
+  and viewer credentials and logout records; and
+- `diagnostics/` for diagnostic reports.
 
 Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
 in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)

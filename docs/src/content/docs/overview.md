@@ -29,7 +29,7 @@ A Mjolnir installation has four main parts:
 
 1. The **controller daemon** owns the local session database, provisions
    targets, synchronizes credentials, and serves the web viewer.
-2. A **target** is the place where a session runs: a local worktree, a
+2. A **target** is the place where a session runs: a local checkout or clone, a
    container, a named SSH machine, or an EC2 instance.
 3. A **session worker** runs on that target beside the selected harness. It
    owns the durable command queue and event journal, so it does not depend on
@@ -95,7 +95,7 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Claude Code | `claude` | Yes | Yes | Yes | Yes |
 | Kimi Code | `kimi` | Yes | Yes | Yes | No |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
-| Muse Code | `muse` | Yes | Yes | Yes | Yes |
+| Muse Code | `muse` | Yes | Yes | Yes | No |
 
 “Native state” means Mjolnir can resume the harness's own session when the
 same harness is selected again. A cross-harness resume instead restores the
@@ -114,11 +114,11 @@ A machine is a host: `local` (this computer), `ssh` (a named host), or
 
 | What you get | Runtime | Machine | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
-| Local Git worktree | `bare` | `local`, on a Linux or macOS controller host | Configured approvals | A Mjolnir-managed local worktree |
+| Local checkout or isolated clone | `bare` | `local`, on a Linux or macOS controller host | Configured approvals, except Muse | Existing directory or independent clone under `.mj/clones/` |
 | Podman container | `podman` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
-| Docker container | `docker` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
+| Docker container | `docker` | `local`, with a reachable Linux Docker daemon, including a VM on macOS | Unconstrained | Disposable container |
 | Apple container | `apple-container` | `local`, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
-| Remote Git worktree | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Managed workspace on the named host |
+| Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained, except Muse | Existing directory or independent clone on that host |
 | Podman over SSH | `podman` | an `ssh` machine | Unconstrained | Disposable remote container |
 | Docker over SSH | `docker` | an `ssh` machine | Unconstrained | Disposable remote container |
 | AWS EC2 | `bare` | an `aws-ec2` machine, in your AWS account | Unconstrained | Disposable instance |
@@ -129,14 +129,17 @@ harness's full-access mode and relies on the runtime boundary to contain the
 blast radius. The exact controls and data boundaries are documented in
 [Security boundaries](/security/).
 
-Use a raw local worktree when you specifically want the agent to operate on
+Muse always runs unconstrained, including on a bare runtime; use an isolated
+target for it. See [Muse limitations](/profiles/#harness-limitations).
+
+Use a bare local target when you specifically want the agent to operate on
 your machine under its normal approvals. Use a container for a disposable
 full-access environment. Use SSH or EC2 when the work needs a different host,
 architecture, or capacity pool. Per-runtime requirements are collected in
 the [Targets guide](/targets/).
 
 The controller, viewer, and local bare worker run on Linux and macOS. On macOS,
-Apple Container and remote targets are also available. Native Windows is not
+Apple Container, Docker through a Linux VM, and remote targets are also available. Native Windows is not
 supported; run Mjolnir under WSL2 instead.
 
 ## Where to go next

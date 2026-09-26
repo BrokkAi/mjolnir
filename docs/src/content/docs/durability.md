@@ -203,10 +203,12 @@ harness-private state is not translated into another harness's native history.
 Move restores the harness from the checkpoint rather than transferring live
 processes, whether or not it keeps the environment.
 
-**Destroy session…** is permanent. Destroying a suspended session removes its
-recovery archive and record. Destroying a live session tears down its target
-without a new checkpoint and removes every Mjolnir-owned recovery artifact; it
-is the explicit data-loss escape hatch.
+**Destroy session…** permanently removes the session record, environment, and
+recovery archive, without taking a new checkpoint. Mjolnir indexes the
+conversation in SessionWiki before removing the record. The archived
+conversation remains searchable and can seed a new session through
+`mj resume --wiki <id>`, but it cannot restore the deleted checkout or files
+that were never pushed or exported.
 
 An independent managed clone owns its own branches. Suspension verifies a
 checkpoint before deleting the clone, and Resume recreates it from the source

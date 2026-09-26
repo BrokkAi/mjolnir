@@ -39,7 +39,7 @@ The target accepts the common container fields:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `image` | yes | Linux image used for every new session. |
+| `image` | no | Linux image used for every new session; defaults to `ghcr.io/brokkai/mjolnir/agent-dev:latest`. |
 | `pull_policy` | no | `auto` (default), `always`, `newer`, `missing`, or `never`. |
 | `platform` | no | Explicit image platform when runtime selection needs it. |
 | `cpus` | no | Backend CPU fallback when an API launch omits a per-session allocation. |

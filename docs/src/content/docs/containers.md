@@ -6,20 +6,22 @@ description: Set up a disposable container target for Mjolnir and start your fir
 ## What container targets give you
 
 Each session on a container target runs in its own disposable, labeled
-container: local Podman or Docker on Linux or WSL2, Apple's `container`
-runtime on macOS 26 or newer on Apple silicon, or Podman over SSH. Container
+container: local Podman on Linux or WSL2, Docker with a reachable Linux daemon
+(including a VM on macOS), Apple's `container` runtime on macOS 26 or newer on
+Apple silicon, or Podman or Docker over SSH. Container
 isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, or Grok Build's `--always-approve`
-launch flag. Every one of those approves every call. Note that Kimi Code's
+launch flag. Muse uses `allowAll`, `--disable-sandbox`, and the staged
+`:unrestricted` profile. Every one of those approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
-Raw localhost worktrees preserve the profile and harness's configured approval
-behavior instead. Codex, Claude Code, and Grok Build expose guardian modes
-through their harnesses; Kimi Code does not. Mjolnir warns against running an
+Bare localhost sessions preserve configured approvals for supported harnesses.
+Codex, Claude Code, and Grok Build expose guardian modes; Kimi Code and Muse
+Code do not, and Muse always runs unconstrained. Mjolnir warns against running an
 unsupported harness on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A
@@ -35,7 +37,7 @@ outside the checkout do not travel, and a checkout with no network remote cannot
 become a container workspace. See
 [Resume a local session into a container](/sessions/#resume-a-local-session-into-a-container).
 
-Closing a session first writes and verifies a recovery archive, then removes
+Suspending a session first writes and verifies a recovery archive, then removes
 that exact container. No mutable session workspace persists past the session
 except what the recovery archive captured and whatever you pushed to a
 remote. Mjolnir may retain read-only Git objects in the host clone cache described
@@ -47,21 +49,22 @@ Install each runtime you want to use as a target:
 
 - **Rootless Podman 4.3 or newer** on Linux or WSL2. See
   [Podman for Mjolnir](/podman/) for installation and verification steps.
-- **Docker with a reachable Linux daemon** on Linux or WSL2. See
+- **Docker with a reachable Linux daemon**, including Colima on macOS. See
   [Docker for Mjolnir](/docker/) for its OverlayFS and lifecycle contract.
 - **Apple's `container` CLI** on macOS 26 or newer on Apple silicon.
 
-Linux releases are static musl binaries, so the controller itself runs the
-session relay in same-architecture Linux containers. The installer also places
-the other supported Linux architecture's
-`mj-worker-<arch>-unknown-linux-musl` companion next to `mj`. On macOS it
-installs both Linux companions.
+Linux controller releases require glibc 2.28 or newer. Session workers are
+separate static musl binaries: both Linux architectures are bundled beside
+`mj` as `mj-worker-<arch>-unknown-linux-musl`. The controller selects and uploads
+the worker matching the container or remote host. macOS bundles also include
+a native `mj-worker` for local bare sessions.
 
 ## Get the agent-dev image
 
 Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, and
-the Codex and Claude ACP bridges. It also carries Playwright's Chromium system
+the Codex and Claude ACP bridges, Muse Code with `muse-acp`, and Bifrost for
+turn review. Kimi and Grok install on demand. It also carries Playwright's Chromium system
 libraries and the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
@@ -131,7 +134,7 @@ in place.
 
 ## Git clone cache
 
-Local Podman, local Docker, SSH Podman, and Apple container targets cache GitHub repository
+Local Podman, local Docker, SSH Podman, SSH Docker, and Apple container targets cache GitHub repository
 objects under the container host user's `~/.cache/mjolnir/git`. Before launch, Mjolnir
 refreshes a bare mirror and creates an isolated session snapshot whose
 immutable objects are shared with ordinary filesystem hardlinks. The snapshot

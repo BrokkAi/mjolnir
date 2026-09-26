@@ -26,12 +26,12 @@ command exercises container creation and removal.
 
 | Runtime | Machine | Isolation boundary | New-session project | Supplemental directories | Resource choice | Target lifecycle |
 | --- | --- | --- | --- | --- | --- | --- |
-| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; the session's managed clone is archived and retired on stop. |
-| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; the per-session clone or workspace is archived and retired. |
+| `bare` | `local` (Linux or macOS controller machine) | none | Existing local directory, optionally an isolated Git clone | no | host-owned | Machine and user-selected directory persist; a managed clone is archived and retired on suspend. |
+| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory, optionally an isolated clone | no | host-owned | Host and user-selected directory persist; the managed clone and staging areas are retired on suspend. |
 | `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
 | `podman` | `local` (Linux/WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
-| `docker` | `local` (Linux/WSL2) or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
+| `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
 | `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
 
 “Verified stop” means Mjolnir has created a recovery archive and checked its
@@ -41,8 +41,9 @@ SHA-256 on the controller before tearing the resource down. See
 ## Harness versions
 
 Mjolnir installs and caches its pinned harness runtimes for every bare session,
-on this machine, on an SSH machine, and on an EC2 instance. Local sessions use the selected profile's
-existing home and credentials, while their runtime is managed independently
+on this machine, on an SSH machine, and on an EC2 instance. Every session uses
+a staged copy of the selected profile's allowlisted files and credentials,
+while its runtime is managed independently
 of commands such as `codex` installed for native terminal use. Containers use
 the runtimes supplied by their image.
 
@@ -65,10 +66,12 @@ chosen harness's controls:
 The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, and Grok Build
 always-approve with its sandbox disabled. These all approve every action; Kimi's
-mode happens to be named `auto` but is not a risk-selective guardian.
+mode happens to be named `auto` but is not a risk-selective guardian. Muse uses
+the staged `:unrestricted` permission profile, `allowAll`, and
+`--disable-sandbox` on every target, overriding the policy in the table.
 
 Codex, Claude Code, and Grok Build can preserve guardian approvals on raw
-targets. Kimi Code cannot, so Mjolnir displays a prominent warning when it is
+targets. Kimi Code and Muse Code cannot, so Mjolnir displays a prominent warning when either is
 selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
@@ -135,7 +138,7 @@ path, not the selected project or its linked-worktree location.
 The host does not need a preinstalled harness bridge. Its worker installs and
 reuses the exact harness version pinned by Mjolnir in the remote user's cache.
 It does require Node.js 22 and npm for Codex and Claude, or curl and Bash for
-Kimi and Grok. Mjolnir never uses sudo to add these prerequisites and does not
+Kimi and Grok, or curl and tar for Muse. Mjolnir never uses sudo to add these prerequisites and does not
 fall back to another harness executable from the remote `PATH`.
 
 `permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
@@ -145,9 +148,9 @@ workspace cleanup.
 
 ## Container targets
 
-All container targets require an image and accept optional `pull_policy`,
-`platform`, `cpus`, `memory`, and target `environment`. The published default is
-multi-architecture:
+All container targets use an image and accept optional `pull_policy`,
+`platform`, `cpus`, `memory`, and target `environment`. If `image` is omitted,
+they use this published multi-architecture default:
 
 ```toml
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"

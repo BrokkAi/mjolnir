@@ -59,7 +59,7 @@ An older Mjolnir refuses to load a configuration last written by a newer build.
 Update Mjolnir, or use the newer build; do not lower the `version` value by
 hand.
 
-## A bare session says the primary checkout is dirty
+## A bare clone does not contain my local changes
 
 When **Create isolated checkout** is checked for a new bare session, Mjolnir
 creates an independent clone. Source changes do not enter that clone. If you
@@ -71,7 +71,8 @@ Inspect the selected checkout on the local or remote target:
 git -C <project-directory> status --short --untracked-files=all
 ```
 
-Commit the listed work before launch if the clone should begin with it. To work directly in the selected
+For a network-backed clone, commit and push the work and select the branch
+that contains it; the default is the remote's default branch. To work directly in the selected
 directory with its current changes, uncheck **Create isolated checkout** on the
 final review. See [Targets](/targets/#bare-runtimes)
 and [Workspaces and bundles](/workspaces-bundles/).
@@ -140,16 +141,16 @@ login-shell probe and carries the discovered `PATH` into the non-login
 runtime. An explicit profile setting wins:
 
 ```toml
-[profiles.<id>.environment]
+[profiles.my-profile.environment]
 PATH = "/opt/my-tools/bin:/usr/local/bin:/usr/bin:/bin"
 ```
 
 After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
-startup files. Raw SSH and EC2 sessions do not launch an ambient harness from
+startup files. Bare sessions on this machine, SSH, and EC2 do not launch an ambient harness from
 this path: they use the exact Mjolnir-managed version, while `PATH` supplies its
 installer prerequisites. These targets require Node.js 22 and npm for Codex
-and Claude, or curl and Bash for Kimi and Grok. Install prerequisites
+and Claude, curl and Bash for Kimi and Grok, or curl and tar for Muse. Install prerequisites
 on the host yourself; Mjolnir never invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.

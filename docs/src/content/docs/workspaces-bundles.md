@@ -53,10 +53,18 @@ that already carries the name, so it is safe to run before every session. Both
 are thin clients for `GET` and `POST /api/v1/workspaces`; see the
 [HTTP API reference](/api-reference/#list-workspaces).
 
-`mj new` does not require one at all. With no `--workspace-id` and no global
-`--workspace`, it uses the instance's only workspace, or the `default` workspace
-when the instance has none, so `mj -i <name> new ...` works on a brand-new
-instance. An instance with several workspaces must name one.
+`mj new` requires `--workspace <name>` or `--workspace-id <id>`, even when
+there is only one workspace. A fresh instance has none; create one first:
+
+```console
+mj workspaces create agents
+mj new --workspace agents --project-directory . "Review this project"
+```
+
+The HTTP create-session endpoint can infer the workspace only when exactly one
+exists. Neither interface creates an implicit `default` workspace for a new
+session. Plain `mj` still creates its first dashboard workspace from the current
+directory name.
 
 ### What belongs to a workspace
 
@@ -78,14 +86,16 @@ session history.
 
 ### Delete safely
 
-Ordinary deletion is allowed only when the workspace has no active sessions and
-no recoverable detached drafts. Force deletion first destroys its active
-sessions and drops its drafts. This is destructive session lifecycle work, not
-just sidebar cleanup; review the confirmation carefully.
+Deleting a workspace first suspends its active sessions, preserving verified
+recovery copies and stopping their Mjolnir sub-agents. The confirmation also
+discards detached drafts and unsent composer text. Only after every suspension
+succeeds does Mjolnir remove the workspace and its drafts.
 
-Suspended and otherwise inactive histories remain available in the global resume
-picker after either form of workspace deletion. For session-level destruction
-and recovery guarantees, see [Durability and recovery](/durability/).
+If a suspension fails or deletion is cancelled, the workspace and drafts stay;
+sessions already suspended remain suspended. Retry after resolving the failure.
+Retained session histories remain available in the global resume picker and can
+be resumed into another workspace. See [Durability and recovery](/durability/)
+for session-level destruction and recovery guarantees.
 
 Workspaces are stored in `mj.sqlite3`, not `config.toml`. Do not add a
 `[workspaces]` table to the configuration file.
@@ -170,10 +180,11 @@ launch. `git_ref` is obsolete and is rejected with migration guidance.
 Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a
 configured bundle.
-When the selected path is a primary checkout, Mjolnir creates a session-specific
-clone under the repository's `.mj/clones/` tree so the primary
-checkout is not used directly. Source working-tree changes stay there. Selecting an
-existing linked worktree keeps that worktree. See
+The final review offers **Create isolated checkout**, on by default for a
+primary checkout and off for an existing linked worktree. When checked,
+Mjolnir creates a session-specific independent clone under `.mj/clones/` and
+leaves source working-tree changes behind. When unchecked, the session uses the
+selected directory directly. See
 [Targets](/targets/#bare-runtimes).
 
 ## GitHub repositories
@@ -183,7 +194,7 @@ repositories, Mjolnir looks for a token in `GH_TOKEN`, then `GITHUB_TOKEN`, then
 the authenticated GitHub CLI. The active token is injected into managed
 non-local sessions and kept out of checkpoints and recovery archives.
 
-Local Podman, Docker, SSH Podman, and Apple Container targets maintain a
+Local Podman, Docker, SSH Podman, SSH Docker, and Apple Container targets maintain a
 read-only Git object cache on the container host under
 `~/.cache/mjolnir/git`. Mjolnir refreshes a bare mirror, makes an isolated
 per-session snapshot with hardlinked immutable objects, and lets the target
@@ -206,7 +217,7 @@ The source checkout is never mounted or copied into the target, and Mjolnir does
 not provide a Git service backed by it. Unpublished commits, staged changes,
 unstaged changes, and untracked files stay on the host. If the source has no
 usable network remote, isolated creation fails before provisioning; a raw local
-session is the only no-remote exception. Closing an isolated session saves its
+session is the only no-remote exception. Suspending an isolated session saves its
 checkpoint and does not publish a branch to the host checkout. New
 network-backed sessions can resume from their saved checkpoint, including work
 made after the clone.
@@ -267,7 +278,9 @@ hidden startup context. New sessions receive at most its first 200 lines or
 
 Delivery is harness-specific. Claude Code uses its native project-memory
 integration; Kimi managed targets receive the service through their staged MCP
-configuration; the remaining supported paths receive it through ACP.
+configuration; Codex, Grok, and local Kimi receive it through ACP. Muse cannot
+receive these injected MCP tools, so its sessions do not have this project-memory
+tool interface. See [Harness limitations](/profiles/#harness-limitations).
 
 For a multi-root bundle, bundle-wide material lives at the virtual root and
 repository-specific material may live below `/roots/<repository-id>/`.

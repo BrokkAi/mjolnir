@@ -131,14 +131,15 @@ itself depends on cgroup v2 being present.
 The container-template configuration exposes exactly seven keys: `image`,
 `platform`, `cpus`, `memory`, `environment`, `pull_policy`, and
 `workspace_storage`. Pull policy applies to Podman, Docker, and Apple container
-targets, but only Podman and Docker participate in background refresh; Apple
-evaluates the policy during session provisioning. Non-default workspace
+targets. All three participate in background image downloads and eligible
+moving-tag refreshes, including SSH Podman and Docker targets; launch also
+evaluates the configured policy. Non-default workspace
 storage is Podman-only; Docker and Apple targets reject it.
 There's no configuration key
 for arbitrary extra container-runtime arguments. Mjolnir derives the
 rest of the run command itself — the generated container name and the
-`dev.mj.session` / `dev.mj.managed` ownership labels it uses to find and
-recover its own containers later — and validates that nothing can override
+`dev.mj.session`, `dev.mj.managed`, and `dev.mj.instance` ownership labels it uses
+to find and recover its own containers later — and validates that nothing can override
 those before starting a container.
 
 ## Example target

@@ -26,13 +26,14 @@ An issue is useful but not mandatory for a well-scoped pull request. Use
 
 ## Development Setup
 
-Mjolnir is a Rust 2024 workspace. The default members build the headless `mj`
+Mjolnir is a Rust 2024 workspace using the compiler pinned in
+`rust-toolchain.toml` (also declared in `Cargo.toml`). The default members build the headless `mj`
 controller and its terminal dashboard, without the optional native desktop and
 speech stacks:
 
 ```bash
 cargo build --release
-./target/release/mj
+./target/release/mj --instance dev
 ```
 
 Use `scripts/run.sh` when exercising sessions: on Linux it builds the native
@@ -48,9 +49,14 @@ and container targets, where an unoptimized binary costs transfer size and
 session speed. A profile flag applies to every binary a script builds, so pass
 `--profile dev` to both, or to neither, when trading that for link speed.
 
-Bare `mj` opens the workspace dashboard; a first run opens the setup dialog
-instead. The `brokk-mj-voice-worker` workspace member provides local Alt+V
-dictation.
+Use a separate named instance for every development daemon, CLI, and UI run;
+do not point a test build at your live default instance. Explicit `MJ_CONFIG_DIR`
+and `MJ_DATA_DIR` override instance paths, so keep test overrides isolated too.
+
+Bare `mj` opens the workspace dashboard; a fresh instance shows the Get started
+panel and creates its first workspace from the current directory name. `mj setup`
+is optional. The `brokk-mj-voice-worker` workspace member provides local
+`prefix+m` dictation (`ctrl+b`, then `m`, by default).
 On Debian or Ubuntu, install the ALSA development headers before building it:
 
 ```bash
@@ -68,23 +74,26 @@ The control plane starts with a foundation and then splits into independent
 branches. A crate may use the crates below it. It must never use a crate above
 it or introduce a dependency between sibling branches.
 
-- `brokk-mj-core` (repository root, library `hel`) is the foundation. It holds
-  configuration, persisted state, the database, the relay protocol, and the
+- `brokk-mj-core` (`mj-core/`, library `mj_core`) is the foundation. It holds
+  configuration, persisted-state types, the relay protocol, and the
   shared transcript, diff, and target types.
+- `brokk-mj-review`, `brokk-mj-checkpoint`, and `brokk-mj-transcript` live in
+  their matching directories. They build on core and share review logic,
+  archive handling, and transcript projection across the runtime branches.
 - `brokk-mj-worker` (`mj-worker/`, library `mj_worker`) is the target side. It
-  runs inside a container or on an SSH host and supervises the agent process
-  there.
+  runs locally, in a container, or on an SSH/EC2 host and owns the harness,
+  durable command queue, and relay journal.
 - `brokk-mj-client` (`mj-client/`, library `mj_client`) holds client-facing
   contracts and shared presentation helpers. It uses the foundation.
 - `brokk-mj-controller` (`mj-controller/`, library `mj_controller`) is the
-  daemon side. It provisions targets, manages sessions, and serves the web
+  daemon side. It owns the database, provisions targets, manages sessions, and serves the web
   surface. It uses the foundation and client branches.
 - `brokk-mj-chat` (`mj-chat/`, library `mj_chat`) holds the conversation view
   state that the terminal and web surfaces render. It uses the foundation and
   client branches, in parallel with the controller.
 
-The controller must not depend on the worker, and the worker must not depend on
-the controller. The controller and chat branches must not depend on each other;
+Production dependencies keep the controller and worker independent; tests may
+use the other crate as a dev-dependency. The controller and chat branches must not depend on each other;
 anything they both need belongs in the foundation or client crate. The worker
 and controller still talk over the relay protocol. Keeping these branches
 apart lets Cargo compile them at the same time, and it stops an edit in one
@@ -138,7 +147,7 @@ Add the smallest regression test that would have caught the problem:
   directly instead of relying only on a manual TUI check.
 - Use the integration tests in `mj-cli/tests/` — `termination_pty.rs` for
   terminal restoration and signal behavior, plus the import, logging,
-  store-divergence, and worker-proxy tests beside it.
+  store-divergence, daemon-startup, instance, and ACP tests beside it.
 - Use the deterministic shell/expect harness in `tests/e2e/` for flows that
   need a process boundary — for example
   `tests/e2e/run-reliability.sh --scenario multi-client-happy-path --seed N <mj binary>`
@@ -154,14 +163,16 @@ Add the smallest regression test that would have caught the problem:
   `docs/AWS.md`, and the pages in `docs/src/content/docs/` when a user-visible
   command, keyboard action, setup flow, harness, target kind, configuration
   option, or limitation changes; `docs/scripts/sync-podman.mjs` copies the
-  Podman and Docker guides into the site during `npm run build` in `docs/`.
+  four runtime guides into the site during the dev, check, and build hooks.
+  See [docs/README.md](docs/README.md) for source ownership and link checks.
   Update [README.md](README.md) when the front-door positioning,
   installation, compatibility, or primary quick start changes.
 - Update [AGENTS.md](AGENTS.md) when an implementation invariant or contributor
   checklist changes.
 
-During development, run targeted tests by name or module. Before submitting,
-run the same core checks as CI:
+During development, run targeted tests by name or module. Run Cargo tests
+outside restricted sandboxes: the suite requires loopback TCP and Unix sockets.
+For Rust code or Cargo dependency changes, run the core checks before submitting:
 
 ```bash
 cargo fmt --check
@@ -169,6 +180,10 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 cargo test
 ```
+
+Documentation-only changes need diff review and the applicable documentation
+checks, not a full Rust build. For website changes, run `npm run check`,
+`npm run build`, and `PUBLIC_DOCS_BASE=/mjolnir npm run build` in `docs/`.
 
 Cargo never deletes stale build output, and each distinct feature or flag set
 keeps its own incremental cache, so `target/` grows without bound (one checkout

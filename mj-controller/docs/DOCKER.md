@@ -91,7 +91,7 @@ Docker mounts, attached files must permit access by the image's configured user;
 Mjolnir does not rewrite file ownership or run the session as root.
 
 On a failed launch, Mjolnir removes only resources carrying the expected session
-identity. On normal close it removes the container first, then its labeled
+identity. On suspension or destruction it removes the container first, then its labeled
 volumes, then the backing volume. It retains the backing volume if
 the container or a volume could not be removed, preventing deletion beneath a
 live mount.
@@ -141,8 +141,11 @@ normal network clone if cache preparation fails. Session snapshots are removed
 after their owning container.
 
 If Mjolnir exits while a container survives, `mj recover scan` finds Docker
-containers carrying both Mjolnir ownership labels, including on an SSH Docker
-host. Adoption verifies those labels, starts a stopped container when safe, and
+containers carrying Mjolnir ownership labels, including on an SSH Docker
+host. By default, the scan includes only containers stamped with the current
+Mjolnir instance's `dev.mj.instance` identity. Use `--all-instances` to include
+other instances and older, unstamped containers. Adoption verifies ownership
+and instance access, starts a stopped container when safe, and
 reconnects its worker. A normal checkpoint/resume instead provisions a fresh
 Docker container from the verified recovery archive on the same host.
 If the worker's original workspace is missing from the controller database,

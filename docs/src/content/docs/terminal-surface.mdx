@@ -14,7 +14,7 @@ The Mjolnir TUI is a single control surface for conversations and the infrastruc
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
     <Image src={shotDashboard} alt="Mjolnir terminal dashboard with a full-height Sessions sidebar beside Conversation, Prompt, Targets, and Quota" />
   </a>
-  <figcaption>The Workspace switcher sits above Sessions, beside the conversation, prompt, targets, and quota. Setup lets you place the sidebar on either side.</figcaption>
+  <figcaption>The Workspace switcher sits above Sessions, beside the conversation, prompt, targets, and quota. Settings lets you place the sidebar on either side.</figcaption>
 </figure>
 
 At startup, Mjolnir opens the most recently active live session in the selected
@@ -36,7 +36,7 @@ new session.
 
 **Create** opens the full session creation wizard and **Open** opens the
 session dialog, which starts on the running sessions and keeps the suspended
-history on its other tabs. The command palette opens with `prefix+:`, from or
+history on its other tabs. The command palette opens with `prefix+:` or
 from the clickable `: palette` hint in the footer; it remains available while you type and while a notice
 replaces the footer. Each session row has a **⋯** button for its actions.
 Displayed dashboard shortcut hints are clickable, including global shortcuts
@@ -47,10 +47,10 @@ Contrast, or Monochrome. Saving applies the palette to the dashboard, conversati
 and preserves it for future launches. Monochrome paints no colors at all and
 carries focus and selection with bold and reverse video; setting the
 `NO_COLOR` environment variable selects it whatever the configuration says.
-**Setup → Advanced → Symbols** switches every status mark, border, chart bar,
+**Settings → Advanced → Symbols** switches every status mark, border, chart bar,
 and footer separator to plain ASCII for a terminal that cannot show Unicode;
 left unset, the dashboard does this by itself on the Linux console or
-without a UTF-8 locale. Setup groups the prefix key, theme, spinner, and
+without a UTF-8 locale. Settings groups the prefix key, theme, spinner, and
 Sessions sidebar position under **Interface**. It also edits Advanced display
 options and integrated review settings; see [Configuration](/configuration/).
 
@@ -305,11 +305,11 @@ When a session you are not looking at starts needing you, Mjolnir rings the
 terminal bell after a short delay and keeps the terminal window title at
 `mj · 2 waiting · 1 unread`, so a background tab or a tmux window shows the
 count without switching to it. Failed and unreachable sessions are counted
-under their own words, for example `mj · 1 unreachable · 2 waiting`. **Setup → Notifications** turns the bell off,
+under their own words, for example `mj · 1 unreachable · 2 waiting`. **Settings → Notifications** turns the bell off,
 adds a desktop notification, or changes the delay; see
 [Configuration](/configuration/#notifications-notify).
 
-**Setup → Advanced → Session order** changes how the Sessions pane sorts.
+**Settings → Advanced → Session order** changes how the Sessions pane sorts.
 `project` (the default) groups sessions under a heading per project in
 creation order. `priority` drops the headings and lists sessions by attention
 level, so a question is always at the top; the numbered fold keys do nothing
@@ -330,9 +330,9 @@ Matching is fuzzy: `cre` finds **Create session** and `mvs` finds **Move session
 
 Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Suspend session, Restart, and Destroy session. **Suspend session** saves a recovery copy and releases the environment for later Resume; managed clones ask for confirmation when publication is unverified, and a running turn or a sub-agent still at work also requires confirmation, since suspending stops the session's sub-agents. Its shortcut is `prefix+shift+x`. **Close pane** (`prefix+x`) only dismisses the viewer and leaves the session running.
 
-**Move** opens preparation and confirmation for a compatible profile or target while keeping the logical session. Restart runs at once when idle and asks first mid-turn. **Destroy session** permanently removes the session, environment, and recovery archive after confirmation. Older linked-worktree sessions also offer a choice to delete their managed branch. Keeping that branch does not save work held only in the environment. After a failed suspension, **Discard changes since checkpoint…** requires a second confirmation identifying the recovery copy and warning that newer work will be lost. Every confirmation lists a letter for each button, for example `c Cancel · d Destroy session`; `Esc` takes the safe answer.
+**Move** opens preparation and confirmation for a compatible profile or target while keeping the logical session. Restart runs at once when idle and asks first mid-turn. **Destroy session** permanently removes the session record, environment, and recovery archive after confirmation, while retaining its indexed conversation in SessionWiki. Restoring that conversation cannot recover deleted workspace files. Older linked-worktree sessions also offer a choice to delete their managed branch. Keeping that branch does not save work held only in the environment. After a failed suspension, **Discard changes since checkpoint…** requires a second confirmation identifying the recovery copy and warning that newer work will be lost. Every confirmation lists a letter for each button, for example `c Cancel · d Destroy session`; `Esc` takes the safe answer.
 
-## New session and Setup
+## New session and Settings
 
 Press **Create**, `n`, `N`, or `prefix+c` to open the full session
 creation wizard. It asks for the profile, then the target, then the project,
@@ -355,10 +355,10 @@ draft: discovery checks the selected reviewer profile's model and effort
 capabilities and filters incompatible profiles. **Save and Close** or Ctrl+S
 validates and saves the complete draft. Errors keep your edits in place. `Esc`
 cancels an open choice menu; otherwise `Esc`, the title-bar `×`, or Cancel
-closes Setup and discards unsaved Setup and review edits. Web listener changes
+closes Settings and discards unsaved configuration and review edits. Web listener changes
 take effect on its next start.
 
-Detailed activity clocks are off by default. Turn them on in **Setup → Advanced
+Detailed activity clocks are off by default. Turn them on in **Settings → Advanced
 → Detailed activity clocks** when you want normal session rows and the
 conversation header to show separate turn, step, and background clocks. The
 ordinary **Running** status covers the originating turn and its follow-on
@@ -368,11 +368,11 @@ while the selected session is actually busy; an idle or suspended session does
 not animate.
 
 Suspended sessions are hidden from the Sessions pane by default and remain
-available through **Open**. Enable **Setup → Advanced → Show suspended sessions**
+available through **Open**. Enable **Settings → Advanced → Show suspended sessions**
 to include them in the Sessions pane for their workspace.
 
 <figure class="shot">
-  <Image src={shotSetup} alt="Setup modal with all configuration sections and a Save and Close control stacked at its right edge" />
+  <Image src={shotSetup} alt="Settings modal with all configuration sections and a Save and Close control stacked at its right edge" />
   <figcaption>Configure Mjolnir without leaving the terminal or editing a file.</figcaption>
 </figure>
 

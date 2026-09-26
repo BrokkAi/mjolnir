@@ -85,8 +85,9 @@ session's complete `/workspace`, not as a shared Cargo cache.
 The default `pull_policy = "auto"` starts a session from the image the host
 already has, and pulls only when the host has no copy at all. Instead of pulling
 during a launch, the daemon runs `podman pull` for every remote `:latest` image
-once an hour and then `podman image prune -f`, so a session never waits on a
-multi-gigabyte download and dangling layers do not pile up. Versioned and local
+once an hour and then `podman image prune -f`, keeping cached moving tags fresh
+and removing dangling layers. The first launch still waits if the image has not
+been downloaded. Versioned and local
 tags stay cached, and a digest-pinned image is never replaced. Set `pull_policy`
 to `always`, `newer`, `missing`, or `never` to override that inference; `always`
 and `newer` pull during the launch as well. Podman's `newer` policy retains a

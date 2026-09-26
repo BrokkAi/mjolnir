@@ -296,13 +296,13 @@ POST /api/v1/sessions
 {
   "workspace_id": "workspace-1",
   "profile_id": "codex",
-  "target_id": "local",
+  "target_id": "localhost",
   "bundle_id": "bundle-1",
   "project_directory": "/home/you/project",
   "launch_branch": "main",
   "launch_base": "origin/main",
   "title": "add a README line",
-  "model": "gpt-5",
+  "model": "<model-id-from-profile-config>",
   "effort": "high",
   "prompt": "add a README line"
 }
@@ -531,10 +531,13 @@ suspension reports its error and preserves recoverable resources; it never
 silently switches to destruction.
 
 Destroy permanently removes the environment, recovery archive, and session
-record, including sub-agents. The optional `{"delete_branch": true}` body applies
+record, including sub-agents, after indexing their conversations in SessionWiki.
+The optional `{"delete_branch": true}` body applies
 only to older linked-worktree sessions and deletes their managed source branch.
 New managed clones have no source branch to delete. Once destruction completes,
-`GET /sessions/{id}` returns `404`.
+`GET /sessions/{id}` returns `404`. The indexed conversation remains available
+through the wiki routes and `mj sessions --session <id>`; restoring it starts
+a new session from conversation context, not from the deleted recovery archive.
 
 Interrupt turn keeps the environment and session available for further prompts.
 For a session that is still starting, it withdraws the prompts held for it.
@@ -550,7 +553,7 @@ POST /api/v1/sessions/{session_id}/resume
 ```json
 {
   "profile_id": "codex",
-  "target_id": "local",
+  "target_id": "localhost",
   "workspace_id": "workspace-1",
   "queue": "start"
 }
@@ -567,7 +570,7 @@ suspended; it defaults to `start`.
   "session_id": "session-1",
   "workspace_id": "workspace-1",
   "profile_id": "codex",
-  "target_id": "local"
+  "target_id": "localhost"
 }
 ```
 
@@ -674,17 +677,17 @@ which is the quickest way to see a shape before you write a client for it.
 
 ```console
 mj workspaces create scripts
-mj new --workspace scripts --profile codex --target local --project-directory . \
+mj new --workspace scripts --profile codex --target localhost --project-directory . \
   "add a README line"
 mj wait --session <id>
 mj prompt --session <id> --wait "now add a test"
 mj diff --session <id>
 mj export --session <id> --kind bundle --out work.bundle
-mj suspend --session <id>
+mj suspend --session <id> --acknowledge-unpublished-work
 ```
 
-`mj transcript --session <id>` still answers after the close: the projection
-outlives the session. See [session lifecycle](/sessions/) for what closing and
+`mj transcript --session <id>` still answers after suspension: the projection
+and session record are retained. See [session lifecycle](/sessions/) for what suspending and
 resuming do, and [security boundaries](/security/) for what the token reaches.
 
 

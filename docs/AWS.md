@@ -1,7 +1,8 @@
 # AWS EC2 machines
 
 This is the setup guide for a Mjolnir `aws-ec2` machine: a disposable EC2 instance
-that Mjolnir launches for one session and terminates when the session closes.
+that Mjolnir launches for one session and terminates when the session is suspended
+or destroyed.
 
 ## What Mjolnir does, and does not, manage
 
@@ -14,18 +15,22 @@ aws --profile <aws_profile> --region <region> ec2 run-instances \
   ...
 ```
 
-Mjolnir adds two tags as part of that launch:
+Mjolnir adds three tags as part of that launch:
 
 - `dev.mj.session=<session-id>` identifies the owning Mjolnir session.
 - `dev.mj.managed=true` lets recovery discover Mjolnir-managed instances.
+- `dev.mj.instance=<controller-identity>` associates the resource with the
+  Mjolnir instance that created it.
 
 The `run-instances` response supplies the exact instance ID. Mjolnir waits for
 that instance to enter the `running` state, then calls `describe-instances` by
 ID to read its public DNS, public IP, private DNS, or private IP according to
 `address_source`. Recovery also uses `describe-instances`, filtered by the
-managed tag and instance state, to find surviving session instances.
+managed tag and instance state, to find surviving session instances. By default,
+`mj recover scan` only lists resources owned by the current Mjolnir instance;
+`--all-instances` includes other instances and older, unstamped resources.
 
-Closing the session runs the matching, idempotent:
+Suspending or destroying the session runs the matching, idempotent:
 
 ```console
 aws --profile <aws_profile> --region <region> ec2 terminate-instances --instance-ids <instance-id>
@@ -40,7 +45,7 @@ AMIs. Prepare those resources before you point a target at AWS.
 
 - The `aws` CLI installed and on `PATH`.
 - Working AWS credentials for the region you'll launch in. If you use a named
-  profile, set `aws_profile` in the target (see below); otherwise Mjolnir uses
+  profile, set `aws_profile` in the machine (see below); otherwise Mjolnir uses
   your default profile.
 - An EC2 **launch template** you create ahead of time, specifying at least an
   AMI and a security group that allows inbound SSH from wherever Mjolnir's
@@ -110,7 +115,7 @@ so it's only available if you built Mjolnir from a source checkout.
 
 By default it reads an SSH public/private key pair at `~/.ssh/vastai.pub` /
 `~/.ssh/vastai` (override with `--ssh-public-key` / `--ssh-identity-file`).
-With `--write-mj-config`, it appends a target block to your `config.toml`
+With `--write-mj-config`, it appends a machine block to your `config.toml`
 named `[machines.aws-runson]` with a matching `[targets.aws-runson]` runtime —
 a fixed name chosen by the script, unrelated to
 the `mj-runson` launch template name or to any target name you might use
@@ -127,7 +132,7 @@ the AWS identity needs these EC2 actions:
 - `ec2:DescribeLaunchTemplateVersions`
 - `ec2:DescribeInstanceTypes`
 - `ec2:RunInstances`
-- `ec2:CreateTags` — `RunInstances` applies the two Mjolnir tags at launch.
+- `ec2:CreateTags` — `RunInstances` applies the three Mjolnir tags at launch.
 - `ec2:DescribeInstances` — used by the instance-running waiter, address lookup,
   and recovery scan.
 - `ec2:TerminateInstances`

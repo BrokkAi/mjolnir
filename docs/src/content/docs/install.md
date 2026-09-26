@@ -19,14 +19,21 @@ The installer selects the release for the current Linux or macOS architecture, v
 - `mj-desktop`, used by `mj app`
 - `mj-voice-worker`, used for local dictation
 - static x86_64 and ARM64 Linux session workers for remote and container targets
+- on macOS, a native `mj-worker` for local bare sessions
+
+The Linux controller requires glibc 2.28 or newer; only the portable workers
+are static musl binaries. Alpine and native Windows are not controller release
+targets.
 
 If `~/.local/bin` is not already on `PATH`, the installer offers to update the detected shell profile. Open a new shell before running `mj`, or add the directory to `PATH` yourself. The installer's last line tells you to run `mj`; see [First run](#first-run).
 
 Pin a release or choose another destination with environment variables:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | MJOLNIR_VERSION=v2.0.0 bash
+curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | MJOLNIR_VERSION=vX.Y.Z bash
 ```
+
+Replace `vX.Y.Z` with the release tag you want to install.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh | MJOLNIR_INSTALL_DIR="$HOME/bin" bash
@@ -140,7 +147,7 @@ and verified-download overrides.
 To work only on controller commands without launching sessions, use:
 
 ```sh
-cargo run
+cargo run -p brokk-mjolnir -- --instance docs-dev --help
 ```
 
 To build the desktop controller on x86_64 GNU/Linux:
