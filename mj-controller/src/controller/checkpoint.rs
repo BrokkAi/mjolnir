@@ -96,6 +96,8 @@ pub(super) fn restart_falls_back_to_checkpoint_only(
 
 mod archives;
 pub use archives::*;
+mod leftovers;
+pub use leftovers::*;
 mod lease;
 pub use lease::*;
 mod barrier;

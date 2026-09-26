@@ -76,9 +76,11 @@ impl Controller {
         };
         // Packing can outlive the relay capture barrier. Another export must
         // never replace the archive whose digest this operation transfers.
-        let operation_id = new_command_id("checkpoint")?;
-        let remote_archive = format!("{worker_root}/{operation_id}.hel.zip");
-        let remote_stage = format!("{worker_root}/{operation_id}-stage");
+        let super::leftovers::TargetCheckpointOperation {
+            id: operation_id,
+            stage: remote_stage,
+            archive: remote_archive,
+        } = super::leftovers::TargetCheckpointOperation::new(&worker_root)?;
         let checkpointed_at = now();
         let target_manifest = TargetManifest {
             template_id: session.target_template_id.clone(),
@@ -698,7 +700,9 @@ impl Controller {
 ///
 /// A cancelled operation leaves them. The executor refuses new commands once
 /// cancellation is requested, and on an SSH target the command it killed from
-/// this side can outlive that and recreate a stage removed underneath it.
+/// this side can outlive that and recreate a stage removed underneath it. The
+/// daemon's startup sweep, [`super::sweep_local_checkpoint_leftovers`],
+/// removes what a cancelled checkpoint left in a local worker root.
 struct TargetCheckpointFiles<'a, E: CommandExecutor> {
     executor: &'a E,
     backend: &'a targets::TargetLocator,
@@ -740,7 +744,7 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
             tracing::warn!(
                 session_id,
                 paths = ?self.paths,
-                "cancelled checkpoint left its files on the target"
+                "cancelled checkpoint left its files on the target; daemon start removes them from a local worker root"
             );
             return;
         }
