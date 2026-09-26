@@ -2323,7 +2323,7 @@ async fn send_input(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
                 request_id: "request".into(),
-                created_at_ms: 0,
+                created_at_ms: mj_core::clock::epoch_millis(),
                 action: mj_core::subagent::SubagentToolAction::SendInput {
                     child_session_id: "child-1".into(),
                     message: message.into(),
@@ -2331,6 +2331,387 @@ async fn send_input(
             },
         )
         .await
+}
+
+fn hold_child_start(backend: &ApiBackend) {
+    backend.starts.lock().unwrap().insert(
+        "child-1".into(),
+        Start {
+            status: StartStatus::Pending,
+            task: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
+    if !isolated_parked_test("queued_input_waits_for_initial_prompt_without_blocking_interrupt") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+    hold_child_start(&backend);
+    let mut pending = tokio::spawn({
+        let backend = backend.clone();
+        async move { send_input(&backend, "follow-up").await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut pending)
+            .await
+            .is_err()
+    );
+    assert!(delivered.try_recv().is_err());
+    assert!(
+        !crate::upgrade::active_labels()
+            .iter()
+            .any(|label| label.starts_with("subagent input delivery"))
+    );
+    let interrupt = backend.execute_subagent_tool(
+        "parent-1".into(),
+        mj_core::subagent::SubagentToolRequest {
+            request_id: "interrupt-start".into(),
+            created_at_ms: mj_core::clock::epoch_millis(),
+            action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+                child_session_id: "child-1".into(),
+            },
+        },
+    );
+    let answer = tokio::time::timeout(Duration::from_secs(1), interrupt)
+        .await
+        .unwrap();
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["interrupted"],
+        false
+    );
+    assert!(!pending.is_finished());
+    let handle = backend.sessions.session("child-1").await.unwrap();
+    let turn = submit_prompt(&handle, "initial".into()).await.unwrap();
+    backend
+        .starts
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .status = StartStatus::Submitted { turn_id: turn };
+    backend.starts_changed.notify_waiters();
+    let answer = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(delivered_prompts(&mut delivered), ["initial", "follow-up"]);
+}
+
+#[tokio::test]
+async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
+    if !isolated_parked_test("queued_input_reports_startup_failure_and_never_delivers_after_close")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    for closed in [false, true] {
+        let exports = ParkingExports::new(SessionState::Running, None);
+        let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+        hold_child_start(&backend);
+        let mut pending = tokio::spawn({
+            let backend = backend.clone();
+            async move { send_input(&backend, "must not run").await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut pending)
+                .await
+                .is_err()
+        );
+        if closed {
+            exports.set_child_state(SessionState::Stopped);
+        } else {
+            backend
+                .starts
+                .lock()
+                .unwrap()
+                .get_mut("child-1")
+                .unwrap()
+                .status = StartStatus::Failed {
+                message: "provider login refused".into(),
+            };
+        }
+        backend.starts_changed.notify_waiters();
+        let answer = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(answer.is_error, "{}", answer.message);
+        let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+        assert_eq!(value["child_session_id"], "child-1");
+        assert_eq!(value["status"], "failed");
+        assert!(value["error"].as_str().unwrap().contains(if closed {
+            "Stopped"
+        } else {
+            "provider login refused"
+        }));
+        assert!(delivered.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn replayed_child_input_reuses_durable_acceptance_without_a_second_prompt() {
+    if !isolated_parked_test(
+        "replayed_child_input_reuses_durable_acceptance_without_a_second_prompt",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    // Recreate the backend each time, as daemon replacement does. There is no
+    // live command ledger in this fake: the receipt must come from the store.
+    for active in [true, false] {
+        let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+        conversation.applied_event_ordinal = 9;
+        conversation.applied_event_digest = format!("{:064x}", 9);
+        if active {
+            conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+            conversation.active_turn = Some(mj_core::state::MaterializedTurn {
+                command_id: "subagent-input-request".into(),
+                accepted_ordinal: Some(3),
+                turn_start_position: 4,
+                started_at_ms: 1,
+                steered_into: None,
+            });
+        } else {
+            conversation.last_turn_outcome = Some(finished_turn("subagent-input-request"));
+        }
+        crate::database::save_materialized_session(&conversation).unwrap();
+        let exports = ParkingExports::new(SessionState::Running, None);
+        let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+        let answer = send_input(&backend, "already delivered").await;
+        assert!(!answer.is_error, "{}", answer.message);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["turn_id"],
+            3
+        );
+        assert!(delivered.try_recv().is_err());
+    }
+    // A later turn replaces last_turn_outcome. The historical receipt must
+    // still reconcile the input even without any retained worker ledger.
+    for (ordinal, command) in [(10, "subagent-input-request"), (11, "newer-turn")] {
+        crate::database::apply_projection_event(
+            "child-1",
+            ordinal,
+            &format!("{:064x}", ordinal - 1),
+            &format!("{ordinal:064x}"),
+            &mj_core::storage::MaterializedSessionMutation {
+                last_turn_outcome: Some(finished_turn(command)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let (backend, mut delivered) = parking_backend(
+        ParkingExports::new(SessionState::Parked, None),
+        &[],
+        Arc::new(|| {}),
+    );
+    let answer = send_input(&backend, "already completed and collected").await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["turn_id"],
+        3
+    );
+    assert!(delivered.try_recv().is_err());
+}
+
+#[test]
+fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() {
+    use super::subagent_input::InputProgress;
+    let mut snapshot = ready_view("model").snapshot.unwrap();
+    snapshot
+        .subagent_requests
+        .push(mj_core::subagent::SubagentToolRequest {
+            request_id: "input".into(),
+            created_at_ms: 1,
+            action: mj_core::subagent::SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "new work".into(),
+            },
+        });
+    let old_report = || ("completed".into(), Some("old report".into()), true);
+    let pending = InputProgress::from_snapshot(&snapshot);
+    assert_eq!(
+        pending.status("child", old_report()),
+        ("running".into(), None, false)
+    );
+    let mut entry = serde_json::json!({});
+    pending.annotate("child", &mut entry);
+    assert_eq!(entry["pending_inputs"], serde_json::json!(["input"]));
+    snapshot.subagent_requests.clear();
+    snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+        request_id: "input".into(), completed_at_ms: 2, is_error: true,
+        message: serde_json::json!({"child_session_id":"child","status":"failed","created_at_ms":1,"error":"login refused"}).to_string(),
+    });
+    let failed = InputProgress::from_snapshot(&snapshot);
+    assert_eq!(
+        failed.status("child", old_report()),
+        (
+            "failed".into(),
+            Some("Input input: login refused".into()),
+            true
+        )
+    );
+    failed.annotate("child", &mut entry);
+    assert_eq!(entry["input_deliveries"][0]["error"], "login refused");
+    snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+        request_id: "later".into(), completed_at_ms: 4, is_error: false,
+        message: serde_json::json!({"child_session_id":"child","status":"submitted","created_at_ms":3,"turn_id":12}).to_string(),
+    });
+    assert_eq!(
+        InputProgress::from_snapshot(&snapshot).status("child", old_report()),
+        old_report()
+    );
+}
+
+#[tokio::test]
+async fn queued_input_is_visible_through_wait_and_list_agents() {
+    if !isolated_parked_test("queued_input_is_visible_through_wait_and_list_agents") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    conversation.last_turn_outcome = Some(finished_turn("old-turn"));
+    crate::database::save_materialized_session(&conversation).unwrap();
+    crate::database::record_subagent_handback(
+        "child-1",
+        &mj_core::subagent::SubagentHandback {
+            command_id: "old-turn".into(),
+            message: "old result".into(),
+            recorded_at_ms: 1,
+        },
+    )
+    .unwrap();
+    for failed in [false, true] {
+        let mut parent = ready_view("model");
+        let snapshot = parent.snapshot.as_mut().unwrap();
+        if failed {
+            snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+                request_id: "follow-up".into(), completed_at_ms: 2, is_error: true,
+                message: serde_json::json!({"child_session_id":"child-1","created_at_ms":1,"status":"failed","error":"restart refused"}).to_string(),
+            });
+        } else {
+            snapshot
+                .subagent_requests
+                .push(mj_core::subagent::SubagentToolRequest {
+                    request_id: "follow-up".into(),
+                    created_at_ms: 1,
+                    action: mj_core::subagent::SubagentToolAction::SendInput {
+                        child_session_id: "child-1".into(),
+                        message: "new work".into(),
+                    },
+                });
+        }
+        let backend = Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: Some(parent),
+            })),
+            running_states(),
+            ParkingExports::new(SessionState::Parked, None),
+        ));
+        for wait in [false, true] {
+            let action = if wait {
+                mj_core::subagent::SubagentToolAction::WaitAgents {
+                    child_session_ids: vec!["child-1".into()],
+                    timeout_seconds: Some(1),
+                    return_when: Default::default(),
+                }
+            } else {
+                mj_core::subagent::SubagentToolAction::ListAgents
+            };
+            let answer = backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        request_id: "observe".into(),
+                        created_at_ms: 0,
+                        action,
+                    },
+                )
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+            let child = &value["agents"][0];
+            assert_eq!(child["state"], if failed { "failed" } else { "running" });
+            if failed {
+                assert_eq!(child["input_deliveries"][0]["error"], "restart refused");
+            } else {
+                assert_eq!(child["pending_inputs"], serde_json::json!(["follow-up"]));
+            }
+            if wait {
+                assert_eq!(
+                    value["status"],
+                    if failed { "complete" } else { "still_running" }
+                );
+                assert_ne!(child["output"], "old result");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn child_interrupt_is_bound_to_the_observed_turn() {
+    if !isolated_parked_test("child_interrupt_is_bound_to_the_observed_turn") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "original-turn".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: 2,
+            started_at_ms: 1,
+            steered_into: None,
+        });
+    let (submitted, mut delivered) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 3,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "interrupt".into(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+                    child_session_id: "child-1".into(),
+                },
+            },
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(
+        delivered.recv().await.unwrap().1,
+        RelayCommand::CancelTurnFor {
+            active_prompt_id: "original-turn".into()
+        }
+    );
+    assert!(delivered.try_recv().is_err());
 }
 
 /// The prompts that reached the child's relay, by text.
@@ -2367,6 +2748,7 @@ fn isolated_parked_test(test: &str) -> bool {
         test,
     ))
     .env(PARKED_TEST_CHILD, "1")
+    .env("MJ_INSTANCE", "queued-subagent-input")
     .isolated_store(directory.path())
     .run();
     false
@@ -2391,10 +2773,9 @@ async fn send_input_starts_a_parked_child_again_and_resends_only_a_prompt_a_park
     let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
     let answer = send_input(&backend, "check the tests too").await;
     assert!(!answer.is_error, "{}", answer.message);
-    assert!(
-        answer.message.contains("\"turn_id\": 9"),
-        "{}",
-        answer.message
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["turn_id"],
+        9
     );
     assert_eq!(exports.unparks(), 1);
     assert_eq!(exports.child_state(), SessionState::Running);

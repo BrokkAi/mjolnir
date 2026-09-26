@@ -1,6 +1,7 @@
 use super::*;
 
 mod project_discovery;
+mod subagent_dispatch;
 
 pub async fn run_server(
     args: ServerArgs,
@@ -258,7 +259,8 @@ pub async fn run_server(
         let mut launch_workspaces = std::collections::BTreeMap::new();
         let mut subagent_jobs = tokio::task::JoinSet::new();
         let mut subagent_completion_jobs = tokio::task::JoinSet::new();
-        let mut active_subagent_requests = std::collections::BTreeSet::new();
+        let mut subagent_dispatch = subagent_dispatch::SubagentDispatch::default();
+        let mut subagent_task_ids = std::collections::BTreeMap::new();
         let (conversation_projection_tx, mut conversation_projection_rx) =
             tokio::sync::mpsc::channel(CONVERSATION_PROJECTION_CHANNEL_CAPACITY);
         let mut conversation_projections = ConversationProjectionDispatcher::new(
@@ -317,6 +319,47 @@ pub async fn run_server(
             };
         }
         loop {
+            subagent_dispatch.retain_parents(|parent| {
+                controller
+                    .state
+                    .sessions
+                    .get(parent)
+                    .is_some_and(|session| session.state.has_live_worker())
+            });
+            if !crate::upgrade::is_draining() {
+                for (parent_session_id, request) in subagent_dispatch.ready(Instant::now()) {
+                    let identity = (parent_session_id.clone(), request.request_id.clone());
+                    let backend = api_backend.clone();
+                    let runtime = daemon_runtime.clone();
+                    let task = subagent_jobs.spawn(async move {
+                        // Inputs and waits remain on the worker while deferred.
+                        // Only bounded submission and result delivery hold admission.
+                        let upgrade_task = if matches!(
+                            request.action,
+                            mj_core::subagent::SubagentToolAction::WaitAgents { .. }
+                                | mj_core::subagent::SubagentToolAction::SendInput { .. }
+                        ) {
+                            None
+                        } else {
+                            Some(crate::upgrade::activity("subagent tool")?)
+                        };
+                        let _upgrade_task = upgrade_task;
+                        let result = backend
+                            .execute_subagent_tool(parent_session_id.clone(), request)
+                            .await;
+                        let _delivery = crate::upgrade::activity("subagent result delivery")?;
+                        let handle = runtime.workspace_session_handle(&parent_session_id).await?;
+                        let mut lease = handle.lease_connection().await?;
+                        lease
+                            .connection_mut()
+                            .complete_subagent_request(result)
+                            .await?;
+                        lease.release();
+                        anyhow::Ok(())
+                    });
+                    subagent_task_ids.insert(task.id(), identity);
+                }
+            }
             if native_agents_dirty && native_agent_jobs.is_empty() {
                 native_agents_dirty = false;
                 native_agent_jobs.spawn(load_native_agents(
@@ -546,53 +589,7 @@ pub async fn run_server(
                     );
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
-                        for request in snapshot.subagent_requests.iter().cloned() {
-                            let identity = (update.session_id.clone(), request.request_id.clone());
-                            if !active_subagent_requests.insert(identity.clone()) {
-                                continue;
-                            }
-                            let backend = api_backend.clone();
-                            let runtime = daemon_runtime.clone();
-                            let parent_session_id = update.session_id.clone();
-                            // A wait can last as long as the children run.
-                            // It does not hold up a daemon upgrade: the request
-                            // stays on the worker until answered, and the next
-                            // daemon runs it again against the caller's
-                            // original deadline. Every other action is short.
-                            let upgrade_task = if matches!(request.action, mj_core::subagent::SubagentToolAction::WaitAgents { .. }) {
-                                None
-                            } else {
-                                let Ok(work) = crate::upgrade::activity("subagent tool") else {
-                                    active_subagent_requests.remove(&identity);
-                                    continue;
-                                };
-                                Some(work)
-                            };
-                            subagent_jobs.spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let result = backend
-                                    .execute_subagent_tool(parent_session_id.clone(), request)
-                                    .await;
-                                let outcome = async {
-                                    // The result reaches the model as the tool
-                                    // call's own answer: completing the request
-                                    // unblocks the worker socket the harness is
-                                    // waiting on. It is not injected as a turn.
-                                    let handle = runtime
-                                        .workspace_session_handle(&parent_session_id)
-                                        .await?;
-                                    let mut lease = handle.lease_connection().await?;
-                                    lease
-                                        .connection_mut()
-                                        .complete_subagent_request(result)
-                                        .await?;
-                                    lease.release();
-                                    anyhow::Ok(())
-                                }
-                                .await;
-                                (identity, outcome)
-                            });
-                        }
+                        subagent_dispatch.observe(&update.session_id, &snapshot.subagent_requests);
                         if let Some(relation) = controller.state.subagents.get_mut(&update.session_id)
                             && matches!(snapshot.materialized.execution, mj_core::state::MaterializedExecutionState::Idle)
                             && let Some(outcome) = snapshot.materialized.last_turn_outcome.as_ref()
@@ -731,22 +728,19 @@ pub async fn run_server(
                     // update even when the worker is publishing continuously.
                     tokio::task::yield_now().await;
                 }
-                completed = subagent_jobs.join_next(), if !subagent_jobs.is_empty() => {
-                    match completed {
-                        Some(Ok((identity, Ok(())))) => {
-                            active_subagent_requests.remove(&identity);
+                completed = subagent_jobs.join_next_with_id(), if !subagent_jobs.is_empty() => {
+                    if let Some(completed) = completed {
+                        let (task_id, result) = match completed {
+                            Ok((id, result)) => (id, result),
+                            Err(error) => (error.id(), Err(anyhow::Error::from(error))),
+                        };
+                        if let Some(identity) = subagent_task_ids.remove(&task_id) {
+                            subagent_dispatch.finish(&identity, result.is_ok());
+                            if let Err(error) = result {
+                                tracing::warn!(parent_session_id = %identity.0, request_id = %identity.1,
+                                    error = %format!("{error:#}"), "sub-agent tool request failed; retrying from worker queue");
+                            }
                         }
-                        Some(Ok((identity, Err(error)))) => {
-                            active_subagent_requests.remove(&identity);
-                            tracing::warn!(
-                                parent_session_id = %identity.0,
-                                request_id = %identity.1,
-                                error = %format!("{error:#}"),
-                                "sub-agent tool request failed"
-                            );
-                        }
-                        Some(Err(error)) => tracing::warn!(%error, "sub-agent tool task panicked"),
-                        None => {}
                     }
                 }
                 completed = subagent_completion_jobs.join_next(), if !subagent_completion_jobs.is_empty() => {

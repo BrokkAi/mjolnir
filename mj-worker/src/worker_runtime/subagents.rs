@@ -195,6 +195,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_input_acknowledges_storage_without_completing_the_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+        let mut input = request("input-1");
+        input.action = SubagentToolAction::SendInput {
+            child_session_id: "starting-child".into(),
+            message: "x".repeat(128 * 1024),
+        };
+        let (client, server) = UnixStream::pair().unwrap();
+        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let (read, mut write) = client.into_split();
+        write
+            .write_all(format!("{}\n", serde_json::to_string(&input).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(read).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        served.await.unwrap().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(reply["result"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["status"], "queued");
+        assert_eq!(payload["child_session_id"], "starting-child");
+        assert!(payload.get("turn_id").is_none());
+        let reopened = SubagentEndpoint::open(directory.path()).unwrap();
+        assert_eq!(reopened.snapshot(), (vec![input.clone()], vec![]));
+        assert_eq!(reopened.enqueue(input.clone()).unwrap(), None);
+        let completed = done("input-1");
+        reopened.complete(completed.clone()).unwrap();
+        assert_eq!(
+            SubagentEndpoint::open(directory.path())
+                .unwrap()
+                .enqueue(input)
+                .unwrap(),
+            Some(completed)
+        );
+    }
+
+    #[tokio::test]
     async fn a_waiting_socket_call_returns_the_daemon_result_when_it_lands() {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
@@ -398,10 +443,9 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         .context("read sub-agent request")?;
     let request: SubagentToolRequest =
         serde_json::from_str(line.trim()).context("parse sub-agent request")?;
-    // Block until the daemon completes this request and return its result as
-    // the tool's answer. A repeat request id returns the cached result at
-    // once; otherwise wait, so the harness never sees a placeholder while the
-    // real answer is delivered elsewhere.
+    // Input acknowledges durable queue admission, not delivery. Keep it pending
+    // for the daemon; wait/list_agents expose its eventual delivery result.
+    // Other tools still return their completed result.
     //
     // A `wait` gets the caller's own deadline here, on this host's monotonic
     // clock. This is the timer the model depends on: it is unaffected by a
@@ -411,9 +455,26 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     let request_id = request.request_id.clone();
     let deadline_budget = wait_budget(&request.action);
     let waiting_for = waiting_children(&request.action);
+    let queued_input = match &request.action {
+        mj_core::subagent::SubagentToolAction::SendInput { child_session_id, .. } => {
+            Some(SubagentToolResult {
+                request_id: request_id.clone(),
+                completed_at_ms: mj_core::clock::epoch_millis(),
+                is_error: false,
+                message: serde_json::json!({
+                    "request_id": request_id,
+                    "child_session_id": child_session_id,
+                    "status": "queued",
+                    "next_action": "Input is stored, not yet confirmed delivered. Use wait or list_agents to check delivery; do not resend it."
+                }).to_string(),
+            })
+        }
+        _ => None,
+    };
     let started = Instant::now();
     let result = match endpoint.enqueue(request)? {
         Some(cached) => Some(cached),
+        None if queued_input.is_some() => queued_input,
         None => {
             endpoint
                 .await_result(&request_id, started + deadline_budget)

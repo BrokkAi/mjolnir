@@ -325,6 +325,51 @@ pub fn load_materialized_turn_outcome(session_id: &str) -> Result<Option<Materia
     load_materialized_turn_outcome_from(&database_path(), session_id)
 }
 
+/// Reconcile a replayed input after the worker has collected its command ledger.
+/// Queued, active and historical turns are read from one projection transaction.
+pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Option<u64>> {
+    let mut reader = open_reader(&database_path())?;
+    let connection = reader.transaction()?;
+    if let Some(fields) = read_materialized_session_fields(&connection, session_id)? {
+        if let Some(turn) = fields
+            .active_turn
+            .filter(|turn| turn.command_id == command_id)
+        {
+            return turn
+                .accepted_ordinal
+                .map(Some)
+                .context("accepted prompt has no acceptance ordinal");
+        }
+        if let Some(turn) = fields
+            .last_turn_outcome
+            .filter(|turn| turn.command_id == command_id)
+        {
+            return turn
+                .accepted_ordinal
+                .map(Some)
+                .context("completed prompt has no acceptance ordinal");
+        }
+    }
+    let ordinal: Option<u64> = connection.query_row(
+        "SELECT accepted_ordinal FROM materialized_queued_prompts WHERE session_id=?1 AND command_id=?2
+         UNION ALL SELECT json_extract(body, '$.accepted_ordinal') FROM session_turn_usage
+         WHERE session_id=?1 AND command_id=?2 LIMIT 1",
+        params![session_id, command_id], |row| row.get(0),
+    ).optional()?.flatten();
+    if ordinal.is_some() {
+        return Ok(ordinal);
+    }
+    let started: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id=?1 AND stable_id IN (?2, ?3))",
+        params![session_id, format!("user:{command_id}"), format!("{}{command_id}", mj_core::archive::CONTEXT_BOUNDARY_PREFIX)], |row| row.get(0),
+    )?;
+    ensure!(
+        !started,
+        "input was delivered but its acceptance ordinal is unavailable; refusing to send it twice"
+    );
+    Ok(None)
+}
+
 pub(super) fn load_materialized_turn_outcome_from(
     path: &Path,
     session_id: &str,

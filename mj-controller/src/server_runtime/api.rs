@@ -30,6 +30,8 @@ use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandO
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod subagent_input;
+
 use crate::daemon::RuntimeState;
 use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo};
 
@@ -287,6 +289,7 @@ pub struct ApiBackend {
     /// How far each created session's follow-up configuration and first prompt
     /// have got.
     starts: Arc<Mutex<BTreeMap<String, Start>>>,
+    starts_changed: Arc<tokio::sync::Notify>,
     /// Latest background-refreshed quota reports, used to rank the profiles a
     /// sub-agent may run on so a child lands on the login with the most quota
     /// left, without making the parent reason about credential aliases.
@@ -311,6 +314,7 @@ impl ApiBackend {
             session_states,
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
+            starts_changed: Arc::default(),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
             rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
@@ -355,6 +359,27 @@ impl ApiBackend {
         let outcome = self
             .execute_subagent_tool_inner(&parent_session_id, &request)
             .await;
+        if let mj_core::subagent::SubagentToolAction::SendInput {
+            child_session_id, ..
+        } = &request.action
+        {
+            let (mut value, is_error) = match outcome {
+                Ok(value) => (value, false),
+                Err(error) => (
+                    serde_json::json!({"status":"failed", "error":format!("{error:#}")}),
+                    true,
+                ),
+            };
+            value["child_session_id"] = child_session_id.clone().into();
+            value["request_id"] = request.request_id.clone().into();
+            value["created_at_ms"] = request.created_at_ms.into();
+            return mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: mj_core::clock::epoch_millis(),
+                is_error,
+                message: value.to_string(),
+            };
+        }
         let (is_error, message) = match outcome {
             Ok(value) => (
                 false,
@@ -501,6 +526,7 @@ impl ApiBackend {
                 }))
             }
             SubagentToolAction::ListAgents => {
+                let inputs = self.subagent_input_progress(parent_session_id).await?;
                 let relations = self.list_subagents(parent_session_id.to_owned()).await?;
                 let child_ids = relations
                     .iter()
@@ -544,13 +570,16 @@ impl ApiBackend {
                             .map_or((None, &unknown), |(summary, progress)| {
                                 (summary.as_ref(), progress)
                             });
-                        let (state, _, _) = subagent_status(
-                            record.as_ref(),
-                            summary,
-                            starts.get(&relation.child_session_id),
-                            None,
-                            self.exports.close_is_requested(&relation.child_session_id),
-                            progress,
+                        let (state, _, _) = inputs.status(
+                            &relation.child_session_id,
+                            subagent_status(
+                                record.as_ref(),
+                                summary,
+                                starts.get(&relation.child_session_id),
+                                None,
+                                self.exports.close_is_requested(&relation.child_session_id),
+                                progress,
+                            ),
                         );
                         let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
@@ -558,6 +587,7 @@ impl ApiBackend {
                             "profile_id":relation.profile_id,
                             "state":state,
                         });
+                        inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         entry
                     })
@@ -570,46 +600,17 @@ impl ApiBackend {
             } => {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
-                let parent_id = parent_session_id.to_owned();
-                let child_id = child_session_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    Controller::load()?.ensure_subagent_slot_available(&parent_id, Some(&child_id))
-                })
-                .await??;
-                // A child that handed back is parked and holds no processes;
-                // its worker starts again here, before the prompt.
-                self.unpark_child(child_session_id).await?;
-                let turn_id = match self.prompt(child_session_id.clone(), message.clone()).await {
-                    Ok(turn_id) => turn_id,
-                    // A park that was finishing when this prompt arrived
-                    // rejects it without delivering it. Only then, and only
-                    // once, is the child started again and the prompt resent;
-                    // a prompt that may have landed is never sent twice.
-                    Err(error)
-                        if error
-                            .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
-                            .is_none()
-                            && self.unpark_child(child_session_id).await? =>
-                    {
-                        tracing::info!(
-                            parent_session_id,
-                            child_session_id = %child_session_id,
-                            error = format!("{error:#}"),
-                            "resending a prompt a sub-agent park turned away"
-                        );
-                        self.prompt(child_session_id.clone(), message.clone())
-                            .await?
-                    }
-                    Err(error) => return Err(error),
-                };
-                // Until a finished turn reaches this prompt, a wait on the
-                // child keeps waiting instead of reading the previous turn.
+                let turn_id = self
+                    .deliver_subagent_input(parent_session_id, child_session_id, message, request)
+                    .await?;
                 blocking("record sub-agent prompt", {
                     let child_id = child_session_id.clone();
                     move || crate::database::record_subagent_prompt(&child_id, turn_id)
                 })
                 .await?;
-                Ok(serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id}))
+                Ok(
+                    serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id,"status":"submitted"}),
+                )
             }
             SubagentToolAction::WaitAgents {
                 child_session_ids,
@@ -640,6 +641,7 @@ impl ApiBackend {
                 );
                 let deadline = started + remaining;
                 loop {
+                    let inputs = self.subagent_input_progress(parent_session_id).await?;
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
                         ids.into_iter()
@@ -662,15 +664,19 @@ impl ApiBackend {
                         .iter()
                         .map(|(id, summary, progress)| {
                             let record = self.exports.session_record(id);
-                            subagent_status(
-                                record.as_ref(),
-                                summary.as_ref(),
-                                starts.get(id),
-                                None,
-                                self.exports.close_is_requested(id),
-                                progress,
-                            )
-                            .2
+                            inputs
+                                .status(
+                                    id,
+                                    subagent_status(
+                                        record.as_ref(),
+                                        summary.as_ref(),
+                                        starts.get(id),
+                                        None,
+                                        self.exports.close_is_requested(id),
+                                        progress,
+                                    ),
+                                )
+                                .2
                         })
                         .collect::<Vec<_>>();
                     let complete = finished.iter().all(|done| *done);
@@ -692,16 +698,20 @@ impl ApiBackend {
                             .into_iter()
                             .map(|(id, summary, progress)| {
                                 let record = self.exports.session_record(&id);
-                                let (state, output, finished) = subagent_status(
-                                    record.as_ref(),
-                                    summary.as_ref(),
-                                    starts.get(&id),
-                                    reports.get(&id).and_then(Option::as_deref),
-                                    self.exports.close_is_requested(&id),
-                                    &progress,
+                                let (state, output, finished) = inputs.status(
+                                    &id,
+                                    subagent_status(
+                                        record.as_ref(),
+                                        summary.as_ref(),
+                                        starts.get(&id),
+                                        reports.get(&id).and_then(Option::as_deref),
+                                        self.exports.close_is_requested(&id),
+                                        &progress,
+                                    ),
                                 );
                                 let mut entry =
                                     wait_agent_entry(&id, &state, output, finished, &progress);
+                                inputs.annotate(&id, &mut entry);
                                 mark_parked(&mut entry, record.as_ref());
                                 entry
                             })
@@ -749,30 +759,47 @@ impl ApiBackend {
             SubagentToolAction::InterruptAgent { child_session_id } => {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
-                // A parked child has nothing running to interrupt, and is not
-                // started just to be told to stop.
-                if self
-                    .exports
-                    .session_record(child_session_id)
-                    .is_some_and(|record| record.state == SessionState::Parked)
-                {
-                    return Ok(serde_json::json!({
-                        "child_session_id":child_session_id,
-                        "interrupted":false,
-                        "parked":true,
-                        "note":"This child is parked: its turn ended and it has nothing running.",
-                    }));
-                }
-                let handle = self
-                    .session_handle(child_session_id.clone())
-                    .await?
-                    .context("child session has no live actor")?;
-                handle
+                let handle = self.session_handle(child_session_id.clone()).await?;
+                let active = handle
+                    .as_ref()
+                    .and_then(|handle| handle.view().snapshot)
+                    .and_then(|snapshot| snapshot.materialized.active_turn);
+                let Some(active) = active else {
+                    return Ok(
+                        serde_json::json!({"child_session_id":child_session_id,"interrupted":false}),
+                    );
+                };
+                let handle = handle.expect("active turn came from this handle");
+                let result = handle
                     .submit(
-                        crate::session_manager::new_command_id("subagent-interrupt")?,
-                        mj_core::relay::RelayCommand::CancelTurn,
+                        format!("subagent-interrupt-{}", request.request_id),
+                        RelayCommand::CancelTurnFor {
+                            active_prompt_id: active.command_id.clone(),
+                        },
                     )
-                    .await?;
+                    .await;
+                if let Err(error) = result {
+                    // An explicit refusal because that turn already ended is a
+                    // no-op, never permission to cancel the next turn instead.
+                    if error
+                        .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
+                        .is_some()
+                    {
+                        return Err(error);
+                    }
+                    handle.sync_now().await?;
+                    let still_active = handle
+                        .view()
+                        .snapshot
+                        .and_then(|s| s.materialized.active_turn)
+                        .is_some_and(|turn| turn.command_id == active.command_id);
+                    if still_active {
+                        return Err(error);
+                    }
+                    return Ok(
+                        serde_json::json!({"child_session_id":child_session_id,"interrupted":false}),
+                    );
+                }
                 Ok(serde_json::json!({"child_session_id":child_session_id,"interrupted":true}))
             }
             SubagentToolAction::CloseAgent { child_session_id } => {
@@ -2180,6 +2207,7 @@ impl SubagentBackend for ApiBackend {
             let states = self.session_states.clone();
             let exports = Arc::clone(&self.exports);
             let starts = Arc::clone(&self.starts);
+            let starts_changed = Arc::clone(&self.starts_changed);
             let id = session_id.clone();
             let cancel = tokio_util::sync::CancellationToken::new();
             // Recorded before the work starts: a follow-up that finishes
@@ -2265,6 +2293,7 @@ impl SubagentBackend for ApiBackend {
                         starts.remove(&id);
                     }
                 }
+                starts_changed.notify_waiters();
             });
             if let Some(start) = self
                 .starts

@@ -33,12 +33,15 @@ child sessions in the same target and filesystem:
 - `spawn` — start a child; returns `child_session_id` at once, before the child
   has started running.
 - `list_agents` — this parent's children and their status.
-- `send_input` — send follow-up input to one child.
+- `send_input` — durably queue follow-up input to one child, including while it
+  starts. The queue receipt is not delivery confirmation; do not resend it.
+  `wait` and `list_agents` show pending input and delivery failures.
 - `wait` — block until the named children finish their current turn. Status
   `complete` means the reports are in `output`; `still_running` means the
   timeout came first. That is not a failure: call `wait` again with the same
   `child_session_ids`.
-- `interrupt` — stop the child's current turn.
+- `interrupt` — stop only the child's current turn. With no active turn it
+  returns immediately; queued input remains queued.
 - `close` — stop a child and keep its conversation.
 
 Prefer these tools when they are listed; they work where the CLI cannot reach
