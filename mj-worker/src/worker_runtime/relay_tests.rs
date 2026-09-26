@@ -58,6 +58,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
         environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
+        excluded_environment: Vec::new(),
         cwd: ".local/share/hel/workspaces/session/repo".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -885,6 +886,7 @@ fn launch_wires_require_the_new_baseline_shape() {
         command: "codex-acp".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: ".".into(),
         harness_lease: None,
     };
@@ -4894,6 +4896,75 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
     assert_eq!(pinned["tui"], "never");
 }
 
+/// #1160: the controller leaves a ChatGPT Codex profile's API key settings out
+/// of the launch, but the worker adds the target's own login environment, which
+/// only it can see. The bridge's spec names the variables so the supervisor
+/// removes them from that as well, and never carries them itself.
+#[tokio::test]
+async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("relay");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.cwd = temp.path().to_owned();
+    config.excluded_environment = vec!["CODEX_API_KEY".into(), "OPENAI_API_KEY".into()];
+    // As a target setting would put it there, past the controller.
+    config
+        .environment
+        .insert("OPENAI_API_KEY".into(), "sk-svcacct-target".into());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unix::run_daemon(root.clone(), config),
+    )
+    .await
+    .expect("the scripted worker child must stop")
+    .expect_err("the test executable is not an ACP supervisor");
+    assert!(!format!("{result:#}").is_empty());
+
+    let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
+    assert_eq!(
+        spec.excluded_environment,
+        ["CODEX_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()]
+    );
+    assert!(!spec.environment.contains_key("OPENAI_API_KEY"));
+}
+
+/// The supervisor removes the excluded variables after it merges the login
+/// environment, so neither a launch setting nor a target's shell profile can
+/// hand the bridge an API key. Other variables pass through.
+#[tokio::test]
+async fn the_acp_bridge_never_sees_an_excluded_variable() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = temp.path().join("observed");
+    let script = format!(
+        "printf '%s|%s|%s\\n' \"${{OPENAI_API_KEY-unset}}\" \"${{CODEX_API_KEY-unset}}\" \"${{KEPT-unset}}\" > {}",
+        mj_core::targets::posix_quote(&observed.to_string_lossy())
+    );
+    let spec = AcpSupervisorSpec {
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), script],
+        environment: BTreeMap::from([
+            ("OPENAI_API_KEY".into(), "sk-svcacct-test".into()),
+            ("CODEX_API_KEY".into(), "sk-test".into()),
+            ("KEPT".into(), "yes".into()),
+        ]),
+        excluded_environment: mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
+            .map(str::to_owned)
+            .to_vec(),
+        cwd: temp.path().to_owned(),
+        harness_lease: None,
+    };
+    let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
+
+    unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "unset|unset|yes\n"
+    );
+}
+
 #[tokio::test]
 async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open() {
     let temp = tempfile::tempdir().unwrap();
@@ -4901,6 +4972,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
         command: "/bin/sh".into(),
         args: vec!["-c".into(), "sleep 30 & exit 17".into()],
         environment: Default::default(),
+        excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
     };
@@ -4939,6 +5011,7 @@ async fn acp_bridge_keeps_the_configured_github_wrapper_and_drops_inherited_toke
             ("GH_TOKEN".into(), "stale-token".into()),
             ("GITHUB_TOKEN".into(), "also-stale".into()),
         ]),
+        excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
     };
@@ -6100,6 +6173,7 @@ while True: time.sleep(1)
                 marker.to_string_lossy().into_owned(),
             ],
             environment: BTreeMap::new(),
+            excluded_environment: Vec::new(),
             cwd: root.path().to_owned(),
             harness_lease: None,
         };

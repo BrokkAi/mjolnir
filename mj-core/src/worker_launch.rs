@@ -152,6 +152,14 @@ pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "HarnessRuntimePolicy::is_ambient")]
     pub harness_runtime: HarnessRuntimePolicy,
     pub environment: std::collections::BTreeMap<String, String>,
+    /// Variables the worker removes from the harness environment after it adds
+    /// the target's own login environment, so that a value set on the target
+    /// (a shell profile, the image, the target's settings) cannot reach the
+    /// harness either. The controller has already left them out of
+    /// `environment`. See
+    /// [`crate::config::HarnessProfile::exclude_harness_environment`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     #[serde(default)]
     pub additional_directories: Vec<PathBuf>,
@@ -247,6 +255,11 @@ pub struct ReviewerLaunchConfig {
     /// from the staged reviewer directory it owns.
     #[serde(default)]
     pub environment: std::collections::BTreeMap<String, String>,
+    /// Variables the worker removes from the reviewer's environment after it
+    /// adds the target's login environment; see
+    /// [`WorkerLaunchConfig::excluded_environment`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_environment: Vec<String>,
     pub execution_policy: ExecutionPolicy,
     /// Model to apply once the session opens, or `None` to keep the profile's
     /// default. Explicit selections must be supported by the target adapter.
@@ -409,6 +422,11 @@ pub struct ProfileProbeSpec {
     pub harness: HarnessKind,
     pub profile_home: PathBuf,
     pub environment: std::collections::BTreeMap<String, String>,
+    /// Variables the probe removes from the harness environment after it adds
+    /// the login environment; see
+    /// [`WorkerLaunchConfig::excluded_environment`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
 }

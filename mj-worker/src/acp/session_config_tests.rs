@@ -998,6 +998,7 @@ for line in sys.stdin:
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: root.path().to_owned(),
         harness_lease: None,
     }

@@ -3448,6 +3448,180 @@ fn a_child_opens_its_parents_container_workspace() {
     );
 }
 
+/// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
+/// environment sets an API key.
+fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::HarnessProfile {
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::json!({"auth_mode": auth_mode, "OPENAI_API_KEY": null}).to_string(),
+    )
+    .unwrap();
+    mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.to_path_buf(),
+        environment: BTreeMap::from([
+            ("OPENAI_API_KEY".to_owned(), "sk-svcacct-profile".to_owned()),
+            ("PROFILE_SETTING".to_owned(), "kept".to_owned()),
+        ]),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    }
+}
+
+/// The launch config of one session of `profile` on this machine, in its own
+/// container, and as a sub-agent child in its parent's container. Every target
+/// sets `CODEX_API_KEY` and `OPENAI_BASE_URL` in its own environment.
+fn launches_on_every_target(
+    profile: &mj_core::config::HarnessProfile,
+) -> Vec<(&'static str, mj_core::worker_launch::WorkerLaunchConfig)> {
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let container = mj_core::config::TargetTemplate::LocalPodman {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let with_target_keys = |template: &mj_core::config::TargetTemplate| {
+        let mut settings = mj_core::state::TargetRuntimeSettings::from(template);
+        settings
+            .environment
+            .insert("CODEX_API_KEY".into(), "sk-target".into());
+        settings.environment.insert(
+            "OPENAI_BASE_URL".into(),
+            "https://example.invalid/v1".into(),
+        );
+        settings
+    };
+
+    let project = tempfile::tempdir().unwrap();
+    let mut local = crate::controller::test_support::checkpoint_test_session(parent_id);
+    local.target_template_id = "localhost".into();
+    local.project_directory = Some(project.path().to_path_buf());
+    let local_root = format!("/home/me/.local/share/hel/workers/{parent_id}");
+    local.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: local_root.clone().into(),
+    });
+    let localhost = worker_launch_config(
+        &local,
+        profile,
+        None,
+        &targets::TargetLocator::LocalBare {
+            worker_root: local_root,
+        },
+        parent_id,
+        None,
+        &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
+    )
+    .unwrap()
+    .0;
+
+    let mut parent = crate::controller::test_support::checkpoint_test_session(parent_id);
+    parent.project_directory = None;
+    parent.container_workspace = Some(parent_workspace.clone());
+    let in_container = worker_launch_config(
+        &parent,
+        profile,
+        Some(&bundle),
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &with_target_keys(&container),
+    )
+    .unwrap()
+    .0;
+
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.project_directory = None;
+    child.container_workspace = Some(parent_workspace.clone());
+    let as_child = worker_launch_config(
+        &child,
+        profile,
+        Some(&bundle),
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: Some(parent_id.into()),
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &with_target_keys(&container),
+    )
+    .unwrap()
+    .0;
+    vec![
+        ("localhost", localhost),
+        ("container", in_container),
+        ("sub-agent", as_child),
+    ]
+}
+
+/// #1160: eleven Codex children of a ChatGPT profile died on their first
+/// request, some with a service-account API key the ChatGPT backend rejected.
+/// A ChatGPT profile's harness environment carries no such key on any target,
+/// and the launch tells the worker to remove the same variables from the
+/// target's own login environment, which only the worker sees.
+#[test]
+fn a_chatgpt_codex_launch_carries_no_api_key_on_any_target() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&profile) {
+        for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
+            assert!(
+                !launch.environment.contains_key(name),
+                "{target}: the harness environment still sets {name}"
+            );
+        }
+        assert_eq!(
+            launch.excluded_environment,
+            mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned),
+            "{target}: the worker is not told what to remove"
+        );
+        assert_eq!(launch.environment["PROFILE_SETTING"], "kept", "{target}");
+    }
+}
+
+/// A Codex profile that signs in with an API key keeps the variables that
+/// carry it, whether `codex login --with-api-key` stored it or a custom
+/// provider names it.
+#[test]
+fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "apikey");
+    for (target, launch) in launches_on_every_target(&profile) {
+        assert_eq!(
+            launch.environment["OPENAI_API_KEY"], "sk-svcacct-profile",
+            "{target}"
+        );
+        assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let profile = zai_profile(home.path());
+    for (target, launch) in launches_on_every_target(&profile) {
+        assert_eq!(
+            launch.environment["ZAI_API_KEY"], "coding-plan-key",
+            "{target}"
+        );
+        assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+}
+
 #[test]
 fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     let project = tempfile::tempdir().unwrap();
@@ -3859,6 +4033,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -3961,6 +4136,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::from([("CODEX_HOME".into(), "/configured/profile/home".into())]),
+        excluded_environment: Vec::new(),
         cwd: "/workspace/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -4048,6 +4224,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,

@@ -1382,6 +1382,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
         environment: Default::default(),
+        excluded_environment: Vec::new(),
         cwd: spec.workspace_root.join("app"),
         additional_directories: Vec::new(),
         native_session_id: Some(NATIVE.into()),

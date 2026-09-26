@@ -26,12 +26,22 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     .await?
     .context("managed discovery installation is missing")?;
     environment.extend(managed.environment.clone());
-    let session_environment = mj_core::login_environment::with_overrides(&environment).await?;
+    let mut session_environment = mj_core::login_environment::with_overrides(&environment).await?;
+    super::exclude_from_harness_environment(
+        spec.harness,
+        &spec.excluded_environment,
+        &session_environment,
+        &mut environment,
+    );
+    for name in &spec.excluded_environment {
+        session_environment.remove(name);
+    }
     let supervisor = spec.cwd.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: managed.command.clone(),
         args: managed.args.clone(),
         environment,
+        excluded_environment: spec.excluded_environment.clone(),
         cwd: spec.cwd.clone(),
         harness_lease: Some(managed.lease_path.clone()),
     }

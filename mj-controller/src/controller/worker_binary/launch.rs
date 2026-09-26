@@ -588,6 +588,8 @@ pub(super) fn worker_launch_config(
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(&session.last_profile),
     );
+    let excluded_environment =
+        exclude_harness_environment(&session.last_profile, profile, &mut environment);
     Ok((
         WorkerLaunchConfig {
             goal_resume_request: None,
@@ -614,6 +616,7 @@ pub(super) fn worker_launch_config(
             bridge_args,
             harness_runtime: harness_runtime_policy(backend),
             environment,
+            excluded_environment,
             cwd: PathBuf::from(&workspace.0),
             additional_directories,
             native_session_id: session.native_session_id.clone(),
@@ -626,6 +629,41 @@ pub(super) fn worker_launch_config(
         project_memory,
         target_profile_home,
     ))
+}
+
+/// Leave out of a launch every variable the profile's harness must never see,
+/// and name them for the worker, which removes them again once it has added
+/// the target's own login environment.
+///
+/// Saying so once per profile is enough: the launch config is rebuilt for
+/// every recovery check, and the variables do not change between them.
+pub(super) fn exclude_harness_environment(
+    profile_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    environment: &mut std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    static REPORTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let before = environment.clone();
+    let excluded = profile.exclude_harness_environment(environment);
+    let removed = excluded
+        .iter()
+        .filter(|name| before.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !removed.is_empty()
+        && REPORTED
+            .lock()
+            .map(|mut reported| reported.insert(profile_id.to_owned()))
+            .unwrap_or(true)
+    {
+        tracing::info!(
+            profile_id,
+            removed = removed.join(", "),
+            "left API key settings out of the harness environment: this Codex profile signs in with ChatGPT and must not fall back to an API key"
+        );
+    }
+    excluded
 }
 
 pub(super) fn harness_runtime_policy(backend: &targets::TargetLocator) -> HarnessRuntimePolicy {

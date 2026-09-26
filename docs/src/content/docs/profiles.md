@@ -248,6 +248,15 @@ transcript across harnesses; it is not a model-token claim.
 For the complete field and validation table, see the
 [Configuration reference](/configuration/).
 
+A Codex profile that signs in with ChatGPT never gets an API key. Mjolnir
+removes `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` and
+`OPENAI_BASE_URL` from its harness environment on every target, wherever they
+were set: in the profile or target settings, in the target's shell profile, or
+in a container image. Otherwise Codex could use the key in place of the login.
+The worker log says when it removed one. A profile signs in with ChatGPT unless
+its `config.toml` names a custom model provider or its `auth.json` records
+`"auth_mode": "apikey"`. Those profiles keep the variables.
+
 ### PATH discovery
 
 Mjolnir-owned workers and bridges use non-login shells. On every bare runtime,

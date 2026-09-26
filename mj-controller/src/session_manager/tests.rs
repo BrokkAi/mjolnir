@@ -254,6 +254,7 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
         bridge_command: "npx".into(),
         bridge_args: vec!["claude-code-acp".into()],
         environment: BTreeMap::from([("EXTRA".into(), "1".into())]),
+        excluded_environment: Vec::new(),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         model: Some("sonnet".into()),
         effort: Some("high".into()),
