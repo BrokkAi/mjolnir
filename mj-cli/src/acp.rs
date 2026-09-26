@@ -180,15 +180,21 @@ async fn serve_on(
         .on_receive_request(
             {
                 let adapter = Arc::clone(&adapter);
-                async move |request: NewSessionRequest, responder, _cx| match Arc::clone(&adapter)
-                    .new_session(request)
-                    .await
-                {
-                    Ok(session_id) => responder.respond(NewSessionResponse::new(session_id)),
-                    Err(error) => {
-                        adapter.note_refusal(&error);
-                        responder.respond_with_error(refusal(&error))
-                    }
+                async move |request: NewSessionRequest, responder, cx| {
+                    let adapter = Arc::clone(&adapter);
+                    // Provisioning can take minutes. Keep reading the pipe
+                    // so other requests and consumer disconnects are observed.
+                    cx.spawn(async move {
+                        match Arc::clone(&adapter).new_session(request).await {
+                            Ok(session_id) => {
+                                responder.respond(NewSessionResponse::new(session_id))
+                            }
+                            Err(error) => {
+                                adapter.note_refusal(&error);
+                                responder.respond_with_error(refusal(&error))
+                            }
+                        }
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -385,11 +391,22 @@ impl Adapter {
                 .lock()
                 .expect("adapter session set")
                 .insert(started.session_id.clone());
-            anyhow::Ok(started.session_id)
+            anyhow::Ok((started.session_id, client))
         });
-        let session_id = created
+        let (session_id, client) = created
             .await
             .context("the session creation task failed")??;
+        // HTTP creation acknowledges admission, whereas ACP consumers prompt
+        // as soon as session/new answers. Wait outside the tracked creation:
+        // disconnect may drop this read-only wait, but cannot lose the id the
+        // exit policy needs, even while provisioning is still in flight.
+        wait_for_session_start(
+            &client,
+            &session_id,
+            Duration::from_secs(600),
+            Duration::from_millis(250),
+        )
+        .await?;
         Ok(SessionId::new(session_id))
     }
 
@@ -793,6 +810,45 @@ async fn look(client: &ApiClient, session_id: &str) -> Result<Option<ApiSession>
         .with_context(|| format!("look up session {session_id}"))
 }
 
+/// Finish ACP session/new only when the worker has attached and the daemon's
+/// creation operation has finished. A durable running record alone is not
+/// readiness; is_idle also requires a live worker and no lifecycle operation.
+async fn wait_for_session_start(
+    client: &ApiClient,
+    session_id: &str,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let session = look(client, session_id)
+                .await?
+                .with_context(|| format!("session {session_id} disappeared while starting"))?;
+            match session.lifecycle {
+                ViewerLifecycleCategory::Failed
+                | ViewerLifecycleCategory::Suspending
+                | ViewerLifecycleCategory::Suspended => {
+                    bail!(
+                        "session {session_id} did not start: {}{}",
+                        session.state,
+                        reason(&session)
+                    );
+                }
+                ViewerLifecycleCategory::Live if session.is_idle => return Ok(()),
+                ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting => {}
+            }
+            tokio::time::sleep(poll).await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "session {session_id} did not become ready within {} seconds; inspect it with `mj sessions --session {session_id}`",
+            timeout.as_secs()
+        )
+    })?
+}
+
 /// The sentence a failed suspension or destruction recorded on the session.
 fn lifecycle_failure(session: &ApiSession) -> Option<&str> {
     session
@@ -1034,6 +1090,12 @@ mod tests {
         chat_phase: "idle",
         error: None,
     };
+    const STARTING: Look = Look::Session {
+        lifecycle: "starting",
+        state: "provisioning",
+        chat_phase: "idle",
+        error: None,
+    };
     const WORKING: Look = Look::Session {
         lifecycle: "live",
         state: "running",
@@ -1156,7 +1218,7 @@ mod tests {
             "state": state,
             "lifecycle": lifecycle,
             "chat_phase": chat_phase,
-            "is_idle": chat_phase == "idle",
+            "is_idle": lifecycle == "live" && state == "running" && chat_phase == "idle",
             "has_error": error.is_some(),
             "error": error,
             "created_at": "now",
@@ -1249,10 +1311,20 @@ mod tests {
         Json(body): Json<Value>,
     ) -> ([(&'static str, &'static str); 1], Json<Value>) {
         tokio::time::sleep(daemon.turn.start_delay).await;
-        daemon.start.lock().unwrap().push(body);
+        let session_id = {
+            let mut started = daemon.start.lock().unwrap();
+            started.push(body);
+            format!("session-{}", started.len())
+        };
+        daemon
+            .looks
+            .lock()
+            .unwrap()
+            .entry(session_id.clone())
+            .or_insert_with(|| [IDLE].into());
         (
             version(),
-            Json(json!({"session_id": "session-1", "turn_id": null})),
+            Json(json!({"session_id": session_id, "turn_id": null})),
         )
     }
 
@@ -1435,6 +1507,147 @@ mod tests {
         })
         .await
         .expect("the turn starts waiting");
+    }
+
+    async fn until_creation_is_observed(daemon: &FakeDaemon) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !daemon.calls().iter().any(|call| call == "look session-1") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the adapter observes the newly admitted session");
+    }
+
+    #[tokio::test]
+    async fn acp_creation_waits_for_readiness_while_other_sessions_can_start() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            outcome: "finished",
+            ..FakeTurn::default()
+        })
+        .await;
+        daemon.script("session-1", &[STARTING]);
+        let mut consumer = Consumer::connect(Arc::new(Adapter::new(
+            AcpArgs::default(),
+            None,
+            Some(client),
+        )));
+        consumer.request(
+            1,
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        );
+        consumer.response(1).await;
+        consumer.request(
+            2,
+            "session/new",
+            json!({"cwd": "/work/project", "mcpServers": []}),
+        );
+        until_creation_is_observed(&daemon).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), consumer.from_adapter.next())
+                .await
+                .is_err(),
+            "creation must not answer while provisioning"
+        );
+        assert!(daemon.prompt.lock().unwrap().is_empty());
+
+        consumer.request(
+            3,
+            "session/new",
+            json!({"cwd": "/work/another-project", "mcpServers": []}),
+        );
+        assert_eq!(
+            consumer.response(3).await["result"]["sessionId"],
+            "session-2"
+        );
+
+        daemon.script("session-1", &[IDLE]);
+        assert_eq!(
+            consumer.response(2).await["result"]["sessionId"],
+            "session-1"
+        );
+        consumer.prompt(4);
+        assert_eq!(
+            consumer.response(4).await["result"]["stopReason"],
+            "end_turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumer_disconnect_during_startup_keeps_the_admitted_session() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script("session-1", &[STARTING]);
+        let adapter = Arc::new(Adapter::new(AcpArgs::default(), None, Some(client)));
+        let consumer = Consumer::connect(Arc::clone(&adapter));
+        consumer.request(
+            2,
+            "session/new",
+            json!({"cwd": "/work/project", "mcpServers": []}),
+        );
+        until_creation_is_observed(&daemon).await;
+        consumer.to_adapter.close_channel();
+        tokio::time::timeout(Duration::from_secs(10), consumer.served)
+            .await
+            .expect("disconnect does not wait for provisioning")
+            .unwrap()
+            .unwrap();
+        assert_eq!(adapter.owned_sessions(), ["session-1"]);
+        assert!(daemon.prompt.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_failure_is_reported_and_the_session_remains_owned_for_cleanup() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script(
+            "session-1",
+            &[Look::Session {
+                lifecycle: "failed",
+                state: "error",
+                chat_phase: "closed",
+                error: Some("container could not start"),
+            }],
+        );
+        let adapter = Arc::new(Adapter::new(AcpArgs::default(), None, Some(client)));
+        let error = Arc::clone(&adapter)
+            .new_session(NewSessionRequest::new(std::path::PathBuf::from(
+                "/work/project",
+            )))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("container could not start"),
+            "{error:#}"
+        );
+        assert_eq!(adapter.owned_sessions(), ["session-1"]);
+        assert!(daemon.prompt.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_wait_reports_missing_sessions_and_its_deadline() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let missing =
+            wait_for_session_start(&client, "missing", Duration::from_secs(5), Duration::ZERO)
+                .await
+                .unwrap_err();
+        assert!(
+            missing.to_string().contains("disappeared while starting"),
+            "{missing:#}"
+        );
+        daemon.script("session-1", &[STARTING]);
+        let timeout = wait_for_session_start(
+            &client,
+            "session-1",
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            timeout.to_string().contains("did not become ready"),
+            "{timeout:#}"
+        );
+        assert!(daemon.prompt.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

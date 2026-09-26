@@ -54,6 +54,13 @@ appears in the viewer, and its transcript is searchable in the session index.
 [Session lifecycle](/sessions/) covers exploring, suspending, resuming, and
 exporting one.
 
+The response waits until provisioning has finished and the worker is ready for
+the first prompt. A slow container or SSH launch can therefore keep
+`session/new` pending for several minutes. A failed launch returns an error
+with the session id and its cause; a launch still pending after ten minutes
+returns an error naming the session to inspect. Other ACP requests and consumer
+disconnects remain responsive during this wait.
+
 The client's id is also the only key it needs. A prompt may name only a session
 the same `mj acp` process created, so one client cannot drive sessions that
 happen to live in the same daemon.
