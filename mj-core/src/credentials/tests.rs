@@ -782,3 +782,127 @@ fn github_token_install_and_remove_refuse_symlink_destinations() {
     assert!(remove_github_token(&path).is_err());
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
 }
+
+/// #1160: after the first child of a profile failed to sign in, ten more
+/// children were spawned on it and died the same way. A sync that answers an
+/// auth failure with nothing fresher to push shows the profile's own login is
+/// the one refused, and it stays refused until the login file changes.
+#[test]
+fn a_refused_login_is_known_until_the_login_file_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = harness_authentication_marker(HarnessKind::Codex, home.path());
+    std::fs::write(&marker, codex_credentials("2026-09-25T20:00:00.000Z")).unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {
+        CredentialSyncResult {
+            profile_id: "codex4".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "child-1".into(),
+                reason,
+            }),
+            failure: failure.map(str::to_owned),
+            outcomes,
+        }
+    };
+    let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {
+        vec![CredentialSyncOutcome {
+            session_id: "child-1".into(),
+            outcome,
+        }]
+    };
+    let pushed = || reached(Ok(vec![CredentialSyncAction::Pushed]));
+    // The session was reconciled, and its copy already matched the profile's.
+    let nothing_pushed = || reached(Ok(vec![CredentialSyncAction::SkillsPushed]));
+
+    let mut rejected = RejectedLogins::default();
+    // A fresher login was pushed to the session: the profile's own is fine.
+    rejected.observe(
+        &result(CredentialSyncReason::AuthenticationFailure, pushed(), None),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+    // The sync failed, or never reached the session, so it compared nothing.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            Vec::new(),
+            Some("sync task stopped"),
+        ),
+        &profile,
+    );
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            reached(Err("worker unreachable".into())),
+            None,
+        ),
+        &profile,
+    );
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            Vec::new(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+    // An empty answer is not an auth failure.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::EmptyPromptResponse,
+            nothing_pushed(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+
+    // Nothing fresher to push: the profile's login is the one refused.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            nothing_pushed(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(
+        rejected.refusal("codex4").as_deref(),
+        Some("the login is no longer valid; run `mj login --profile codex4` and spawn again")
+    );
+    assert_eq!(rejected.refusal("codex3"), None);
+
+    // `mj login` rewrites the file.
+    std::fs::write(&marker, codex_credentials("2026-09-25T22:49:05.000Z")).unwrap();
+    assert_eq!(rejected.refusal("codex4"), None);
+
+    // A profile that signs in with an API key has no login to redo.
+    let provider = tempfile::tempdir().unwrap();
+    std::fs::write(
+        provider.path().join("config.toml"),
+        "model_provider = \"zai\"\n[model_providers.zai]\nbase_url = \"https://api.z.ai/api/v1\"\nenv_key = \"ZAI_API_KEY\"\nwire_api = \"responses\"\n",
+    )
+    .unwrap();
+    let api_key = HarnessProfile {
+        home: provider.path().to_path_buf(),
+        ..profile
+    };
+    let mut rejected = RejectedLogins::default();
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            nothing_pushed(),
+            None,
+        ),
+        &api_key,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+}

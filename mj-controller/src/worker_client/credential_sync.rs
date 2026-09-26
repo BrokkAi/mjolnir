@@ -100,9 +100,12 @@ impl CredentialSyncCoordinator {
                     // polling its connect timeouts through runtime shutdown
                     // and panics with "A Tokio 1.x context was found, but it
                     // is being shutdown".
+                    let triggered_by = trigger.cause.as_ref().map(|cause| cause.session_id.clone());
                     tokio::spawn(async move {
-                        let joined =
-                            tokio::spawn(async move { reconcile_profile(&targets).await }).await;
+                        let joined = tokio::spawn(async move {
+                            reconcile_profile(&targets, triggered_by.as_deref()).await
+                        })
+                        .await;
                         let (failure, outcomes) = match joined {
                             Ok(outcomes) => (None, outcomes),
                             Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
@@ -161,8 +164,14 @@ impl CredentialSyncCoordinator {
 /// runs again once with the new canonical bytes. Two passes are enough: the
 /// second cannot pull anything the first did not already see unless a harness
 /// refreshed mid-cycle, and that lands in the next cycle.
+///
+/// A session that already agreed is left out of the outcomes, except
+/// `triggered_by`, the session whose failure asked for this sync: that it was
+/// reached and had nothing to change is what shows the profile's own login
+/// is the one the provider refused.
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
     // The token lookup may run `gh auth token`, a synchronous child process,
     // so it goes to the blocking pool rather than stalling a scheduler thread.
@@ -180,7 +189,10 @@ pub(super) async fn reconcile_profile(
         let mut pulled = false;
         for target in targets {
             match reconcile_session(target, github_token.as_deref()).await {
-                Ok(actions) if actions.is_empty() => {}
+                Ok(actions)
+                    if actions.is_empty()
+                        && (triggered_by != Some(target.session_id.as_str())
+                            || outcomes.contains_key(&target.session_id)) => {}
                 Ok(actions) => {
                     pulled |= actions.contains(&CredentialSyncAction::Pulled);
                     outcomes.insert(

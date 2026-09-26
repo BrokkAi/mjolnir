@@ -464,7 +464,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable.",
             json!({
                 "type":"object",
                 "properties":{
@@ -489,7 +489,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again on another profile, or after that login. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"required":["child_session_ids"],"additionalProperties":false}),
@@ -528,6 +528,26 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::sync::{Arc, Mutex};
+
+    /// #1160: a parent read a child's failed login as the child's report and
+    /// gave up on the profile. The tools say what a refused login looks like
+    /// and what to do about it.
+    #[test]
+    fn wait_and_spawn_say_what_a_refused_login_looks_like() {
+        let description = |name: &str| {
+            tool_definitions(None)
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["description"].as_str().map(str::to_owned))
+                .unwrap()
+        };
+        let wait = description("wait");
+        assert!(wait.contains("failure kind login_invalid"), "{wait}");
+        assert!(wait.contains("`mj login`"), "{wait}");
+        assert!(wait.contains("not about the task"), "{wait}");
+        let spawn = description("spawn");
+        assert!(spawn.contains("login the provider has refused"), "{spawn}");
+    }
 
     #[test]
     fn wait_advertises_the_shared_runtime_timeout_limit() {

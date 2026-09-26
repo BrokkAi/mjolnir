@@ -22,6 +22,9 @@ pub async fn run_server(
     workspace_updates.borrow_and_update();
     let mut quotas = std::collections::BTreeMap::new();
     let subagent_quota_reports = Arc::new(std::sync::Mutex::new(quotas.clone()));
+    let rejected_logins = Arc::new(std::sync::Mutex::new(
+        mj_core::credentials::RejectedLogins::default(),
+    ));
     let (quota_profiles_tx, mut quota_updates_rx) = spawn_quota_refresher();
     let mut quota_batch = QuotaRefreshBatch::default();
     let mut published_quota_profiles = std::collections::BTreeMap::new();
@@ -142,6 +145,7 @@ pub async fn run_server(
             daemon_runtime.clone(),
         )
         .with_quota_reports(subagent_quota_reports.clone())
+        .with_rejected_logins(rejected_logins.clone())
         .with_profile_catalog(profile_catalog.clone()),
     );
     options.set_subagent_backend(api_backend.clone());
@@ -791,6 +795,12 @@ pub async fn run_server(
                     );
                     while let Some(result) = credential_sync.try_result() {
                         crate::pollers::log_credential_sync_actions(&result);
+                        if let Some(profile) = controller.config.profiles.get(&result.profile_id) {
+                            rejected_logins
+                                .lock()
+                                .expect("refused logins lock poisoned")
+                                .observe(&result, profile);
+                        }
                         let harness = controller
                             .config
                             .profiles

@@ -258,6 +258,9 @@ pub struct ApiBackend {
     /// sub-agent may run on so a child lands on the login with the most quota
     /// left, without making the parent reason about credential aliases.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    /// Profiles whose login the credential sync found refused; a spawn on one
+    /// is refused until its login file changes.
+    rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     /// The capabilities `list_profiles` answers with and `spawn` chooses
     /// from. The catalogue discovers them in the background, so a call only
     /// ranks what it holds, waiting for a profile the pass has not published.
@@ -276,6 +279,7 @@ impl ApiBackend {
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
+            rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
             // care about profiles — reports that `list_profiles` has nothing
@@ -291,6 +295,14 @@ impl ApiBackend {
         quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
     ) -> Self {
         self.quota_reports = quota_reports;
+        self
+    }
+
+    pub fn with_rejected_logins(
+        mut self,
+        rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
+    ) -> Self {
+        self.rejected_logins = rejected_logins;
         self
     }
 
@@ -491,6 +503,7 @@ impl ApiBackend {
                             awaited_ordinal: None,
                             answered_ordinal: None,
                             failed_turn: None,
+                            login_failure: None,
                             report_dir: None,
                         };
                         let (summary, progress) = summaries
@@ -1054,13 +1067,30 @@ fn subagent_status(
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
             Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => {
-                match (&progress.report, &progress.failed_turn) {
-                    (ReportState::Delivered(message), _) => {
+                match (
+                    &progress.report,
+                    &progress.login_failure,
+                    &progress.failed_turn,
+                ) {
+                    (ReportState::Delivered(message), _, _) => {
                         ("completed".into(), Some(message.clone()), true)
                     }
+                    // A child whose profile could not sign in failed for a
+                    // reason its parent can fix, not for anything in its task
+                    // (#1160), so the answer names the profile and the fix.
+                    (_, Some(profile_id), _) => (
+                        "failed".into(),
+                        Some(format!(
+                            "profile {profile_id}: {}",
+                            mj_core::subagent::login_invalid_reason(profile_id)
+                        )),
+                        true,
+                    ),
                     // A turn that failed says so, with its reason: it is not a
                     // report, and the child can be given another prompt.
-                    (_, Some((state, reason))) => ((*state).to_owned(), Some(reason.clone()), true),
+                    (_, None, Some((state, reason))) => {
+                        ((*state).to_owned(), Some(reason.clone()), true)
+                    }
                     _ => (
                         "completed".into(),
                         finished_turn_message
@@ -1087,6 +1117,9 @@ pub(crate) struct ChildProgress {
     pub answered_ordinal: Option<u64>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
+    /// The child's profile, when that turn failed because the provider
+    /// refused the profile's login.
+    pub login_failure: Option<String>,
     /// The directory on the parent's target where the child writes the
     /// details its report points to.
     pub report_dir: Option<String>,
@@ -1102,6 +1135,7 @@ impl ChildProgress {
             awaited_ordinal: None,
             answered_ordinal: None,
             failed_turn: None,
+            login_failure: None,
             report_dir: None,
         }
     }
@@ -1120,8 +1154,8 @@ impl ChildProgress {
 /// `list_agents` apply this one rule; the session wait and the reminder apply
 /// the same report rule to the turn they saw.
 pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
-    let handback_tool =
-        crate::database::load_subagent(child_id)?.is_some_and(|record| record.handback_tool);
+    let subagent = crate::database::load_subagent(child_id)?;
+    let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
     let recorded = crate::database::load_subagent_report(child_id)?;
     let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
         .map(|(_, active, last)| (active, last))
@@ -1145,11 +1179,16 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         }
         _ => None,
     };
+    let login_failure = last
+        .as_ref()
+        .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
+        .and(subagent.map(|record| record.profile_id));
     Ok(ChildProgress {
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(|turn| turn.accepted_ordinal),
         failed_turn,
+        login_failure,
         report_dir: recorded.report_dir,
     })
 }
@@ -1175,6 +1214,14 @@ fn wait_agent_entry(
     });
     if output.is_some_and(|(_, truncated)| truncated) {
         agent["truncated"] = serde_json::Value::Bool(true);
+    }
+    if state == "failed"
+        && let Some(profile_id) = &progress.login_failure
+    {
+        agent["failure"] = serde_json::json!({
+            "kind": "login_invalid",
+            "profile_id": profile_id,
+        });
     }
     agent
 }
@@ -1722,7 +1769,24 @@ impl SubagentBackend for ApiBackend {
         parent_profile: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            let mut ids = self.profile_catalog.candidates(&parent_profile)?;
+            // A profile whose login the provider has refused would start a
+            // child that dies on its first request (#1160), so it is refused
+            // here, with the fix, until its login file changes.
+            {
+                let rejected = self
+                    .rejected_logins
+                    .lock()
+                    .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+                ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
+                    Some(reason) => {
+                        candidates.unavailable.push((profile_id.clone(), reason));
+                        false
+                    }
+                    None => true,
+                });
+            }
             // One discovery per profile, so a profile whose harness cannot be
             // discovered drops out on its own instead of failing the answer.
             let discoveries = futures::future::join_all(
@@ -1734,7 +1798,6 @@ impl SubagentBackend for ApiBackend {
                 .quota_reports
                 .lock()
                 .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
-            let mut candidates = crate::server::api::SubagentCandidates::default();
             for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
                 match discovery.map(|mut choices| choices.pop()) {
                     Ok(Some(choices)) => {
@@ -1762,7 +1825,7 @@ impl SubagentBackend for ApiBackend {
             }
             if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
                 bail!(
-                    "no sub-agent profile could be discovered: {}",
+                    "no sub-agent profile is available: {}",
                     candidates
                         .unavailable
                         .iter()

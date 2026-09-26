@@ -431,7 +431,7 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 6] = [
+const AUTH_FAILURE_PHRASES: [&str; 7] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
@@ -439,6 +439,9 @@ const AUTH_FAILURE_PHRASES: [&str; 6] = [
     // could not be refreshed. Please log out and sign in again."
     "access token could not be refreshed",
     "log out and sign in again",
+    // OpenAI, when it refuses an API key (#1160): "401 Unauthorized:
+    // Incorrect API key provided: sk-...".
+    "incorrect api key provided",
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
@@ -474,6 +477,12 @@ fn contains_auth_failure_signature(text: &str) -> bool {
 }
 
 pub fn auth_failure_signature(_kind: HarnessKind, text: &str) -> bool {
+    contains_auth_failure_signature(text)
+}
+
+/// [`auth_failure_signature`] for text whose harness is not known, such as a
+/// failed turn's recorded reason.
+pub fn text_reports_auth_failure(text: &str) -> bool {
     contains_auth_failure_signature(text)
 }
 
@@ -709,6 +718,73 @@ impl CredentialSyncResult {
                     .is_ok_and(|actions| actions.iter().copied().any(&wanted))
             })
             .count()
+    }
+}
+
+/// Profiles whose own stored login the provider has refused.
+///
+/// The credential sync is what learns it: a session reported an auth failure,
+/// the sync reached that session, and the profile's copy was no fresher than
+/// the session's, so there was nothing to push that could help. Each entry
+/// keeps the fingerprint the profile's credential file had at that moment and
+/// holds only while the file is unchanged, so `mj login`, or a fresher copy
+/// pulled from another session, ends it.
+#[derive(Debug, Default)]
+pub struct RejectedLogins {
+    profiles: std::collections::BTreeMap<String, (PathBuf, String)>,
+}
+
+impl RejectedLogins {
+    /// Take in one finished sync of `profile`.
+    pub fn observe(&mut self, result: &CredentialSyncResult, profile: &HarnessProfile) {
+        let Some(cause) = &result.trigger else {
+            return;
+        };
+        // An API-key profile has no login to redo, and the sync never
+        // compares its key.
+        if cause.reason != CredentialSyncReason::AuthenticationFailure
+            || result.failure.is_some()
+            || profile.auth_scheme().is_api_key()
+        {
+            return;
+        }
+        let reached = result.outcomes.iter().find_map(|outcome| {
+            (outcome.session_id == cause.session_id).then_some(&outcome.outcome)
+        });
+        let Some(Ok(actions)) = reached else {
+            return;
+        };
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                CredentialSyncAction::Pushed | CredentialSyncAction::Pulled
+            )
+        }) {
+            // A fresher copy was pushed, or the session's own became the
+            // profile's; either way the next turn may succeed.
+            return;
+        }
+        let marker = profile.authentication_marker();
+        if let Ok((snapshot, _)) = read_credential_file(profile.kind, &marker)
+            && snapshot.present
+        {
+            tracing::info!(
+                profile_id = %result.profile_id,
+                session_id = %cause.session_id,
+                "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+            );
+            self.profiles
+                .insert(result.profile_id.clone(), (marker, snapshot.fingerprint));
+        }
+    }
+
+    /// Why a new session on this profile would fail to sign in, while its
+    /// login file is still the one the provider refused.
+    pub fn refusal(&self, profile_id: &str) -> Option<String> {
+        let (marker, refused) = self.profiles.get(profile_id)?;
+        let current = std::fs::read(marker).ok()?;
+        (credential_fingerprint(&current) == *refused)
+            .then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 

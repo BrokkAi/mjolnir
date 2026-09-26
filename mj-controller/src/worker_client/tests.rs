@@ -1012,3 +1012,121 @@ for line in sys.stdin:
         );
     }
 }
+
+/// Plays a worker for a credential sync: it reports the credential copy and
+/// the skills fingerprint it is given, and keeps any credential file it is
+/// sent at the path in its last argument.
+#[cfg(unix)]
+const CREDENTIAL_RELAY: &str = r#"
+import base64, hashlib, json, sys
+protocol, session, fingerprint, freshness, skills, received = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "credential-fixture", "session_id": session}}
+    elif method == "credential_state":
+        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": fingerprint, "freshness_epoch_ms": freshness}}
+    elif method == "skills_state":
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": skills}}
+    elif method == "install_credentials":
+        data = base64.b64decode(req["request"]["params"]["data"])
+        with open(received, "wb") as out:
+            out.write(data)
+        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": None}}
+    else:
+        break
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+/// A ChatGPT login as Codex writes it, refreshed at `refreshed`.
+#[cfg(unix)]
+fn codex_login(refreshed: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {"access_token": format!("access-{refreshed}")},
+        "last_refresh": refreshed,
+    }))
+    .unwrap()
+}
+
+/// A sync target for one session of the Codex profile in `home`, whose worker
+/// is [`CREDENTIAL_RELAY`] holding a login refreshed at `session_refreshed`.
+/// A file the sync pushes lands at `received`.
+#[cfg(unix)]
+fn codex_sync_target(
+    home: &std::path::Path,
+    session_id: &str,
+    session_refreshed: &str,
+    received: &std::path::Path,
+) -> CredentialSyncTarget {
+    let mut target = CredentialSyncTarget {
+        session_id: session_id.into(),
+        profile_id: "codex4".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        profile_home: home.to_path_buf(),
+        authenticates_with_api_key: false,
+        sync_github_token: false,
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+    };
+    let skills = canonical_session_skills(&target, mj_core::skills::SkillsArchiveFormat::Gzip)
+        .unwrap()
+        .state()
+        .fingerprint;
+    let session = CredentialSnapshot::of(
+        mj_core::config::HarnessKind::Codex,
+        &codex_login(session_refreshed),
+    );
+    target.spec = CommandSpec::new(
+        "python3",
+        [
+            "-c".to_owned(),
+            CREDENTIAL_RELAY.to_owned(),
+            RELAY_PROTOCOL_VERSION.to_string(),
+            session_id.to_owned(),
+            session.fingerprint,
+            session.freshness_epoch_ms.unwrap_or_default().to_string(),
+            skills,
+            received.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose("credential sync fixture");
+    target
+}
+
+/// #1160: a sync that a session's auth failure asked for says whether it
+/// reached that session, even when the session's login already matched the
+/// profile's. That match is what shows the profile's own login is the one the
+/// provider refused, so a spawn on the profile can be refused at once. A
+/// periodic sync still leaves sessions that agreed out of its outcomes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    std::fs::write(
+        home.path().join("auth.json"),
+        codex_login("2026-09-25T20:00:00.000Z"),
+    )
+    .unwrap();
+    let target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+
+    let triggered = reconcile_profile(std::slice::from_ref(&target), Some(SESSION_ID)).await;
+    assert_eq!(
+        triggered,
+        [CredentialSyncOutcome {
+            session_id: SESSION_ID.into(),
+            outcome: Ok(Vec::new()),
+        }]
+    );
+    assert!(!received.exists(), "nothing was pushed");
+
+    let periodic = reconcile_profile(std::slice::from_ref(&target), None).await;
+    assert!(periodic.is_empty(), "{periodic:?}");
+}

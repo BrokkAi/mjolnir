@@ -550,6 +550,33 @@ pub fn failed_turn(
     Some((state, reason))
 }
 
+/// Whether a child's last finished turn failed because the provider refused
+/// its profile's login: the turn's diagnostic says so (an error kind such as
+/// Codex's `unauthorized`, or an auth failure sentence), or the turn failed
+/// with such a sentence as its reason. A usage limit is never one.
+///
+/// Only the recorded failure is read, never the child's own messages: a child
+/// may well be writing about authentication errors.
+#[must_use]
+pub fn turn_failed_on_login(turn: &crate::state::MaterializedTurnOutcome) -> bool {
+    if turn
+        .diagnostic
+        .as_ref()
+        .is_some_and(crate::credentials::turn_diagnostic_reports_auth_failure)
+    {
+        return true;
+    }
+    failed_turn(turn, None).is_some_and(|(state, reason)| {
+        state == "failed" && crate::credentials::text_reports_auth_failure(&reason)
+    })
+}
+
+/// What a parent is told about a profile whose login the provider refused.
+#[must_use]
+pub fn login_invalid_reason(profile_id: &str) -> String {
+    format!("the login is no longer valid; run `mj login --profile {profile_id}` and spawn again")
+}
+
 /// Where a child's report stands after its last finished turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportState {
@@ -1045,6 +1072,56 @@ mod tests {
         assert_eq!(
             failed_turn(&finished("t", "cancelled"), None),
             Some(("interrupted", "the turn was cancelled".to_owned()))
+        );
+    }
+
+    /// #1160: a child whose profile could not sign in died on its first
+    /// request, and its parent read the error as the child's report. The
+    /// turns below are the shapes that failure takes.
+    #[test]
+    fn a_turn_the_provider_refused_for_its_login_is_a_login_failure() {
+        let diagnostic = |message: &str, code: Option<&str>| crate::diagnostic::TurnDiagnostic {
+            message: message.into(),
+            code: code.map(str::to_owned),
+            http_status: None,
+            reset_at: None,
+        };
+        let failed_with = |message: &str, code: Option<&str>| {
+            let mut turn = finished("t", "error");
+            turn.diagnostic = Some(diagnostic(message, code));
+            turn
+        };
+        // Codex could not refresh its ChatGPT login (R14-1).
+        assert!(turn_failed_on_login(&failed_with(
+            "Your access token could not be refreshed. Please log out and sign in again.",
+            Some("unauthorized"),
+        )));
+        // Codex sent an API key the backend rejected.
+        assert!(turn_failed_on_login(&failed_with(
+            "unexpected status 401 Unauthorized: Incorrect API key provided: sk-svca****fvMA.",
+            Some("-32603"),
+        )));
+        // The error kind alone is enough.
+        assert!(turn_failed_on_login(&failed_with(
+            "Your session ended.",
+            Some("unauthorized")
+        )));
+
+        // A usage limit, another failure, and a turn that finished are not.
+        assert!(!turn_failed_on_login(&failed_with(
+            "You've hit your usage limit.",
+            Some("usageLimitExceeded"),
+        )));
+        assert!(!turn_failed_on_login(&failed_with(
+            "stream disconnected before completion",
+            Some("responseStreamDisconnected"),
+        )));
+        assert!(!turn_failed_on_login(&finished("t", "end_turn")));
+        assert!(!turn_failed_on_login(&finished("t", "cancelled")));
+
+        assert_eq!(
+            login_invalid_reason("codex4"),
+            "the login is no longer valid; run `mj login --profile codex4` and spawn again"
         );
     }
 

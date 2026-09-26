@@ -114,6 +114,15 @@ async fn selection_backend(
     offers: &[(&str, &[&str])],
     parent_view: Option<ManagedSessionView>,
 ) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
+    selection_backend_refusing(offers, parent_view, Default::default()).await
+}
+
+/// [`selection_backend`], with logins the credential sync found refused.
+async fn selection_backend_refusing(
+    offers: &[(&str, &[&str])],
+    parent_view: Option<ManagedSessionView>,
+    rejected_logins: mj_core::credentials::RejectedLogins,
+) -> (Arc<ApiBackend>, Arc<RecordingExports>) {
     let catalog = ProfileCatalog::with_probe(models_probe(offers));
     catalog
         .sync_now(&test_config(
@@ -152,7 +161,8 @@ async fn selection_backend(
             exports.clone(),
         )
         .with_profile_catalog(catalog)
-        .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas))),
+        .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas)))
+        .with_rejected_logins(Arc::new(std::sync::Mutex::new(rejected_logins))),
     );
     (backend, exports)
 }
@@ -1875,6 +1885,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 awaited_ordinal: awaited,
                 answered_ordinal: answered,
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
+                login_failure: None,
                 report_dir: None,
             }
         };
@@ -1912,6 +1923,146 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
         )
     );
     assert_eq!(report_source("failed", &ReportState::Fallback), None);
+}
+
+/// #1160: a Codex child whose profile could not sign in died on its first
+/// request, and `wait` handed its parent the error text as the child's report.
+/// The parent concluded the profile was dead. The answer now says the turn
+/// failed, which profile's login was refused, and what fixes it.
+#[test]
+fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 4,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: Some(
+            "Your access token could not be refreshed. Please log out and sign in again.".into(),
+        ),
+        last_user_message: None,
+        last_agent_message_follows_last_user: true,
+        agent_message_latest_content_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
+    };
+    let progress = ChildProgress {
+        report: ReportState::Fallback,
+        awaited_ordinal: Some(20),
+        answered_ordinal: Some(20),
+        failed_turn: Some((
+            "failed",
+            "Your access token could not be refreshed. Please log out and sign in again.".into(),
+        )),
+        login_failure: Some("codex4".into()),
+        report_dir: None,
+    };
+    let expected = "profile codex4: the login is no longer valid; run `mj login --profile codex4` and spawn again";
+
+    let (state, output, finished) =
+        subagent_status(Some(&record), Some(&summary), None, None, false, &progress);
+    assert_eq!(
+        (state.as_str(), output.as_deref(), finished),
+        ("failed", Some(expected), true)
+    );
+    let entry = super::wait_agent_entry("child", &state, output, finished, &progress);
+    assert_eq!(entry["state"], "failed", "{entry}");
+    assert_eq!(entry["output"], expected, "{entry}");
+    assert_eq!(entry["report_source"], serde_json::Value::Null, "{entry}");
+    assert_eq!(
+        entry["failure"],
+        serde_json::json!({"kind": "login_invalid", "profile_id": "codex4"}),
+        "{entry}"
+    );
+
+    // A report the child did hand back is still its report.
+    let delivered = ChildProgress {
+        report: ReportState::Delivered("done".into()),
+        ..progress
+    };
+    assert_eq!(
+        subagent_status(Some(&record), Some(&summary), None, None, false, &delivered),
+        ("completed".into(), Some("done".into()), true)
+    );
+}
+
+/// Once the credential sync has found a profile's login refused, a spawn on it
+/// is refused at once instead of starting a child that cannot sign in. An
+/// unpinned spawn goes to another profile that offers the model.
+#[tokio::test]
+async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"chatgpt","last_refresh":"2026-09-25T20:00:00.000Z"}"#,
+    )
+    .unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let mut rejected = mj_core::credentials::RejectedLogins::default();
+    rejected.observe(
+        &mj_core::credentials::CredentialSyncResult {
+            profile_id: "codex-high".into(),
+            trigger: Some(mj_core::credentials::CredentialSyncCause {
+                session_id: "child-1".into(),
+                reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: None,
+            outcomes: vec![mj_core::credentials::CredentialSyncOutcome {
+                session_id: "child-1".into(),
+                outcome: Ok(Vec::new()),
+            }],
+        },
+        &profile,
+    );
+    let (backend, exports) = selection_backend_refusing(SAME_MODELS, None, rejected).await;
+
+    let pinned = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(Some("codex-high"), Some("luna"), Some("low")),
+        )
+        .await;
+    assert!(pinned.is_error, "{}", pinned.message);
+    assert!(
+        pinned.message.contains(
+            "the login is no longer valid; run `mj login --profile codex-high` and spawn again"
+        ),
+        "{}",
+        pinned.message
+    );
+    assert!(exports.registered.lock().unwrap().is_none());
+
+    let listed = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "request-2".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListProfiles,
+            },
+        )
+        .await;
+    let answer: serde_json::Value = serde_json::from_str(&listed.message).unwrap();
+    assert_eq!(
+        answer["unavailable"][0]["profile_id"], "codex-high",
+        "{answer}"
+    );
+
+    backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            spawn_with(None, Some("luna"), Some("low")),
+        )
+        .await;
+    assert_eq!(exports.registered().profile_id, "parent");
 }
 
 /// A last message that stands in for a missing handback has no bound, so the
