@@ -381,7 +381,6 @@ def create_session(
     )
 
     code, _ = lab.wait_daemon_status(port)
-    lab.base_url = f"http://127.0.0.1:{port}"
     status, _ = lab.request("POST", "/auth/session", {"code": code})
     if status != 204:
         raise ScenarioFailure(f"fixture viewer login returned {status}")

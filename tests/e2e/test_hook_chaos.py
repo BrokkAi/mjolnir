@@ -83,7 +83,6 @@ def start_dashboard(lab: Lab, name: str, create_workspace: bool) -> object:
 def login_web(lab: Lab, port: int) -> None:
     code, pid = lab.wait_daemon_status(port)
     lab.daemon_pid = pid
-    lab.base_url = f"http://127.0.0.1:{port}"
     status, _ = lab.request("POST", "/auth/session", {"code": code})
     if status != 204:
         raise ScenarioFailure(f"web login returned {status}")

@@ -239,7 +239,6 @@ def main():
         tui = lab.start_tui("tui-1")
         tui.wait_for("Sessions")
         code, _ = lab.wait_daemon_status(port)
-        lab.base_url = f"http://127.0.0.1:{port}"
         assert lab.request("POST", "/auth/session", {"code": code})[0] == 204
         workspace = lab.snapshot()["workspaces"][0]["id"]
         status, created = lab.request(

@@ -455,6 +455,7 @@ class Lab:
         self,
         *,
         phone_tls: bool = False,
+        phone_port: int = 0,
         fake_acp_delay_ms: int = 0,
         fake_acp_prompt_delay_ms: int | None = None,
         fake_acp_swallow_prompt: int = 0,
@@ -680,7 +681,9 @@ for line in sys.stdin:
         # Keep the ambient shim too: it remains useful for any setup/probe
         # command that runs before the worker takes the managed entrypoint.
         (fixture_bin / "codex-acp").symlink_to(bridge)
-        port = self.free_port()
+        # Let the viewer own allocation. Probing a free port and closing the
+        # socket leaves a race with the daemon's other ephemeral sockets.
+        port = phone_port
         tls_config = ""
         if phone_tls:
             certificate = self.runtime_root / "viewer-cert.pem"
@@ -805,8 +808,10 @@ pull_policy = "never"
             if isinstance(access, dict) and "Ready" in access:
                 ready = access["Ready"]
                 url = urllib.parse.urlsplit(ready["viewer_url"])
-                if url.hostname != "127.0.0.1" or url.port != port:
+                if url.hostname != "127.0.0.1" or not url.port or port not in (0, url.port):
                     raise ScenarioFailure(f"viewer bound an unexpected address: {url.hostname}:{url.port}")
+                self.base_url = urllib.parse.urlunsplit((url.scheme, url.netloc, "", "", ""))
+                self.record_action("viewer-ready", port=url.port)
                 metadata = json.loads((self.data / "daemon.json").read_text())
                 self.daemon_pid = int(metadata["pid"])
                 self.record_process("observed", "daemon", self.daemon_pid)
@@ -1060,7 +1065,6 @@ pull_policy = "never"
         first = self.start_tui("tui-1")
         first.wait_for("Sessions")
         code, _ = self.wait_daemon_status(port)
-        self.base_url = f"http://127.0.0.1:{port}"
         status, _ = self.request("POST", "/auth/session", {"code": code})
         if status != 204:
             raise ScenarioFailure(f"web login returned {status}")
@@ -1184,7 +1188,6 @@ pull_policy = "never"
         client = self.start_tui("tui-1")
         client.wait_for("Sessions")
         code, _ = self.wait_daemon_status(port)
-        self.base_url = f"http://127.0.0.1:{port}"
         status, _ = self.request("POST", "/auth/session", {"code": code})
         if status != 204:
             raise ScenarioFailure(f"web login returned {status}")
@@ -1332,7 +1335,6 @@ pull_policy = "never"
         client = self.start_tui("tui-1")
         client.wait_for("Sessions")
         code, _ = self.wait_daemon_status(port)
-        self.base_url = f"http://127.0.0.1:{port}"
         status, _ = self.request("POST", "/auth/session", {"code": code})
         if status != 204:
             raise ScenarioFailure(f"web login returned {status}")

@@ -23,7 +23,8 @@ def main() -> int:
     # The lab outlives this script by design, so it gets no watchdog;
     # finish-luna-lab.py cleans it up when the campaign ends.
     lab = Lab(args.hel, "luna-manual", args.seed, watchdog=False)
-    port = lab.prepare(fake_acp_delay_ms=args.fake_delay_ms)
+    # Manual labs advertise a fixed port before the operator starts the daemon.
+    port = lab.prepare(fake_acp_delay_ms=args.fake_delay_ms, phone_port=Lab.free_port())
     values = {
         "MJ_CONFIG_DIR": str(lab.config),
         "MJ_DATA_DIR": str(lab.data),

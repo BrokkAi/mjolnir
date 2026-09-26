@@ -25,7 +25,6 @@ def run(lab):
     client.send(b"\r\r")
     client.wait_for("Sessions")
     code, _ = lab.wait_daemon_status(port)
-    lab.base_url = f"http://127.0.0.1:{port}"
     assert lab.request("POST", "/auth/session", {"code": code})[0] == 204
     workspace = lab.snapshot()["workspaces"][0]["id"]
     assert lab.request("POST", "/api/actions", {

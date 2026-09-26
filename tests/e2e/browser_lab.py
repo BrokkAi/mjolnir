@@ -155,7 +155,6 @@ def run(lab: Lab) -> None:
     port = lab.prepare(phone_tls=True)
     dashboard = start_dashboard(lab)
     code, _ = lab.wait_daemon_status(port)
-    lab.base_url = f"https://127.0.0.1:{port}"
     status, _ = lab.request("POST", "/auth/session", {"code": code})
     if status != 204:
         raise ScenarioFailure(f"Python observer login returned {status}")

@@ -210,3 +210,15 @@ all supported tests. Full Cargo tests and all-target Clippy passed again; see
 `cargo-test-helper-guards.log` and `clippy-helper-guards.log`. The corrected
 remote crash matrix, browser convergence, and highly parallel suite are green
 in reliability run 36232667089.
+
+The earlier soak failed after 42 successful iterations because its temporary
+free-port probe released the port before the viewer bound it. Automated labs
+now request port zero and consume the daemon's actual viewer URL, including
+after restart; manual labs may still explicitly select their advertised port.
+The failing seed 700043, HTTPS browser/TUI convergence with all 113 browser
+checks, and a forced old-port-occupied daemon restart passed with `leaks=0`.
+Evidence logs are `dynamic-port.log`, `browser-dynamic-port.log`, and
+`dynamic-port-restart.log` under `target/release-validation`. A full corrected
+30-minute soak is running with stable matching binaries and separate instance
+data; it does not require another Rust build because only Python test drivers
+changed.
