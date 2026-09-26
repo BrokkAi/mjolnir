@@ -3613,9 +3613,7 @@ impl LiveParent {
 /// `hel` in the parent's worker root, which fails the way a full disk does.
 #[cfg(unix)]
 async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy) -> LiveParent {
-    use crate::controller::checkpoint::tests::{
-        LATCH_RELAY_SESSION, ReleaseSupport, latch_relay_target,
-    };
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -3627,20 +3625,7 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     for path in [&worker_root, &relay_root, &archives, &checkout] {
         std::fs::create_dir_all(path).unwrap();
     }
-    let mut seed =
-        mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
-    seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
-        native_session_id: "native-session".into(),
-        native_continuity_lost: false,
-        replaced_unused_native_session_id: None,
-        resumed: true,
-    })
-    .unwrap();
-    seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
-        config_options: Vec::new(),
-    })
-    .unwrap();
-    drop(seed);
+    seed_live_session(directory.path(), &relay_root);
     let hel = worker_root.join("hel");
     std::fs::write(
         &hel,
@@ -3648,24 +3633,6 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     )
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let profile_home = directory.path().join("profile");
-    std::fs::create_dir_all(&profile_home).unwrap();
-    Config::update(|config| {
-        config.profiles.insert(
-            "codex".into(),
-            mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: profile_home,
-                environment: BTreeMap::new(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-            },
-        );
-        Ok(())
-    })
-    .unwrap();
 
     let workspace = crate::database::create_workspace("Parent suspension").unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(LATCH_RELAY_SESSION);
@@ -3702,11 +3669,73 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     )
     .unwrap();
 
+    let (channels, state) = serve_live_session(&relay_root).await;
+    LiveParent {
+        _directory: directory,
+        relay_root,
+        channels,
+        state,
+    }
+}
+
+/// Seed the stand-in relay of a live session that has opened its native
+/// session, and give the controller the Codex profile the session uses.
+#[cfg(unix)]
+fn seed_live_session(directory: &Path, relay_root: &Path) {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+
+    let mut seed =
+        mj_worker::relay::DurableRelay::open(relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
+        native_session_id: "native-session".into(),
+        native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
+        resumed: true,
+    })
+    .unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+        config_options: Vec::new(),
+    })
+    .unwrap();
+    drop(seed);
+
+    let profile_home = directory.join("profile");
+    std::fs::create_dir_all(&profile_home).unwrap();
+    Config::update(|config| {
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: profile_home,
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Serve the live session from the stand-in relay and start a daemon runtime
+/// over the store, which must already hold every record the test needs.
+#[cfg(unix)]
+async fn serve_live_session(
+    relay_root: &Path,
+) -> (
+    crate::session_manager::SessionManagerChannels,
+    Arc<RuntimeState>,
+) {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_SESSION, ReleaseSupport, latch_relay_target,
+    };
+
     let channels = crate::session_manager::spawn_session_manager().unwrap();
     channels
         .targets
         .send(vec![latch_relay_target(
-            &relay_root,
+            relay_root,
             None,
             ReleaseSupport::Supported,
             false,
@@ -3730,12 +3759,211 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
         Vec::new(),
         Controller::load,
     ));
-    LiveParent {
+    (channels, state)
+}
+
+/// Marks the stand-in worker's run of [`stand_in_worker_exports_a_checkpoint`].
+#[cfg(unix)]
+const STAND_IN_EXPORT: &str = "MJ_TEST_STAND_IN_EXPORT";
+
+/// The worker's `export-checkpoint`, run from this test binary for the
+/// stand-in worker of [`live_clone_with_an_unpushed_commit`], because unit
+/// tests have no worker binary. It does nothing unless that stand-in runs it.
+#[cfg(unix)]
+#[test]
+fn stand_in_worker_exports_a_checkpoint() {
+    if std::env::var_os(STAND_IN_EXPORT).is_none() {
+        return;
+    }
+    // With `--nocapture` libtest writes `test <name> ... ` without a
+    // trailing newline before the body runs. End that line first so the
+    // result is a line of its own.
+    println!();
+    let exported =
+        mj_worker::checkpoint::export_from_spec_reader(&mut std::io::stdin().lock()).unwrap();
+    println!("{}", serde_json::to_string(&exported).unwrap());
+}
+
+#[cfg(unix)]
+struct LiveClone {
+    _source: tempfile::TempDir,
+    _directory: tempfile::TempDir,
+    checkout: PathBuf,
+    worker_root: PathBuf,
+    unpushed_commit: String,
+    relay_root: PathBuf,
+    channels: crate::session_manager::SessionManagerChannels,
+    state: Arc<RuntimeState>,
+}
+
+#[cfg(unix)]
+impl LiveClone {
+    /// Whether the session's relay was sealed by a close.
+    fn sealed(&self) -> bool {
+        let journal = std::fs::read_to_string(
+            self.relay_root
+                .join(mj_core::relay::RELAY_JOURNAL_DIR)
+                .join("active.jsonl"),
+        )
+        .unwrap();
+        journal.lines().any(|line| {
+            let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
+            matches!(
+                event.observation,
+                mj_core::relay::RelayObservation::CommandQueued {
+                    command: RelayCommand::Close { .. },
+                    ..
+                }
+            )
+        })
+    }
+}
+
+/// A live session on an isolated clone whose last commit is not on the
+/// clone's origin, served by the stand-in relay. Its stand-in worker runs the
+/// real checkpoint export, so a suspend checks the clone's publication against
+/// a real archive and a real origin.
+#[cfg(unix)]
+async fn live_clone_with_an_unpushed_commit() -> LiveClone {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    use crate::controller::test_support::{committed_repository, test_git};
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    // A LocalBare worker root ends in its session id, and its harness home is
+    // the worker root's `profile` directory.
+    let worker_root = directory.path().join(LATCH_RELAY_SESSION);
+    let relay_root = directory.path().join("relay");
+    for path in [&worker_root.join("profile"), &relay_root] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    seed_live_session(directory.path(), &relay_root);
+    let hel = worker_root.join("hel");
+    std::fs::write(
+        &hel,
+        format!(
+            "#!/bin/sh\n\
+             [ \"$1 $2\" = 'worker export-checkpoint' ] || \
+             {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
+             {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
+            program = std::env::current_exe().unwrap().display(),
+            test = crate::controller::test_support::test_name(
+                module_path!(),
+                "stand_in_worker_exports_a_checkpoint",
+            ),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The project's `master` is on its origin, and the session's clone has one
+    // commit of its own that is not.
+    let source = committed_repository();
+    let origin = directory.path().join("origin.git");
+    test_git(
+        directory.path(),
+        &["init", "--bare", "--initial-branch=master", "origin.git"],
+    );
+    test_git(
+        source.path(),
+        &["remote", "add", "origin", &origin.to_string_lossy()],
+    );
+    test_git(source.path(), &["push", "origin", "master"]);
+    let mut session =
+        crate::controller::test_support::managed_clone_session(source.path(), LATCH_RELAY_SESSION);
+    let checkout = session.project_directory.clone().unwrap();
+    test_git(&checkout, &["config", "user.name", "Hel Tests"]);
+    test_git(&checkout, &["config", "user.email", "hel@example.invalid"]);
+    std::fs::write(checkout.join("session.txt"), "work\n").unwrap();
+    test_git(&checkout, &["add", "."]);
+    test_git(&checkout, &["commit", "-m", "session work"]);
+    let unpushed_commit = test_git(&checkout, &["rev-parse", "HEAD"]);
+
+    let workspace = crate::database::create_workspace("Clone suspension").unwrap();
+    session.workspace_id = workspace.id.clone();
+    session.state = SessionState::Running;
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_session(&session).unwrap();
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        LATCH_RELAY_SESSION,
+    ))
+    .unwrap();
+
+    let (channels, state) = serve_live_session(&relay_root).await;
+    LiveClone {
+        _source: source,
         _directory: directory,
+        checkout,
+        worker_root,
+        unpushed_commit,
         relay_root,
         channels,
         state,
     }
+}
+
+/// R2-3 and R13-5: a suspend of a live clone with unpushed work, sent
+/// without the acknowledgement, is refused by the controller's own check
+/// after its checkpoint, not only by the API's early refusal. The daemon
+/// closes a live session through the route that finishes an interrupted
+/// close, which acknowledged on the caller's behalf. The refused session is
+/// running again, not left `Closing` for the next start to close, with its
+/// relay open and its checkout and target in place, and a suspend that
+/// acknowledges then goes through.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_isolated_live_parent_test(
+        "a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let clone = live_clone_with_an_unpushed_commit().await;
+
+    let refusal = tokio::time::timeout(
+        Duration::from_secs(60),
+        clone
+            .state
+            .suspend_session_with_ack(LATCH_RELAY_SESSION.to_owned(), false),
+    )
+    .await
+    .unwrap()
+    .expect_err("a suspend without the acknowledgement must be refused");
+    assert!(
+        format!("{refusal:#}").contains("acknowledge_unpublished_work"),
+        "the refusal names the acknowledgement: {refusal:#}"
+    );
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running, "{record:?}");
+    assert!(record.target.is_some(), "{record:?}");
+    assert!(!clone.sealed(), "a refused suspend must not seal the relay");
+    assert!(clone.worker_root.is_dir());
+    assert_eq!(
+        crate::controller::test_support::test_git(&clone.checkout, &["rev-parse", "HEAD"]),
+        clone.unpushed_commit
+    );
+
+    // An internal suspend (workspace close, recovery, a sub-agent's
+    // teardown) acknowledges on its own, as a caller with the flag does.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Stopped, "{record:?}");
+    assert!(clone.sealed());
+    clone.channels.shutdown.shutdown().await.unwrap();
 }
 
 /// A suspend whose checkpoint fails leaves the parent's sub-agents running,

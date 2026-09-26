@@ -414,12 +414,15 @@ impl RuntimeState {
                         session_id.clone(),
                     );
                     let deferred = match route {
+                        // `prepare_suspension` marks a live session `Closing`,
+                        // so this is also the route of every live suspend.
                         CloseRoute::RecoverInterrupted => {
                             controller
                                 .recover_interrupted_close_managed(
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
+                                    acknowledge_unpublished_work,
                                     Some(state.stop_subagents_before_close(&session_id)),
                                 )
                                 .await?

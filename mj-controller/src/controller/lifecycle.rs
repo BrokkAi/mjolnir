@@ -222,9 +222,13 @@ impl Controller {
                 .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)
         {
             latched.relay.cancel_abandoned_barrier().await?;
-            self.state
-                .sessions
-                .insert(session_id.to_owned(), previous.clone());
+            // The relay is still open, so the session is running again. Left
+            // `Closing`, the record would be an interrupted close, which the
+            // next start finishes without the acknowledgement.
+            let mut restored = previous.clone();
+            restored.state = state_after_unsealed_close(&previous);
+            restored.updated_at = now();
+            self.state.sessions.insert(session_id.to_owned(), restored);
             self.persist_session_transition_or_restore(
                 session_id,
                 &previous,
@@ -279,11 +283,7 @@ impl Controller {
                 );
             }
             let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.state = if previous.state == SessionState::Closing {
-                SessionState::Running
-            } else {
-                previous.state
-            };
+            record.state = state_after_unsealed_close(&previous);
             record.last_error = Some(format!("{error:#}"));
             record.updated_at = now();
             self.persist_session_transition_or_restore(
@@ -365,11 +365,18 @@ impl Controller {
     /// installed checkpoint gate. If it had not, take a fresh checkpoint;
     /// the previously installed archive may have become stale after EOF
     /// released its barrier.
+    ///
+    /// The daemon also closes every live session this way, because it marks
+    /// the record `Closing` before the close starts. So the fresh checkpoint's
+    /// publication check uses `acknowledge_unpublished_work` as the caller
+    /// sent it. A relay already sealed was checked by the close that sealed
+    /// it, and that close can only go forward.
     pub async fn recover_interrupted_close_managed(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let (state, verified) = {
@@ -418,7 +425,7 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
-                        true,
+                        acknowledge_unpublished_work,
                         before_close,
                     )
                     .await;
@@ -1147,14 +1154,22 @@ fn apply_close_checkpoint_failure(
              resume from its checkpoint, or explicitly destroy it with mj destroy: {error:#}"
         ));
     } else {
-        record.state = if previous.state == SessionState::Closing {
-            SessionState::Running
-        } else {
-            previous.state
-        };
+        record.state = state_after_unsealed_close(previous);
     }
     record.last_checkpoint_error = Some(format!("{error:#}"));
     record.updated_at = updated_at;
+}
+
+/// The state a session goes back to when its close stops before sealing the
+/// relay. `Closing` there is only the intent of this close, or of one
+/// interrupted before it sealed the relay, and the relay is still open, so the
+/// session is running.
+fn state_after_unsealed_close(previous: &SessionRecord) -> SessionState {
+    if previous.state == SessionState::Closing {
+        SessionState::Running
+    } else {
+        previous.state
+    }
 }
 
 fn apply_interrupted_close_error(

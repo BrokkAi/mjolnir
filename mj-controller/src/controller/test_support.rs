@@ -12,7 +12,8 @@ use mj_core::config::{
     TargetTemplate,
 };
 use mj_core::state::{
-    CheckpointMetadata, ManagedWorktree, ManagedWorktreeTarget, SessionRecord, SessionState,
+    CheckpointMetadata, ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeTarget, SessionRecord,
+    SessionState,
 };
 
 use crate::targets::ProcessExecutor;
@@ -414,11 +415,29 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
 
 /// A managed raw session whose worktree really exists in `repository`.
 pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
+    managed_checkout_session(repository, session_id, ManagedCheckoutKind::Worktree)
+}
+
+/// A managed raw session on an isolated clone of `repository`, created the
+/// way a session's clone is, so its `origin` is the one `repository` has.
+pub(crate) fn managed_clone_session(repository: &Path, session_id: &str) -> SessionRecord {
+    managed_checkout_session(repository, session_id, ManagedCheckoutKind::Clone)
+}
+
+fn managed_checkout_session(
+    repository: &Path,
+    session_id: &str,
+    kind: ManagedCheckoutKind,
+) -> SessionRecord {
+    let directory = match kind {
+        ManagedCheckoutKind::Worktree => ".mj/worktrees",
+        ManagedCheckoutKind::Clone => ".mj/clones",
+    };
     let worktree = ManagedWorktree {
-        kind: Default::default(),
+        kind,
         source_project_directory: repository.to_path_buf(),
         source_repository: repository.to_path_buf(),
-        worktree_root: repository.join(".mj/worktrees").join(session_id),
+        worktree_root: repository.join(directory).join(session_id),
         branch: format!("mj/{session_id}"),
         target: ManagedWorktreeTarget::Local,
         // Production records the owning repository's head when the worktree is
