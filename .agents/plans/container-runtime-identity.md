@@ -85,3 +85,7 @@ PR review findings (2026-09-26): Preserve unconstrained launches when `CODEX_PAT
 Review validation: the complete focused worker-provisioning module passed (105 tests, two pre-existing opt-in tests ignored), including six container runtime tests and all existing bare/SSH preparation and refresh cases. Formatting and diff checks pass. PR #1167 is open; its review fixes and the 2.23.1 candidate now await fresh full CI.
 
 CI finding: macOS reached the new fallback-installation test with a valid managed runtime, then failed its cache-prefix assertion because the temporary directory is reached through a symlink while the selected executable is canonical. Canonicalize the expected cache path in the assertion. This is a test portability correction; the runtime selection and identity checks had already passed. Full CI will rerun on the corrected commit before merge/release.
+
+Second macOS CI finding: all container/controller tests now pass (1,819 controller tests), but older reviewer fixtures use `/bin/false`, absent on macOS. Shared preparation now validates that formerly unused placeholder. Resolve `false` through PATH in the fixture so it is valid on both Unix platforms, then validate the reviewer module and rerun CI. Production behavior remains unchanged by these portability fixes.
+
+The full reviewer module passes locally after the portable placeholder correction: 26 tests, including lifecycle, recovery, cancellation, concurrent roles, and payloads larger than the pipe buffer.
