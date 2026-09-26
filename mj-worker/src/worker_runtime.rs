@@ -97,6 +97,19 @@ pub struct AcpSupervisorSpec {
     pub harness_lease: Option<PathBuf>,
 }
 
+impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
+    fn from(config: &WorkerLaunchConfig) -> Self {
+        Self {
+            command: config.bridge_command.clone(),
+            args: config.bridge_args.clone(),
+            environment: config.environment.clone(),
+            excluded_environment: config.excluded_environment.clone(),
+            cwd: config.cwd.clone(),
+            harness_lease: None,
+        }
+    }
+}
+
 impl AcpSupervisorSpec {
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
@@ -250,6 +263,10 @@ pub(crate) fn repin_bridge_selectors(
 mod discovery;
 #[cfg(unix)]
 pub(crate) mod harness;
+#[cfg(unix)]
+mod harness_launch;
+#[cfg(unix)]
+pub use harness_launch::{PreparedHarnessLaunch, prepare_harness_launch};
 #[cfg(unix)]
 mod runtime_identity;
 #[cfg(unix)]

@@ -65,26 +65,11 @@ pub(in crate::controller) fn bridge_launch(
 ) -> (String, Vec<String>) {
     match harness {
         mj_core::config::HarnessKind::Muse => ("muse-acp".into(), Vec::new()),
-        mj_core::config::HarnessKind::Codex => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}\" ]; then exec codex-acp; fi; {}; exec npx -y {CODEX_ACP_PACKAGE}@{CODEX_ACP_VERSION}",
-                    ensure_node_script()
-                ),
-            ],
-        ),
-        mj_core::config::HarnessKind::Claude => (
-            "sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {}; exec npx -y @agentclientprotocol/claude-agent-acp@{CLAUDE_ACP_VERSION}",
-                    ensure_node_script()
-                ),
-            ],
-        ),
+        mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude => {
+            let bridge =
+                mj_core::harness_runtime::npm_bridge(harness).expect("npm harness has a bridge");
+            ("sh".into(), vec!["-c".into(), bridge.bootstrap_script()])
+        }
         mj_core::config::HarnessKind::Kimi => (
             "sh".into(),
             vec![
@@ -181,10 +166,6 @@ pub(in crate::controller) fn preflight_harness(
 /// The exit status the harness preflight script uses when Node.js or npm is
 /// unusable and the agent's own command is missing as well.
 const HARNESS_CLI_MISSING_STATUS: i32 = 3;
-
-pub(super) fn ensure_node_script() -> &'static str {
-    "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi"
-}
 
 pub(super) const MJ_CONTAINER_ENVIRONMENT: &str = "## Mjolnir disposable environment\n\nThis session runs in a disposable Mjolnir container. When the session closes, Mjolnir checkpoints everything in project workspace directories under `/workspace`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then removes the container.\n\nEverything outside `/workspace`, including installed packages, `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n";
 
