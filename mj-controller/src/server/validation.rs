@@ -368,7 +368,6 @@ fn validate_action_against(
                 validate_public_id(workspace_id)?;
             }
             validate_public_id(profile_id)?;
-            validate_public_id(bundle_id)?;
             validate_public_id(target_id)?;
             if let Some(title) = title {
                 validate_title(title)?;
@@ -386,8 +385,13 @@ fn validate_action_against(
                 ));
             }
             require_profile(snapshot, profile_id)?;
-            require_bundle(snapshot, bundle_id)?;
             let target = require_target(snapshot, target_id)?;
+            // Bare sessions open the selected directory; the browser has no
+            // bundle selection to supply for that flow.
+            if !target.requires_project_directory || !bundle_id.is_empty() {
+                validate_public_id(bundle_id)?;
+                require_bundle(snapshot, bundle_id)?;
+            }
             if *create_managed_worktree == Some(true) && !target.requires_project_directory {
                 return Err(ApiError::bad_request(
                     "managed worktree creation requires a bare Git project",

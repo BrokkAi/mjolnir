@@ -283,11 +283,23 @@ fn app_with(
 }
 
 fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleRequest>) {
+    let (app, bundles, _) = app_with_bundle_and_action_receivers(|_| {});
+    (app, bundles)
+}
+
+fn app_with_bundle_and_action_receivers(
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+) -> (
+    Router,
+    mpsc::Receiver<BundleRequest>,
+    mpsc::Receiver<ControllerRequest>,
+) {
     let (config, state) = sample_config_state();
-    let (_snapshot_tx, snapshot_rx) =
-        watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    adjust(&mut snapshot);
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
     let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
-    let (action_tx, _action_rx) = mpsc::channel(8);
+    let (action_tx, action_rx) = mpsc::channel(8);
     let (bundle_tx, bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
     let (preflight_tx, _preflight_rx) = mpsc::channel(8);
@@ -304,7 +316,7 @@ fn app_with_bundle_receiver() -> (Router, mpsc::Receiver<BundleRequest>) {
         client_state_tx,
     )
     .with_test_credentials("123456", b"01234567890123456789012345678901");
-    (router(options), bundle_rx)
+    (router(options), bundle_rx, action_rx)
 }
 
 // Keep this test factory's arguments aligned with `ServerRequests`; each
@@ -1919,6 +1931,36 @@ async fn a_new_session_without_a_title_is_accepted() {
     assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
 }
 
+#[tokio::test]
+async fn a_bare_session_can_start_without_a_bundle() {
+    let (app, mut bundles, mut actions) =
+        app_with_bundle_and_action_receivers(|snapshot| snapshot.bundles.clear());
+    let response = tokio::spawn(post_action(
+        app,
+        cookie(),
+        r#"{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"","target_id":"raw","project_directory":"/work/project"}"#
+            .to_owned(),
+    ));
+    let bundle = tokio::time::timeout(Duration::from_secs(5), bundles.recv())
+        .await
+        .expect("the directory is registered through normal bundle creation")
+        .unwrap();
+    assert_eq!(bundle.source, "/work/project");
+    assert!(actions.try_recv().is_err(), "creation waits for the bundle");
+    bundle.reply.send(Ok("project".into())).unwrap();
+    let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .expect("the directory-only request reached the controller")
+        .unwrap();
+    assert!(matches!(
+        action.action,
+        ControllerAction::New { ref bundle_id, ref project_directory, .. }
+            if bundle_id == "project" && project_directory.as_deref() == Some(Path::new("/work/project"))
+    ));
+    action.reply.send(ActionOutcome::accepted()).unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
 /// Two phones must not share stored state, and one phone's state must
 /// survive its own re-login. Neither is true of a cookie that signs only
 /// an expiry, which is what this replaced.
@@ -2019,6 +2061,10 @@ async fn a_preflight_validates_before_it_reaches_the_controller() {
             r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw"}"#,
             "a bare target with no directory",
         ),
+        (
+            r#"{"profile_id":"codex-1","bundle_id":"","target_id":"podman"}"#,
+            "a container target with no bundle",
+        ),
     ] {
         let (app, _, _, mut preflights, _) = app();
         let response = app
@@ -2044,18 +2090,23 @@ async fn a_preflight_validates_before_it_reaches_the_controller() {
 /// projection cannot inspect the filesystem or an SSH host.
 #[tokio::test]
 async fn a_bare_preflight_forwards_directory_validation_to_the_controller() {
-    let (app, _, _, mut preflights, _) = app();
+    let (app, _, _, mut preflights, _) = app_with_snapshot(|snapshot| snapshot.bundles.clear());
     let response = tokio::spawn(app.oneshot(
             Request::post("/api/preflight/new")
                 .header(COOKIE, cookie())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw","project_directory":"~/project"}"#,
+                    r#"{"profile_id":"codex-1","bundle_id":"","target_id":"raw","project_directory":"~/project"}"#,
                 ))
                 .unwrap(),
         ));
-    let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
-    assert_eq!(request.bundle_id, "hel");
+    let request = new_preflight(
+        tokio::time::timeout(Duration::from_secs(5), preflights.recv())
+            .await
+            .expect("the directory-only preflight reached the controller")
+            .expect("the controller was asked"),
+    );
+    assert!(request.bundle_id.is_empty());
     assert_eq!(request.target_id, "raw");
     assert_eq!(request.project_directory, Some(PathBuf::from("~/project")));
     request

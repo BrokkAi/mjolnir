@@ -26,8 +26,8 @@ use mj_core::config::Config;
 use mj_core::state::{SessionRecord, SessionState, State};
 
 /// How long a failed upgrade waits before it is tried again, doubling per
-/// consecutive failure. A session that is quiet produces an observation every
-/// sync tick, so without this one broken target would be retried forever.
+/// consecutive failure. The daemon periodically reobserves quiet sessions, so
+/// without this one broken target would be retried continuously.
 const WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Ceiling on the widening retry delay, so a target that is broken rather than

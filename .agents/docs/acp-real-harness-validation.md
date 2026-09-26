@@ -118,5 +118,8 @@ No already-passed case was substituted with a fake or rerun against live data.
 
 `cargo test -p brokk-mjolnir acp::tests` passed all 31 tests. The consumer relay
 also passed a one-MiB round trip and an abrupt-consumer-death pipe-closure check.
-The interrupted workspace-wide Cargo run did not produce a result; full tests
-and Clippy are required on the subsequently merged release tree before pushing.
+After merging latest master and repairing its existing CI failures, the full
+workspace `cargo test`, `cargo clippy --all-targets -- -D warnings`, and format
+checks passed in the dev profile. Logs are retained under
+`target/release-validation/`. All six durability crash boundaries and the
+browser/TUI convergence scenario with 113 browser checks also passed.

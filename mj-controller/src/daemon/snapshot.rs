@@ -1,6 +1,64 @@
 use super::*;
 
+/// Derived worker facts, rebuilt on attachment. Records and configuration are
+/// read afresh when retrying work after gate contention or a policy deadline.
+pub(super) struct BackgroundPolicyState {
+    quiet: bool,
+    checkpoint_safe: bool,
+    latest_completed_turn_ordinal: Option<u64>,
+    execution: mj_core::state::MaterializedExecutionState,
+    worker_build: Option<String>,
+}
+
 impl RuntimeState {
+    fn observe_background_policy(
+        &self,
+        session: &SessionRecord,
+        config: &Config,
+        policy: &BackgroundPolicyState,
+    ) {
+        if policy.quiet {
+            self.worker_upgrade_observer
+                .observe(WorkerUpgradeObservation {
+                    session: session.clone(),
+                    config: config.clone(),
+                    worker_build: policy.worker_build.clone(),
+                    quiet: true,
+                });
+        }
+        self.recovery_observer.observe(RecoveryObservation {
+            checkpoint_safe: policy.checkpoint_safe,
+            session: session.clone(),
+            config: config.clone(),
+            latest_completed_turn_ordinal: policy.latest_completed_turn_ordinal,
+            execution: policy.execution,
+        });
+    }
+
+    /// Quiet workers need no new view to retry a skipped or delayed operation.
+    /// This only queues observations; coordinators perform the actual I/O.
+    pub(super) fn refresh_background_policies(&self) {
+        let controller = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.background_policies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|session_id, policy| {
+                let Some(session) = controller
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .filter(|session| session.state.has_live_worker())
+                else {
+                    return false;
+                };
+                self.observe_background_policy(session, &controller.config, policy);
+                true
+            });
+    }
+
     pub async fn reload_controller(&self) -> Result<()> {
         // Serialize installs so an earlier phone publication cannot overwrite
         // a later completed lifecycle with the controller snapshot it loaded.
@@ -194,36 +252,33 @@ impl RuntimeState {
             has_snapshot,
             "daemon received a session view"
         );
-        if let Some(snapshot) = view.snapshot.as_ref() {
+        {
             let controller = self
                 .controller
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if let Some(session) = controller.state.sessions.get(&session_id).cloned() {
-                // An upgrade only ever runs on a quiet session, and a session
-                // in a turn publishes a view every 150 ms. Skipping those here
-                // keeps the config clone off the streaming path; the
-                // coordinator still decides, from `quiet`, whether to act.
-                let quiet =
-                    view.connected && snapshot.operational.safe_to_replace(session.harness_kind);
-                if quiet {
-                    self.worker_upgrade_observer
-                        .observe(WorkerUpgradeObservation {
-                            session: session.clone(),
-                            config: controller.config.clone(),
-                            worker_build: snapshot.worker_build.clone(),
-                            quiet,
-                        });
-                }
-                self.recovery_observer.observe(RecoveryObservation {
+            let mut policies = self
+                .background_policies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if view.connected
+                && let Some(snapshot) = view.snapshot.as_ref()
+                && let Some(session) = controller.state.sessions.get(&session_id)
+                && session.state.has_live_worker()
+            {
+                let policy = BackgroundPolicyState {
+                    quiet: snapshot.operational.safe_to_replace(session.harness_kind),
                     checkpoint_safe: snapshot
                         .operational
                         .safe_for_checkpoint(session.harness_kind),
-                    session,
-                    config: controller.config.clone(),
                     latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),
                     execution: snapshot.materialized.execution,
-                });
+                    worker_build: snapshot.worker_build.clone(),
+                };
+                self.observe_background_policy(session, &controller.config, &policy);
+                policies.insert(session_id.clone(), policy);
+            } else {
+                policies.remove(&session_id);
             }
         }
         self.sessions

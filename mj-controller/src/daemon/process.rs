@@ -188,6 +188,8 @@ pub(super) async fn run_daemon_runtime(
     owner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
     recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut background_policy_tick = tokio::time::interval(Duration::from_secs(1));
+    background_policy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // How often the harness readiness wait is looked at. The wait itself is
     // minutes long, so this only bounds how late a failure is noticed, and it
     // reads in-memory state rather than the store.
@@ -361,6 +363,9 @@ pub(super) async fn run_daemon_runtime(
                     while let Some(result) = worker_upgrades.try_result() {
                         report_worker_upgrade(&state, &result);
                     }
+                }
+                _ = background_policy_tick.tick() => {
+                    state.refresh_background_policies();
                 }
                 _ = readiness_tick.tick() => {
                     // A live session whose harness never advertised itself

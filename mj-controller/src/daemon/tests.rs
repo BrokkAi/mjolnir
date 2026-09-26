@@ -2343,6 +2343,128 @@ fn ready_startup_view() -> ManagedSessionView {
     }
 }
 
+#[tokio::test]
+async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
+    let mut state = test_runtime_state();
+    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
+        observations,
+        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+    };
+    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
+    snapshot.window.latest_turn_start_position = Some(9);
+    state
+        .publish_session("session-1".into(), view)
+        .await
+        .unwrap();
+    let first = observed.try_recv().unwrap();
+    assert!(first.checkpoint_safe);
+    assert_eq!(first.latest_completed_turn_ordinal, Some(9));
+    let revision = state.revisions.current();
+
+    // A retry must pick up the current record, not a retained copy from the
+    // original worker event. No new worker event or UI publication is needed.
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .title = "renamed".into();
+    state.refresh_background_policies();
+    let retry = observed.try_recv().unwrap();
+    assert_eq!(retry.session.title, "renamed");
+    assert_eq!(retry.latest_completed_turn_ordinal, Some(9));
+    assert!(retry.checkpoint_safe);
+    assert_eq!(state.revisions.current(), revision);
+
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .state = SessionState::Parked;
+    state.refresh_background_policies();
+    assert!(observed.try_recv().is_err());
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .state = SessionState::Running;
+    state.refresh_background_policies();
+    assert!(
+        observed.try_recv().is_err(),
+        "resumed sessions need a fresh worker view"
+    );
+}
+
+#[tokio::test]
+async fn disconnected_and_removed_sessions_stop_background_retries() {
+    let mut state = test_runtime_state();
+    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
+        observations,
+        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+    };
+    let session = runtime_test_session("session-1", "workspace", SessionState::Running);
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    observed.try_recv().unwrap();
+    let mut disconnected = ready_startup_view();
+    disconnected.connected = false;
+    state
+        .publish_session("session-1".into(), disconnected)
+        .await
+        .unwrap();
+    state.refresh_background_policies();
+    assert!(observed.try_recv().is_err());
+
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    observed.try_recv().unwrap();
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .remove("session-1");
+    state.refresh_background_policies();
+    assert!(observed.try_recv().is_err());
+    assert!(state.background_policies.lock().unwrap().is_empty());
+}
+
 /// Put `session-1` into the daemon's in-memory controller as a session that
 /// is still coming up, which is when a startup prompt can be queued.
 fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {

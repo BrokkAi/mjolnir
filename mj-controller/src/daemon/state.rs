@@ -57,6 +57,7 @@ impl RuntimeState {
             web_viewer: crate::web_viewer::ViewerControl::new(),
             ever_attached: AtomicBool::new(false),
             sessions: Mutex::new(BTreeMap::new()),
+            background_policies: Mutex::new(BTreeMap::new()),
             revisions,
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),

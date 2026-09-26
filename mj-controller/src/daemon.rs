@@ -110,6 +110,7 @@ pub struct RuntimeState {
     pub web_viewer: crate::web_viewer::ViewerControl,
     ever_attached: AtomicBool,
     sessions: Mutex<BTreeMap<String, RuntimeSessionView>>,
+    background_policies: Mutex<BTreeMap<String, snapshot::BackgroundPolicyState>>,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     workspace_refresh: tokio::sync::Mutex<()>,

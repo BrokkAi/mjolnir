@@ -190,9 +190,20 @@ pub(super) async fn upload_attachment(
 /// still running.
 pub(super) async fn action(
     State(state): State<ServerState>,
-    Json(action): Json<ControllerAction>,
+    Json(mut action): Json<ControllerAction>,
 ) -> Result<StatusCode, ApiError> {
     validate_action_live(&state, &action).await?;
+    if let ControllerAction::New {
+        bundle_id,
+        project_directory: Some(directory),
+        ..
+    } = &mut action
+        && bundle_id.is_empty()
+    {
+        // Match documented API creation: directory callers need no saved
+        // bundle, but the durable session still records a valid bundle id.
+        *bundle_id = create_quick_bundle(&state, directory.display().to_string()).await?;
+    }
     let action = decode_prompt_images_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state

@@ -116,6 +116,7 @@ impl AcpSupervisorSpec {
 /// about to write into a bridge spec, and say once, at info, which of them the
 /// target had set. `environment` is the merged session environment, login
 /// environment included; `overrides` is what the spec carries.
+#[cfg(unix)]
 pub(crate) fn exclude_from_harness_environment(
     harness: mj_core::config::HarnessKind,
     excluded: &[String],
