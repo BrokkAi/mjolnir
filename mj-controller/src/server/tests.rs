@@ -162,6 +162,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 publication: None,
                 build_cache: None,
                 container_workspace: None,
@@ -3274,6 +3275,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
         ControllerAction::New {
             launch_base: None,
             launch_branch: None,
+            checkout: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -3299,6 +3301,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),

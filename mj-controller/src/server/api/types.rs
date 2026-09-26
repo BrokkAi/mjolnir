@@ -30,6 +30,9 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    /// Immutable starting selection; session readiness verifies preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work: Option<ApiBackgroundWork>,
     pub id: String,
@@ -75,6 +78,7 @@ impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
             background_work: None,
+            checkout: session.checkout.clone(),
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
             title: session.title.clone(),
@@ -139,12 +143,15 @@ pub struct CreateWorkspaceResponse {
 pub struct StartSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
-    /// Git revision the session starts at, as the caller typed it.
+    /// Diff baseline; also the starting revision for a raw managed worktree.
     #[serde(default)]
     pub launch_base: Option<String>,
     /// Branch to check out in a new isolated workspace.
     #[serde(default)]
     pub launch_branch: Option<String>,
+    /// Exact starting selection for one bundle repository, verified before readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     /// None means native sub-agents, the same as `Some(false)`.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,

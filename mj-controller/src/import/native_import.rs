@@ -135,6 +135,7 @@ pub fn import_native_session(
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
+            checkout: None,
             publication: None,
             build_cache: None,
             mjolnir_subagents: None,

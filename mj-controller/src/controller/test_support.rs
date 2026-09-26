@@ -27,6 +27,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

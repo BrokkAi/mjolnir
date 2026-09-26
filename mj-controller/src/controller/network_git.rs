@@ -27,6 +27,15 @@ impl Controller {
             .bundles
             .get(&session.bundle_id)
             .context("session bundle is missing")?;
+        if let Some(checkout) = &session.checkout {
+            ensure!(
+                bundle
+                    .repositories
+                    .iter()
+                    .any(|repo| repo.id == checkout.repository_id),
+                "checkout repository is no longer in the configured bundle"
+            );
+        }
         let root = workspace_root(backend, session.container_workspace.as_deref());
         for repository in &bundle.repositories {
             let directory = std::path::Path::new(&root).join(&repository.destination);
@@ -37,6 +46,10 @@ impl Controller {
                 &directory,
                 session.launch_base.as_deref(),
                 session.launch_branch.as_deref(),
+                session
+                    .checkout
+                    .as_ref()
+                    .filter(|checkout| checkout.repository_id == repository.id),
             )?;
         }
         Ok(())
@@ -71,6 +84,7 @@ fn initialize_workspace(
     directory: &std::path::Path,
     launch_base: Option<&str>,
     launch_branch: Option<&str>,
+    checkout: Option<&mj_core::remote_git::ExactCheckout>,
 ) -> Result<()> {
     let git = |arguments: &[&str]| -> Result<targets::CommandOutput> {
         let mut args = vec![
@@ -97,6 +111,10 @@ fn initialize_workspace(
         );
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
+    if let Some(checkout) = checkout {
+        prepare_exact_checkout(&git, &checked, session_id, checkout)?;
+        return configure_workspace(&git, &checked, &checkout.commit);
+    }
     let marker = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
     ensure!(
         matches!(marker.status, 0 | 1),
@@ -161,12 +179,20 @@ fn initialize_workspace(
         }
         _ => anyhow::bail!("could not inspect the selected local branch"),
     }
+    configure_workspace(&git, &checked, &base)
+}
+
+fn configure_workspace(
+    git: &impl Fn(&[&str]) -> Result<targets::CommandOutput>,
+    checked: &impl Fn(&[&str]) -> Result<String>,
+    base: &str,
+) -> Result<()> {
     for (key, value) in [
         ("push.default", "current"),
         ("push.autoSetupRemote", "true"),
         ("remote.pushDefault", "origin"),
         ("remote.origin.mirror", "false"),
-        ("mj.baseCommit", base.as_str()),
+        ("mj.baseCommit", base),
         ("mj.remoteWorkspace", "true"),
     ] {
         checked(&["config", "--local", "--replace-all", key, value])?;
@@ -175,6 +201,143 @@ fn initialize_workspace(
     ensure!(
         matches!(removed.status, 0 | 5),
         "could not clear inherited push refspec"
+    );
+    Ok(())
+}
+
+fn prepare_exact_checkout(
+    git: &impl Fn(&[&str]) -> Result<targets::CommandOutput>,
+    checked: &impl Fn(&[&str]) -> Result<String>,
+    session_id: &str,
+    checkout: &mj_core::remote_git::ExactCheckout,
+) -> Result<()> {
+    checkout.validate()?;
+    let current_head = checked(&["rev-parse", "HEAD"])?;
+    let current_branch = checked(&["branch", "--show-current"])?;
+    let marker = git(&["config", "--local", "--get", "mj.exactCheckout"])?;
+    ensure!(
+        matches!(marker.status, 0 | 1),
+        "could not inspect exact checkout marker"
+    );
+    let retry = marker.status == 0;
+    if retry {
+        let (owner, selection, original_head, original_branch): (
+            String,
+            mj_core::remote_git::ExactCheckout,
+            String,
+            String,
+        ) = serde_json::from_slice(&marker.stdout).context("invalid exact checkout marker")?;
+        ensure!(
+            owner == session_id && selection == *checkout,
+            "workspace belongs to a different exact checkout selection"
+        );
+        ensure!(
+            (current_head == original_head && current_branch == original_branch)
+                || (current_head == checkout.commit
+                    && current_branch == checkout.branch.as_deref().unwrap_or("")),
+            "checkout moved after interrupted preparation; existing work was retained"
+        );
+    } else {
+        let completed = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
+        ensure!(
+            completed.status == 1,
+            "workspace is already occupied or its marker cannot be read"
+        );
+    }
+    ensure!(
+        checked(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty(),
+        "exact checkout requires a clean working tree; existing work was retained"
+    );
+    if let Some(branch) = &checkout.branch {
+        checked(&["check-ref-format", "--branch", branch])?;
+        let existing = git(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])?;
+        ensure!(
+            matches!(existing.status, 0 | 1),
+            "could not inspect private branch"
+        );
+        if existing.status == 0 {
+            ensure!(retry, "checkout branch {branch:?} is already occupied");
+            ensure!(
+                checked(&["rev-parse", "--verify", &format!("refs/heads/{branch}")])?
+                    == checkout.commit,
+                "private branch moved after preparation; existing work was retained"
+            );
+        }
+    }
+    let object = git(&["cat-file", "-t", &checkout.commit])?;
+    if object.status != 0 {
+        checked(&["fetch", "--no-tags", "origin", &checkout.commit]).with_context(|| {
+            format!(
+                "exact checkout commit {} is unavailable from origin",
+                checkout.commit
+            )
+        })?;
+    }
+    ensure!(
+        checked(&["cat-file", "-t", &checkout.commit])? == "commit",
+        "exact checkout object is not a commit"
+    );
+    // Write intent before switching. A retry may finish only this session's
+    // selection; neither retry nor completion can overwrite subsequent work.
+    let completed = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
+    ensure!(
+        matches!(completed.status, 0 | 1),
+        "could not inspect completion marker"
+    );
+    if completed.status == 0 {
+        ensure!(
+            String::from_utf8(completed.stdout)?.trim() == "true",
+            "invalid network workspace completion marker"
+        );
+    }
+    if completed.status == 1 {
+        if !retry {
+            let identity =
+                serde_json::to_string(&(session_id, checkout, current_head, current_branch))?;
+            checked(&[
+                "config",
+                "--local",
+                "--replace-all",
+                "mj.exactCheckout",
+                &identity,
+            ])?;
+        }
+        if let Some(branch) = &checkout.branch {
+            let existing = git(&[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])?;
+            match existing.status {
+                0 => {
+                    checked(&["switch", "--no-guess", branch])?;
+                }
+                1 => {
+                    checked(&["switch", "--no-track", "-c", branch, &checkout.commit])?;
+                }
+                _ => anyhow::bail!("could not inspect private branch"),
+            }
+        } else {
+            checked(&["switch", "--detach", &checkout.commit])?;
+        }
+    }
+    ensure!(
+        checked(&["rev-parse", "HEAD"])? == checkout.commit,
+        "exact checkout HEAD moved; existing work was retained"
+    );
+    ensure!(
+        checked(&["branch", "--show-current"])? == checkout.branch.as_deref().unwrap_or(""),
+        "exact checkout branch changed; existing work was retained"
+    );
+    ensure!(
+        checked(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty(),
+        "exact checkout working tree changed during preparation"
     );
     Ok(())
 }
@@ -321,6 +484,277 @@ mod tests {
         assert!(session.checkpoint.as_ref().unwrap().archive_path.is_file());
     }
 
+    struct ExactFixture {
+        _host: tempfile::TempDir,
+        _root: tempfile::TempDir,
+        directory: PathBuf,
+        backend: targets::TargetLocator,
+        selection: mj_core::remote_git::ExactCheckout,
+        later: String,
+    }
+
+    const EXACT_SESSION: &str = "11111111-1111-4111-8111-111111111111";
+
+    impl ExactFixture {
+        fn new() -> Self {
+            let host = committed_repository();
+            let commit = test_git(host.path(), &["rev-parse", "HEAD"]);
+            std::fs::write(host.path().join("nested/file.txt"), "later\n").unwrap();
+            test_git(host.path(), &["commit", "-am", "later"]);
+            let later = test_git(host.path(), &["rev-parse", "HEAD"]);
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join(EXACT_SESSION);
+            test_git(
+                root.path(),
+                &[
+                    "clone",
+                    host.path().to_str().unwrap(),
+                    directory.to_str().unwrap(),
+                ],
+            );
+            Self {
+                _host: host,
+                _root: root,
+                backend: targets::TargetLocator::LocalBare {
+                    worker_root: directory.to_string_lossy().into_owned(),
+                },
+                directory,
+                selection: mj_core::remote_git::ExactCheckout {
+                    repository_id: "project".into(),
+                    commit,
+                    branch: Some("town/run-123".into()),
+                },
+                later,
+            }
+        }
+        fn prepare(&self, executor: &impl CommandExecutor) -> Result<()> {
+            initialize_workspace(
+                executor,
+                &self.backend,
+                EXACT_SESSION,
+                &self.directory,
+                None,
+                None,
+                Some(&self.selection),
+            )
+        }
+    }
+
+    #[test]
+    fn exact_checkout_starts_at_a_on_a_new_private_branch_while_origin_is_at_b() {
+        let fixture = ExactFixture::new();
+        let source_refs = test_git(fixture._host.path(), &["show-ref"]);
+        fixture.prepare(&ProcessExecutor).unwrap();
+        assert_eq!(
+            test_git(&fixture.directory, &["rev-parse", "HEAD"]),
+            fixture.selection.commit
+        );
+        assert_eq!(
+            test_git(&fixture.directory, &["branch", "--show-current"]),
+            "town/run-123"
+        );
+        assert_eq!(
+            test_git(&fixture.directory, &["rev-parse", "origin/master"]),
+            fixture.later
+        );
+        assert_eq!(
+            test_git(&fixture.directory, &["config", "mj.baseCommit"]),
+            fixture.selection.commit
+        );
+        assert!(test_git(&fixture.directory, &["status", "--porcelain"]).is_empty());
+        assert_eq!(test_git(fixture._host.path(), &["show-ref"]), source_refs);
+        fixture.prepare(&ProcessExecutor).unwrap();
+    }
+
+    #[test]
+    fn exact_checkout_fetches_a_new_exact_object_and_can_leave_head_detached() {
+        let mut fixture = ExactFixture::new();
+        test_git(
+            fixture._host.path(),
+            &["commit", "--allow-empty", "-m", "after clone"],
+        );
+        fixture.selection.commit = test_git(fixture._host.path(), &["rev-parse", "HEAD"]);
+        fixture.selection.branch = None;
+        fixture.prepare(&ProcessExecutor).unwrap();
+        assert_eq!(
+            test_git(&fixture.directory, &["rev-parse", "HEAD"]),
+            fixture.selection.commit
+        );
+        assert!(test_git(&fixture.directory, &["branch", "--show-current"]).is_empty());
+        assert_eq!(
+            test_git(&fixture.directory, &["rev-parse", "origin/master"]),
+            fixture.later
+        );
+    }
+
+    #[test]
+    fn exact_checkout_refuses_unavailable_invalid_and_occupied_selections_without_moving_head() {
+        for case in ["unknown", "invalid_branch", "occupied", "dirty", "tag"] {
+            let mut fixture = ExactFixture::new();
+            match case {
+                "unknown" => fixture.selection.commit = "f".repeat(40),
+                "invalid_branch" => fixture.selection.branch = Some("bad..branch".into()),
+                "occupied" => {
+                    test_git(
+                        &fixture.directory,
+                        &["branch", "town/run-123", &fixture.selection.commit],
+                    );
+                }
+                "dirty" => {
+                    std::fs::write(fixture.directory.join("untracked"), "keep me").unwrap();
+                }
+                "tag" => {
+                    test_git(
+                        &fixture.directory,
+                        &[
+                            "-c",
+                            "user.name=Test",
+                            "-c",
+                            "user.email=test@example.test",
+                            "tag",
+                            "-a",
+                            "test-tag",
+                            "-m",
+                            "tag",
+                        ],
+                    );
+                    fixture.selection.commit =
+                        test_git(&fixture.directory, &["rev-parse", "test-tag"]);
+                }
+                _ => unreachable!(),
+            }
+            assert!(fixture.prepare(&ProcessExecutor).is_err(), "{case}");
+            assert_eq!(
+                test_git(&fixture.directory, &["rev-parse", "HEAD"]),
+                fixture.later,
+                "{case}"
+            );
+        }
+    }
+
+    struct InterruptAfterSwitch;
+    impl CommandExecutor for InterruptAfterSwitch {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let output = ProcessExecutor.execute(command)?;
+            if command.args.iter().any(|arg| arg == "switch") {
+                anyhow::bail!("preparation interrupted after switch");
+            }
+            Ok(output)
+        }
+    }
+
+    #[test]
+    fn exact_checkout_retries_interruption_but_refuses_subsequent_branch_movement_or_dirty_work() {
+        for change in ["none", "commit", "dirty", "selection"] {
+            let mut fixture = ExactFixture::new();
+            assert!(
+                fixture
+                    .prepare(&InterruptAfterSwitch)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("interrupted")
+            );
+            match change {
+                "commit" => {
+                    test_git(
+                        &fixture.directory,
+                        &[
+                            "-c",
+                            "user.name=Test",
+                            "-c",
+                            "user.email=test@example.test",
+                            "commit",
+                            "--allow-empty",
+                            "-m",
+                            "new work",
+                        ],
+                    );
+                }
+                "dirty" => {
+                    std::fs::write(fixture.directory.join("work"), "retain").unwrap();
+                }
+                "selection" => fixture.selection.commit = fixture.later.clone(),
+                _ => {}
+            }
+            let head = test_git(&fixture.directory, &["rev-parse", "HEAD"]);
+            assert_eq!(
+                fixture.prepare(&ProcessExecutor).is_ok(),
+                change == "none",
+                "{change}"
+            );
+            assert_eq!(test_git(&fixture.directory, &["rev-parse", "HEAD"]), head);
+        }
+    }
+
+    #[test]
+    fn completed_exact_checkout_does_not_reset_a_moved_private_branch() {
+        let fixture = ExactFixture::new();
+        fixture.prepare(&ProcessExecutor).unwrap();
+        test_git(
+            &fixture.directory,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "new work",
+            ],
+        );
+        let head = test_git(&fixture.directory, &["rev-parse", "HEAD"]);
+        assert!(fixture.prepare(&ProcessExecutor).is_err());
+        assert_eq!(test_git(&fixture.directory, &["rev-parse", "HEAD"]), head);
+    }
+
+    #[test]
+    fn exact_checkout_applies_only_to_the_named_bundle_repository() {
+        let fixture = ExactFixture::new();
+        let other = committed_repository();
+        let other_commit = test_git(other.path(), &["rev-parse", "HEAD"]);
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join(EXACT_SESSION);
+        std::fs::create_dir(&workspace).unwrap();
+        for (source, name) in [(fixture._host.path(), "project"), (other.path(), "other")] {
+            test_git(&workspace, &["clone", source.to_str().unwrap(), name]);
+        }
+        let mut bundle = local_bundle(fixture._host.path());
+        let mut secondary = bundle.repositories[0].clone();
+        secondary.id = "other".into();
+        secondary.destination = "other".into();
+        secondary.local = Some(other.path().to_path_buf());
+        bundle.repositories.push(secondary);
+        let mut config = resume_compatibility_config();
+        config.bundles.insert("project".into(), bundle);
+        let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
+        session.checkout = Some(fixture.selection.clone());
+        let mut state = mj_core::state::State::default();
+        state.sessions.insert(EXACT_SESSION.into(), session);
+        let controller = Controller { config, state };
+        controller
+            .initialize_network_workspaces(
+                EXACT_SESSION,
+                &targets::TargetLocator::LocalBare {
+                    worker_root: workspace.to_string_lossy().into_owned(),
+                },
+                &ProcessExecutor,
+            )
+            .unwrap();
+        assert_eq!(
+            test_git(&workspace.join("project"), &["rev-parse", "HEAD"]),
+            fixture.selection.commit
+        );
+        assert_eq!(
+            test_git(&workspace.join("other"), &["rev-parse", "HEAD"]),
+            other_commit
+        );
+        assert_eq!(
+            test_git(&workspace.join("other"), &["branch", "--show-current"]),
+            "master"
+        );
+    }
+
     #[test]
     fn a_launch_base_sets_diff_base_without_moving_selected_branch() {
         let host = committed_repository();
@@ -355,6 +789,7 @@ mod tests {
             &pinned,
             Some(&initial),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(test_git(&pinned, &["rev-parse", "HEAD"]), later);
@@ -371,6 +806,7 @@ mod tests {
             "22222222-2222-4222-8222-222222222222",
             &tracked,
             Some("origin/master"),
+            None,
             None,
         )
         .unwrap();
@@ -389,6 +825,7 @@ mod tests {
             "33333333-3333-4333-8333-333333333333",
             &missing,
             Some("host-only"),
+            None,
             None,
         )
         .unwrap_err();
@@ -507,8 +944,16 @@ mod tests {
             let backend = targets::TargetLocator::LocalBare {
                 worker_root: destination.to_string_lossy().into_owned(),
             };
-            initialize_workspace(&executor, &backend, session_id, &destination, None, None)
-                .unwrap();
+            initialize_workspace(
+                &executor,
+                &backend,
+                session_id,
+                &destination,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             assert_eq!(test_git(&destination, &["rev-parse", "HEAD"]), initial);
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
@@ -554,8 +999,16 @@ mod tests {
                 first_pushed_head = Some(head.clone());
             }
             test_git(&destination, &["switch", "-c", "user-selected"]);
-            initialize_workspace(&executor, &backend, session_id, &destination, None, None)
-                .unwrap();
+            initialize_workspace(
+                &executor,
+                &backend,
+                session_id,
+                &destination,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 test_git(&destination, &["branch", "--show-current"]),
                 "user-selected"

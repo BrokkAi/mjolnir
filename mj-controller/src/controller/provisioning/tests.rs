@@ -470,6 +470,7 @@ fn failed_new_session_provisioning_retains_error_record() {
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -562,6 +563,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 create_managed_worktree: None,
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,
                 additional_mounts: Vec::new(),
@@ -619,6 +621,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             SessionLaunchOptions {
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -701,6 +704,7 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
             SessionLaunchOptions {
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -798,6 +802,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             SessionLaunchOptions {
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,
@@ -851,6 +856,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         ).unwrap()).into()),
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -991,6 +997,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             SessionLaunchOptions {
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 initial_prompt: None,

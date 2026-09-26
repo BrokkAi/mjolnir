@@ -280,6 +280,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
