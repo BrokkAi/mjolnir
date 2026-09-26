@@ -98,25 +98,15 @@ pub(super) async fn wait_for_checkpoint_barrier(
     let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
-        if busy == BarrierBusyPolicy::DeferWhileRunning {
-            if !snapshot.operational.safe_for_checkpoint(harness) {
-                // The native task level can change after the controller's
-                // initial idle sync and before the queued BeginCheckpoint is
-                // processed. Defer from the barrier wait rather than allowing
-                // its timeout to classify the worker as wedged and restart it.
-                return Err(CheckpointDeferred::background_snapshot(
-                    &snapshot.operational,
-                    harness,
-                )
-                .into());
-            }
-            if snapshot.operational.has_work_in_flight() {
-                // A foreground tool, a turn the execution flag has not caught
-                // up with, or queued work can all appear after the initial
-                // sync. Defer rather than let the deadline restart the worker
-                // underneath it.
-                return Err(CheckpointDeferred::harness_busy().into());
-            }
+        if busy == BarrierBusyPolicy::DeferWhileRunning
+            && let Some(wait) = snapshot.operational.routine_checkpoint_wait(harness)
+        {
+            // Provider-owned work, a foreground tool, a turn the execution
+            // flag has not caught up with, or queued work can all appear
+            // after the initial sync and before the queued BeginCheckpoint is
+            // processed. Defer rather than let the deadline classify the
+            // worker as wedged and restart it underneath that work.
+            return Err(CheckpointDeferred::from(wait).into());
         }
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             if let Some(started_at) = cancel_started_at {
@@ -341,6 +331,15 @@ impl CheckpointDeferred {
             "the agent started a turn of its own while target state was captured, so this checkpoint was deferred"
                 .to_owned(),
         )
+    }
+}
+
+impl From<mj_core::activity::CheckpointWait> for CheckpointDeferred {
+    fn from(wait: mj_core::activity::CheckpointWait) -> Self {
+        match wait {
+            mj_core::activity::CheckpointWait::ProviderWork(reason) => Self(reason.to_owned()),
+            mj_core::activity::CheckpointWait::WorkInFlight => Self::harness_busy(),
+        }
     }
 }
 

@@ -80,8 +80,17 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     worker_binary: &Path,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
-    if launch.harness_runtime != HarnessRuntimePolicy::Managed {
+    if !launch.requires_harness_preparation() {
         return Ok(());
+    }
+    if locator.container_engine().is_some() {
+        return prepare_container_harness_for_upgrade(
+            executor,
+            locator,
+            session_id,
+            worker_binary,
+            launch,
+        );
     }
     let worker_root = targets::worker_root(locator, session_id)?;
     let staging_root = format!("{worker_root}/harness-prepare");
@@ -174,40 +183,103 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     }
 }
 
+// A private staged binary prepares container fallbacks without touching the
+// live worker's executable, launch config, control connection, or idle state.
+fn prepare_container_harness_for_upgrade(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_binary: &Path,
+    launch: &WorkerLaunchConfig,
+) -> Result<()> {
+    let staging = tempfile::Builder::new()
+        .prefix("harness-prepare-")
+        .tempdir()?;
+    let name = staging
+        .path()
+        .file_name()
+        .context("harness staging directory has no name")?
+        .to_string_lossy();
+    let worker_root = targets::worker_root(locator, session_id)?;
+    let staging_root = format!("{worker_root}/{name}");
+    let staging_binary = format!("{staging_root}/hel");
+    let staging_config = format!("{staging_root}/launch.json");
+    let upload =
+        worker_binary_replacement_plan(locator, session_id, worker_binary, &format!("{name}/hel"))?;
+    let result = (|| -> Result<()> {
+        execute_checked(
+            executor,
+            targets::locator_command(
+                locator,
+                vec!["mkdir".into(), "-p".into(), staging_root.clone()],
+            )
+            .purpose("create container harness preparation staging"),
+        )?;
+        upload.execute(executor)?;
+        execute_checked(
+            executor,
+            write_launch_config_command(
+                locator,
+                &staging_config,
+                serde_json::to_vec_pretty(launch)?,
+            )
+            .purpose("stage container harness launch configuration"),
+        )?;
+        execute_checked(
+            executor,
+            targets::locator_command(
+                locator,
+                vec![
+                    staging_binary,
+                    "worker".into(),
+                    "prepare-harness".into(),
+                    "--config".into(),
+                    staging_config,
+                ],
+            )
+            .purpose("prepare exact container harness before worker upgrade"),
+        )?;
+        Ok(())
+    })();
+    // A lost exec connection does not prove that the target process stopped.
+    // Retain its private files on failure; never delete a possibly live process's
+    // working files as cleanup. Successful exec has waited for the process exit.
+    result.with_context(|| {
+        format!("container harness preparation failed; staging retained at {staging_root}")
+    })?;
+    execute_checked(
+        executor,
+        targets::locator_command(
+            locator,
+            vec!["rm".into(), "-rf".into(), "--".into(), staging_root],
+        )
+        .purpose("remove container harness preparation staging"),
+    )
+    .context("clean container harness preparation staging")?;
+    Ok(())
+}
+
 pub(super) fn prepare_installed_managed_harness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
-    if launch.harness_runtime != HarnessRuntimePolicy::Managed {
+    if !launch.requires_harness_preparation() {
         return Ok(());
     }
     let worker_binary = format!("{worker_root}/hel");
     let launch_config = format!("{worker_root}/launch.json");
-    let command = match locator {
-        targets::TargetLocator::LocalBare { .. } => CommandSpec::new(
-            worker_binary.clone(),
-            [
-                "worker",
-                "prepare-harness",
-                "--config",
-                launch_config.as_str(),
-            ],
-        ),
-        targets::TargetLocator::AwsEc2 { ssh, .. }
-        | targets::TargetLocator::SshBare { ssh, .. } => crate::targets::ssh_command(
-            ssh,
-            [
-                worker_binary.as_str(),
-                "worker",
-                "prepare-harness",
-                "--config",
-                launch_config.as_str(),
-            ],
-        ),
-        _ => bail!("managed harness policy requires a local bare, SSH-bare, or EC2 target"),
-    };
+    let command = targets::locator_command(
+        locator,
+        vec![
+            worker_binary,
+            "worker".into(),
+            "prepare-harness".into(),
+            "--config".into(),
+            launch_config,
+        ],
+    );
     execute_checked(
         executor,
         command.purpose("prepare exact managed harness before worker startup"),
@@ -379,15 +451,10 @@ pub(super) fn worker_launch_refresh_plan(
 ) -> Result<WorkerLaunchRefreshPlan> {
     let worker_root = targets::worker_root(locator, session_id)?;
     let installed = format!("{worker_root}/launch.json");
-    let staged = format!("{installed}.next");
-    let staged_arg = targets::join_remote_command(std::slice::from_ref(&staged));
-    let installed_arg = targets::join_remote_command(std::slice::from_ref(&installed));
-    let script = format!("umask 077; cat > {staged_arg} && mv -f -- {staged_arg} {installed_arg}");
     let body = serde_json::to_vec_pretty(launch).context("serialize worker launch config")?;
     let expected_sha256 = lower_hex(Sha256::digest(&body));
-    let replace = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("replace stale Mjolnir worker launch config")
-        .with_sensitive_stdin(body);
+    let replace = write_launch_config_command(locator, &installed, body)
+        .purpose("replace stale Mjolnir worker launch config");
     Ok(WorkerLaunchRefreshPlan {
         expected_sha256,
         installed_digest: installed_file_digest_command(
@@ -400,6 +467,19 @@ pub(super) fn worker_launch_refresh_plan(
             commands: vec![replace],
         },
     })
+}
+
+fn write_launch_config_command(
+    locator: &targets::TargetLocator,
+    installed: &str,
+    body: Vec<u8>,
+) -> CommandSpec {
+    let staged = format!("{installed}.next");
+    let staged_arg = targets::join_remote_command(&[staged]);
+    let installed_arg = targets::join_remote_command(&[installed.to_owned()]);
+    let script = format!("umask 077; cat > {staged_arg} && mv -f -- {staged_arg} {installed_arg}");
+    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .with_sensitive_stdin(body)
 }
 
 /// Plan a refresh without resolving or hashing a worker binary. Both happen

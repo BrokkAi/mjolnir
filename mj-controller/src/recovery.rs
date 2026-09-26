@@ -13,12 +13,19 @@ use crate::database::record_recovery_failure;
 use crate::recovery_gate::{RecoveryGate, RecoveryObserver};
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
-use mj_core::state::{CheckpointMetadata, MaterializedExecutionState, RecoveryObservation, State};
+use mj_core::state::{CheckpointMetadata, RecoveryObservation, State};
 
 /// How long an automatic checkpoint stays fresh: a copy is due once the
 /// session's newest checkpoint is at least this old, and a failed copy waits at
 /// least this long before it is retried.
 pub const AUTO_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How long a boundary whose copy stood down because the agent was working
+/// waits before it is tried again with nothing changed.
+const DEFERRED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Ceiling on the widening wait after consecutive deferrals.
+const MAX_DEFERRED_RETRY_INTERVAL: Duration = AUTO_CHECKPOINT_INTERVAL;
 
 /// Ceiling on the widening retry delay. Doubling forever would retire a target
 /// that is broken rather than blipping; a capped delay keeps probing it, just
@@ -85,11 +92,12 @@ impl RecoveryCoordinator {
                         let policy = policies.entry(session_id.clone()).or_default();
                         policy.observe_checkpoint(observation.session.checkpoint.as_ref());
                         policy.observe_completed_turn(observation.latest_completed_turn_ordinal);
+                        policy.observe_wait(observation.checkpoint_wait);
                         if checkpoint_due(policy, &observation, Utc::now())
                             && let Some(expected_target) = observation.session.target.clone()
                             && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id)
                         {
-                            policy.last_attempted_turn = Some(policy.latest_completed_turn);
+                            policy.start_attempt();
                             let completed_tx = completed_tx.clone();
                             let session_manager = session_manager.clone();
                             let cancelled = copy_cancelled.clone();
@@ -160,15 +168,19 @@ impl RecoveryCoordinator {
                             }
                             Err(detail) => {
                                 if result.cancelled || result.deferred {
-                                    // An abandoned copy says nothing about this
-                                    // turn: it must neither suppress the next
-                                    // attempt nor be recorded as a checkpoint
-                                    // failure against the session. A preempted
-                                    // copy was interrupted; a deferred one
-                                    // found the agent working, and the turn it
-                                    // is working through produces the next
-                                    // observation, which is idle.
-                                    policy.abandon_attempt();
+                                    // Neither is a checkpoint failure against
+                                    // the session. A preempted copy was
+                                    // interrupted and says nothing about this
+                                    // turn, so the next observation may try
+                                    // again. A deferred one found the agent
+                                    // working although the observation said a
+                                    // copy could start, so it waits for that
+                                    // to change or for a cooldown.
+                                    if result.cancelled {
+                                        policy.abandon_attempt();
+                                    } else {
+                                        policy.record_deferral(Utc::now());
+                                    }
                                     let result_session_id = result.session_id.clone();
                                     if let Err(error) = results_tx.send(result) {
                                         tracing::debug!(
@@ -236,14 +248,40 @@ impl RecoveryCoordinator {
 #[derive(Default)]
 struct PolicyState {
     latest_completed_turn: u64,
-    last_attempted_turn: Option<u64>,
     checkpoint: Option<CheckpointMetadata>,
-    /// When the last copy failed for a reason other than cancellation, and how
-    /// many have failed in a row. An idle session may never complete another
-    /// turn, so a failure has to expire instead of retiring its turn boundary
-    /// for good and leaving the session's newest work uncovered.
-    failed_at: Option<chrono::DateTime<Utc>>,
+    /// The boundary a copy was last started for, and what became of it.
+    /// `None` when nothing holds the newest boundary back: no copy was
+    /// started for it, or the last one was preempted.
+    attempt: Option<Attempt>,
+    /// Failed copies in a row, across boundaries. An idle session may never
+    /// complete another turn, so a failure has to expire instead of retiring
+    /// its boundary for good and leaving the session's newest work
+    /// uncovered. A copy that succeeds ends the run.
     consecutive_failures: u32,
+    /// Deferred copies in a row with no observation in between that said the
+    /// session had to wait. A run of these means the coordinator keeps seeing
+    /// a session admission then finds working, so each widens the wait.
+    consecutive_deferrals: u32,
+}
+
+/// One copy the coordinator started, for the boundary it was started for.
+#[derive(Debug, Clone, Copy)]
+struct Attempt {
+    turn: u64,
+    outcome: AttemptOutcome,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AttemptOutcome {
+    /// Still running, or finished with a checkpoint. Never retried.
+    Started,
+    /// Failed; retried once [`retry_delay`] has passed.
+    Failed { at: chrono::DateTime<Utc> },
+    /// Stood down because the agent was working. Judges nothing and records
+    /// no failure, but is not retried until something changes: an
+    /// observation says the session had to wait, a new turn completes, or
+    /// [`deferred_retry_delay`] passes.
+    Deferred { at: chrono::DateTime<Utc> },
 }
 
 /// How long a boundary that just failed waits before it may be retried: one
@@ -254,6 +292,17 @@ fn retry_delay(consecutive_failures: u32) -> Duration {
         AUTO_CHECKPOINT_INTERVAL,
         MAX_AUTO_CHECKPOINT_RETRY_INTERVAL,
         consecutive_failures,
+    )
+}
+
+/// How long a boundary whose copy was deferred waits when nothing changes:
+/// [`DEFERRED_RETRY_INTERVAL`], doubling per consecutive deferral up to
+/// [`MAX_DEFERRED_RETRY_INTERVAL`].
+fn deferred_retry_delay(consecutive_deferrals: u32) -> Duration {
+    backoff_delay(
+        DEFERRED_RETRY_INTERVAL,
+        MAX_DEFERRED_RETRY_INTERVAL,
+        consecutive_deferrals,
     )
 }
 
@@ -281,33 +330,60 @@ pub(crate) fn elapsed_at_least(
 }
 
 impl PolicyState {
+    fn start_attempt(&mut self) {
+        self.attempt = Some(Attempt {
+            turn: self.latest_completed_turn,
+            outcome: AttemptOutcome::Started,
+        });
+    }
+
     fn record_success(&mut self, checkpoint: CheckpointMetadata) {
         self.checkpoint = Some(checkpoint);
-        self.failed_at = None;
         self.consecutive_failures = 0;
+        self.consecutive_deferrals = 0;
     }
 
     /// Forget that this boundary was attempted, so the next observation of the
-    /// same turn may try again. A copy that was abandoned rather than judged -
-    /// preempted, or deferred because the agent was working - leaves no
-    /// evidence about the turn, so it must not suppress the retry and must not
-    /// count as a failure.
+    /// same turn may try again. A copy that was preempted leaves no evidence
+    /// about the turn, so it must not suppress the retry and must not count
+    /// as a failure.
     fn abandon_attempt(&mut self) {
-        self.last_attempted_turn = None;
+        self.attempt = None;
+    }
+
+    /// The copy stood down because the agent was working. The observation
+    /// that started it said a copy could start, so retrying on the next
+    /// observation of the same facts would only repeat the deferral.
+    fn record_deferral(&mut self, now: chrono::DateTime<Utc>) {
+        self.consecutive_deferrals = self.consecutive_deferrals.saturating_add(1);
+        self.settle(AttemptOutcome::Deferred { at: now });
     }
 
     fn record_failure(&mut self, now: chrono::DateTime<Utc>) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        self.failed_at = Some(now);
+        self.settle(AttemptOutcome::Failed { at: now });
     }
 
-    /// Whether a failed attempt at the current boundary has waited out its
-    /// backoff. A boundary with no recorded failure is not retryable: either a
-    /// copy is still running or it succeeded.
-    fn retry_due(&self, now: chrono::DateTime<Utc>) -> bool {
-        self.failed_at.is_some_and(|failed_at| {
-            elapsed_at_least(failed_at, now, retry_delay(self.consecutive_failures))
-        })
+    fn settle(&mut self, outcome: AttemptOutcome) {
+        if let Some(attempt) = &mut self.attempt {
+            attempt.outcome = outcome;
+        }
+    }
+
+    /// An observation that says the session has to wait is the change a
+    /// deferred copy waits for: the deferral was the session starting work
+    /// after an observation, and the next observation that says a copy may
+    /// start can retry at once.
+    fn observe_wait(&mut self, wait: Option<mj_core::activity::CheckpointWait>) {
+        if wait.is_some()
+            && let Some(Attempt {
+                outcome: AttemptOutcome::Deferred { .. },
+                ..
+            }) = self.attempt
+        {
+            self.attempt = None;
+            self.consecutive_deferrals = 0;
+        }
     }
 
     fn observe_completed_turn(&mut self, sequence: Option<u64>) {
@@ -330,9 +406,8 @@ impl PolicyState {
         }
     }
 
-    fn due(&self, execution: MaterializedExecutionState, now: chrono::DateTime<Utc>) -> bool {
-        if execution != MaterializedExecutionState::Idle
-            || self.latest_completed_turn == 0
+    fn due(&self, now: chrono::DateTime<Utc>) -> bool {
+        if self.latest_completed_turn == 0
             || self
                 .checkpoint
                 .as_ref()
@@ -340,12 +415,25 @@ impl PolicyState {
         {
             return false;
         }
-        // This boundary was already attempted. Only a failure that has waited
-        // out its backoff makes it due again: an unattended session completes
-        // no further turn, so one transient failure must not leave its newest
-        // work uncovered until someone prompts it.
-        if self.last_attempted_turn == Some(self.latest_completed_turn) && !self.retry_due(now) {
-            return false;
+        // This boundary was already attempted. Only a failure or a deferral
+        // that has waited out its backoff makes it due again: an unattended
+        // session completes no further turn, so one transient failure must
+        // not leave its newest work uncovered until someone prompts it.
+        if let Some(attempt) = self.attempt
+            && attempt.turn == self.latest_completed_turn
+        {
+            let waited = match attempt.outcome {
+                AttemptOutcome::Started => false,
+                AttemptOutcome::Failed { at } => {
+                    elapsed_at_least(at, now, retry_delay(self.consecutive_failures))
+                }
+                AttemptOutcome::Deferred { at } => {
+                    elapsed_at_least(at, now, deferred_retry_delay(self.consecutive_deferrals))
+                }
+            };
+            if !waited {
+                return false;
+            }
         }
         self.checkpoint.as_ref().is_none_or(|checkpoint| {
             chrono::DateTime::parse_from_rfc3339(&checkpoint.created_at)
@@ -355,12 +443,15 @@ impl PolicyState {
     }
 }
 
+/// Whether to start a copy now. Whether the session is working is not this
+/// policy's question: the observation carries checkpoint admission's own
+/// answer, so a copy is never started that admission would defer.
 fn checkpoint_due(
     policy: &PolicyState,
     observation: &RecoveryObservation,
     now: chrono::DateTime<Utc>,
 ) -> bool {
-    observation.checkpoint_safe && policy.due(observation.execution, now)
+    observation.checkpoint_wait.is_none() && policy.due(now)
 }
 
 #[cfg(test)]
@@ -437,22 +528,25 @@ mod tests {
             session: session_record("session-1"),
             config: Config::default(),
             latest_completed_turn_ordinal: latest_completed_turn_ordinal(&completed(position)),
-            execution: MaterializedExecutionState::Idle,
-            checkpoint_safe: true,
+            checkpoint_wait: None,
         }
     }
 
     #[test]
-    fn unsafe_background_work_defers_recovery_until_a_safe_observation() {
+    fn a_session_that_must_wait_is_not_copied_until_an_observation_says_it_may_start() {
         let mut policy = PolicyState::default();
         policy.observe_completed_turn(Some(1));
         let mut observed = observation(1);
-        observed.checkpoint_safe = false;
+        for wait in [
+            mj_core::activity::CheckpointWait::WorkInFlight,
+            mj_core::activity::CheckpointWait::ProviderWork("a background agent"),
+        ] {
+            observed.checkpoint_wait = Some(wait);
+            assert!(!checkpoint_due(&policy, &observed, Utc::now()));
+            assert!(policy.attempt.is_none());
+        }
 
-        assert!(!checkpoint_due(&policy, &observed, Utc::now()));
-        assert_eq!(policy.last_attempted_turn, None);
-
-        observed.checkpoint_safe = true;
+        observed.checkpoint_wait = None;
         assert!(checkpoint_due(&policy, &observed, Utc::now()));
     }
 
@@ -560,42 +654,85 @@ mod tests {
     /// observation of that same turn must be allowed to try again.
     #[test]
     fn a_preempted_attempt_leaves_the_turn_retryable() {
-        let mut policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
-        assert!(!policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        let mut policy = attempted(8);
+        assert!(!policy.due(Utc::now()));
 
-        policy.last_attempted_turn = None;
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        policy.abandon_attempt();
+        assert!(policy.due(Utc::now()));
     }
 
-    /// A copy that stood down because the agent was working judged nothing.
-    /// It records no failure, and the same turn is copied at the next idle
-    /// observation.
+    /// A copy that stood down because the agent was working is not retried on
+    /// the next observation of the same facts. Retrying at once is how a
+    /// disagreement about whether the session was working became a 260 MB
+    /// copy every second. The boundary is tried again once an observation
+    /// says the session had to wait (it was a race, and the work is over when
+    /// the next observation says it may start), once a new turn completes, or
+    /// after a cooldown that widens while nothing changes.
     #[test]
-    fn a_deferred_copy_records_no_failure_and_leaves_the_turn_retryable() {
+    fn a_deferred_copy_is_retried_only_after_a_change_or_a_cooldown() {
+        // The coordinator knows a deferral by the marker on the error, which
+        // survives the context the checkpoint path adds.
         let deferred = anyhow::Error::new(crate::controller::CheckpointDeferred::harness_busy())
             .context("create a recovery checkpoint");
         assert!(checkpoint_was_deferred(&deferred), "{deferred:#}");
-        assert!(!checkpoint_was_deferred(&anyhow::anyhow!(
-            "export target checkpoint failed with status 1"
-        )));
 
-        let mut policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
-        assert!(!policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        let now = Utc::now();
+        let second = chrono::Duration::seconds(1);
+        let base = chrono::Duration::from_std(DEFERRED_RETRY_INTERVAL).unwrap();
+        let mut policy = PolicyState::default();
+        policy.observe_completed_turn(Some(8));
+        let ready = observation(8);
+        assert!(checkpoint_due(&policy, &ready, now));
 
-        policy.abandon_attempt();
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
-        assert!(
-            policy.failed_at.is_none() && policy.consecutive_failures == 0,
-            "a deferral is not a failure"
-        );
+        policy.start_attempt();
+        policy.record_deferral(now);
+        // Nothing changed: the same observation a second later is not due.
+        assert!(!checkpoint_due(&policy, &ready, now + second));
+        assert!(!checkpoint_due(&policy, &ready, now + base - second));
+        assert!(checkpoint_due(&policy, &ready, now + base));
+
+        // Deferred again with still nothing changed: the wait doubles.
+        let again = now + base;
+        policy.start_attempt();
+        policy.record_deferral(again);
+        assert!(!checkpoint_due(&policy, &ready, again + base * 2 - second));
+        assert!(checkpoint_due(&policy, &ready, again + base * 2));
+
+        // An observation that says the session has to wait is the change: the
+        // next one that says it may start retries at once, and the cooldown
+        // starts over.
+        policy.start_attempt();
+        policy.record_deferral(again);
+        policy.observe_wait(Some(mj_core::activity::CheckpointWait::WorkInFlight));
+        assert!(checkpoint_due(&policy, &ready, again + second));
+        policy.start_attempt();
+        policy.record_deferral(again);
+        assert!(checkpoint_due(&policy, &ready, again + base));
+
+        // A turn that completes is a new boundary, due at once.
+        policy.start_attempt();
+        policy.record_deferral(again);
+        policy.observe_completed_turn(Some(12));
+        assert!(checkpoint_due(&policy, &observation(12), again + second));
+
+        // None of this is a failure.
+        assert_eq!(policy.consecutive_failures, 0);
+    }
+
+    /// The deferral cooldown never grows past its cap, so a session whose
+    /// copies keep standing down is still tried a few times an hour.
+    #[test]
+    fn repeated_deferrals_back_off_up_to_a_capped_delay() {
+        let now = Utc::now();
+        let cap = chrono::Duration::from_std(MAX_DEFERRED_RETRY_INTERVAL).unwrap();
+        let mut policy = PolicyState::default();
+        policy.observe_completed_turn(Some(8));
+        for _ in 0..64 {
+            policy.start_attempt();
+            policy.record_deferral(now);
+        }
+        assert!(!policy.due(now + cap - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + cap));
     }
 
     #[tokio::test]
@@ -613,11 +750,15 @@ mod tests {
     fn first_completed_idle_turn_is_due() {
         let mut policy = PolicyState::default();
         policy.observe_completed_turn(latest_completed_turn_ordinal(&completed(3)));
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
-        assert!(!policy.due(
-            MaterializedExecutionState::Running { started_at_ms: 1 },
-            Utc::now()
-        ));
+        assert!(policy.due(Utc::now()));
+    }
+
+    /// A policy whose copy of `turn` has started and not finished.
+    fn attempted(turn: u64) -> PolicyState {
+        let mut policy = PolicyState::default();
+        policy.observe_completed_turn(Some(turn));
+        policy.start_attempt();
+        policy
     }
 
     fn interval() -> chrono::Duration {
@@ -646,11 +787,11 @@ mod tests {
             )),
             ..Default::default()
         };
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
+        assert!(!policy.due(now));
         policy.checkpoint.as_mut().unwrap().created_at = (now - interval()).to_rfc3339();
-        assert!(policy.due(MaterializedExecutionState::Idle, now));
+        assert!(policy.due(now));
         policy.checkpoint.as_mut().unwrap().event_frontier = 8;
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
+        assert!(!policy.due(now));
     }
 
     /// An idle session may never complete another turn, so a failed copy has to
@@ -659,19 +800,12 @@ mod tests {
     #[test]
     fn a_failed_boundary_retries_after_a_cooldown() {
         let now = Utc::now();
-        let mut policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
+        let mut policy = attempted(8);
         policy.record_failure(now);
 
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + interval() - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + interval()));
+        assert!(!policy.due(now));
+        assert!(!policy.due(now + interval() - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + interval()));
     }
 
     /// Consecutive failures widen the wait, so a target that is broken rather
@@ -679,29 +813,19 @@ mod tests {
     #[test]
     fn repeated_failures_back_off_up_to_a_capped_delay() {
         let now = Utc::now();
-        let mut policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
+        let mut policy = attempted(8);
         policy.record_failure(now);
         policy.record_failure(now);
 
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + interval() * 2 - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + interval() * 2));
+        assert!(!policy.due(now + interval() * 2 - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + interval() * 2));
 
         for _ in 0..64 {
             policy.record_failure(now);
         }
         let cap = chrono::Duration::from_std(MAX_AUTO_CHECKPOINT_RETRY_INTERVAL).unwrap();
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + cap - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + cap));
+        assert!(!policy.due(now + cap - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + cap));
     }
 
     /// A copy that succeeds ends the failure run, so the next unrelated failure
@@ -709,26 +833,19 @@ mod tests {
     #[test]
     fn a_successful_copy_restarts_the_backoff() {
         let now = Utc::now();
-        let mut policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
+        let mut policy = attempted(8);
         for _ in 0..3 {
             policy.record_failure(now);
         }
         policy.record_success(checkpoint_at(now, 8));
 
         policy.observe_completed_turn(Some(12));
-        policy.last_attempted_turn = Some(12);
+        policy.start_attempt();
         let failed_at = now + interval() * 2;
         policy.record_failure(failed_at);
 
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            failed_at + interval() - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, failed_at + interval()));
+        assert!(!policy.due(failed_at + interval() - chrono::Duration::seconds(1)));
+        assert!(policy.due(failed_at + interval()));
     }
 
     /// A copy that is still running has not failed, so its boundary stays
@@ -736,15 +853,8 @@ mod tests {
     #[test]
     fn an_attempt_in_flight_never_becomes_due_again() {
         let now = Utc::now();
-        let policy = PolicyState {
-            latest_completed_turn: 8,
-            last_attempted_turn: Some(8),
-            ..Default::default()
-        };
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + chrono::Duration::days(1)
-        ));
+        let policy = attempted(8);
+        assert!(!policy.due(now));
+        assert!(!policy.due(now + chrono::Duration::days(1)));
     }
 }

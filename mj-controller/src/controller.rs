@@ -86,6 +86,7 @@ pub(crate) use worktree::path_exists_on_managed_target;
 pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
     checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
+    sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint,

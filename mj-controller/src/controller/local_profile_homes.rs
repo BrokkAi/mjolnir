@@ -306,7 +306,7 @@ fn remove_replica(directory: &Path) -> std::io::Result<Option<bool>> {
 /// and `-ww` keeps long arguments whole.
 pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<String>> {
     let command = CommandSpec::new("ps", ["-A", "-ww", "-o", "args="])
-        .purpose("list running processes before removing leftover project-memory replicas");
+        .purpose("list running processes before removing files they may be using");
     match executor.execute(&command) {
         Ok(output) if output.status == 0 => Some(
             String::from_utf8_lossy(&output.stdout)

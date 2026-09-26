@@ -3,6 +3,10 @@ use mj_core::hex::lower_hex;
 
 pub(super) const CHECKPOINT_STAGE_MANIFEST: &str = "stage.json";
 
+/// The name a capture gives the directory it fills before sealing it as the
+/// stage, beside the stage. A capture that is killed leaves it behind.
+pub const CHECKPOINT_CAPTURE_TEMPORARY_PREFIX: &str = ".checkpoint-capture-";
+
 /// Capture mutable target-owned state into a sealed, uncompressed generation.
 /// The caller holds the relay barrier only for this operation; packaging the
 /// generation is intentionally a separate command.
@@ -77,7 +81,7 @@ pub fn capture_checkpoint_with_native_state(
         resolved.stage_path.display()
     );
     let temporary = tempfile::Builder::new()
-        .prefix(".checkpoint-capture-")
+        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
         .tempdir_in(parent)
         .with_context(|| format!("create temporary checkpoint stage in {}", parent.display()))?;
 

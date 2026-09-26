@@ -45,6 +45,9 @@ pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
 ) -> Result<()> {
+    // Before this daemon can start a checkpoint, so every checkpoint file older
+    // than this belongs to a checkpoint that no longer runs.
+    let started = SystemTime::now();
     let startup_work = crate::upgrade::activity("daemon startup recovery")?;
     // Freeze worker sources before any session can be created or upgraded.
     // Copying binaries belongs on a blocking task, never the runtime event loop.
@@ -146,6 +149,20 @@ pub(super) async fn run_daemon_runtime(
     let move_owned = state.recover_moves(move_operations)?;
     state.resume_retained_cleanups();
     let cancellation = crate::termination::Coordinator::install().token();
+    // Checkpoint files that a cancelled or interrupted checkpoint left in a
+    // local worker root. Deleting them can take minutes after a long leak, so
+    // this runs beside the daemon rather than before it serves. It stops at
+    // shutdown, and the next start finishes it.
+    let checkpoint_sweep = {
+        let cancellation = cancellation.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::controller::sweep_local_checkpoint_leftovers(
+                &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(15)),
+                started,
+                &|| cancellation.is_cancelled(),
+            );
+        })
+    };
     let (mut manager_updates, continuation_task) =
         continuation::spawn(state.clone(), manager_updates, cancellation.clone());
 
@@ -546,6 +563,11 @@ pub(super) async fn run_daemon_runtime(
             tombstone_sweep.await.map_err(anyhow::Error::new),
         );
     }
+    record_daemon_cleanup(
+        &mut outcome,
+        "join checkpoint leftover sweep",
+        checkpoint_sweep.await.map_err(anyhow::Error::new),
+    );
     for interrupted_close_task in interrupted_close_tasks {
         record_daemon_cleanup(
             &mut outcome,

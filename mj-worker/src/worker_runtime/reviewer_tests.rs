@@ -378,8 +378,9 @@ fn config(generation: u64) -> ReviewerLaunchConfig {
         profile_id: "reviewer-profile".into(),
         harness: HarnessKind::Kimi,
         // The sidecar spawns the worker executable, which the fixture points
-        // at the scripted bridge, so this command is never reached.
-        bridge_command: "/bin/false".into(),
+        // at the scripted bridge, so this command is never reached. It still
+        // needs to resolve during preparation; false lives in /usr/bin on macOS.
+        bridge_command: "false".into(),
         bridge_args: Vec::new(),
         environment: Default::default(),
         excluded_environment: Vec::new(),
