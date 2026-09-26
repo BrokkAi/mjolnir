@@ -48,6 +48,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -290,6 +291,7 @@ for line in sys.stdin:
         let launch = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

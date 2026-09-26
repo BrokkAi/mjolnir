@@ -19,7 +19,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
-                s.launch_branch, s.publication_json, s.checkout_json
+                s.launch_branch, s.publication_json, s.checkout_json, s.expected_runtime_identity
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
@@ -50,6 +50,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             create_managed_worktree: row.get(23)?,
             launch_base: row.get(27)?,
             launch_branch: row.get(29)?,
+            expected_runtime_identity: row.get(32)?,
             checkout: row
                 .get::<_, Option<String>>(31)?
                 .map(|json| {
@@ -594,8 +595,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              mjolnir_subagents, container_workspace, build_cache_json, launch_base,
-             target_runtime_json, launch_branch, publication_json, checkout_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+             target_runtime_json, launch_branch, publication_json, checkout_json, expected_runtime_identity
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -626,7 +627,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              target_runtime_json = excluded.target_runtime_json,
              launch_branch = excluded.launch_branch,
              publication_json = excluded.publication_json,
-             checkout_json = excluded.checkout_json",
+             checkout_json = excluded.checkout_json,
+             expected_runtime_identity = excluded.expected_runtime_identity",
         params![
             session.id,
             session.title,
@@ -675,6 +677,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.launch_branch,
             session.publication.as_ref().map(serde_json::to_string).transpose()?,
             session.checkout.as_ref().map(serde_json::to_string).transpose()?,
+            session.expected_runtime_identity,
         ],
     )?;
     tx.execute(
@@ -720,6 +723,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         launch_base: _,
         launch_branch: _,
         checkout: _,
+        expected_runtime_identity: _,
         publication: _,
         mjolnir_subagents: _,
         additional_mounts: _,

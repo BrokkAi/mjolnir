@@ -564,6 +564,8 @@ pub struct RelayOperationalState {
     pub checkpoint_only: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::harness_runtime::RuntimeReceipt>,
     /// Older workers do not report the optional ACP steering extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_supported: Option<bool>,
@@ -844,6 +846,8 @@ pub enum RelayObservation {
         protocol_version: AcpProtocolVersion,
         capabilities: Box<AgentCapabilities>,
         agent_info: Option<Implementation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<crate::harness_runtime::RuntimeIdentity>,
     },
     SessionOpened {
         native_session_id: String,
@@ -1162,6 +1166,8 @@ pub struct RelaySnapshot {
     pub restored_native_session_unused: bool,
     pub agent_capabilities: Option<Box<AgentCapabilities>>,
     pub agent_info: Option<Implementation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::harness_runtime::RuntimeReceipt>,
     pub config_options: Vec<SessionConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
@@ -1218,6 +1224,7 @@ impl RelaySnapshot {
             restored_native_session_unused: false,
             agent_capabilities: None,
             agent_info: None,
+            runtime: None,
             config_options: Vec::new(),
             modes: None,
             available_commands: Vec::new(),
@@ -1281,6 +1288,7 @@ impl RelaySnapshot {
             acp_ready: None,
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),
+            runtime: self.runtime.clone(),
             // Steering support belongs to the connected harness, like readiness.
             steering_supported: None,
             config_options: self.config_options.clone(),

@@ -36,6 +36,7 @@ impl ClaudeProbe {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

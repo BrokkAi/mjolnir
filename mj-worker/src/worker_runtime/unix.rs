@@ -482,6 +482,39 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     for name in &config.excluded_environment {
         session_environment.remove(name);
     }
+    let identity_environment = session_environment.clone();
+    let identity_command =
+        if config.bridge_command.is_relative() && config.bridge_command.components().count() > 1 {
+            config.cwd.join(&config.bridge_command)
+        } else {
+            config.bridge_command.clone()
+        };
+    let identity_root = managed_harness
+        .as_ref()
+        .and_then(|managed| managed.lease_path.parent())
+        .map(std::path::Path::to_path_buf);
+    let identity_harness = config.harness;
+    let (resolved_command, runtime_identity) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let command =
+            super::runtime_identity::resolve_command(&identity_command, &identity_environment)?;
+        let identity = super::runtime_identity::inspect(
+            identity_harness,
+            &command,
+            &identity_environment,
+            identity_root.as_deref(),
+        );
+        Ok((command, identity))
+    })
+    .await
+    .context("runtime identity inspection task failed")??;
+    config.bridge_command = resolved_command;
+    relay
+        .lock()
+        .expect("relay lock poisoned")
+        .configure_runtime_identity(
+            runtime_identity.clone(),
+            config.expected_runtime_identity.clone(),
+        );
     let supervisor_path = root.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: config.bridge_command,
@@ -563,6 +596,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             })),
         }));
         let acp_spec = LaunchSpec {
+            runtime_constraint: config.expected_runtime_identity.clone().map(|expected| (runtime_identity.clone(), expected)),
             clear_context_request: None,
         context_restore: None,
             goal_recovery,

@@ -463,6 +463,7 @@ pub struct SessionLaunchOptions {
     pub launch_base: Option<String>,
     pub launch_branch: Option<String>,
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub expected_runtime_identity: Option<String>,
     pub mjolnir_subagents: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -715,6 +716,7 @@ impl Controller {
             launch_base,
             launch_branch,
             checkout,
+            expected_runtime_identity,
             mjolnir_subagents,
             initial_prompt,
             workspace_id,
@@ -723,6 +725,9 @@ impl Controller {
             project_directory,
             session_title_override,
         } = options;
+        if let Some(expected) = &expected_runtime_identity {
+            mj_core::harness_runtime::validate_expected_identity(expected)?;
+        }
         let launch_base = match launch_base {
             Some(base) => {
                 let base = base.trim();
@@ -842,6 +847,7 @@ impl Controller {
             launch_base,
             launch_branch,
             checkout,
+            expected_runtime_identity,
             publication: None,
             mjolnir_subagents,
             archived: false,

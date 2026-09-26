@@ -6,6 +6,13 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn runtime_receipt(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::harness_runtime::RuntimeReceipt>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn transcript_history(
         &self,
         session_id: String,

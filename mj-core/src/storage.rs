@@ -287,6 +287,9 @@ pub struct ApiEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ApiEventData {
+    RuntimeResolved {
+        receipt: crate::harness_runtime::RuntimeReceipt,
+    },
     TurnStarted {
         turn: MaterializedTurn,
     },
@@ -316,6 +319,7 @@ pub enum ApiEventData {
 impl ApiEventData {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::RuntimeResolved { .. } => "runtime_resolved",
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnEnded { .. } => "turn_ended",
             Self::Error { .. } => "error",

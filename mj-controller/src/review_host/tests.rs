@@ -756,6 +756,7 @@ fn the_primary_profile_can_run_an_independent_reviewer() {
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

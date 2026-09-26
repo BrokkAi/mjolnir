@@ -29,6 +29,7 @@ pub(super) async fn get_session(
         ApiSession::from(require_session_record(&snapshot, &session_id)?)
     };
     if let Ok(backend) = backend(&state) {
+        session.runtime = backend.runtime_receipt(session_id.clone()).await?;
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
             session.last_turn_diagnostic = turn
                 .last_turn_outcome
@@ -42,6 +43,14 @@ pub(super) async fn get_session(
                 && let Some(snapshot) = view.snapshot
             {
                 session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+                if let Some(runtime) = &snapshot.operational.runtime
+                    && session
+                        .runtime
+                        .as_ref()
+                        .is_none_or(|persisted| persisted.event_ordinal < runtime.event_ordinal)
+                {
+                    session.runtime = Some(runtime.clone());
+                }
             }
         }
     }
@@ -109,6 +118,7 @@ pub(super) async fn start_session(
         launch_base: request.launch_base.clone(),
         launch_branch: request.launch_branch.clone(),
         checkout: request.checkout.clone(),
+        expected_runtime_identity: request.expected_runtime_identity.clone(),
         mjolnir_subagents: request.mjolnir_subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,

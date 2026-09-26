@@ -22,6 +22,8 @@ pub enum ControllerAction {
         launch_branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkout: Option<mj_core::remote_git::ExactCheckout>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_runtime_identity: Option<String>,
         /// None means native sub-agents.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,

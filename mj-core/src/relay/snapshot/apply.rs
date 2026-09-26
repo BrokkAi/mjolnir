@@ -76,10 +76,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         RelayObservation::AgentInitialized {
             capabilities,
             agent_info,
+            runtime,
             ..
         } => {
             snapshot.agent_capabilities = Some(capabilities.clone());
             snapshot.agent_info = agent_info.clone();
+            snapshot.runtime =
+                runtime
+                    .as_ref()
+                    .map(|identity| crate::harness_runtime::RuntimeReceipt {
+                        identity: identity.clone(),
+                        event_ordinal: event.ordinal,
+                        observed_at_ms: event.recorded_at_ms,
+                    });
         }
         RelayObservation::SessionOpened {
             native_session_id,

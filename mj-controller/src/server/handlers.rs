@@ -504,6 +504,7 @@ pub(super) async fn preflight_new(
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),

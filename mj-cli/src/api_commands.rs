@@ -612,6 +612,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         launch_base: args.base.clone(),
         launch_branch: args.branch.clone(),
         checkout: None,
+        expected_runtime_identity: None,
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),

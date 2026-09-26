@@ -441,6 +441,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -660,6 +661,52 @@ fn normalized_state_round_trip_preserves_children_and_order() {
 }
 
 #[test]
+fn runtime_identity_migration_and_lifecycle_updates_preserve_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.sqlite3");
+    let mut record = session("old-session", "project-1");
+    save_session_to(&path, &record).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN expected_runtime_identity;
+        DELETE FROM schema_migrations WHERE version >= 55;
+        UPDATE schema_compatibility SET minimum_compatible_version = 54;
+        PRAGMA user_version = 54;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&path);
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["old-session"],
+        record
+    );
+    record.expected_runtime_identity = Some("mj-runtime-v1:saved".into());
+    save_session_to(&path, &record).unwrap();
+    let mut connection = open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT minimum_compatible_version FROM schema_compatibility",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        55
+    );
+    let tx = connection.transaction().unwrap();
+    let mut stale = record.clone();
+    stale.expected_runtime_identity = None;
+    stale.state = SessionState::Error;
+    update_lifecycle_fields(&tx, &stale).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["old-session"].expected_runtime_identity,
+        record.expected_runtime_identity
+    );
+}
+
+#[test]
 fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_selection() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("exact-checkout.sqlite3");
@@ -685,7 +732,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        54
+        SCHEMA_VERSION
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],

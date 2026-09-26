@@ -514,6 +514,7 @@ fn adopted_session_record(
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         mjolnir_subagents: None,

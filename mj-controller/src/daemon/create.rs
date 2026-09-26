@@ -102,6 +102,7 @@ impl RuntimeState {
                     launch_base: request.launch_base,
                     launch_branch: request.launch_branch,
                     checkout: request.checkout,
+                    expected_runtime_identity: request.expected_runtime_identity,
                     mjolnir_subagents: request.mjolnir_subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,

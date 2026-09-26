@@ -24,6 +24,7 @@ pub(crate) async fn native_muse_turn(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -159,6 +160,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

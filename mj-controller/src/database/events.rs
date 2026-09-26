@@ -1,5 +1,28 @@
 //! Durable, ordered events for the native subagent API.
 use super::*;
+/// The last initialization receipt remains available after its worker stops.
+pub fn load_runtime_receipt(
+    session_id: &str,
+) -> Result<Option<mj_core::harness_runtime::RuntimeReceipt>> {
+    load_runtime_receipt_from(&database_path(), session_id)
+}
+
+pub(super) fn load_runtime_receipt_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<mj_core::harness_runtime::RuntimeReceipt>> {
+    let connection = open_reader(path)?;
+    let body: Option<String> = connection.query_row(
+        "SELECT body FROM api_events WHERE session_id = ?1 AND json_extract(body, '$.type') = 'runtime_resolved' ORDER BY seq DESC LIMIT 1",
+        [session_id], |row| row.get(0),
+    ).optional()?;
+    body.map(|body| match serde_json::from_str::<ApiEventData>(&body)? {
+        ApiEventData::RuntimeResolved { receipt } => Ok(receipt),
+        _ => anyhow::bail!("runtime receipt event has an invalid type"),
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 use mj_core::elicitation::ElicitationRequest;
 
@@ -207,6 +230,66 @@ mod tests {
                 },
             },
         ]
+    }
+
+    #[test]
+    fn runtime_identity_history_survives_reopen_and_resume_without_rewriting_old_runs() {
+        use mj_core::harness_runtime::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite");
+        save_session_to(
+            &path,
+            &super::super::tests::session("session-1", "project-1"),
+        )
+        .unwrap();
+        let observation = |version: &str| {
+            let mut runtime = RuntimeIdentity {
+                id: None,
+                harness: mj_core::config::HarnessKind::Codex,
+                platform: "test-target".into(),
+                provenance: RuntimeProvenance::TargetInstallation,
+                components: vec![RuntimeComponent {
+                    name: "provider".into(),
+                    version: Some(version.into()),
+                    sha256: None,
+                }],
+                unavailable_reason: None,
+            };
+            runtime.refresh_id().unwrap();
+            RelayObservation::AgentInitialized {
+                protocol_version: agent_client_protocol::schema::ProtocolVersion::V1,
+                capabilities: Box::default(),
+                agent_info: None,
+                runtime: Some(runtime),
+            }
+        };
+        page(&path, vec![observation("first")], false).unwrap();
+        let first = load_runtime_receipt_from(&path, "session-1")
+            .unwrap()
+            .unwrap();
+        page(
+            &path,
+            vec![RelayObservation::SessionRestarted, observation("second")],
+            false,
+        )
+        .unwrap();
+        super::super::schema::forget_verified_schema(&path);
+        let second = load_runtime_receipt_from(&path, "session-1")
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.identity.id, second.identity.id);
+        assert!(first.event_ordinal < second.event_ordinal);
+        let receipts: Vec<_> =
+            load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter_map(|event| match event.event {
+                    ApiEventData::RuntimeResolved { receipt } => Some(receipt),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(receipts, vec![first, second]);
     }
 
     #[test]
