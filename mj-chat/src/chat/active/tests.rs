@@ -310,6 +310,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 acp_ready: None,
                 agent_capabilities: None,
                 agent_info: None,
+                runtime: None,
                 steering_supported: None,
                 config_options: Vec::new(),
                 modes: None,
