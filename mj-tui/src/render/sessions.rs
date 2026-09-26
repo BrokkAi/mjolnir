@@ -971,51 +971,90 @@ pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, widt
 /// The pane name the title carries when there is room for it beside a label.
 const FULL_TITLE_PREFIX: &str = " Sessions · ";
 
+/// What ends a Sessions title after its label: a closing space, or, while a
+/// filter is in force, the chip that clears it (` × `, or ` x ` with ASCII
+/// symbols), whose own padding takes the place of that space.
+fn title_end(clear: bool) -> &'static str {
+    if clear { theme::glyphs().close } else { " " }
+}
+
 /// Whether a label is short enough for the pane to keep its full name rather
 /// than falling back to `S · `. Callers that want to add to the label ask this
 /// first, so the pane name never loses its place to something optional.
-pub(crate) fn label_keeps_full_prefix(label: &str, width: u16, maximize_enabled: bool) -> bool {
+/// `clear` says whether the title ends with the filter's clear chip.
+pub(crate) fn label_keeps_full_prefix(
+    label: &str,
+    width: u16,
+    maximize_enabled: bool,
+    clear: bool,
+) -> bool {
     let budget = usize::from(pane_title_content_width(width, maximize_enabled));
-    FULL_TITLE_PREFIX.chars().count() + label.chars().count() < budget
+    FULL_TITLE_PREFIX.chars().count() + label.chars().count() + title_end(clear).chars().count()
+        <= budget
+}
+
+/// A Sessions pane title, and where its filter clear chip starts, counted in
+/// cells from the title's first cell, when the title shows one.
+pub(crate) struct SessionsTitle {
+    pub(crate) line: Line<'static>,
+    pub(crate) clear_chip: Option<u16>,
 }
 
 /// The Sessions title keeps the workspace ahead of the long pane label when
 /// the screen is narrow, while visible size controls retain their cells.
+/// With `clear`, the label ends with the chip that clears the filter, and
+/// the label gives up its cells to it first.
 pub(crate) fn sessions_title(
     workspace_name: &str,
     width: u16,
     maximize_enabled: bool,
-) -> Line<'static> {
+    clear: bool,
+) -> SessionsTitle {
     let budget = usize::from(pane_title_content_width(width, maximize_enabled));
     if workspace_name.is_empty() {
-        return Line::raw(truncate_to_cells(" Sessions ", budget, Truncate::SUMMARY));
+        return SessionsTitle {
+            line: Line::raw(truncate_to_cells(" Sessions ", budget, Truncate::SUMMARY)),
+            clear_chip: None,
+        };
     }
-    let prefix = if label_keeps_full_prefix(workspace_name, width, maximize_enabled) {
+    let prefix = if label_keeps_full_prefix(workspace_name, width, maximize_enabled, clear) {
         FULL_TITLE_PREFIX
     } else {
         " S · "
     };
-    let workspace_room = budget.saturating_sub(prefix.chars().count() + 1);
-    Line::from(vec![
-        Span::raw(prefix),
-        Span::styled(
-            truncate_to_cells(workspace_name, workspace_room, Truncate::SUMMARY),
-            Style::default().fg(theme::palette().muted),
-        ),
-        Span::raw(" "),
-    ])
+    let end = title_end(clear);
+    let workspace_room = budget.saturating_sub(prefix.chars().count() + end.chars().count());
+    let label = Span::styled(
+        truncate_to_cells(workspace_name, workspace_room, Truncate::SUMMARY),
+        Style::default().fg(theme::palette().muted),
+    );
+    let chip_start = Span::raw(prefix).width() + label.width();
+    let clear_chip = (clear && chip_start + Span::raw(end).width() <= budget)
+        .then(|| u16::try_from(chip_start).ok())
+        .flatten();
+    let end = if clear {
+        Span::styled(end, theme::muted())
+    } else {
+        Span::raw(end)
+    };
+    SessionsTitle {
+        line: Line::from(vec![Span::raw(prefix), label, end]),
+        clear_chip,
+    }
 }
 
 /// Reserve a title suffix for the sessions that want a person. At narrow
 /// widths a compact form keeps that count visible while preserving the
 /// Sessions label; the narrowest form is the most urgent level's own glyph.
+/// The compact forms leave out the filter label, and its clear chip with it.
 pub(crate) fn sessions_title_with_attention(
     workspace_name: &str,
     width: u16,
     badge: Option<(AttentionLevel, usize)>,
     maximize_enabled: bool,
-) -> Line<'static> {
-    let base = sessions_title(workspace_name, width, maximize_enabled);
+    clear: bool,
+) -> SessionsTitle {
+    let base = sessions_title(workspace_name, width, maximize_enabled, clear);
     let Some((level, count)) = badge else {
         return base;
     };
@@ -1025,22 +1064,33 @@ pub(crate) fn sessions_title_with_attention(
         .add_modifier(Modifier::BOLD);
     let glyph = attention_glyph(level);
     let suffix = Span::styled(format!(" · Attention: {count}"), style);
-    if base.width().saturating_add(suffix.width()) <= budget {
-        let mut spans = base.spans;
+    if base.line.width().saturating_add(suffix.width()) <= budget {
+        let mut spans = base.line.spans;
         spans.push(suffix);
-        return Line::from(spans);
+        return SessionsTitle {
+            line: Line::from(spans),
+            clear_chip: base.clear_chip,
+        };
     }
     let compact = Line::styled(format!(" Sessions [{glyph}{count}]"), style);
     if compact.width() <= budget {
-        return compact;
+        return SessionsTitle {
+            line: compact,
+            clear_chip: None,
+        };
     }
     let tiny = Line::styled(format!(" {glyph}{count}"), style);
     if tiny.width() <= budget {
-        return tiny;
+        return SessionsTitle {
+            line: tiny,
+            clear_chip: None,
+        };
     }
     base
 }
 
+/// The Sessions pane's frame, and where its title's filter clear chip
+/// starts, as [`SessionsTitle::clear_chip`] counts it.
 pub(crate) fn sessions_block(
     focused: bool,
     workspace_name: &str,
@@ -1048,15 +1098,21 @@ pub(crate) fn sessions_block(
     size: PaneSize,
     badge: Option<(AttentionLevel, usize)>,
     maximize_enabled: bool,
-) -> Block<'static> {
-    theme::panel(focused)
-        .title(sessions_title_with_attention(
-            workspace_name,
-            width,
-            badge.filter(|_| size == PaneSize::Minimized),
-            maximize_enabled,
-        ))
-        .title(pane_size_controls(size, maximize_enabled))
+    clear: bool,
+) -> (Block<'static>, Option<u16>) {
+    let title = sessions_title_with_attention(
+        workspace_name,
+        width,
+        badge.filter(|_| size == PaneSize::Minimized),
+        maximize_enabled,
+        clear,
+    );
+    (
+        theme::panel(focused)
+            .title(title.line)
+            .title(pane_size_controls(size, maximize_enabled)),
+        title.clear_chip,
+    )
 }
 
 /// The glyph that stands for an attention level wherever it is named: a row
@@ -1131,30 +1187,45 @@ pub(crate) fn render_sessions(
     let focused = dashboard.focus() == Focus::Sessions;
     let maximize_enabled = dashboard.pane_maximize_enabled(SupportPane::Sessions);
     let filter_label = dashboard.sessions_filter_label();
+    // While a filter is in force, the title ends with a chip that clears it.
+    let clear = dashboard.sessions_filter.is_some();
     // The count is the first thing to give up its place. Below the width that
     // keeps both, the pane name is worth more than the number.
     let filter_label = match dashboard.sessions_hidden_count() {
         0 => filter_label,
         hidden => {
             let counted = format!("{filter_label} · {hidden} hidden");
-            if label_keeps_full_prefix(&counted, area.width, maximize_enabled) {
+            if label_keeps_full_prefix(&counted, area.width, maximize_enabled, clear) {
                 counted
             } else {
                 filter_label
             }
         }
     };
-    frame.render_widget(
-        sessions_block(
-            focused,
-            &filter_label,
-            area.width,
-            dashboard.pane_size(SupportPane::Sessions),
-            dashboard.sessions_attention_summary(),
-            maximize_enabled,
-        ),
-        area,
+    let (block, clear_chip) = sessions_block(
+        focused,
+        &filter_label,
+        area.width,
+        dashboard.pane_size(SupportPane::Sessions),
+        dashboard.sessions_attention_summary(),
+        maximize_enabled,
+        clear,
     );
+    frame.render_widget(block, area);
+    if let Some(offset) = clear_chip {
+        // The title starts one cell in, after the border's corner.
+        let chip_width = u16::try_from(Line::raw(theme::glyphs().close).width()).unwrap_or(0);
+        crate::surface_controls::render_sessions_filter_clear(
+            frame,
+            Rect::new(
+                area.x.saturating_add(1).saturating_add(offset),
+                area.y,
+                chip_width,
+                area.height.min(1),
+            ),
+            dashboard,
+        );
+    }
     crate::surface_controls::render_session_buttons(frame, actions_area, dashboard);
     let table = Table::new(
         drawn.iter().map(|row| {

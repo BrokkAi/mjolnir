@@ -22,6 +22,9 @@ pub(crate) enum SurfaceControl {
     PaneMenu(PaneId),
     /// A support pane's title, which opens the menu that hangs from it.
     PaneTitleMenu(SupportPane),
+    /// The `×` after the filter label on the Sessions title, which drops the
+    /// filter as `Esc` on the pane does.
+    ClearSessionsFilter,
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -162,6 +165,10 @@ impl DashboardState {
                     self.begin_support_pane_menu(pane);
                     DashboardAction::None
                 }
+                SurfaceControl::ClearSessionsFilter => {
+                    self.clear_sessions_filter();
+                    DashboardAction::None
+                }
                 SurfaceControl::PanePin(pane) => {
                     if let Some(id) = self.pane_session(pane).map(str::to_owned) {
                         self.toggle_session_pin(id)
@@ -218,6 +225,28 @@ pub(crate) fn register_pane_title_menu(
     let mut form = dashboard.surface_form.borrow_mut();
     form.register(control, ControlKind::Button, area, true);
     form.is_armed(control)
+}
+
+/// Registers the clear chip that ends a filtered Sessions title, drawn at
+/// `area` as part of the title, and draws it pressed while the pointer holds
+/// it down.
+pub(crate) fn render_sessions_filter_clear(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let control = SurfaceControl::ClearSessionsFilter;
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    if form.is_armed(control) {
+        frame.render_widget(
+            Paragraph::new(theme::glyphs().close).style(theme::selection(true)),
+            area,
+        );
+    }
 }
 
 /// Draws the pinned three-cell workspace manager control. It is registered in
@@ -442,7 +471,7 @@ mod tests {
     use crate::test_support::{
         buffer_lines, chord, dashboard_with_session, key, mouse_at, point, running_session,
     };
-    use crate::{Focus, Mode, PaneSize, SupportPane};
+    use crate::{Focus, Mode, PaneSize, SessionStateFilter, SupportPane};
     use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
     use mj_chat::theme;
     use ratatui::{Terminal, backend::TestBackend};
@@ -761,5 +790,64 @@ mod tests {
         let lines = draw(&mut dashboard, (120, 40));
         click(&mut dashboard, point(&lines, "×"));
         assert_eq!(dashboard.mode, previous);
+    }
+
+    /// User request 2026-09-26: a click on the `×` (`x` with ASCII symbols)
+    /// that ends the Sessions filter label drops the whole filter, the search
+    /// text and the state together, as `Esc` on the pane does. A click on the
+    /// label's own text leaves the filter in force.
+    #[test]
+    fn the_filter_clear_chip_drops_the_filter_and_the_label_does_not() {
+        use mj_core::config::SymbolSet;
+
+        for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+            let mut dashboard = dashboard_with_session(running_session());
+            let mut config = dashboard.config.clone();
+            config.advanced.symbols = Some(symbols);
+            dashboard.set_config(config);
+            dashboard.focus_sessions();
+            // A search and a state filter together: `/ses`, Enter, then `b`.
+            dashboard.handle_key(key(KeyCode::Char('/')));
+            for character in "ses".chars() {
+                dashboard.handle_key(key(KeyCode::Char(character)));
+            }
+            dashboard.handle_key(key(KeyCode::Enter));
+            dashboard.handle_key(key(KeyCode::Char('b')));
+            let filter = dashboard.sessions_filter.clone();
+            assert_eq!(
+                filter
+                    .as_ref()
+                    .map(|filter| (filter.query.as_str(), filter.state)),
+                Some(("ses", Some(SessionStateFilter::Blocked)))
+            );
+
+            let label = "/ses · blocked";
+            let lines = draw(&mut dashboard, (120, 40));
+            let (x, y) = point(&lines, &format!("{label} {close} "));
+            let pane = dashboard.pane_areas.expect("pane areas")[0];
+            assert_eq!(y, pane.y, "{symbols:?}: the label is on the title");
+
+            // The label's first and last cells are not the chip.
+            let last = x + label.chars().count() as u16 - 1;
+            for cell in [x, last] {
+                assert_eq!(click(&mut dashboard, (cell, y)), DashboardAction::None);
+                assert_eq!(dashboard.sessions_filter, filter, "{symbols:?}: {cell}");
+                draw(&mut dashboard, (120, 40));
+            }
+
+            let chip = last + 2;
+            assert_eq!(
+                lines[usize::from(y)].chars().nth(usize::from(chip)),
+                Some(close)
+            );
+            assert_eq!(click(&mut dashboard, (chip, y)), DashboardAction::None);
+            assert_eq!(dashboard.sessions_filter, None, "{symbols:?}");
+            let lines = draw(&mut dashboard, (120, 40));
+            assert!(
+                !lines[usize::from(y)].contains(&format!(" {close} ")),
+                "{symbols:?}: the chip leaves with the filter: {:?}",
+                lines[usize::from(y)]
+            );
+        }
     }
 }

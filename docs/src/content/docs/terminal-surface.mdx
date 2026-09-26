@@ -111,7 +111,9 @@ letters `b`, `w`, `i`, and `d` keep only blocked (waiting or failed),
 working, idle, or done (unread) sessions, `a` shows all again, and a state
 filter composes with the search text. The footer names these letters beside the
 `/` key, and the pane title reports how many sessions the filter is holding
-back when there is room for the count. Switching workspace clears the filter,
+back when there is room for the count. While a filter is on, the title ends
+with `×` (`x` with ASCII symbols), and clicking it clears the whole filter,
+search text and state together. Switching workspace clears the filter,
 and so does jumping with `prefix+o` to a session the filter would hide.
 
 Normal session rows use four lines: the session name, one metadata line, and

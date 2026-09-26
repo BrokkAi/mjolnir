@@ -347,15 +347,115 @@ fn unanswered_user_line_stays_bright_and_shows_the_latest_agent_activity() {
 
 #[test]
 fn the_sessions_title_prioritizes_workspace_and_controls_at_minimum_width() {
-    let wide = sessions_title("a-workspace", 120, true).to_string();
+    let wide = sessions_title("a-workspace", 120, true, false)
+        .line
+        .to_string();
     assert_eq!(wide, " Sessions · a-workspace ");
     assert!(!wide.contains("Turn"));
     assert!(!wide.contains("Step"));
 
-    let narrow = sessions_title("a-rather-long-workspace-name", 32, true).to_string();
+    let narrow = sessions_title("a-rather-long-workspace-name", 32, true, false)
+        .line
+        .to_string();
     assert!(narrow.starts_with(" S · "), "{narrow:?}");
     assert!(narrow.contains('…'), "{narrow:?}");
     assert!(narrow.chars().count() <= usize::from(pane_title_content_width(32, true)));
+}
+
+/// User request 2026-09-26: while a filter is in force, the Sessions title
+/// ends the filter label with the chip that clears it, `×`, or `x` with
+/// ASCII symbols. A title without a filter has no chip, and a narrow title
+/// shortens the label rather than drop the chip.
+#[test]
+fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_sets() {
+    use mj_core::config::SymbolSet;
+
+    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+        theme::with_symbols(symbols, || {
+            let unfiltered = sessions_title("", 120, true, false);
+            assert_eq!(unfiltered.line.to_string(), "Sessions", "{symbols:?}");
+            assert_eq!(unfiltered.clear_chip, None, "{symbols:?}");
+
+            for label in ["working", "working · 3 hidden"] {
+                let without = sessions_title(label, 120, true, false);
+                assert_eq!(without.line.to_string(), format!(" Sessions · {label} "));
+                assert_eq!(without.clear_chip, None);
+
+                let with = sessions_title(label, 120, true, true);
+                let text = with.line.to_string();
+                assert_eq!(text, format!(" Sessions · {label} {close} "));
+                let chip = usize::from(with.clear_chip.expect("the chip has room"));
+                assert_eq!(
+                    text.chars().skip(chip).collect::<String>(),
+                    format!(" {close} "),
+                    "the chip is the padded glyph that ends the title"
+                );
+            }
+
+            let narrow = sessions_title("a-rather-long-search-query", 32, true, true);
+            let text = narrow.line.to_string();
+            assert!(text.starts_with(" S · "), "{text:?}");
+            assert!(text.ends_with(&format!(" {close} ")), "{text:?}");
+            assert!(text.chars().count() <= usize::from(pane_title_content_width(32, true)));
+            assert_eq!(
+                narrow.clear_chip.map(usize::from),
+                Some(text.chars().count() - 3),
+                "{text:?}"
+            );
+        });
+    }
+}
+
+/// The drawn Sessions pane shows the chip on its title row exactly while a
+/// filter is in force, with the state label and, given the room, the hidden
+/// count before it.
+#[test]
+fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
+    use mj_core::config::SymbolSet;
+
+    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(symbols);
+        dashboard.set_config(config);
+        set_working(&mut dashboard, "session-1");
+        dashboard.focus_sessions();
+        // The Sessions pane's own cells on its title row.
+        let title = |dashboard: &mut DashboardState, width: u16| {
+            let lines = drawn(dashboard, width, 40);
+            let pane = dashboard.pane_areas.expect("pane areas")[0];
+            lines[usize::from(pane.y)]
+                .chars()
+                .skip(usize::from(pane.x))
+                .take(usize::from(pane.width))
+                .collect::<String>()
+        };
+        let chip = format!(" {close} ");
+
+        let unfiltered = title(&mut dashboard, 120);
+        assert!(unfiltered.contains("Sessions"), "{unfiltered:?}");
+        assert!(!unfiltered.contains(&chip), "{symbols:?}: {unfiltered:?}");
+
+        dashboard.handle_key(key(KeyCode::Char('w')));
+        let working = title(&mut dashboard, 120);
+        assert!(
+            working.contains(&format!(" Sessions · working{chip}")),
+            "{symbols:?}: {working:?}"
+        );
+
+        // Nothing is blocked, so the one session is held back, and a wide
+        // pane has room to say so before the chip.
+        dashboard.handle_key(key(KeyCode::Char('b')));
+        let blocked = title(&mut dashboard, 240);
+        assert!(
+            blocked.contains(&format!(" Sessions · blocked · 1 hidden{chip}")),
+            "{symbols:?}: {blocked:?}"
+        );
+
+        dashboard.handle_key(key(KeyCode::Esc));
+        let cleared = title(&mut dashboard, 120);
+        assert!(!cleared.contains(&chip), "{symbols:?}: {cleared:?}");
+    }
 }
 
 #[test]

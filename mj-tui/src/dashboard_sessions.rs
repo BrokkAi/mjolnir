@@ -355,7 +355,8 @@ impl DashboardState {
         }
         match key.code {
             KeyCode::Esc if self.sessions_filter.is_some() => {
-                self.sessions_filter = None;
+                self.clear_sessions_filter();
+                return Some(());
             }
             KeyCode::Char(letter) if SessionStateFilter::from_letter(letter).is_some() => {
                 let state = SessionStateFilter::from_letter(letter)?;
@@ -379,6 +380,20 @@ impl DashboardState {
             }
             _ => return None,
         }
+        self.settle_sessions_filter();
+        Some(())
+    }
+
+    /// Drops the whole Sessions filter, the search text and the state
+    /// together. `Esc` on the pane and the `×` at the end of the filter's
+    /// title label both come here.
+    pub(crate) fn clear_sessions_filter(&mut self) {
+        self.sessions_filter = None;
+        self.settle_sessions_filter();
+    }
+
+    /// Settles the selection after the Sessions filter changed.
+    fn settle_sessions_filter(&mut self) {
         self.clamp_selections();
         // A filter that hides every row leaves the focus on the action row,
         // because there is nothing to select. Once a row is back, it takes the
@@ -386,7 +401,6 @@ impl DashboardState {
         if !self.visible_session_indices().is_empty() {
             self.set_session_action_focus(None);
         }
-        Some(())
     }
 
     /// Whether the Sessions pane lists `session` as a top-level row of
