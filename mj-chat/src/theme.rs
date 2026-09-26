@@ -441,6 +441,11 @@ pub fn base() -> Style {
     Style::default().fg(palette().text).bg(palette().background)
 }
 
+/// An enabled clickable label, visible before it receives focus.
+pub fn actionable() -> Style {
+    Style::default().fg(palette().accent)
+}
+
 pub fn muted() -> Style {
     Style::default().fg(palette().muted)
 }

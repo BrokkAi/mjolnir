@@ -17,9 +17,7 @@ fn focus_style() -> Style {
     theme::focus_control()
 }
 fn normal_style() -> Style {
-    Style::new()
-        .fg(theme::palette().text)
-        .bg(theme::palette().selection)
+    theme::actionable().bg(theme::palette().selection)
 }
 fn disabled_style() -> Style {
     Style::new()

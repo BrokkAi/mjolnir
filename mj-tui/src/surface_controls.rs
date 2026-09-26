@@ -264,7 +264,7 @@ pub(crate) fn render_workspace_menu(frame: &mut Frame, area: Rect, dashboard: &D
     let style = if focused || form.is_armed(control) {
         theme::focus_control()
     } else {
-        theme::muted().patch(theme::raised())
+        theme::actionable().patch(theme::raised())
     };
     frame.render_widget(
         Paragraph::new(theme::glyphs().workspace_menu).style(style),
@@ -297,9 +297,7 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
             // Monochrome reserves bold reverse video for actual keyboard focus.
             theme::active_control()
         } else if enabled {
-            ratatui::style::Style::default()
-                .fg(theme::palette().text)
-                .patch(theme::raised())
+            theme::actionable().patch(theme::raised())
         } else {
             theme::muted().patch(theme::raised())
         };
@@ -328,7 +326,7 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
                 .get(index)
                 .and_then(|session| dashboard.pin_id(session));
             let (text, style) = badge.map_or_else(
-                || (theme::glyphs().pin.to_owned(), theme::muted()),
+                || (theme::glyphs().pin.to_owned(), theme::actionable()),
                 |id| {
                     (
                         if id < 26 {
@@ -352,7 +350,7 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
             Paragraph::new(theme::glyphs().row_menu).style(if form.is_armed(id) {
                 theme::selection(true)
             } else {
-                theme::muted()
+                theme::actionable()
             }),
             area,
         );
@@ -395,7 +393,7 @@ pub(crate) fn render_pane_close_control(
     let style = if form.is_armed(control) {
         theme::selection(true)
     } else {
-        theme::muted()
+        theme::actionable()
     };
     frame.render_widget(Paragraph::new(theme::glyphs().close).style(style), area);
 }
@@ -427,7 +425,7 @@ pub(crate) fn render_pane_zoom_control(
     let style = if form.is_armed(control) {
         theme::selection(true)
     } else {
-        theme::muted()
+        theme::actionable()
     };
     frame.render_widget(Paragraph::new(" Z ").style(style), area);
 }

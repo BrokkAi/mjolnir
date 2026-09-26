@@ -55,7 +55,7 @@ pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Li
         let style = if size == active {
             theme::active_control()
         } else {
-            theme::muted().bg(theme::palette().surface)
+            theme::actionable().bg(theme::palette().surface)
         };
         spans.push(Span::styled(format!(" {glyph} "), style));
     }
@@ -185,8 +185,8 @@ pub(crate) fn drawn_session_rows_with_options(
                     last.spacing = 1;
                 }
                 let mut spans = vec![
-                    Span::styled(hotkey, theme::muted()),
-                    Span::styled(label, theme::title(false)),
+                    Span::styled(hotkey, theme::key_hint()),
+                    Span::styled(label, theme::actionable().add_modifier(Modifier::BOLD)),
                 ];
                 // A folded project hides its rows, so the heading says what
                 // is waiting inside it. An unfolded one shows every symbol.

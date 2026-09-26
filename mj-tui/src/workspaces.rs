@@ -1060,7 +1060,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         let style = if index == selected {
             theme::active_control()
         } else {
-            theme::muted()
+            theme::actionable()
         };
         let line = workspace_tab_line(&labels[index], badges[index].clone(), width, style);
         frame.render_widget(Paragraph::new(line), tab_area);
