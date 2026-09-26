@@ -1373,6 +1373,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
+        expected_runtime_identity: None,
         review_capture: false,
         session_id: SESSION.into(),
         harness: HarnessKind::Codex,

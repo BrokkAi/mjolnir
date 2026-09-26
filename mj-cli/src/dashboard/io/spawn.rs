@@ -1332,6 +1332,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         launch_base: None,
                         launch_branch: None,
                         checkout: None,
+                        expected_runtime_identity: None,
                         mjolnir_subagents,
                         create_managed_worktree,
                         initial_prompt: None,

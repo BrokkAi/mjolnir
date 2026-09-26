@@ -14,6 +14,19 @@ pub(super) fn derive(
         events.push(ApiEventData::TurnStarted { turn: turn.clone() });
     }
     match &event.observation {
+        RelayObservation::AgentInitialized {
+            runtime: Some(identity),
+            ..
+        } => {
+            events.push(ApiEventData::RuntimeResolved {
+                receipt: mj_core::harness_runtime::RuntimeReceipt {
+                    identity: identity.clone(),
+                    event_ordinal: event.ordinal,
+                    observed_at_ms: event.recorded_at_ms,
+                },
+            });
+        }
+
         RelayObservation::CommandRejected {
             command_id,
             message,

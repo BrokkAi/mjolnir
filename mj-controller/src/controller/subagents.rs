@@ -233,6 +233,7 @@ impl Controller {
             launch_base: None,
             launch_branch: None,
             checkout: None,
+            expected_runtime_identity: None,
             publication: None,
             // A child shares its parent's container, so it shares the build
             // cache that container was created with.

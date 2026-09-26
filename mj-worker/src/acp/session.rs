@@ -133,6 +133,15 @@ pub(super) async fn serve_session(
     )
     .await?;
 
+    // Gate session/load as well as prompts: a resumed goal can begin work
+    // during loading, before the coordinator processes its Connected event.
+    if let Some((identity, expected)) = &spec.runtime_constraint {
+        identity
+            .clone()
+            .with_reported_agent(initialized.agent_info.as_ref())?
+            .require(expected)?;
+    }
+
     if matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex)
         && !native_children_supported
     {

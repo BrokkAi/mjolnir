@@ -30,9 +30,13 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<mj_core::harness_runtime::RuntimeReceipt>,
     /// Immutable starting selection; session readiness verifies preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work: Option<ApiBackgroundWork>,
     pub id: String,
@@ -79,6 +83,8 @@ impl From<&ViewerSession> for ApiSession {
         Self {
             background_work: None,
             checkout: session.checkout.clone(),
+            expected_runtime_identity: session.expected_runtime_identity.clone(),
+            runtime: None,
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
             title: session.title.clone(),
@@ -152,6 +158,8 @@ pub struct StartSessionRequest {
     /// Exact starting selection for one bundle repository, verified before readiness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_identity: Option<String>,
     /// None means native sub-agents, the same as `Some(false)`.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,

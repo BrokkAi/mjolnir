@@ -544,7 +544,7 @@ fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) 
     Ok(())
 }
 
-fn entrypoint_is_executable(path: &Path) -> bool {
+pub(super) fn entrypoint_is_executable(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };

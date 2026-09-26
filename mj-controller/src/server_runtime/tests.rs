@@ -442,6 +442,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         acp_ready: None,
         agent_capabilities: None,
         agent_info: None,
+        runtime: None,
         steering_supported: None,
         config_options: Vec::new(),
         modes: Some(SessionModeState::new(
@@ -1012,6 +1013,7 @@ fn new_action() -> ControllerAction {
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -1030,6 +1032,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

@@ -184,6 +184,25 @@ impl DurableRelay {
                 ordinal: accepted_ordinal,
             }));
         }
+        if self.expected_runtime_identity.is_some()
+            && (command.prompt_blocks().is_some() || matches!(command, RelayCommand::Steer { .. }))
+        {
+            let checked = if self.acp_ready {
+                self.verify_runtime_identity()
+            } else {
+                Err(anyhow::anyhow!(
+                    "runtime identity is not ready; no prompt was accepted"
+                ))
+            };
+            if let Err(error) = checked {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    error.to_string(),
+                    false,
+                    None,
+                )));
+            }
+        }
         if self.clear_context_in_progress() {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
@@ -748,6 +767,7 @@ impl DurableRelay {
         if self.checkpoint_only || !acp_session_configured || maximum == 0 {
             return Ok(Vec::new());
         }
+        self.verify_runtime_identity()?;
         // Reject controls whose targets settled between admission and dispatch.
         let stale: Vec<_> = self
             .snapshot

@@ -19,6 +19,7 @@ impl SubagentMcpSocket {
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub runtime_constraint: Option<(mj_core::harness_runtime::RuntimeIdentity, String)>,
     pub clear_context_request: Option<ContextReset>,
     /// Settings to restore when a failed clear reloads the old conversation.
     pub context_restore: Option<ContextReset>,

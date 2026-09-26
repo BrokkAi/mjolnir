@@ -17,6 +17,7 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -389,6 +390,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -451,6 +453,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -538,6 +541,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -698,6 +702,7 @@ fn a_child_socket_serves_handback_without_hiding_native_tools() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -813,6 +818,7 @@ fn resumed_session_request_keeps_load_context() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1000,6 +1006,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             }),
             stall_policy: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -1617,6 +1624,7 @@ async fn answer_to_ext_request(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -1845,6 +1853,7 @@ async fn answer_architecture_form(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2250,6 +2259,7 @@ async fn config_change_request(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2432,6 +2442,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2521,6 +2532,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -2714,6 +2726,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3015,6 +3028,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3374,6 +3388,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -3856,6 +3871,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4087,6 +4103,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4225,6 +4242,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -4316,6 +4334,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -4650,6 +4669,7 @@ mod terminals {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -5168,6 +5188,7 @@ for line in sys.stdin:
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -5348,6 +5369,7 @@ for line in sys.stdin:
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
         }),
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5501,6 +5523,7 @@ while True:
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5646,6 +5669,7 @@ while True:
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5753,6 +5777,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -5833,6 +5858,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6134,6 +6160,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6215,6 +6242,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -6351,6 +6379,7 @@ fn missing_native_session_spec(
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -6749,6 +6778,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             }),
             stall_policy: None,
             subagent_mcp_socket: None,
+            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),
@@ -7176,6 +7206,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),
@@ -7401,6 +7432,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),

@@ -1319,6 +1319,8 @@ pub struct SessionRecord {
     /// preserves checkpointed work rather than applying this selection again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<crate::remote_git::ExactCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_runtime_identity: Option<String>,
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationAssessment>,

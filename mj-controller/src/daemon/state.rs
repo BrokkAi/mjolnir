@@ -188,6 +188,7 @@ impl RuntimeState {
                 launch_base: None,
                 launch_branch: None,
                 checkout: None,
+                expected_runtime_identity: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,

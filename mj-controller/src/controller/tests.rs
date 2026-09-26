@@ -538,6 +538,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         launch_base: None,
         launch_branch: None,
         checkout: None,
+        expected_runtime_identity: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,
