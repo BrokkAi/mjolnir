@@ -913,7 +913,7 @@ impl Controller {
                 return Ok(());
             }
         }
-        self.recover_interrupted_close_managed(&id, executor, manager)
+        self.recover_interrupted_close_managed(&id, executor, manager, None)
             .await?;
         Ok(())
     }

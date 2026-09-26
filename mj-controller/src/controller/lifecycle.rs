@@ -61,6 +61,14 @@ pub(super) enum SourceTargetDisposition {
     RetainForInPlaceSwap,
 }
 
+/// Work a close runs once the session is about to close: its checkpoint is
+/// verified and recorded, and its relay is not sealed yet. A daemon suspend
+/// stops the session's sub-agents here, so a close that fails at its
+/// checkpoint leaves them running. When this fails, the close does not
+/// proceed: the session returns to its previous state with its relay
+/// unsealed.
+pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
 impl Controller {
     /// Checkpoint, ask the harness to close, and only then tear down the exact
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
@@ -84,6 +92,7 @@ impl Controller {
                 None,
                 SourceTargetDisposition::Destroy,
                 true,
+                None,
             )
             .await?
         {
@@ -98,6 +107,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         acknowledge_unpublished_work: bool,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         self.suspend_session_controlled_with_manager(
             session_id,
@@ -106,6 +116,7 @@ impl Controller {
             None,
             SourceTargetDisposition::Destroy,
             acknowledge_unpublished_work,
+            before_close,
         )
         .await
     }
@@ -128,10 +139,12 @@ impl Controller {
             Some((operation, preparation)),
             disposition,
             true,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn suspend_session_controlled_with_manager(
         &mut self,
         session_id: &str,
@@ -143,6 +156,7 @@ impl Controller {
         )>,
         disposition: SourceTargetDisposition,
         acknowledge_unpublished_work: bool,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -252,6 +266,33 @@ impl Controller {
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
         }
+        if let Some(before_close) = before_close
+            && let Err(error) = before_close.await
+        {
+            // The session stays live: dropping the barrier resumes dispatch,
+            // and the record keeps the checkpoint it just verified.
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cancel:#}"),
+                    "could not release the checkpoint barrier of a close that did not proceed"
+                );
+            }
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = if previous.state == SessionState::Closing {
+                SessionState::Running
+            } else {
+                previous.state
+            };
+            record.last_error = Some(format!("{error:#}"));
+            record.updated_at = now();
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "restore a session whose close did not proceed past its checkpoint",
+            )?;
+            return Err(error);
+        }
         prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
         // A stopping session will not checkpoint again, so this is its last
         // chance to release what its checkpoint now covers.
@@ -329,6 +370,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let (state, verified) = {
             let session = self
@@ -347,6 +389,9 @@ impl Controller {
         };
         if state == SessionState::Destroying {
             let verified = verified.context("destroying session has no verified checkpoint")?;
+            if let Some(before_close) = before_close {
+                before_close.await?;
+            }
             return self.destroy_after_verified_checkpoint(session_id, &verified, executor);
         }
         ensure!(
@@ -374,12 +419,17 @@ impl Controller {
                         None,
                         SourceTargetDisposition::Destroy,
                         true,
+                        before_close,
                     )
                     .await;
             }
         }
         lease.release();
         let verified = verified.context("closed relay has no verified checkpoint")?;
+        // The relay is sealed already, so this close can only go forward.
+        if let Some(before_close) = before_close {
+            before_close.await?;
+        }
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
     }
 

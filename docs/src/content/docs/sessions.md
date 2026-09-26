@@ -172,19 +172,21 @@ Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and veri
 
 Select a live session, press `prefix+:`, and choose **Suspend session**. Suspending a session:
 
-1. Stops its Mjolnir sub-agents, if it has any (see below).
-2. Freezes dispatch at a safe boundary.
-3. Captures and verifies a current recovery archive.
+1. Freezes dispatch at a safe boundary.
+2. Captures and verifies a current recovery archive.
+3. Stops its Mjolnir sub-agents, if it has any (see below).
 4. Terminates the owning process group or remote worker.
 5. Retires the session's managed clone, container, or instance only after the worker has stopped.
 6. Leaves the session record and verified archive available to resume.
 
 If checkpoint creation or verification fails, suspension refuses teardown and
-reports the failure. Retry suspension after resolving it. When a recovery copy
+reports the failure. The session and its sub-agents keep running. Retry
+suspension after resolving it. When a recovery copy
 exists, the terminal also offers **Discard changes since checkpoint…**. A second
 confirmation shows the copy's timestamp and explains that newer work may be lost.
 The daemon verifies the selected recovery copy again before releasing the environment.
-Discarding changes stops the session's sub-agents the same way.
+Discarding changes stops the session's sub-agents the same way, just before
+the session goes back to that copy.
 
 ### Sub-agents and suspend
 
@@ -202,6 +204,8 @@ itself:
   viewer ask for confirmation first when they can see a sub-agent still at
   work. `mj suspend` prints the warning when the suspend is accepted, and the
   API returns it in its answer.
+- The sub-agents stop only after the session's recovery copy is verified, so
+  a suspend that fails before that point leaves them running.
 - A sub-agent that cannot be stopped normally, for example because its target
   cannot be reached, is removed anyway. It never makes the session's suspend
   fail.
@@ -211,7 +215,10 @@ the suspend stopped, and its agent is told on its first prompt: which
 sub-agents were stopped, what each was working on, whether each had handed
 back, and that the work not handed back was lost. The agent can start them
 again with `spawn` if it still needs that work. The agent is told once; if the
-session is suspended again before its next prompt, it is not told again.
+session is suspended again before its next prompt, it is not told again. If a
+suspend or a discard fails after it stopped sub-agents and the session is
+still running, the session is told at once in the same way, without waiting
+for a resume.
 
 **Destroy session…** is a separate irreversible action in both terminal and web
 interfaces. It removes the environment, managed checkout, and recovery archive,

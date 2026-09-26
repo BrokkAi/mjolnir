@@ -60,7 +60,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     }
 }
 
-pub(super) fn write_checkpoint_gate_archive(
+pub(crate) fn write_checkpoint_gate_archive(
     directory: &Path,
     session_id: &str,
     event_frontier: u64,

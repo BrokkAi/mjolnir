@@ -129,15 +129,34 @@ impl RuntimeState {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
     ) -> Result<()> {
-        // The parent goes back to an older recovery copy, and its sub-agents
-        // stop exactly as they do when it is suspended.
-        self.stop_subagents_for_suspend(&session_id).await?;
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
                 operation_session_id,
                 LifecycleKind::ForceStop,
                 move |state, session_id, cancelled| async move {
+                    // Refuse before anything stops when the copy changed.
+                    blocking({
+                        let session_id = session_id.clone();
+                        let checkpoint = checkpoint.clone();
+                        move || {
+                            ensure!(
+                                Controller::load()?
+                                    .state
+                                    .sessions
+                                    .get(&session_id)
+                                    .and_then(|s| s.checkpoint.as_ref())
+                                    == Some(&checkpoint),
+                                "the recovery copy changed; review it before discarding changes"
+                            );
+                            Ok(())
+                        }
+                    })
+                    .await?;
+                    // The parent is about to go back to an older recovery
+                    // copy, and its sub-agents stop exactly as they do when
+                    // it is suspended.
+                    state.stop_subagents_for_suspend(&session_id).await?;
                     blocking(move || {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
@@ -164,8 +183,12 @@ impl RuntimeState {
                     .await
                 },
             )
-            .await?;
-        let _ = result; // The lifecycle supervisor owns the cleanup handoff.
+            .await;
+        if result.is_err() {
+            self.tell_live_parent_about_stopped_subagents(&session_id)
+                .await;
+        }
+        let _ = result?; // The lifecycle supervisor owns the cleanup handoff.
         Ok(())
     }
 

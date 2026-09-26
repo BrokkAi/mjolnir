@@ -507,9 +507,10 @@ with no content; suspend answers with the body below. Acceptance is not
 completion: inspect the session's lifecycle and error, or use `mj wait` for
 suspension. An idle conversation alone says nothing about lifecycle completion.
 
-Suspend saves a verified recovery copy before releasing the environment. It
-stops the session's active Mjolnir sub-agents first, without a recovery copy of
-their own, and suspends the session alone. A sub-agent that has not handed back
+Suspend saves a verified recovery copy before releasing the environment. Once
+that copy is verified, it stops the session's active Mjolnir sub-agents,
+without a recovery copy of their own, and suspends the session alone. A
+suspend that fails before then leaves the sub-agents running. A sub-agent that has not handed back
 its report loses the work it has not reported. The answer says how many
 sub-agents the suspend stops and warns about those:
 

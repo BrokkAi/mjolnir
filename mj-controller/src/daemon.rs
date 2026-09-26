@@ -30,8 +30,8 @@ use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
 use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
-    BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard, SessionLaunchOptions,
-    SessionResumeOptions,
+    BeforeClose, BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard,
+    SessionLaunchOptions, SessionResumeOptions,
 };
 use crate::review_host::TurnReviewHost;
 use crate::session_manager::{
