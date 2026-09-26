@@ -334,6 +334,14 @@ impl ReviewerLaunchConfig {
 }
 
 impl WorkerLaunchConfig {
+    /// Downloads must finish before startup or an upgrade's idle reservation.
+    pub fn requires_harness_preparation(&self) -> bool {
+        self.harness_runtime == HarnessRuntimePolicy::Managed
+            || crate::harness_runtime::npm_bridge(self.harness).is_some_and(|bridge| {
+                bridge.matches_launcher(&self.bridge_command, &self.bridge_args)
+            })
+    }
+
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
             .with_context(|| format!("read worker launch config {}", path.display()))?;

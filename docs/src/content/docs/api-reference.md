@@ -248,9 +248,13 @@ The example abbreviates the components. Treat `id` as an opaque comparison ID.
 It covers the harness, target OS/architecture, provenance, inspected component
 versions/content digests, and the ACP-reported agent name/version. Managed bare
 workers report `managed_installation`: the leased installation manifest and
-contents participate. Container/ambient workers report `target_installation`:
-Mjolnir inspects the selected bridge and provider on that target, without using
-the controller's release pins. For npm runtimes, digests include the containing
+contents participate. Container/ambient workers report `target_installation`
+when they use a preinstalled bridge and provider. If a container needs Mjolnir's
+pinned Codex/Claude installation, it reports `managed_installation` instead.
+Selection finishes before inspection and ACP startup, so the identity describes
+the bridge actually executed, including for launch configurations saved by older
+releases. Mjolnir inspects the packages on the target; version pins alone never
+establish identity. For npm runtimes, digests include the containing
 `node_modules` tree so hoisted provider binaries and dependencies participate;
 changing other packages in that tree can also change the identity. Codex requires
 an explicit `CODEX_PATH`; Claude includes its provider SDK. Muse includes its

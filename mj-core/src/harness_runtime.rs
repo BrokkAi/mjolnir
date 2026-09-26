@@ -1,4 +1,4 @@
-//! Exact harness versions used by Mjolnir-managed bare workers.
+//! Exact harness versions used by Mjolnir-managed installations.
 //!
 //! Installation and process ownership live in `brokk-mj-worker`; this module
 //! contains only shared, inert metadata so the controller, worker, container
@@ -14,6 +14,80 @@ pub const KIMI_VERSION: &str = "2.0.2";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.5.0";
 pub const MUSE_VERSION: &str = "1.3.0-R3401.1";
+
+/// The built-in npm launcher, selected on the worker before runtime inspection.
+#[derive(Clone, Copy)]
+pub struct NpmBridge {
+    pub command: &'static str,
+    pub package: &'static str,
+    pub version: &'static str,
+}
+
+pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
+    match kind {
+        HarnessKind::Codex => Some(NpmBridge {
+            command: "codex-acp",
+            package: CODEX_ACP_PACKAGE,
+            version: CODEX_ACP_VERSION,
+        }),
+        HarnessKind::Claude => Some(NpmBridge {
+            command: "claude-agent-acp",
+            package: "@agentclientprotocol/claude-agent-acp",
+            version: CLAUDE_ACP_VERSION,
+        }),
+        _ => None,
+    }
+}
+
+impl NpmBridge {
+    pub fn matches_launcher(&self, command: &std::path::Path, args: &[String]) -> bool {
+        (command == std::path::Path::new(self.command) && args.is_empty())
+            || self.is_legacy_launcher(command, args)
+    }
+
+    /// Keep launch descriptions usable by older workers, including reviewers on
+    /// a busy worker that cannot upgrade yet. New workers resolve this before ACP.
+    pub fn bootstrap_script(&self) -> String {
+        self.script_for_version(self.version)
+    }
+
+    /// Recognize persisted launch descriptions from before worker-side selection.
+    /// Match the entire generated script; arbitrary shell wrappers stay custom.
+    pub fn is_legacy_launcher(&self, command: &std::path::Path, args: &[String]) -> bool {
+        if command != std::path::Path::new("sh") || args.len() != 2 || args[0] != "-c" {
+            return false;
+        }
+        let Some((_, version)) = args[1].rsplit_once(&format!("exec npx -y {}@", self.package))
+        else {
+            return false;
+        };
+        if version.is_empty()
+            || !version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+        {
+            return false;
+        }
+        args[1] == self.script_for_version(version)
+    }
+
+    fn script_for_version(&self, version: &str) -> String {
+        let check = if self.package == CODEX_ACP_PACKAGE {
+            format!(
+                " && [ \"$(codex-acp --version 2>/dev/null)\" = \"{} {version}\" ]",
+                self.package
+            )
+        } else {
+            String::new()
+        };
+        let node_check = "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi";
+        format!(
+            "if command -v {command} >/dev/null 2>&1{check}; then exec {command}; fi; {node_check}; exec npx -y {package}@{version}",
+            command = self.command,
+            package = self.package,
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HarnessPin {

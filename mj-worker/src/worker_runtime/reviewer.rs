@@ -795,29 +795,22 @@ impl ReviewerRole {
         config
             .harness
             .configure_execution_environment(config.execution_policy, &mut environment)?;
-        let managed_harness = super::harness::resolve(
-            self.placement.harness_runtime,
+        let prepared_harness = super::prepare_harness_launch(
             config.harness,
+            self.placement.harness_runtime,
             config.execution_policy,
-            &environment,
+            AcpSupervisorSpec {
+                command: config.bridge_command.clone(),
+                args: config.bridge_args.clone(),
+                environment,
+                excluded_environment: config.excluded_environment.clone(),
+                cwd: self.placement.cwd.clone(),
+                harness_lease: None,
+            },
         )
         .await
-        .with_context(|| format!("prepare managed reviewer {}", config.harness.display_name()))?;
-        if let Some(managed) = &managed_harness {
-            environment.extend(managed.environment.clone());
-        }
-
-        let mut session_environment =
-            mj_core::login_environment::with_overrides(&environment).await?;
-        super::exclude_from_harness_environment(
-            config.harness,
-            &config.excluded_environment,
-            &session_environment,
-            &mut environment,
-        );
-        for name in &config.excluded_environment {
-            session_environment.remove(name);
-        }
+        .with_context(|| format!("prepare reviewer {}", config.harness.display_name()))?;
+        let session_environment = prepared_harness.environment.clone();
         // A Codex reviewer needs its recorded model at launch for the same
         // reason the primary session does. The ACP runtime further down pins
         // it into the spec below before every bridge start; this value is what
@@ -829,23 +822,7 @@ impl ReviewerRole {
             acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
         };
         let supervisor_path = root.join("acp-supervisor.json");
-        AcpSupervisorSpec {
-            command: managed_harness.as_ref().map_or_else(
-                || config.bridge_command.clone(),
-                |managed| managed.command.clone(),
-            ),
-            args: managed_harness.as_ref().map_or_else(
-                || config.bridge_args.clone(),
-                |managed| managed.args.clone(),
-            ),
-            environment,
-            excluded_environment: config.excluded_environment.clone(),
-            cwd: self.placement.cwd.clone(),
-            harness_lease: managed_harness
-                .as_ref()
-                .map(|managed| managed.lease_path.clone()),
-        }
-        .write_spec(&supervisor_path)?;
+        prepared_harness.spec.write_spec(&supervisor_path)?;
 
         // Captured before the harness starts, so a later scan sees only what
         // this launch produced and never an earlier one's events.
