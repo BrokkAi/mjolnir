@@ -182,3 +182,24 @@ disk-backed root inside `target` invalidated two non-Git-directory fixtures
 because Git discovered the enclosing checkout. That environmental run is
 retained as `target/release-validation/cargo-test-invalid-temp-root.log`.
 Passing logs are `cargo-test.log` and `clippy.log` in the same directory.
+
+The prepared 2.22.0 commit's remote checks exposed two previously masked
+test defects. Windows progressed past the worker helper, then found a shell
+fixture test with no Unix guard; that guard was duplicated on the preceding
+test. Move the duplicate to the intended shell test. The remote crash matrix
+passed all six durability hooks, then its topology script killed the second
+bridge during ACP initialization because a PID and restart marker do not
+prove readiness. Wait for each generation's reported `acp_ready` and native
+session before injecting the next death. The corrected topology script passes
+all five generations and the supervisor lease check locally; its evidence is
+`target/reliability-artifacts/worker-topology-fixed`. Remote browser/TUI
+convergence passed on the prepared commit. These corrections change test
+compilation and timing only, not application behavior.
+
+Follow-up validation passed: full `cargo test`, all-target Clippy with denied
+warnings, Rust formatting, shell syntax, and the isolated `active-stop`
+scenario (`leaks=0`). Logs are `cargo-test-windows-followup.log`,
+`clippy-windows-followup.log`, `topology-fixed.log`, and `active-stop-fixed.log`
+in `target/release-validation`. The active-stop run used matching 2.22.0
+host binaries after its initial setup correctly rejected an older 2.21.0
+portable worker; that setup failure made no application assertion.

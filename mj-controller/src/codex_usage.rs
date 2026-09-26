@@ -773,7 +773,6 @@ mod tests {
         assert!(client.is_none());
     }
 
-    #[cfg(unix)]
     /// The quota probe reads a ChatGPT login's rate limits (#1160). An API key
     /// in the profile's environment, or in the daemon's own, must not reach
     /// the Codex it starts.
@@ -802,6 +801,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_uses_one_initialized_client_for_repeated_queries() {
         let temp = tempfile::tempdir().expect("tempdir");

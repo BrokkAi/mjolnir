@@ -227,6 +227,25 @@ print(sum(event["observation"].get("type") == "session_restarted" for event in e
 '
 }
 
+wait_for_ready_session() {
+    # A new bridge PID and restart marker precede its ACP handshake. Kill a
+    # usable generation, not a process still initializing its native session.
+    for _ in $(seq 1 25); do
+        if attach_response | python3 -c '
+import json, sys
+state = json.loads(sys.stdin.readline())["payload"]["data"]["state"]
+sys.exit(0 if state.get("acp_ready") is True and state.get("native_session_id") else 1)
+'; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "worker did not finish the ACP handshake" >&2
+    tail -n 80 "$worker_log" >&2
+    tail -n 80 "$chaos_root/bridge.log" >&2 || true
+    return 1
+}
+
 wait_for_markers() {
     local expected=$1 actual=
     for _ in $(seq 1 25); do
@@ -276,6 +295,7 @@ bridge_pid=$(wait_for_file_pid "$chaos_root/bridge.pid" bridge)
 memory_pid=$(wait_for_file_pid "$chaos_root/memory.pid" memory)
 provider_pid=$(wait_for_file_pid "$chaos_root/provider.pid" provider)
 supervisor=$(supervisor_pid)
+wait_for_ready_session
 echo "chaos: topology worker=$worker_pid supervisor=$supervisor bridge=$bridge_pid memory=$memory_pid provider=$provider_pid"
 assert_markers 0
 
@@ -301,9 +321,11 @@ assert_markers 0
 kill_exact acp-bridge "$bridge_pid" TERM 1
 wait_for_markers 1
 bridge_pid=$(wait_for_file_pid "$chaos_root/bridge.pid" bridge "$bridge_pid")
+wait_for_ready_session
 kill_exact acp-bridge "$bridge_pid" KILL 2
 wait_for_markers 2
 bridge_pid=$(wait_for_file_pid "$chaos_root/bridge.pid" bridge "$bridge_pid")
+wait_for_ready_session
 
 # Let the resumed session clear the intentional rapid-death fuse before
 # exercising the independent supervisor boundary.
@@ -312,6 +334,7 @@ supervisor=$(supervisor_pid)
 kill_exact acp-supervisor "$supervisor" KILL 3
 wait_for_markers 3
 wait_for_file_pid "$chaos_root/bridge.pid" bridge "$bridge_pid" >/dev/null
+wait_for_ready_session
 
 kill_exact worker "$worker_pid" TERM 4
 wait "$worker_pid" 2>/dev/null || true
@@ -319,6 +342,7 @@ old_worker=$worker_pid
 start_worker
 [[ $worker_pid != "$old_worker" ]]
 wait_for_markers 4
+wait_for_ready_session
 
 kill_exact worker "$worker_pid" KILL 5
 wait "$worker_pid" 2>/dev/null || true
@@ -326,6 +350,7 @@ old_worker=$worker_pid
 start_worker
 [[ $worker_pid != "$old_worker" ]]
 wait_for_markers 5
+wait_for_ready_session
 
 # A managed harness version must stay leased by the ACP supervisor after its
 # worker-side lease disappears. Otherwise a quiet upgrade can garbage-collect
