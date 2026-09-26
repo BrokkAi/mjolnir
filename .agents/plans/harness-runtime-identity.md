@@ -15,7 +15,13 @@ A scheduler can create a session without a task prompt, read the runtime receipt
 - [x] (2026-09-26) Enforce startup and prompt admission constraints and add isolated regressions.
 - [x] (2026-09-26) Documented the HTTP/ACP contract and passed 10 focused tests: 3 controller, 6 worker, and 1 ACP consumer.
 - [x] (2026-09-26) Opened and reviewed PR #1165; PR #1164 holds the independent checkout change.
-- [ ] Merge both after CI validation and publish the validated v2.23.0 candidate.
+- [x] (2026-09-26 12:25Z) PR #1164 merged after every CI check passed.
+- [x] (2026-09-26) PR #1165 merged as cbea6af52889e1c98f7f76aa46d3eaaf2a5fb298 after all 15 checks passed; issue #1163 is closed.
+- [x] (2026-09-26) Tagged the fully validated b881a87bedf6d9646a509eb5777302fe1658c8e9 as v2.23.0 and integrated the release version into master.
+- [x] (2026-09-26) Release workflow 36244531873 published all six GitHub release assets and notices.
+- [x] (2026-09-26) crates.io workflow 36246727151 completed publication of all workspace crates.
+- [x] (2026-09-26) Homebrew formula commit 9085e89099c345477a6bda34aad6659e89c3630b passed Linux and macOS installation checks in workflow 36246816030.
+- [x] (2026-09-26) npm workflow 36246732272 published all platform packages and the wrapper; the registry reports 2.23.0 on latest.
 
 ## Surprises & Discoveries
 
@@ -46,7 +52,7 @@ The worker journal already records every ACP initialization, but the controller 
 
 ## Outcomes & Retrospective
 
-The target inspection, durable receipt, expected selection, migration, HTTP lookup/events, and ACP flag are implemented. All 10 focused migration/API/ACP/installation/admission/pre-load tests passed; receipt persistence is verified after reopening the database. PR #1164 is independently running CI for exact checkout. Broad tests and Clippy will run in CI.
+The target inspection, durable receipt, expected selection, migration, HTTP lookup/events, and ACP flag are implemented. All 10 focused migration/API/ACP/installation/admission/pre-load tests passed; receipt persistence is verified after reopening the database. PR #1164 and PR #1165 both passed all CI checks, were reviewed, and merged; issues #1162 and #1163 are closed. The exact v2.23.0 commit passed CI 36241829474, including broad dev-profile tests, Clippy, and all platform jobs. Release workflow 36244531873 published that validated commit and all six release assets; crates.io publication and Homebrew installation checks passed. npm workflow 36246732272 also completed successfully and the registry reports 2.23.0 on latest. The two requested issues and the release are complete; no other issue work was undertaken.
 
 ## Context and Orientation
 
@@ -100,3 +106,9 @@ Validation 2026-09-26: `cargo test -p brokk-mj-controller -p brokk-mj-worker -p 
 CI findings 2026-09-26: added the new optional runtime field to the chat fixture and gave the two launch-spec tests disposable executable bridges (both targeted regressions passed). The release candidate exposed a pre-existing terminal fixture race: its readiness probe could briefly take controller.lock and deny the starting daemon admission. Wait for published daemon metadata/PID instead; keep production sole-writer admission unchanged. The existing isolated pending-session PTY regression validates this fix.
 
 Validation 2026-09-26: the existing pending-session terminal regression passed with the lock-free metadata/PID startup observation (1 passed in 1.81s). This release-blocking race fix changes test scaffolding only; production admission is untouched.
+
+Release progress 2026-09-26: `cargo release minor --workspace --execute --no-confirm` prepared version 2.23.0 in /home/ryan/mj-release-2.23.0 on ci/release-2.23.0. The candidate includes the terminal fixture race fix; candidate b881a87bedf6d9646a509eb5777302fe1658c8e9 passed every job in CI 36241829474. Publication waited for PR #1165 to merge and reused this exact candidate's passing validation. PR #1165 was retargeted to master before merging.
+
+Merge and release update 2026-09-26: PR #1165 passed CI 36241828291 and merged. Release candidate b881a87bedf6d9646a509eb5777302fe1658c8e9 passed CI 36241829474; v2.23.0 points to that exact commit. Workflow 36244531873 published it. Master includes the version update as adf1304e; concurrent documentation updates were incorporated by fast-forward before the version merge.
+
+Completion 2026-09-26: https://github.com/BrokkAi/mjolnir/releases/tag/v2.23.0 is published with six assets and release notes linking both PRs. GitHub Release 36244531873, crates.io 36246727151, npm 36246732272, and Homebrew 36246816030 all succeeded. The public crates.io index exposes brokk-mjolnir 2.23.0 (not yanked), and npm latest resolves to 2.23.0. Homebrew commit 9085e89099c345477a6bda34aad6659e89c3630b updates only the Mjolnir formula and passed installation checks on Linux and macOS. Subsequent concurrent master changes are outside the tagged release; its exact validated commit remains b881a87bedf6d9646a509eb5777302fe1658c8e9.

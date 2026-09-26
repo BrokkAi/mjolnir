@@ -13,7 +13,7 @@ Issue #1162 lets an API or ACP scheduler create an isolated bundle checkout at a
 - [x] (2026-09-26) Implemented strict checkout preparation and interruption recovery.
 - [x] (2026-09-26) Added disposable repository and fake-service behavior regressions and public documentation.
 - [x] (2026-09-26) Nine focused controller/API tests, all-target Clippy, and formatting passed.
-- [ ] Let CI run broad validation per user instruction; review the PR and merge when green.
+- [x] (2026-09-26 12:25Z) Reviewed and merged PR #1164 after CI run 36239938784 passed every job; issue #1162 is closed.
 
 ## Surprises & Discoveries
 
@@ -33,7 +33,7 @@ Bundle initialization currently applies `launch_base` and `launch_branch` to eve
 
 ## Outcomes & Retrospective
 
-Implementation is complete. Nine focused controller/API tests passed; Clippy passed for all targets. The user requested that CI handle broad validation, so the local full Cargo suite was stopped during compilation. CI will run the full suite including migration and ACP regressions. PR review and CI remain pending.
+Implementation is complete. Nine focused controller/API tests passed; Clippy passed for all targets. The user requested that CI handle broad validation, so the local full Cargo suite was stopped during compilation. CI run 36239938784 passed the full suite, Clippy, Linux/Windows/macOS, desktop, portable-worker, web, and reliability gates. Reviewed PR #1164 merged as cd3bffd1dc5089eb498699885b468d429b7ad67d; issue #1162 is closed.
 
 ## Context and Orientation
 
@@ -80,3 +80,5 @@ Initial plan recorded 2026-09-26 before implementation.
 Implementation update 2026-09-26: preparation markers also retain the original HEAD and branch, so interrupted retries cannot reset newly committed work. Public receipts expose immutable intent, with readiness distinguishing verified preparation.
 
 Validation update 2026-09-26: the user explicitly delegated the big validation run to CI. Stopped the local full-suite build without deleting build files; subsequent broad validation belongs to CI.
+
+Completion update 2026-09-26: CI exposed an old parked-state migration assertion fixed to require its minimum supported floor without assuming no later migration exists. All final checks passed before merge.
