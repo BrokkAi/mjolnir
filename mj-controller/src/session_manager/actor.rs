@@ -12,6 +12,7 @@ fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
         SessionState::Error
             | SessionState::Lost
             | SessionState::Stopped
+            | SessionState::Parked
             | SessionState::DestroyedWithDataLoss
     )
 }
@@ -229,6 +230,11 @@ pub(super) async fn run_session_actor(
                                 ?state,
                                 "session reached a terminal state; retiring its relay actor"
                             );
+                            // A parked sub-agent stopped its worker on
+                            // purpose; it is not unreachable.
+                            if state == mj_core::state::SessionState::Parked {
+                                break;
+                            }
                             let snapshot = view_tx.borrow().snapshot.clone();
                             publish_view(
                                 &target.session_id,
@@ -900,6 +906,22 @@ pub(super) async fn run_session_actor(
                 session_id = %target.session_id,
                 operation = "submit",
                 "deferred submit shutdown receiver was already closed"
+            );
+        }
+    }
+    // A submission still in the command queue never reached the relay. Say
+    // so, instead of dropping its reply, which its caller would have to read
+    // as possibly delivered: a sub-agent's `send_input` resends a prompt only
+    // when it knows the first one was not delivered.
+    commands.close();
+    while let Ok(command) = commands.try_recv() {
+        if let ActorCommand::Submit { reply, .. } = command
+            && reply.send(Err("session manager stopped".into())).is_err()
+        {
+            tracing::debug!(
+                session_id = %target.session_id,
+                operation = "submit",
+                "queued submit shutdown receiver was already closed"
             );
         }
     }

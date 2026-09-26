@@ -36,6 +36,13 @@ pub enum SessionState {
     /// was renamed, so the alias keeps those records loading.
     #[serde(alias = "archived")]
     Stopped,
+    /// A Mjolnir sub-agent whose turn ended and whose parent was told: its
+    /// worker process tree is stopped so it holds no processes in the
+    /// parent's container, while its record, relation, target locator and
+    /// worker root (relay journal, native session id) stay. Only a parent's
+    /// `send_input` starts it again. Nothing that connects to, reconnects,
+    /// recovers or upgrades live sessions acts on it.
+    Parked,
     Lost,
     Error,
     DestroyedWithDataLoss,
@@ -698,6 +705,7 @@ impl SessionState {
             Self::Closing => "closing",
             Self::Destroying => "destroying",
             Self::Stopped => "stopped",
+            Self::Parked => "parked",
             Self::Lost => "lost",
             Self::Error => "error",
             Self::DestroyedWithDataLoss => "destroyed-with-data-loss",
@@ -715,6 +723,7 @@ impl SessionState {
             "closing" => Self::Closing,
             "destroying" => Self::Destroying,
             "stopped" | "archived" => Self::Stopped,
+            "parked" => Self::Parked,
             "lost" => Self::Lost,
             "error" => Self::Error,
             "destroyed-with-data-loss" => Self::DestroyedWithDataLoss,
@@ -735,7 +744,10 @@ impl SessionState {
 
     /// True while the session still belongs on the dashboard. `Closing` and
     /// `Checkpointing` stay active on purpose: a stop that has not produced a
-    /// verified checkpoint must not make its row disappear.
+    /// verified checkpoint must not make its row disappear. A `Parked`
+    /// sub-agent is active too: it is still its parent's child, still listed,
+    /// and its parent's suspend, destroy or workspace close must still end
+    /// it. Code that needs a live worker must ask [`Self::has_live_worker`].
     pub const fn is_active(self) -> bool {
         matches!(
             self,
@@ -745,7 +757,23 @@ impl SessionState {
                 | Self::Checkpointing
                 | Self::Closing
                 | Self::Destroying
+                | Self::Parked
                 | Self::Error
+        )
+    }
+
+    /// True while the session may have a worker process tree on its target,
+    /// including one still being started or torn down: the states in which a
+    /// sub-agent counts against its parent's cap.
+    pub const fn has_live_worker(self) -> bool {
+        matches!(
+            self,
+            Self::Provisioning
+                | Self::Running
+                | Self::Disconnected
+                | Self::Checkpointing
+                | Self::Closing
+                | Self::Destroying
         )
     }
 }

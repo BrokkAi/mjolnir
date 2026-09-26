@@ -866,9 +866,11 @@ impl ViewerLifecycleCategory {
     pub(super) const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
-            SessionState::Running | SessionState::Disconnected | SessionState::Checkpointing => {
-                Self::Live
-            }
+            // A parked sub-agent stays on the dashboard with its parent.
+            SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+            | SessionState::Parked => Self::Live,
             SessionState::Closing | SessionState::Destroying => Self::Suspending,
             SessionState::Stopped => Self::Suspended,
             SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {

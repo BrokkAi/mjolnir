@@ -60,7 +60,9 @@ const CONTAINER_START_ADMISSION: usize = 2;
 /// Keyed by the container the children share. A bare target has no gate: a
 /// child there is an ordinary process on a whole machine, and twenty
 /// sequential and four concurrent starts measured 2.8 seconds each.
-fn container_start_gate(locator: &targets::TargetLocator) -> Option<Arc<tokio::sync::Semaphore>> {
+pub(super) fn container_start_gate(
+    locator: &targets::TargetLocator,
+) -> Option<Arc<tokio::sync::Semaphore>> {
     static GATES: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>> = OnceLock::new();
     let container = match locator {
         targets::TargetLocator::LocalPodman { container_id, .. }
@@ -205,9 +207,9 @@ impl Controller {
             Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
             Err(error) => {
                 // Without placement there is no worker to stop.
-                if let Some((backend, worker_root)) = placement
+                if let Some((backend, worker_root)) = &placement
                     && let Err(stop_error) =
-                        super::worker_binary::stop_worker(executor, &backend, &worker_root)
+                        super::worker_binary::stop_worker(executor, backend, worker_root)
                 {
                     tracing::warn!(
                         session_id,
@@ -227,6 +229,14 @@ impl Controller {
                     .context("failed sub-agent session disappeared")?;
                 record.state = SessionState::Error;
                 record.updated_at = super::now();
+                // A container out of process slots is something the parent
+                // can fix, so its `wait` reads that, not the raw failure.
+                let error = match &placement {
+                    Some((backend, _)) => {
+                        super::subagent_park::explain_process_exhaustion(error, backend, session_id)
+                    }
+                    None => error,
+                };
                 record.last_error = Some(format!("sub-agent startup failed: {error:#}"));
                 crate::database::save_lifecycle_session(record)?;
                 Err(error)

@@ -873,7 +873,12 @@ impl Controller {
         let mut deferred = false;
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, session, &self.config)?;
-            if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
+            // A sub-agent borrows its parent's target: only its own worker and
+            // private state go, as they do when a live child's close finishes.
+            // A parked child reaches this, with its worker already stopped.
+            if self.state.subagents.contains_key(session_id) {
+                targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
+            } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                 plan.execute(executor)?;
                 deferred = true;
             } else {
@@ -1079,6 +1084,10 @@ impl Controller {
 pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
     match session.state {
         SessionState::Provisioning => true,
+        // A parked sub-agent's worker is stopped. A child is never resumed on
+        // its own, so its close keeps no archive; its conversation and report
+        // are already in the store.
+        SessionState::Parked => true,
         SessionState::Closing
         | SessionState::Destroying
         | SessionState::Error

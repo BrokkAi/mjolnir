@@ -640,6 +640,15 @@ pub async fn run_server(
                                         move || crate::database::mark_subagent_turn_noticed(&child_id, turn)
                                     })
                                     .await??;
+                                    // The parent has been told this turn
+                                    // ended and nothing else is queued, so
+                                    // the child gives its processes back until
+                                    // the parent sends it more input (#1161).
+                                    // The park checks again, under the
+                                    // child's lifecycle, that it is idle.
+                                    if !reminded && in_flight.is_empty() {
+                                        backend.park_subagent(&child_id).await;
+                                    }
                                     anyhow::Ok(())
                                 }
                                 .await;

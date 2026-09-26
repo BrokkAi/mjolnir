@@ -1078,6 +1078,9 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (pendingLifecycleActions.has(`suspend:${session.id}`)) return 'Suspending…';
   if (session.launch_error) return session.launch_error;
   if (session.configuration_issue) return 'Needs configuration repair';
+  // A sub-agent whose turn ended: idle, with its processes stopped until its
+  // parent sends it more input.
+  if (session.state === 'parked') return 'Parked';
   if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);

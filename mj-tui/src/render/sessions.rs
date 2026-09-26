@@ -553,6 +553,10 @@ pub(crate) fn session_activity_line(
         )
     } else if facts.state == SessionState::Error {
         "Error".to_owned()
+    } else if facts.state == SessionState::Parked {
+        // A sub-agent whose turn ended: idle, with its processes stopped
+        // until its parent sends it more input.
+        "Parked".to_owned()
     } else if session.state == SessionState::Provisioning {
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         format!(
@@ -787,6 +791,7 @@ impl SessionRowFacts<'_> {
             SessionState::Checkpointing => glyphs.checkpointing,
             SessionState::Closing => glyphs.stopping,
             SessionState::Destroying => glyphs.destroying,
+            SessionState::Parked => glyphs.idle,
             SessionState::Lost
             | SessionState::Error
             | SessionState::DestroyedWithDataLoss

@@ -175,6 +175,34 @@ fn recoverable_error_session_stays_out_of_live_target_pollers() {
     assert!(credential_sync_targets(&recoverable_error).is_empty());
 }
 
+/// #1161: a parked sub-agent's worker was stopped on purpose. Nothing that
+/// dials, samples or credentials live workers may reach it, and the startup
+/// repair of interrupted lifecycles leaves it parked.
+#[test]
+fn a_parked_sub_agent_stays_out_of_live_target_pollers_and_startup_repair() {
+    let parked = podman_controller(SessionState::Parked);
+    assert!(
+        parked
+            .state
+            .sessions
+            .values()
+            .all(|session| session.target.is_some() && session.state.is_active()),
+        "the parked session keeps its target and its place on the dashboard"
+    );
+    assert!(
+        !parked
+            .state
+            .sessions
+            .values()
+            .any(session_target_is_pollable)
+    );
+    assert!(dashboard_worker_targets(&parked).is_empty());
+    assert!(dashboard_resource_targets(&parked).is_empty());
+    assert!(credential_sync_targets(&parked).is_empty());
+    assert!(interrupted_suspend_session_ids(&parked).is_empty());
+    assert!(unowned_interrupted_lifecycles(&parked, &Default::default()).is_empty());
+}
+
 /// R7-3: a bare target has no container to sample, so the resource poller
 /// has nothing to ask it. It must skip the session without a warning: the
 /// dashboard rebuilds these targets on every poll, and each bare session

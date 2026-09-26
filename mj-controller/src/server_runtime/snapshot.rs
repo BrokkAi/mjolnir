@@ -601,12 +601,20 @@ pub(super) fn viewer_snapshot(
             mj_core::relay::RelayExecutionState::Closing => crate::server::ViewerChatPhase::Closing,
             mj_core::relay::RelayExecutionState::Closed => crate::server::ViewerChatPhase::Closed,
         };
+        // A parked sub-agent is idle: its turn ended and its worker is
+        // stopped until its parent sends it more input.
         session.is_idle = activity_state.is_idle()
             && controller
                 .state
                 .sessions
                 .get(&session.id)
-                .is_some_and(|record| record.state == mj_core::state::SessionState::Running)
+                .is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        mj_core::state::SessionState::Running
+                            | mj_core::state::SessionState::Parked
+                    )
+                })
             && session.operation.is_none();
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {

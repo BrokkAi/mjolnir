@@ -220,6 +220,20 @@ pub(super) fn clear_stopped_subagents_from(
 
 /// Everything recorded about one child's report. A child with nothing
 /// recorded yet reads as the empty report.
+/// One session's stored lifecycle state, or `None` when the store holds no
+/// such session.
+pub fn load_session_state(session_id: &str) -> Result<Option<SessionState>> {
+    let connection = open_reader(&database_path())?;
+    let stored = connection
+        .query_row(
+            "SELECT state FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored.as_deref().map(stored_session_state))
+}
+
 pub fn load_subagent_report(child_session_id: &str) -> Result<mj_core::subagent::SubagentReport> {
     load_subagent_report_from(&database_path(), child_session_id)
 }

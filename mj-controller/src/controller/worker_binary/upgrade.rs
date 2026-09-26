@@ -451,6 +451,23 @@ pub(crate) fn refresh_target_worker_binary_if_stale(
     .map(|_| ())
 }
 
+/// Copy the worker binary this controller would install for `locator` over
+/// the session's installed one, only when their digests differ. A parked
+/// sub-agent calls this before its worker starts again, so a daemon that was
+/// upgraded while the child was parked starts it on the current build.
+pub(in crate::controller) fn refresh_installed_worker_binary(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+) -> Result<()> {
+    let Some(WorkerBinaryRefresh::Deferred(refresh)) =
+        worker_binary_refresh_plan(locator, session_id)?
+    else {
+        anyhow::bail!("the worker binary refresh plan was not deferred");
+    };
+    refresh_target_worker_binary_if_stale(executor, &refresh)
+}
+
 /// Copy `source` over the installed worker only when the installed
 /// digest differs from `source`'s. Returns whether a copy ran. Split from the
 /// resolver above so the digest gate is testable without resolving a real

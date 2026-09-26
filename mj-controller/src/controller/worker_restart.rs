@@ -233,6 +233,31 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         restart: InstalledWorkerRestart<'_>,
     ) -> Result<StandaloneSession> {
+        // A failed stop may leave the old worker alive, so it stays outside the
+        // marker the start below applies: only steps after a successful stop
+        // can leave the session with no worker at all.
+        stop_worker_after_target_recovery(
+            executor,
+            restart.backend,
+            session_id,
+            restart.worker_root,
+        )
+        .context(restart.messages.stop)?;
+        self.start_installed_worker(session_id, executor, restart)
+            .await
+    }
+
+    /// The part of a restart after its stop: install the binary unless it is
+    /// `prepared`, start the worker on the existing worker root, connect with
+    /// the long restart timeout, and wait until its harness has loaded its
+    /// native session and gone idle. A parked sub-agent is started again with
+    /// exactly this sequence, since its worker was stopped when it was parked.
+    pub(super) async fn start_installed_worker(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        restart: InstalledWorkerRestart<'_>,
+    ) -> Result<StandaloneSession> {
         let InstalledWorkerRestart {
             backend,
             worker_root,
@@ -241,11 +266,6 @@ impl Controller {
             prepared,
             messages,
         } = restart;
-        // A failed stop may leave the old worker alive, so it stays outside the
-        // marker below: only steps after a successful stop can leave the
-        // session with no worker at all.
-        stop_worker_after_target_recovery(executor, backend, session_id, worker_root)
-            .context(messages.stop)?;
         // Everything up to the first successful connection either fails with no
         // worker running or cannot tell: the marker covers all of it.
         let mut connection = async {

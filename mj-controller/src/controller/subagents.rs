@@ -219,18 +219,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        let occupied = crate::database::list_subagents(&parent.id)?
-            .into_iter()
-            .filter(|child| {
-                self.subagent_occupies_slot(&child.child_session_id)
-                    .unwrap_or(true)
-            })
-            .count();
-        ensure!(
-            occupied < self.config.subagents.max_concurrent,
-            "parent session already has the maximum {} active sub-agents",
-            self.config.subagents.max_concurrent
-        );
+        self.ensure_subagent_slot_available(&parent.id, None)?;
 
         let child_id = new_session_id()?;
         let target = borrowed_locator(
@@ -320,49 +309,91 @@ impl Controller {
         Ok(relation)
     }
 
+    /// Refuse to start another child process tree for `parent_session_id`
+    /// when it already has the maximum number of live children.
+    ///
+    /// `starting` is the child a `send_input` is about to start again from
+    /// parked; it is not counted against itself. A spawn passes `None`.
+    ///
+    /// Every child whose worker may be holding processes in the parent's
+    /// container counts, idle or not: those processes are what the cap
+    /// protects (#1161). A parked, stopped, failed or lost child holds none.
     pub fn ensure_subagent_slot_available(
         &self,
         parent_session_id: &str,
-        child_id: &str,
+        starting: Option<&str>,
     ) -> Result<()> {
-        let occupied = crate::database::list_subagents(parent_session_id)?
+        let live = crate::database::list_subagents(parent_session_id)?
             .into_iter()
-            .filter(|child| child.child_session_id != child_id)
-            .filter(|child| {
-                self.subagent_occupies_slot(&child.child_session_id)
-                    .unwrap_or(true)
+            .filter(|child| Some(child.child_session_id.as_str()) != starting)
+            .filter_map(|child| {
+                let session = self.state.sessions.get(&child.child_session_id)?;
+                session.state.has_live_worker().then(|| LiveSubagent {
+                    child_session_id: child.child_session_id.clone(),
+                    title: session.listed_title().to_owned(),
+                    state: live_subagent_state(session),
+                })
             })
-            .count();
-        ensure!(
-            occupied < self.config.subagents.max_concurrent,
-            "parent session already has the maximum {} active sub-agents",
-            self.config.subagents.max_concurrent
-        );
+            .collect::<Vec<_>>();
+        let maximum = self.config.subagents.max_concurrent;
+        ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
         Ok(())
     }
+}
 
-    fn subagent_occupies_slot(&self, child_id: &str) -> Result<bool> {
-        let Some(session) = self.state.sessions.get(child_id) else {
-            return Ok(false);
-        };
-        if matches!(
-            session.state,
-            SessionState::Provisioning | SessionState::Closing | SessionState::Checkpointing
-        ) {
-            return Ok(true);
-        }
-        if !session.state.is_active() {
-            return Ok(false);
-        }
-        Ok(
-            crate::database::load_materialized_session_summary(child_id)?.is_none_or(|summary| {
-                !matches!(
+/// One child that holds processes on its parent's target, as a cap refusal
+/// names it.
+struct LiveSubagent {
+    child_session_id: String,
+    title: String,
+    state: &'static str,
+}
+
+/// The word a cap refusal uses for a live child's state. An idle child is
+/// told apart from a working one, because only an idle child can be closed
+/// without losing work.
+fn live_subagent_state(session: &SessionRecord) -> &'static str {
+    match session.state {
+        SessionState::Provisioning => "starting",
+        SessionState::Checkpointing => "checkpointing",
+        SessionState::Closing | SessionState::Destroying => "stopping",
+        SessionState::Disconnected => "disconnected",
+        _ => match crate::database::load_materialized_session_summary(&session.id) {
+            Ok(Some(summary))
+                if matches!(
                     summary.execution,
                     mj_core::state::MaterializedExecutionState::Idle
-                )
-            }),
-        )
+                ) =>
+            {
+                "idle"
+            }
+            _ => "running",
+        },
     }
+}
+
+/// The refusal a parent model reads when it asks for one child too many: how
+/// many are live, the maximum, which ones they are, and how a slot frees up.
+fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
+    let listed = live
+        .iter()
+        .map(|child| {
+            format!(
+                "{} \"{}\" ({})",
+                mj_core::state::short_id(&child.child_session_id),
+                child.title,
+                child.state
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "this session already has {} live sub-agents and the maximum is {maximum}. \
+         Live sub-agents: {listed}. A sub-agent frees its slot when it hands back its \
+         report (it is then parked and holds no processes until you send it input) or \
+         when you close it.",
+        live.len()
+    )
 }
 
 /// Whether a sub-agent child has handed back its report for its parent's
@@ -373,6 +404,11 @@ pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
     let Some(relation) = crate::database::load_subagent(child_session_id)? else {
         return Ok(false);
     };
+    // A child is parked only once its turn ended and its parent was told, so
+    // whatever the parent was going to get from it, it has.
+    if crate::database::load_session_state(child_session_id)? == Some(SessionState::Parked) {
+        return Ok(true);
+    }
     let Some((execution, active_turn, last_turn)) =
         crate::database::load_materialized_turn_outcome(child_session_id)?
     else {
@@ -699,6 +735,113 @@ mod tests {
             "this session uses native sub-agents"
         );
         assert!(ensure_parent_may_delegate(&parent(Some(true))).is_ok());
+    }
+
+    /// #1161: idle children held the processes that exhausted their parent's
+    /// container, yet did not count against the cap. Every child that holds
+    /// processes counts now; a parked one does not. The refusal is what the
+    /// parent model reads, so it names the live children and how to free a
+    /// slot.
+    #[test]
+    fn the_cap_counts_every_child_holding_processes_and_names_them() {
+        const MARKER: &str = "MJ_TEST_SUBAGENT_CAP_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
+                module_path!(),
+                "the_cap_counts_every_child_holding_processes_and_names_them",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let parent = super::super::test_support::checkpoint_test_session("parent-1");
+        crate::database::save_session(&parent).unwrap();
+        let children = [
+            ("aaaaaaaa-idle", "Audit the lockfile", SessionState::Running),
+            ("bbbbbbbb-busy", "Run the suite", SessionState::Running),
+            ("cccccccc-park", "Map the parser", SessionState::Parked),
+            ("dddddddd-done", "Old task", SessionState::Stopped),
+        ];
+        for (id, title, state) in children {
+            let mut child = super::super::test_support::checkpoint_test_session(id);
+            child.state = state;
+            child.session_title_override = Some(title.into());
+            crate::database::save_subagent_session(
+                &child,
+                &SubagentRecord {
+                    child_session_id: id.into(),
+                    parent_session_id: "parent-1".into(),
+                    task_name: title.into(),
+                    profile_id: "codex".into(),
+                    model: None,
+                    effort: None,
+                    working_directory: PathBuf::new(),
+                    initial_prompt: "do it".into(),
+                    request_key: format!("request-{id}"),
+                    created_at: "2026-09-25T00:00:00Z".into(),
+                    noticed_turn: None,
+                    handback_tool: true,
+                },
+            )
+            .unwrap();
+        }
+        let mut controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: crate::database::load_state().unwrap(),
+        };
+        controller.config.subagents.max_concurrent = 2;
+
+        // Two live children fill a cap of two, idle or not.
+        let refusal = controller
+            .ensure_subagent_slot_available("parent-1", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("already has 2 live sub-agents and the maximum is 2"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("aaaaaaaa \"Audit the lockfile\"")
+                && refusal.contains("bbbbbbbb \"Run the suite\""),
+            "the refusal names every live child: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Map the parser") && !refusal.contains("Old task"),
+            "parked and stopped children hold no processes: {refusal}"
+        );
+        assert!(
+            refusal.contains("hands back")
+                && refusal.contains("parked")
+                && refusal.contains("close it"),
+            "the refusal says how a slot frees up: {refusal}"
+        );
+        // Starting the parked child again is refused the same way.
+        assert!(
+            controller
+                .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
+                .is_err()
+        );
+        // Input to a live child starts nothing, so the cap never refuses it.
+        controller
+            .ensure_subagent_slot_available("parent-1", Some("aaaaaaaa-idle"))
+            .unwrap();
+
+        // Once one live child is parked, a spawn and a restart both fit.
+        controller
+            .state
+            .sessions
+            .get_mut("aaaaaaaa-idle")
+            .unwrap()
+            .state = SessionState::Parked;
+        controller
+            .ensure_subagent_slot_available("parent-1", None)
+            .unwrap();
+        controller
+            .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
+            .unwrap();
     }
 
     #[test]

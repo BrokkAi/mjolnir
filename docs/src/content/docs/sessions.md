@@ -14,7 +14,7 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `◐` | Working, including reviews and background commands |
 | `!` | Waiting for your input or a review decision |
 | `✓` | Idle with unread activity, or a completed clean review |
-| `○` | Idle with no unread activity |
+| `○` | Idle with no unread activity, including a parked sub-agent (its row reads "Parked") |
 | `·` | Activity not yet available |
 | `?` | Disconnected or unreachable |
 | `×` | Failed or lost |
@@ -188,6 +188,43 @@ The daemon verifies the selected recovery copy again before releasing the enviro
 Discarding changes stops the session's sub-agents the same way, just before
 the session goes back to that copy.
 
+### Parked sub-agents
+
+A sub-agent runs on its parent's target. In a container, every live
+sub-agent holds hundreds of processes and threads against the container's
+process limit, even when it is only waiting. So when a sub-agent's turn ends
+and its parent has been told, Mjolnir parks it:
+
+- Its worker and harness stop, so it holds no processes.
+- Its conversation, its report, and the files on its target stay. Its row
+  shows the idle symbol and reads "Parked". The parent's `wait` and
+  `list_agents` report it as finished, as before, with `"parked": true`.
+- Mjolnir parks a sub-agent only when nothing is queued for it. A sub-agent
+  that Mjolnir reminded to hand back its report is parked after the reminder
+  turn ends.
+- When the parent sends it input with `send_input`, Mjolnir starts it again in
+  place, waits until its harness has loaded its conversation, and then
+  delivers the input. That can take tens of seconds. If the start fails, the
+  sub-agent stays parked, and the parent is told what failed so it can try
+  again.
+- If parking fails, the sub-agent stays live and the failure is logged.
+
+A session may have at most `max_concurrent` live sub-agents (see
+[Sub-agents configuration](/configuration/#sub-agents-subagents)). A
+sub-agent counts while it holds processes, idle or not; a parked, stopped, or
+failed sub-agent does not. A `spawn`, or a `send_input` that would start a
+parked sub-agent, is refused over the limit. The refusal lists the live
+sub-agents with their state and says that a sub-agent frees its slot when it
+hands back or is closed.
+
+When a sub-agent cannot start because its container ran out of process slots,
+the parent is told that plainly, with the container's `pids.current` and
+`pids.max` when Mjolnir can read them, and is asked to close sub-agents it no
+longer needs.
+
+Closing a parked sub-agent does not start it: it ends the same way as closing
+an idle one, and the parent's `wait` then reports it as `"stopped"`.
+
 ### Sub-agents and suspend
 
 A session that uses Mjolnir's sub-agents gets each child's work back as the
@@ -198,8 +235,9 @@ itself:
   own. Its conversation is put into SessionWiki first, so
   `mj sessions --session <child-id>` still finds it.
 - While a sub-agent stops, its row and its conversation say "Stopping".
-- A sub-agent that already handed back its report is stopped without a
-  warning, since its report already reached the session.
+- A sub-agent that already handed back its report, or that is parked, is
+  stopped without a warning, since its report already reached the session. A
+  parked sub-agent is not started first.
 - When a sub-agent has not handed back yet, Mjolnir says so: "2 sub-agents
   have not handed back; suspending stops them". The terminal and the web
   viewer ask for confirmation first when they can see a sub-agent still at

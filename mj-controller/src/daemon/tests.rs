@@ -4256,3 +4256,161 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             .contains_key(WORKING_CHILD)
     );
 }
+
+/// Run the named test alone, with a store and a SessionWiki index of its own
+/// and an empty home. Returns whether this process is that run.
+#[cfg(unix)]
+fn in_isolated_parked_test(name: &str) -> bool {
+    const PARKED_CHILD: &str = "MJ_TEST_PARKED_SUBAGENT_DAEMON_CHILD";
+    if std::env::var_os(PARKED_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        name,
+    ))
+    .env(PARKED_CHILD, "1")
+    .isolated_store(directory.path())
+    .env(
+        mj_core::config::SESSION_INDEX_ENV,
+        directory.path().join("sessionwiki"),
+    )
+    .env("HOME", &home)
+    .env("XDG_DATA_HOME", home.join(".local/share"))
+    .env("XDG_CONFIG_HOME", home.join(".config"))
+    .run();
+    false
+}
+
+/// A parked child on a bare target under `root`, whose worker root holds a
+/// `hel` that records any attempt to start it in `root/started`.
+#[cfg(unix)]
+fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str) -> SessionRecord {
+    use std::os::unix::fs::PermissionsExt;
+    let worker_root = root.join(child_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let hel = worker_root.join("hel");
+    std::fs::write(
+        &hel,
+        format!(
+            "#!/bin/sh\necho started >> {}\n",
+            root.join("started").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = runtime_test_session(child_id, workspace_id, SessionState::Parked);
+    child.target = Some(mj_core::state::TargetLocator::LocalBare { worker_root });
+    child.session_title_override = Some("Map the parser".into());
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+    child
+}
+
+/// #1161: a parent's suspend ends its parked children the way it ends live
+/// ones, without starting them first, and counts them as handed back, since
+/// a child is parked only after its parent was told its turn ended.
+#[cfg(unix)]
+#[tokio::test]
+async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_warning() {
+    if !in_isolated_parked_test(
+        "suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_warning",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parked children").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "44444444444444444444444444444444";
+    // A parent with nothing to checkpoint yet, so its own suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    // No handback tool and no finished turn on record: only being parked
+    // says this child's parent already has what it will get from it.
+    parked_child(root.path(), child_id, parent_id, &workspace.id);
+    assert!(crate::controller::subagent_has_handed_back(child_id).unwrap());
+    sessionwiki::index::open().unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(parent_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    assert!(
+        !stored.sessions.contains_key(child_id) && !stored.subagents.contains_key(child_id),
+        "the parked child is removed with its parent's suspend"
+    );
+    let stopped = crate::database::load_stopped_subagents(parent_id).unwrap();
+    assert_eq!(stopped.len(), 1);
+    assert!(stopped[0].handed_back, "a parked child is not warned about");
+    assert!(
+        !root.path().join("started").exists(),
+        "the parked child's worker was not started"
+    );
+}
+
+/// Closing a parked child ends it as closing an idle one does, so its
+/// parent's `wait` reads "stopped", without starting its worker first.
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
+    if !in_isolated_parked_test("closing_a_parked_sub_agent_stops_it_without_starting_its_worker") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parked close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "55555555555555555555555555555555";
+    let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    crate::database::save_session(&parent).unwrap();
+    let child = parked_child(root.path(), child_id, parent_id, &workspace.id);
+    let worker_root = match &child.target {
+        Some(mj_core::state::TargetLocator::LocalBare { worker_root }) => worker_root.clone(),
+        _ => unreachable!(),
+    };
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(child_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    let closed = &stored.sessions[child_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(
+        closed.target.is_none(),
+        "the child's private target state is gone"
+    );
+    assert!(
+        stored.subagents.contains_key(child_id),
+        "the relation stays"
+    );
+    assert!(
+        !worker_root.exists(),
+        "only the child's own worker root is removed"
+    );
+    assert!(
+        !root.path().join("started").exists(),
+        "the parked child's worker was not started"
+    );
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Running);
+}

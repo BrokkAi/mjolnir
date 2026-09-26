@@ -5376,3 +5376,80 @@ fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
         "a session that is not a child records nothing"
     );
 }
+
+/// Migration 53 rebuilds `sessions` so its state constraint admits a parked
+/// sub-agent. The rebuild keeps every row, column and trigger of the table,
+/// and raises the compatibility floor: an older build reads a session state it
+/// does not know as a broken store, so it must refuse this one.
+#[test]
+fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("parked-migration.sqlite3");
+    let mut old = session("old-session", "project-1");
+    old.launch_branch = Some("main".into());
+    save_session_to(&database, &old).unwrap();
+
+    // Put the store back at revision 52, whose constraint has no `parked`.
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch(
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema
+            SET sql = replace(sql, '''stopped'',''parked'',''lost'',', '''stopped'',''lost'',')
+          WHERE type = 'table' AND name = 'sessions';
+         PRAGMA writable_schema = OFF;
+         DELETE FROM schema_migrations WHERE version >= 53;
+         UPDATE schema_compatibility SET minimum_compatible_version = 49;
+         PRAGMA user_version = 52;",
+    )
+    .unwrap();
+    drop(raw);
+    let raw = Connection::open(&database).unwrap();
+    assert!(
+        raw.execute("UPDATE sessions SET state = 'parked'", [])
+            .is_err(),
+        "the rolled-back store refuses the new state"
+    );
+    drop(raw);
+    schema::forget_verified_schema(&database);
+
+    let connection = open(&database).unwrap();
+    let state = schema::read_schema_state(&connection).unwrap();
+    assert_eq!(state.revision, SCHEMA_VERSION);
+    let floor: i64 = connection
+        .query_row(
+            "SELECT minimum_compatible_version FROM schema_compatibility",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 53, "older builds are refused");
+    let triggers: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(triggers, 2, "the table's own triggers are recreated");
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    drop(connection);
+
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(
+        loaded.sessions["old-session"].launch_branch.as_deref(),
+        Some("main")
+    );
+    let mut parked = loaded.sessions["old-session"].clone();
+    parked.state = SessionState::Parked;
+    save_lifecycle_session_to(&database, &parked).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["old-session"].state,
+        SessionState::Parked
+    );
+}

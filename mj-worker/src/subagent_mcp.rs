@@ -15,7 +15,7 @@ use mj_core::subagent::{
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for context-heavy work: exploration, census, suite runs and mechanical implementation slices. Give each child files excerpts and one question or one bounded slice. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. The user can see every child in the Sub-agents workspace.";
+const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for context-heavy work: exploration, census, suite runs and mechanical implementation slices. Give each child files excerpts and one question or one bounded slice. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. When a child's turn ends and you are told so, Mjolnir parks it: its processes stop, and it keeps its conversation and report. send_input starts a parked child again. Only children that hold processes count toward this session's limit on children; a parked child does not. The user can see every child in the Sub-agents workspace.";
 
 /// A child's server instructions: its report reaches the parent only through
 /// `handback`, which is the rule Claude Code's own subagents follow.
@@ -464,7 +464,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again.",
             json!({
                 "type":"object",
                 "properties":{
@@ -483,13 +483,13 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "send_input",
-            "Send follow-up input to one child session.",
+            "Send follow-up input to one child session and return the turn it starts; collect the result with wait. A child whose turn ended is parked (wait and list_agents show parked true) and holds no processes: send_input starts it again first, with its conversation intact, which can take tens of seconds. Starting a parked child is refused when this session already has the maximum number of live children; the refusal lists them. If the start fails, the child stays parked and you can retry.",
             json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
         ),
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again on another profile, or after that login. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again on another profile, or after that login. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"required":["child_session_ids"],"additionalProperties":false}),
@@ -501,7 +501,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Stopping a child is not instant: it checkpoints the child, seals its transcript and tears its process tree down. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait with the closed child's id first and spawn its replacement only once that wait reports the child finished with state \"stopped\" - a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait with the closed child's id first and spawn its replacement only once that wait reports the child finished with state \"stopped\" - a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
     ]
@@ -547,6 +547,30 @@ mod tests {
         assert!(wait.contains("not about the task"), "{wait}");
         let spawn = description("spawn");
         assert!(spawn.contains("login the provider has refused"), "{spawn}");
+    }
+
+    /// #1161: a child that handed back is parked. The parent has to know
+    /// that such a child holds no processes, that `send_input` starts it
+    /// again and can take a while, and that the cap counts live children.
+    #[test]
+    fn the_tools_explain_parked_children_and_the_live_child_limit() {
+        let description = |name: &str| {
+            tool_definitions(None)
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["description"].as_str().map(str::to_owned))
+                .unwrap()
+        };
+        let send_input = description("send_input");
+        assert!(send_input.contains("parked true"), "{send_input}");
+        assert!(send_input.contains("starts it again"), "{send_input}");
+        assert!(send_input.contains("tens of seconds"), "{send_input}");
+        let wait = description("wait");
+        assert!(wait.contains("parked true"), "{wait}");
+        let spawn = description("spawn");
+        assert!(spawn.contains("live children"), "{spawn}");
+        assert!(spawn.contains("parks it"), "{spawn}");
+        assert!(SERVER_INSTRUCTIONS.contains("send_input starts a parked child again"));
     }
 
     #[test]

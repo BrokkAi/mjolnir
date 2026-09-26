@@ -20,6 +20,8 @@ pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
 mod resume;
 mod reviewer;
+mod subagent_park;
+pub use subagent_park::ParkOutcome;
 mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;

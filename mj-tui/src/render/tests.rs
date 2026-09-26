@@ -3540,6 +3540,32 @@ fn active_session_with_no_turn_in_flight_reads_idle() {
     assert!(text.contains("Idle"), "{text}");
 }
 
+/// #1161: a parked sub-agent's turn ended and its worker is stopped. It
+/// needs nothing from anyone, so it is idle (and drawn with the idle
+/// symbol), and its row says
+/// "Parked" rather than a clock that would never move.
+#[test]
+fn a_parked_sub_agent_is_idle_and_reads_parked() {
+    let mut session = stopped_session();
+    session.state = SessionState::Parked;
+    let detail = SessionDetail {
+        last_activity_at_ms: Some(1_000_000),
+        ..SessionDetail::default()
+    };
+
+    let attention = crate::dashboard_sessions::attention_level(
+        Some(&detail),
+        None,
+        session.state,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(attention, crate::AttentionLevel::Idle);
+    let text = session_metadata_text(&session, Some(&detail), None, 1_480, &config());
+    assert!(text.contains("Parked"), "{text}");
+}
+
 #[test]
 fn provisioning_clock_uses_elapsed_seconds_since_state_update() {
     let mut session = stopped_session();

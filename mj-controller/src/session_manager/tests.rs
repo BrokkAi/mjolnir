@@ -1674,6 +1674,9 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     for state in [
         SessionState::Destroying,
         SessionState::Stopped,
+        // A parked sub-agent's worker was stopped on purpose; recovery must
+        // not start it again.
+        SessionState::Parked,
         SessionState::Lost,
         SessionState::Error,
         SessionState::Provisioning,

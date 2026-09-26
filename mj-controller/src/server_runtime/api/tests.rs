@@ -2091,3 +2091,439 @@ fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
     assert!(short.get("truncated").is_none(), "{short}");
     assert_eq!(short["report_source"], "handback");
 }
+
+/// The daemon side of a parent and one child, as the sub-agent tools read
+/// it: the child's record, and a restart that either succeeds, making the
+/// record running, or fails with the given reason and leaves it parked.
+struct ParkingExports {
+    records: std::sync::Mutex<BTreeMap<String, SessionRecord>>,
+    unparks: std::sync::atomic::AtomicUsize,
+    unpark_failure: Option<String>,
+}
+
+impl ParkingExports {
+    fn new(child_state: SessionState, unpark_failure: Option<&str>) -> Arc<Self> {
+        let mut child = parent_record("child-1", "helper");
+        child.state = child_state;
+        let records = [parent_record("parent-1", "parent"), child]
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect();
+        Arc::new(Self {
+            records: std::sync::Mutex::new(records),
+            unparks: Default::default(),
+            unpark_failure: unpark_failure.map(str::to_owned),
+        })
+    }
+
+    fn set_child_state(&self, state: SessionState) {
+        self.records
+            .lock()
+            .unwrap()
+            .get_mut("child-1")
+            .unwrap()
+            .state = state;
+    }
+
+    fn child_state(&self) -> SessionState {
+        self.records.lock().unwrap()["child-1"].state
+    }
+
+    fn unparks(&self) -> usize {
+        self.unparks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ExportRuntime for ParkingExports {
+    fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+        self.records.lock().unwrap().get(session_id).cloned()
+    }
+    fn checkpoint_now(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
+    }
+    fn unpark_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            self.unparks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(failure) = &self.unpark_failure {
+                bail!("{failure}");
+            }
+            if self.records.lock().unwrap()[&session_id].state == SessionState::Parked {
+                self.set_child_state(SessionState::Running);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// A child's session actor whose next submissions fail as scripted before
+/// it delivers again: `false` is a definite rejection, what a park that
+/// finished around the prompt answers, and `true` a failure that may have
+/// delivered it. Each failure first runs `on_failure`.
+#[derive(Clone)]
+struct ScriptedSession {
+    inner: FakeSession,
+    failures: Arc<std::sync::Mutex<std::collections::VecDeque<bool>>>,
+    on_failure: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl SessionHandleBackend for ScriptedSession {
+    fn search_prompts(
+        &self,
+        bundle_id: String,
+        scope: mj_core::storage::HistoryScope,
+        query: String,
+    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.search_prompts(bundle_id, scope, query)
+    }
+    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
+        self.inner.review_state()
+    }
+    fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
+        self.inner.config_result(command_id)
+    }
+    fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
+        Box::new(self.clone())
+    }
+    fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+    fn view(&self) -> ManagedSessionView {
+        self.inner.view()
+    }
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn has_changed(&self) -> Result<bool> {
+        Ok(false)
+    }
+    fn changed(&mut self) -> BoxFuture<'_, Result<ManagedSessionView>> {
+        Box::pin(std::future::pending())
+    }
+    fn enqueue_submit(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> BoxFuture<'_, Result<PendingRelaySubmit>> {
+        let failure = self.failures.lock().unwrap().pop_front();
+        let Some(unconfirmed) = failure else {
+            return self.inner.enqueue_submit(command_id, command);
+        };
+        (self.on_failure)();
+        Box::pin(async move {
+            Ok(PendingRelaySubmit::new(Box::pin(async move {
+                let error = anyhow!("session target is changing");
+                Err(if unconfirmed {
+                    error.context(mj_client::session::DeliveryUnconfirmed)
+                } else {
+                    error
+                })
+            })))
+        })
+    }
+    fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>> {
+        self.inner.enqueue_sync()
+    }
+    fn respond_elicitation(
+        &self,
+        elicitation_id: String,
+        response: mj_core::elicitation::ElicitationResponse,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.inner.respond_elicitation(elicitation_id, response)
+    }
+    fn stop_background_task(&self, background_task_id: String) -> BoxFuture<'_, Result<()>> {
+        self.inner.stop_background_task(background_task_id)
+    }
+    fn reviewer(
+        &self,
+        role: Option<String>,
+        action: mj_client::session::ReviewerAction,
+    ) -> BoxFuture<'_, Result<mj_client::session::ReviewerOutcome>> {
+        self.inner.reviewer(role, action)
+    }
+}
+
+struct ScriptedControl(ScriptedSession);
+
+impl SessionControlBackend for ScriptedControl {
+    fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>> {
+        let session = self.0.clone();
+        Box::pin(async move {
+            anyhow::ensure!(session_id == session.inner.session_id, "unknown session");
+            Ok(SessionHandle::new(session))
+        })
+    }
+}
+
+/// Store a parent and its child `child_id`, so the sub-agent tools accept
+/// the child as the parent's.
+fn store_parent_and_child(child_id: &str) {
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    crate::database::save_subagent_session(
+        &parent_record(child_id, "helper"),
+        &mj_core::subagent::SubagentRecord {
+            child_session_id: child_id.into(),
+            parent_session_id: "parent-1".into(),
+            task_name: "audit deps".into(),
+            profile_id: "helper".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "check the lockfile".into(),
+            request_key: format!("request-{child_id}"),
+            created_at: "2026-09-24T00:00:00Z".into(),
+            noticed_turn: None,
+            handback_tool: true,
+        },
+    )
+    .unwrap();
+}
+
+/// A parent's backend over `exports` and a child actor scripted as given.
+/// Returns the backend and the receiver of what reached the child's relay.
+fn parking_backend(
+    exports: Arc<ParkingExports>,
+    failures: &[bool],
+    on_failure: Arc<dyn Fn() + Send + Sync>,
+) -> (
+    Arc<ApiBackend>,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
+    let (submitted, delivered) = mpsc::unbounded_channel();
+    let session = ScriptedSession {
+        inner: FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 9,
+            submitted,
+            view: Some(ready_view("model")),
+        },
+        failures: Arc::new(std::sync::Mutex::new(failures.iter().copied().collect())),
+        on_failure,
+    };
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(ScriptedControl(session)),
+        running_states(),
+        exports,
+    ));
+    (backend, delivered)
+}
+
+async fn send_input(
+    backend: &Arc<ApiBackend>,
+    message: &str,
+) -> mj_core::subagent::SubagentToolResult {
+    backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                request_id: "request".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::SendInput {
+                    child_session_id: "child-1".into(),
+                    message: message.into(),
+                },
+            },
+        )
+        .await
+}
+
+/// The prompts that reached the child's relay, by text.
+fn delivered_prompts(
+    delivered: &mut mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) -> Vec<String> {
+    std::iter::from_fn(|| delivered.try_recv().ok())
+        .filter_map(|(_, command)| match command {
+            RelayCommand::Prompt { prompt } => Some(
+                prompt
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+const PARKED_TEST_CHILD: &str = "MJ_PARKED_SUBAGENT_TEST_CHILD";
+
+/// Run the named test alone, with a store of its own. Returns whether this
+/// process is that run.
+fn isolated_parked_test(test: &str) -> bool {
+    if std::env::var_os(PARKED_TEST_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        test,
+    ))
+    .env(PARKED_TEST_CHILD, "1")
+    .isolated_store(directory.path())
+    .run();
+    false
+}
+
+/// #1161: a child that handed back is parked, and the parent's next
+/// `send_input` has to start it again before the prompt can run. A prompt
+/// that a finishing park turned away is known not to have been delivered, so
+/// it is sent again once; one that may have landed is never sent twice.
+#[tokio::test]
+async fn send_input_starts_a_parked_child_again_and_resends_only_a_prompt_a_park_turned_away() {
+    if !isolated_parked_test(
+        "send_input_starts_a_parked_child_again_and_resends_only_a_prompt_a_park_turned_away",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+
+    // A parked child is started again, then given the prompt.
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let answer = send_input(&backend, "check the tests too").await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert!(
+        answer.message.contains("\"turn_id\": 9"),
+        "{}",
+        answer.message
+    );
+    assert_eq!(exports.unparks(), 1);
+    assert_eq!(exports.child_state(), SessionState::Running);
+    assert_eq!(delivered_prompts(&mut delivered), ["check the tests too"]);
+
+    // A park finishes as the prompt arrives and turns it away: the child is
+    // started again and the prompt delivered exactly once.
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let parking = exports.clone();
+    let (backend, mut delivered) = parking_backend(
+        exports.clone(),
+        &[false],
+        Arc::new(move || parking.set_child_state(SessionState::Parked)),
+    );
+    let answer = send_input(&backend, "and the docs").await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(exports.unparks(), 1, "the child was started again once");
+    assert_eq!(exports.child_state(), SessionState::Running);
+    assert_eq!(delivered_prompts(&mut delivered), ["and the docs"]);
+
+    // A prompt that may have been delivered is reported, not sent again.
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let parking = exports.clone();
+    let (backend, mut delivered) = parking_backend(
+        exports.clone(),
+        &[true],
+        Arc::new(move || parking.set_child_state(SessionState::Parked)),
+    );
+    let answer = send_input(&backend, "once only").await;
+    assert!(answer.is_error, "{}", answer.message);
+    assert_eq!(exports.unparks(), 0);
+    assert!(delivered_prompts(&mut delivered).is_empty());
+}
+
+/// A restart that fails leaves the child parked, so the parent can try
+/// again, and the parent reads what failed.
+#[tokio::test]
+async fn a_failed_restart_leaves_the_child_parked_and_tells_the_parent_why() {
+    if !isolated_parked_test("a_failed_restart_leaves_the_child_parked_and_tells_the_parent_why") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(
+        SessionState::Parked,
+        Some(
+            "the parent's container ran out of process slots (pids.current 8192 of pids.max 8192)",
+        ),
+    );
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+
+    let answer = send_input(&backend, "check the tests too").await;
+
+    assert!(answer.is_error, "{}", answer.message);
+    assert!(
+        answer.message.contains("still parked") && answer.message.contains("retry"),
+        "{}",
+        answer.message
+    );
+    assert!(
+        answer
+            .message
+            .contains("ran out of process slots (pids.current 8192 of pids.max 8192)"),
+        "the cause reaches the parent: {}",
+        answer.message
+    );
+    assert_eq!(exports.child_state(), SessionState::Parked);
+    assert!(delivered_prompts(&mut delivered).is_empty());
+}
+
+/// A parked child reports as the finished child it is, with its report,
+/// and says it is parked.
+#[tokio::test]
+async fn wait_and_list_agents_report_a_parked_child_with_its_report() {
+    if !isolated_parked_test("wait_and_list_agents_report_a_parked_child_with_its_report") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 3;
+    conversation.applied_event_digest = format!("{:064x}", 3);
+    conversation.last_turn_outcome = Some(finished_turn("task-1"));
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(
+        crate::database::record_subagent_handback(
+            "child-1",
+            &mj_core::subagent::SubagentHandback {
+                command_id: "task-1".into(),
+                message: "The lockfile is current.".into(),
+                recorded_at_ms: 1,
+            },
+        )
+        .unwrap()
+    );
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, _delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+    let call = |action| {
+        let backend = backend.clone();
+        async move {
+            let answer = backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        request_id: "request".into(),
+                        created_at_ms: mj_core::clock::epoch_millis(),
+                        action,
+                    },
+                )
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()
+        }
+    };
+
+    let waited = call(mj_core::subagent::SubagentToolAction::WaitAgents {
+        child_session_ids: vec!["child-1".into()],
+        timeout_seconds: Some(1),
+        return_when: Default::default(),
+    })
+    .await;
+    let agent = &waited["agents"][0];
+    assert_eq!(
+        waited["status"],
+        mj_core::subagent::WAIT_STATUS_COMPLETE,
+        "{waited}"
+    );
+    assert_eq!(agent["state"], "completed", "{agent}");
+    assert_eq!(agent["output"], "The lockfile is current.", "{agent}");
+    assert_eq!(agent["parked"], true, "{agent}");
+
+    let listed = call(mj_core::subagent::SubagentToolAction::ListAgents).await;
+    assert_eq!(listed["agents"][0]["parked"], true, "{listed}");
+    assert_eq!(listed["agents"][0]["state"], "completed", "{listed}");
+}
