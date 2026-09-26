@@ -5333,7 +5333,12 @@ mod container_runtime {
             let identity = prepared.runtime_identity().await.unwrap();
             assert!(identity.id.is_some(), "{identity:?}");
             assert_eq!(identity.provenance, RuntimeProvenance::ManagedInstallation);
-            assert!(prepared.spec.command.starts_with(temp.path().join("cache")));
+            assert!(
+                prepared
+                    .spec
+                    .command
+                    .starts_with(temp.path().join("cache").canonicalize().unwrap())
+            );
             assert!(prepared.spec.args.is_empty());
             let lease = std::fs::OpenOptions::new()
                 .write(true)
