@@ -1035,6 +1035,8 @@ const RELEASE_TEST_CHILD: &str = "MJ_TEST_RELEASE_LATCH_CHILD";
 const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
 #[cfg(unix)]
 const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
+#[cfg(unix)]
+const STAGE_CLEANUP_TEST_CHILD: &str = "MJ_TEST_STAGE_CLEANUP_CHILD";
 pub(crate) const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
 /// Open a new native session with this id instead of reloading one, as a
 /// restored worker does when the harness has no record of the session it was
@@ -2341,6 +2343,184 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     );
     assert!(executor.active_stages.lock().unwrap().is_empty());
     assert!(checkpoint.archive_path.exists());
+}
+/// A routine checkpoint copies the session's native state into a stage on its
+/// target before it asks for the barrier, so the barrier is held only while
+/// that stage is refreshed. When the barrier then defers because the agent is
+/// working, the stage is never packed, and packing is what removes it. That
+/// left a 260 MB directory behind on every deferred attempt until the disk
+/// filled. Every exit that does not hand the stage to the pack step removes
+/// it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
+    if std::env::var_os(STAGE_CLEANUP_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::a_deferred_routine_checkpoint_leaves_no_stage_on_its_target",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .env(STAGE_CLEANUP_TEST_CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("the deferred checkpoint never returned");
+        std::process::exit(101);
+    });
+
+    /// Does the target's side of a prestage here: it seals a stage where the
+    /// spec says, as the worker's capture does. Every other command runs for
+    /// real, so a removal really removes.
+    #[derive(Default)]
+    struct StagingExecutor {
+        purposes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StagingExecutor {
+        fn purposes(&self) -> Vec<String> {
+            self.purposes.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for StagingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            ProcessExecutor.execute(command)
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            let spec: CheckpointCaptureSpec = serde_json::from_reader(input)?;
+            // The prestage is a capture that starts a fresh generation; the
+            // barrier's capture refreshes it and must not run in this test.
+            anyhow::ensure!(
+                command.purpose == "capture target checkpoint" && !spec.refresh_existing,
+                "this test stages only the prestage, not {}",
+                command.purpose
+            );
+            let native = spec.stage_path.join("native");
+            std::fs::create_dir_all(&native)?;
+            std::fs::write(native.join("00000000"), vec![7_u8; 256 * 1024])?;
+            std::fs::write(spec.stage_path.join("stage.json"), b"{}")?;
+            Ok(CommandOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&CapturedCheckpoint {
+                    stage_path: spec.stage_path,
+                    native_bytes: 256 * 1024,
+                    repository_bytes: 0,
+                    reused_native: false,
+                })?,
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    let worker_root = data_directory.join("workers").join(LATCH_RELAY_SESSION);
+    for directory in [&relay_root, &profile_home, &worker_root] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_session(&session).unwrap();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: profile_home,
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![ProjectRepository {
+                id: "project".into(),
+                github: Some("example/project".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+            }],
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session)]),
+            ..State::default()
+        },
+    };
+
+    // The stand-in relay starts with a prompt running, so the checkpoint's
+    // admission finds the agent working after the prestage has run.
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            true,
+        )])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let executor = StagingExecutor::default();
+    let deferred = controller
+        .checkpoint_session_latched(
+            LATCH_RELAY_SESSION,
+            &executor,
+            Some(&channels.control),
+            LatchExclusivity::ReleaseAfterLatch,
+            CheckpointExportPolicy::Always,
+        )
+        .await;
+    let Err(error) = deferred else {
+        panic!("a working session was checkpointed");
+    };
+    assert!(checkpoint_was_deferred(&error), "{error:#}");
+    assert!(
+        executor
+            .purposes()
+            .contains(&"capture target checkpoint".to_owned()),
+        "the checkpoint deferred before it staged anything, so this proves nothing: {:?}",
+        executor.purposes()
+    );
+    let left = std::fs::read_dir(&worker_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        left.is_empty(),
+        "the deferred checkpoint left {left:?} in its worker root"
+    );
+    channels.shutdown.shutdown().await.unwrap();
 }
 #[cfg(unix)]
 fn relay_starts(path: &Path) -> usize {

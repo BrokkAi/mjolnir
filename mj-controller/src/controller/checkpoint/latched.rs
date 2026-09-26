@@ -102,9 +102,24 @@ impl Controller {
             adapter_version: "acp-v1".into(),
         };
         let releases_after_capture = exclusivity == LatchExclusivity::ReleaseAfterLatch;
+        // The stage and the archive belong to this operation from the first
+        // command that can write either one. This is declared before the relay
+        // lease, so an exit drops the lease, and with it the barrier, before
+        // it removes them.
+        let own_target_files = || {
+            TargetCheckpointFiles::new(
+                executor,
+                &backend,
+                session_id,
+                &remote_stage,
+                &remote_archive,
+            )
+        };
+        let mut target_files = None;
         if releases_after_capture
             && let Some(native_session_id) = session.native_session_id.as_deref()
         {
+            target_files.get_or_insert_with(own_target_files);
             let prestage = CheckpointCaptureSpec {
                 protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
                 session: session_manifest(native_session_id),
@@ -402,6 +417,7 @@ impl Controller {
         let mut completion = CheckpointCompletion::HeldBarrier;
 
         let exported: Result<CheckpointArtifact> = async {
+            let target_files = target_files.get_or_insert_with(own_target_files);
             let spec = CheckpointExportSpec {
                 protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
                 session: session_manifest(&native_session_id),
@@ -623,6 +639,9 @@ impl Controller {
                         error.context("clean target checkpoint staging"),
                     ));
                 }
+                // Packing removed the stage and the cleanup just removed the
+                // archive, so nothing is left for the exit to remove.
+                target_files.handed_off();
                 CheckpointMetadata {
                     archive_path: verified.archive_path().to_path_buf(),
                     sha256: verified.sha256().to_string(),
@@ -664,5 +683,86 @@ impl Controller {
             cursor,
             completion,
         })
+    }
+}
+
+/// The files one checkpoint operation writes in its worker root on the
+/// target: the staged generation and the packed archive, both named by the
+/// operation ID.
+///
+/// The operation owns them from the first command that can write one. The
+/// pack step consumes the stage and a verified transfer removes the archive;
+/// every other exit, a deferral included, removes both when this is dropped.
+/// Without that, a prestage whose barrier deferred left a full copy of the
+/// session's native state behind on every attempt.
+///
+/// A cancelled operation leaves them. The executor refuses new commands once
+/// cancellation is requested, and on an SSH target the command it killed from
+/// this side can outlive that and recreate a stage removed underneath it.
+struct TargetCheckpointFiles<'a, E: CommandExecutor> {
+    executor: &'a E,
+    backend: &'a targets::TargetLocator,
+    session_id: &'a str,
+    paths: [String; 2],
+    handed_off: bool,
+}
+
+impl<'a, E: CommandExecutor> TargetCheckpointFiles<'a, E> {
+    fn new(
+        executor: &'a E,
+        backend: &'a targets::TargetLocator,
+        session_id: &'a str,
+        stage: &str,
+        archive: &str,
+    ) -> Self {
+        Self {
+            executor,
+            backend,
+            session_id,
+            paths: [stage.to_owned(), archive.to_owned()],
+            handed_off: false,
+        }
+    }
+
+    /// Both files were consumed where the checkpoint meant them to be.
+    fn handed_off(&mut self) {
+        self.handed_off = true;
+    }
+}
+
+impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
+    fn drop(&mut self) {
+        if self.handed_off {
+            return;
+        }
+        let session_id = self.session_id;
+        if self.executor.cancellation_requested() {
+            tracing::warn!(
+                session_id,
+                paths = ?self.paths,
+                "cancelled checkpoint left its files on the target"
+            );
+            return;
+        }
+        let mut args = vec!["rm".to_owned(), "-rf".to_owned(), "--".to_owned()];
+        args.extend(self.paths.iter().cloned());
+        let command = targets::locator_command(self.backend, args)
+            .purpose("remove unused target checkpoint files");
+        match self.executor.execute(&command) {
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => tracing::warn!(
+                session_id,
+                paths = ?self.paths,
+                status = output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "could not remove an unused checkpoint's files from the target"
+            ),
+            Err(error) => tracing::warn!(
+                session_id,
+                paths = ?self.paths,
+                error = format!("{error:#}"),
+                "could not remove an unused checkpoint's files from the target"
+            ),
+        }
     }
 }
