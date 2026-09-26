@@ -13,7 +13,7 @@ use crate::database::record_recovery_failure;
 use crate::recovery_gate::{RecoveryGate, RecoveryObserver};
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
-use mj_core::state::{CheckpointMetadata, MaterializedExecutionState, RecoveryObservation, State};
+use mj_core::state::{CheckpointMetadata, RecoveryObservation, State};
 
 /// How long an automatic checkpoint stays fresh: a copy is due once the
 /// session's newest checkpoint is at least this old, and a failed copy waits at
@@ -330,9 +330,8 @@ impl PolicyState {
         }
     }
 
-    fn due(&self, execution: MaterializedExecutionState, now: chrono::DateTime<Utc>) -> bool {
-        if execution != MaterializedExecutionState::Idle
-            || self.latest_completed_turn == 0
+    fn due(&self, now: chrono::DateTime<Utc>) -> bool {
+        if self.latest_completed_turn == 0
             || self
                 .checkpoint
                 .as_ref()
@@ -355,12 +354,15 @@ impl PolicyState {
     }
 }
 
+/// Whether to start a copy now. Whether the session is working is not this
+/// policy's question: the observation carries checkpoint admission's own
+/// answer, so a copy is never started that admission would defer.
 fn checkpoint_due(
     policy: &PolicyState,
     observation: &RecoveryObservation,
     now: chrono::DateTime<Utc>,
 ) -> bool {
-    observation.checkpoint_safe && policy.due(observation.execution, now)
+    observation.checkpoint_wait.is_none() && policy.due(now)
 }
 
 #[cfg(test)]
@@ -437,22 +439,25 @@ mod tests {
             session: session_record("session-1"),
             config: Config::default(),
             latest_completed_turn_ordinal: latest_completed_turn_ordinal(&completed(position)),
-            execution: MaterializedExecutionState::Idle,
-            checkpoint_safe: true,
+            checkpoint_wait: None,
         }
     }
 
     #[test]
-    fn unsafe_background_work_defers_recovery_until_a_safe_observation() {
+    fn a_session_that_must_wait_is_not_copied_until_an_observation_says_it_may_start() {
         let mut policy = PolicyState::default();
         policy.observe_completed_turn(Some(1));
         let mut observed = observation(1);
-        observed.checkpoint_safe = false;
+        for wait in [
+            mj_core::activity::CheckpointWait::WorkInFlight,
+            mj_core::activity::CheckpointWait::ProviderWork("a background agent"),
+        ] {
+            observed.checkpoint_wait = Some(wait);
+            assert!(!checkpoint_due(&policy, &observed, Utc::now()));
+            assert_eq!(policy.last_attempted_turn, None);
+        }
 
-        assert!(!checkpoint_due(&policy, &observed, Utc::now()));
-        assert_eq!(policy.last_attempted_turn, None);
-
-        observed.checkpoint_safe = true;
+        observed.checkpoint_wait = None;
         assert!(checkpoint_due(&policy, &observed, Utc::now()));
     }
 
@@ -565,10 +570,10 @@ mod tests {
             last_attempted_turn: Some(8),
             ..Default::default()
         };
-        assert!(!policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        assert!(!policy.due(Utc::now()));
 
         policy.last_attempted_turn = None;
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        assert!(policy.due(Utc::now()));
     }
 
     /// A copy that stood down because the agent was working judged nothing.
@@ -588,10 +593,10 @@ mod tests {
             last_attempted_turn: Some(8),
             ..Default::default()
         };
-        assert!(!policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        assert!(!policy.due(Utc::now()));
 
         policy.abandon_attempt();
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
+        assert!(policy.due(Utc::now()));
         assert!(
             policy.failed_at.is_none() && policy.consecutive_failures == 0,
             "a deferral is not a failure"
@@ -613,11 +618,7 @@ mod tests {
     fn first_completed_idle_turn_is_due() {
         let mut policy = PolicyState::default();
         policy.observe_completed_turn(latest_completed_turn_ordinal(&completed(3)));
-        assert!(policy.due(MaterializedExecutionState::Idle, Utc::now()));
-        assert!(!policy.due(
-            MaterializedExecutionState::Running { started_at_ms: 1 },
-            Utc::now()
-        ));
+        assert!(policy.due(Utc::now()));
     }
 
     fn interval() -> chrono::Duration {
@@ -646,11 +647,11 @@ mod tests {
             )),
             ..Default::default()
         };
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
+        assert!(!policy.due(now));
         policy.checkpoint.as_mut().unwrap().created_at = (now - interval()).to_rfc3339();
-        assert!(policy.due(MaterializedExecutionState::Idle, now));
+        assert!(policy.due(now));
         policy.checkpoint.as_mut().unwrap().event_frontier = 8;
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
+        assert!(!policy.due(now));
     }
 
     /// An idle session may never complete another turn, so a failed copy has to
@@ -666,12 +667,9 @@ mod tests {
         };
         policy.record_failure(now);
 
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + interval() - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + interval()));
+        assert!(!policy.due(now));
+        assert!(!policy.due(now + interval() - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + interval()));
     }
 
     /// Consecutive failures widen the wait, so a target that is broken rather
@@ -687,21 +685,15 @@ mod tests {
         policy.record_failure(now);
         policy.record_failure(now);
 
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + interval() * 2 - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + interval() * 2));
+        assert!(!policy.due(now + interval() * 2 - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + interval() * 2));
 
         for _ in 0..64 {
             policy.record_failure(now);
         }
         let cap = chrono::Duration::from_std(MAX_AUTO_CHECKPOINT_RETRY_INTERVAL).unwrap();
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + cap - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, now + cap));
+        assert!(!policy.due(now + cap - chrono::Duration::seconds(1)));
+        assert!(policy.due(now + cap));
     }
 
     /// A copy that succeeds ends the failure run, so the next unrelated failure
@@ -724,11 +716,8 @@ mod tests {
         let failed_at = now + interval() * 2;
         policy.record_failure(failed_at);
 
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            failed_at + interval() - chrono::Duration::seconds(1)
-        ));
-        assert!(policy.due(MaterializedExecutionState::Idle, failed_at + interval()));
+        assert!(!policy.due(failed_at + interval() - chrono::Duration::seconds(1)));
+        assert!(policy.due(failed_at + interval()));
     }
 
     /// A copy that is still running has not failed, so its boundary stays
@@ -741,10 +730,7 @@ mod tests {
             last_attempted_turn: Some(8),
             ..Default::default()
         };
-        assert!(!policy.due(MaterializedExecutionState::Idle, now));
-        assert!(!policy.due(
-            MaterializedExecutionState::Idle,
-            now + chrono::Duration::days(1)
-        ));
+        assert!(!policy.due(now));
+        assert!(!policy.due(now + chrono::Duration::days(1)));
     }
 }

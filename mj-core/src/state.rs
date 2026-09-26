@@ -648,11 +648,10 @@ pub struct RecoveryObservation {
     pub session: SessionRecord,
     pub config: Config,
     pub latest_completed_turn_ordinal: Option<u64>,
-    pub execution: MaterializedExecutionState,
-    /// Whether live provider-owned work permits an automatic checkpoint now.
-    /// This is separate from materialized execution because Kimi detached
-    /// agents outlive the parent turn that returned the session to `Idle`.
-    pub checkpoint_safe: bool,
+    /// Why a routine checkpoint has to wait, or `None` when one may start now:
+    /// [`crate::activity::routine_checkpoint_wait`] on the worker's
+    /// operational state, the same answer checkpoint admission gives.
+    pub checkpoint_wait: Option<crate::activity::CheckpointWait>,
 }
 
 /// The position where the session's most recent finished turn began, or

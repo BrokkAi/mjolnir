@@ -13,7 +13,10 @@
 //! * Does it still own work that killing the worker would destroy?
 //!   [`has_work_in_flight`].
 //! * May a controller replace this worker? [`safe_to_replace`].
-//! * May a routine checkpoint open a barrier? [`checkpoint_blocker`].
+//! * May a routine checkpoint start now? [`routine_checkpoint_wait`].
+//! * Would provider-owned work make a checkpoint cut wrong?
+//!   [`checkpoint_blocker`], which is part of the answer above and is also
+//!   asked alone while a barrier is held.
 //! * Has the turn stopped responding? [`stall_verdict`].
 //!
 //! The worker produces the facts and publishes both them and the classified
@@ -514,13 +517,18 @@ pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
         && (harness != HarnessKind::Kimi || facts.background_work_known == Some(true))
 }
 
-/// Why a routine checkpoint may not admit a barrier, or `None` when it may.
+/// Why provider-owned work rules out a routine checkpoint cut, or `None`.
 ///
 /// This asks only about provider-owned work, which is a different question
 /// from whether a turn is running: a checkpoint that finds a turn running can
 /// try again in a minute, but a checkpoint taken while a native goal or a
 /// background agent owns the session captures a state that does not exist.
 /// Unknown native state fails closed.
+///
+/// Whether a routine checkpoint may start is [`routine_checkpoint_wait`],
+/// which includes this. This alone is for a checkpoint that already holds its
+/// barrier: the barrier accepts and queues new work, so work in flight no
+/// longer says anything about the cut, but provider-owned work still does.
 #[must_use]
 pub fn checkpoint_blocker(facts: &ActivityFacts, harness: HarnessKind) -> Option<&'static str> {
     if facts.checkpoint_only || facts.execution == RelayExecutionState::Closed {
@@ -546,6 +554,39 @@ pub fn checkpoint_blocker(facts: &ActivityFacts, harness: HarnessKind) -> Option
     } else {
         None
     }
+}
+
+/// Why a routine checkpoint has to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointWait {
+    /// Provider-owned work that a checkpoint cut would capture half done. The
+    /// text is [`checkpoint_blocker`]'s reason.
+    ProviderWork(&'static str),
+    /// The session is working: a turn, a tool, a queued command, a background
+    /// command, a shell or a terminal. See [`has_work_in_flight`].
+    WorkInFlight,
+}
+
+/// Whether a routine checkpoint may start now, or why it has to wait.
+///
+/// A routine checkpoint is one that can run again later: a recovery copy, or a
+/// checkpoint someone asked for while the session runs. Close is not one; it
+/// may interrupt the work instead.
+///
+/// This is the one answer. The recovery coordinator asks it before it starts a
+/// copy, and the checkpoint asks it again before and while it opens its
+/// barrier, because the session can start working in between. When the two
+/// asked different questions, the coordinator started copies that the barrier
+/// then deferred, once a second for as long as the disagreement lasted.
+#[must_use]
+pub fn routine_checkpoint_wait(
+    facts: &ActivityFacts,
+    harness: HarnessKind,
+) -> Option<CheckpointWait> {
+    if let Some(reason) = checkpoint_blocker(facts, harness) {
+        return Some(CheckpointWait::ProviderWork(reason));
+    }
+    has_work_in_flight(facts).then_some(CheckpointWait::WorkInFlight)
 }
 
 /// The four-valued phase to report for a session the daemon can see.

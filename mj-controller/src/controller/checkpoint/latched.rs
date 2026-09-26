@@ -211,31 +211,18 @@ impl Controller {
             }
             if exclusivity == LatchExclusivity::ReleaseAfterLatch {
                 let snapshot = relay.connection_mut().sync().await?;
-                if !snapshot
+                if let Some(wait) = snapshot
                     .operational
-                    .safe_for_checkpoint(session.harness_kind)
+                    .routine_checkpoint_wait(session.harness_kind)
                 {
-                    // Kimi's native task level is process-owned workspace
-                    // work. Unknown or active work must defer before the
-                    // barrier is submitted; close deliberately does not use
-                    // this path and may still interrupt/terminate it.
+                    // The same answer the recovery coordinator acted on, asked
+                    // again because the session can start working after the
+                    // observation. A routine checkpoint must not open a
+                    // barrier just to abandon it, so this defers before
+                    // BeginCheckpoint is submitted. Close deliberately does
+                    // not use this path and may interrupt the work instead.
                     relay.release();
-                    return Err(CheckpointDeferred::background_snapshot(
-                        &snapshot.operational,
-                        session.harness_kind,
-                    )
-                    .into());
-                }
-                if snapshot.operational.execution != RelayExecutionState::Closed
-                    && snapshot.operational.has_work_in_flight()
-                {
-                    // A routine recovery copy must not open a barrier just to
-                    // abandon it as soon as it observes the active turn, and
-                    // the bare execution flag misses a turn or a tool whose
-                    // projection has not caught up. Any remaining work defers
-                    // to the next idle observation.
-                    relay.release();
-                    return Err(CheckpointDeferred::harness_busy().into());
+                    return Err(CheckpointDeferred::from(wait).into());
                 }
             }
             let barrier_command_id = new_command_id("checkpoint")?;

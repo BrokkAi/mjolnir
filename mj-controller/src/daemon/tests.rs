@@ -2372,7 +2372,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
         .await
         .unwrap();
     let first = observed.try_recv().unwrap();
-    assert!(first.checkpoint_safe);
+    assert_eq!(first.checkpoint_wait, None);
     assert_eq!(first.latest_completed_turn_ordinal, Some(9));
     let revision = state.revisions.current();
 
@@ -2391,7 +2391,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     let retry = observed.try_recv().unwrap();
     assert_eq!(retry.session.title, "renamed");
     assert_eq!(retry.latest_completed_turn_ordinal, Some(9));
-    assert!(retry.checkpoint_safe);
+    assert_eq!(retry.checkpoint_wait, None);
     assert_eq!(state.revisions.current(), revision);
 
     state
@@ -2418,6 +2418,58 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     assert!(
         observed.try_recv().is_err(),
         "resumed sessions need a fresh worker view"
+    );
+}
+
+/// A recovery copy is due only when checkpoint admission would let it start.
+/// A Claude session whose projection is idle but whose agent left background
+/// shells running is still working as far as the barrier is concerned, so the
+/// observation has to say so too. When it did not, the coordinator started a
+/// copy every second that the barrier then deferred, for hours.
+#[tokio::test]
+async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
+    let mut state = test_runtime_state();
+    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
+        observations,
+        gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
+    };
+    let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+    let mut view = ready_startup_view();
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
+    snapshot.window.latest_turn_start_position = Some(9);
+    snapshot.operational.background_commands = vec![mj_core::relay::BackgroundCommand {
+        id: "shell-1".into(),
+        started_at_ms: 1,
+        command: "cargo test".into(),
+        can_stop: true,
+    }];
+    assert!(snapshot.operational.has_work_in_flight());
+    state
+        .publish_session("session-1".into(), view)
+        .await
+        .unwrap();
+
+    let observation = observed.try_recv().unwrap();
+    assert_eq!(
+        observation.checkpoint_wait,
+        Some(mj_core::activity::CheckpointWait::WorkInFlight),
+        "a session the checkpoint barrier would defer was observed as ready for a copy"
+    );
+    // The retry tick re-sends the same answer rather than recomputing it.
+    state.refresh_background_policies();
+    assert_eq!(
+        observed.try_recv().unwrap().checkpoint_wait,
+        Some(mj_core::activity::CheckpointWait::WorkInFlight)
     );
 }
 

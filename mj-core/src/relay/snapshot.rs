@@ -792,6 +792,16 @@ impl RelayOperationalState {
     pub fn checkpoint_background_blocker(&self, harness: HarnessKind) -> Option<&'static str> {
         crate::activity::checkpoint_blocker(&self.facts(), harness)
     }
+
+    /// Whether a routine checkpoint may start now, or why it has to wait.
+    /// See [`crate::activity::routine_checkpoint_wait`].
+    #[must_use]
+    pub fn routine_checkpoint_wait(
+        &self,
+        harness: HarnessKind,
+    ) -> Option<crate::activity::CheckpointWait> {
+        crate::activity::routine_checkpoint_wait(&self.facts(), harness)
+    }
 }
 
 /// On-disk record format for a relay event.

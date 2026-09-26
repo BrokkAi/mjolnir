@@ -457,9 +457,9 @@ fn an_unrecognized_published_state_is_cautious_rather_than_fatal() {
 }
 
 #[test]
-fn checkpoint_admission_asks_only_about_provider_owned_work() {
-    // A turn is not a reason to refuse a checkpoint barrier; it is a reason to
-    // try again later, which is a different decision with a different caller.
+fn checkpoint_blocker_asks_only_about_provider_owned_work() {
+    // A turn does not make a held barrier's cut wrong; it is a reason not to
+    // start one, which `routine_checkpoint_wait` answers.
     let working = ActivityFacts {
         execution: RelayExecutionState::Running,
         goal_synchronized: true,
@@ -491,6 +491,58 @@ fn checkpoint_admission_asks_only_about_provider_owned_work() {
         ..ActivityFacts::default()
     };
     assert!(checkpoint_blocker(&busy_kimi, HarnessKind::Kimi).is_some());
+}
+
+/// A routine checkpoint waits for everything that holds work, not only for
+/// provider-owned work. A Claude session whose agent left a background shell
+/// running has no provider blocker at all, and it still has to wait: that gap
+/// is what let the recovery coordinator start a copy every second that the
+/// barrier then deferred.
+#[test]
+fn a_routine_checkpoint_waits_for_provider_work_and_for_work_in_flight() {
+    let quiet = ActivityFacts {
+        goal_synchronized: true,
+        background_work_known: Some(true),
+        ..ActivityFacts::default()
+    };
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Kimi] {
+        assert_eq!(
+            routine_checkpoint_wait(&quiet, harness),
+            None,
+            "{harness:?}"
+        );
+    }
+
+    let background_shell = ActivityFacts {
+        background_commands: 1,
+        ..quiet.clone()
+    };
+    assert_eq!(
+        checkpoint_blocker(&background_shell, HarnessKind::Claude),
+        None
+    );
+    assert_eq!(
+        routine_checkpoint_wait(&background_shell, HarnessKind::Claude),
+        Some(CheckpointWait::WorkInFlight)
+    );
+
+    // Provider-owned work is named, so the deferral can say what it waits for.
+    let background_agent = ActivityFacts {
+        background_commands: 1,
+        ..quiet.clone()
+    };
+    assert!(matches!(
+        routine_checkpoint_wait(&background_agent, HarnessKind::Kimi),
+        Some(CheckpointWait::ProviderWork(reason)) if reason.contains("background agents")
+    ));
+
+    // A stopped worker holds nothing, so there is nothing to wait for.
+    let closed = ActivityFacts {
+        execution: RelayExecutionState::Closed,
+        background_commands: 1,
+        ..quiet
+    };
+    assert_eq!(routine_checkpoint_wait(&closed, HarnessKind::Kimi), None);
 }
 
 /// Silence is published as a fact and never turned into a verdict.

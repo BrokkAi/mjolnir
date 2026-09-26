@@ -4,9 +4,8 @@ use super::*;
 /// read afresh when retrying work after gate contention or a policy deadline.
 pub(super) struct BackgroundPolicyState {
     quiet: bool,
-    checkpoint_safe: bool,
+    checkpoint_wait: Option<mj_core::activity::CheckpointWait>,
     latest_completed_turn_ordinal: Option<u64>,
-    execution: mj_core::state::MaterializedExecutionState,
     worker_build: Option<String>,
 }
 
@@ -27,11 +26,10 @@ impl RuntimeState {
                 });
         }
         self.recovery_observer.observe(RecoveryObservation {
-            checkpoint_safe: policy.checkpoint_safe,
+            checkpoint_wait: policy.checkpoint_wait,
             session: session.clone(),
             config: config.clone(),
             latest_completed_turn_ordinal: policy.latest_completed_turn_ordinal,
-            execution: policy.execution,
         });
     }
 
@@ -268,11 +266,10 @@ impl RuntimeState {
             {
                 let policy = BackgroundPolicyState {
                     quiet: snapshot.operational.safe_to_replace(session.harness_kind),
-                    checkpoint_safe: snapshot
+                    checkpoint_wait: snapshot
                         .operational
-                        .safe_for_checkpoint(session.harness_kind),
+                        .routine_checkpoint_wait(session.harness_kind),
                     latest_completed_turn_ordinal: snapshot.latest_completed_turn_ordinal(),
-                    execution: snapshot.materialized.execution,
                     worker_build: snapshot.worker_build.clone(),
                 };
                 self.observe_background_policy(session, &controller.config, &policy);
