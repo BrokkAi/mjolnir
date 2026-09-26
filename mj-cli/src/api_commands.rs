@@ -611,6 +611,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         create_managed_worktree: None,
         launch_base: args.base.clone(),
         launch_branch: args.branch.clone(),
+        checkout: None,
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),

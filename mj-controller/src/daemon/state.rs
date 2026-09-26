@@ -187,6 +187,7 @@ impl RuntimeState {
             .start_create_session(CreateSessionRequest {
                 launch_base: None,
                 launch_branch: None,
+                checkout: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,

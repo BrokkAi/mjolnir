@@ -15,11 +15,13 @@ pub enum ControllerAction {
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,
-        /// Git revision the session starts at, as the caller typed it.
+        /// Diff baseline; also the starting revision for a raw managed worktree.
         #[serde(default)]
         launch_base: Option<String>,
         #[serde(default)]
         launch_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkout: Option<mj_core::remote_git::ExactCheckout>,
         /// None means native sub-agents.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,

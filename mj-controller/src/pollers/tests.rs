@@ -103,6 +103,7 @@ fn podman_controller(state: SessionState) -> Controller {
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
+            checkout: None,
             publication: None,
             build_cache: None,
             container_workspace: None,

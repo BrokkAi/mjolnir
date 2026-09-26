@@ -462,6 +462,7 @@ pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
     pub launch_base: Option<String>,
     pub launch_branch: Option<String>,
+    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     pub mjolnir_subagents: Option<bool>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -713,6 +714,7 @@ impl Controller {
             create_managed_worktree,
             launch_base,
             launch_branch,
+            checkout,
             mjolnir_subagents,
             initial_prompt,
             workspace_id,
@@ -780,6 +782,30 @@ impl Controller {
         if project_directory.is_none() && bundle.is_none() {
             bail!("unknown bundle {bundle_id:?}");
         }
+        let checkout = checkout
+            .map(|mut checkout| -> Result<_> {
+                checkout.validate()?;
+                let bundle = bundle.context("exact checkout requires a bundle-backed session")?;
+                ensure!(
+                    launch_base.is_none() && launch_branch.is_none(),
+                    "checkout cannot be combined with launch_base or launch_branch"
+                );
+                ensure!(
+                    create_managed_worktree != Some(false),
+                    "checkout requires an isolated workspace"
+                );
+                ensure!(
+                    bundle
+                        .repositories
+                        .iter()
+                        .any(|repo| repo.id == checkout.repository_id),
+                    "checkout repository {:?} is not in bundle {bundle_id:?}",
+                    checkout.repository_id
+                );
+                checkout.commit.make_ascii_lowercase();
+                Ok(checkout)
+            })
+            .transpose()?;
         if profile.kind == mj_core::config::HarnessKind::Muse
             && (!additional_mounts.is_empty()
                 || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
@@ -815,6 +841,7 @@ impl Controller {
             create_managed_worktree,
             launch_base,
             launch_branch,
+            checkout,
             publication: None,
             mjolnir_subagents,
             archived: false,

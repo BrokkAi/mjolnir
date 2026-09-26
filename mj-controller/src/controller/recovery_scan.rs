@@ -513,6 +513,7 @@ fn adopted_session_record(
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         mjolnir_subagents: None,

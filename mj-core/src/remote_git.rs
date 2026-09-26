@@ -14,6 +14,34 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec};
 
 pub use crate::local_git::resolve_local_repository;
 
+/// An immutable starting selection for one repository in a bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactCheckout {
+    pub repository_id: String,
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+impl ExactCheckout {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.repository_id.is_empty(),
+            "checkout repository_id is required"
+        );
+        anyhow::ensure!(
+            is_object_id(&self.commit),
+            "checkout commit must be a full nonzero commit object ID"
+        );
+        if let Some(branch) = &self.branch {
+            validate_branch_name(branch).context("invalid checkout branch")?;
+            anyhow::ensure!(branch != "HEAD", "checkout branch cannot be HEAD");
+        }
+        Ok(())
+    }
+}
+
 /// The network endpoints a target checkout should use for Git fetches and
 /// pushes. The first push URL is the primary destination; all configured push
 /// URLs are retained because Git intentionally supports pushing to several

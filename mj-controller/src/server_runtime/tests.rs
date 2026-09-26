@@ -1011,6 +1011,7 @@ fn new_action() -> ControllerAction {
     ControllerAction::New {
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -1028,6 +1029,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

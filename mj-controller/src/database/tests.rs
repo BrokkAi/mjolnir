@@ -440,6 +440,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -618,6 +619,11 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     });
     record.resource_allocation = None;
     record.launch_base = Some("origin/main".into());
+    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: "a".repeat(40),
+        branch: Some("town/run-123".into()),
+    });
     record.target = Some(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     });
@@ -651,6 +657,56 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("exact-checkout.sqlite3");
+    let mut record = session("old-session", "project-1");
+    save_session_to(&path, &record).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions DROP COLUMN checkout_json;
+        DELETE FROM schema_migrations WHERE version >= 54;
+        UPDATE schema_compatibility SET minimum_compatible_version = 53;
+        PRAGMA user_version = 53;",
+        )
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&path);
+    let connection = open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT minimum_compatible_version FROM schema_compatibility",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        54
+    );
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["old-session"],
+        record
+    );
+    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: "a".repeat(40),
+        branch: Some("town/run-123".into()),
+    });
+    save_session_to(&path, &record).unwrap();
+    let mut connection = open(&path).unwrap();
+    let tx = connection.transaction().unwrap();
+    let mut stale = record.clone();
+    stale.checkout = None;
+    stale.state = SessionState::Error;
+    update_lifecycle_fields(&tx, &stale).unwrap();
+    tx.commit().unwrap();
+    let loaded = load_state_from(&path).unwrap();
+    assert_eq!(loaded.sessions["old-session"].checkout, record.checkout);
+    assert_eq!(loaded.sessions["old-session"].state, SessionState::Error);
 }
 
 #[test]
@@ -5422,7 +5478,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(floor, 53, "older builds are refused");
+    assert!(floor >= 53, "builds predating parked sessions are refused");
     let triggers: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",

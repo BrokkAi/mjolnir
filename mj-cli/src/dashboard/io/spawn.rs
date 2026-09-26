@@ -1331,6 +1331,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .start_create_session(daemon::CreateSessionRequest {
                         launch_base: None,
                         launch_branch: None,
+                        checkout: None,
                         mjolnir_subagents,
                         create_managed_worktree,
                         initial_prompt: None,

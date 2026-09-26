@@ -138,6 +138,7 @@ pub(super) async fn apply_phone_action(
             create_managed_worktree,
             launch_base,
             launch_branch,
+            checkout,
             mjolnir_subagents,
             dirty_ack: _dirty_ack,
         } => {
@@ -180,6 +181,7 @@ pub(super) async fn apply_phone_action(
                         create_managed_worktree,
                         launch_base,
                         launch_branch,
+                        checkout,
                         mjolnir_subagents,
                         initial_prompt: None,
                         workspace_id,
