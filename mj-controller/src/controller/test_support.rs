@@ -420,6 +420,7 @@ pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> S
 
 /// A managed raw session on an isolated clone of `repository`, created the
 /// way a session's clone is, so its `origin` is the one `repository` has.
+#[cfg(unix)]
 pub(crate) fn managed_clone_session(repository: &Path, session_id: &str) -> SessionRecord {
     managed_checkout_session(repository, session_id, ManagedCheckoutKind::Clone)
 }

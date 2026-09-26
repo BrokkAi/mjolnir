@@ -361,6 +361,7 @@ pub fn remove_replicas_left_in_profile_homes(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn session(
         id: &str,
         harness: HarnessKind,
@@ -374,6 +375,7 @@ mod tests {
         session
     }
 
+    #[cfg(unix)]
     fn install_launch(worker_root: &Path, launch: serde_json::Value) {
         std::fs::create_dir_all(worker_root).unwrap();
         std::fs::write(

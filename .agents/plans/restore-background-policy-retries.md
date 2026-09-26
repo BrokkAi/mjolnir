@@ -203,3 +203,10 @@ scenario (`leaks=0`). Logs are `cargo-test-windows-followup.log`,
 in `target/release-validation`. The active-stop run used matching 2.22.0
 host binaries after its initial setup correctly rejected an older 2.21.0
 portable worker; that setup failure made no application assertion.
+
+With the shell fixture compiling, Windows then reported three test helpers
+whose only callers are Unix-only. Matching guards on those helpers preserve
+all supported tests. Full Cargo tests and all-target Clippy passed again; see
+`cargo-test-helper-guards.log` and `clippy-helper-guards.log`. The corrected
+remote crash matrix, browser convergence, and highly parallel suite are green
+in reliability run 36232667089.
