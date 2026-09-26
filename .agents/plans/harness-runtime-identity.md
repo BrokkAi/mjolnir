@@ -14,7 +14,8 @@ A scheduler can create a session without a task prompt, read the runtime receipt
 - [x] (2026-09-26) Record receipts in the worker journal and public event history; expose the latest receipt on session lookup.
 - [x] (2026-09-26) Enforce startup and prompt admission constraints and add isolated regressions.
 - [x] (2026-09-26) Documented the HTTP/ACP contract and passed 10 focused tests: 3 controller, 6 worker, and 1 ACP consumer.
-- [ ] Open and review the PR, and merge after CI validation.
+- [x] (2026-09-26) Opened and reviewed PR #1165; PR #1164 holds the independent checkout change.
+- [ ] Merge both after CI validation and publish the validated v2.23.0 candidate.
 
 ## Surprises & Discoveries
 
@@ -95,3 +96,7 @@ Initial plan recorded 2026-09-26 before implementation.
 Revision 2026-09-26: implemented the cross-layer contract, added pre-load enforcement after identifying native goal recovery timing, and defined npm dependency fingerprint scope. User narrowed the remaining task to issues #1162/#1163 and the release; do not work the other issues.
 
 Validation 2026-09-26: `cargo test -p brokk-mj-controller -p brokk-mj-worker -p brokk-mjolnir runtime_identity --lib --bins` passed 10 tests in isolated temporary stores, with no live harness or default instance. Formatting and diff whitespace checks passed.
+
+CI findings 2026-09-26: added the new optional runtime field to the chat fixture and gave the two launch-spec tests disposable executable bridges (both targeted regressions passed). The release candidate exposed a pre-existing terminal fixture race: its readiness probe could briefly take controller.lock and deny the starting daemon admission. Wait for published daemon metadata/PID instead; keep production sole-writer admission unchanged. The existing isolated pending-session PTY regression validates this fix.
+
+Validation 2026-09-26: the existing pending-session terminal regression passed with the lock-free metadata/PID startup observation (1 passed in 1.81s). This release-blocking race fix changes test scaffolding only; production admission is untouched.

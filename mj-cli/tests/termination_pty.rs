@@ -761,9 +761,7 @@ image = "ubuntu:24.04"
     // over before that daemon owns the store would let teardown finish first,
     // and the daemon would then recreate the storage that teardown removed.
     assert!(
-        storage
-            .wait_until_owned(Instant::now() + Duration::from_secs(30))
-            .expect("probe fixture store ownership"),
+        storage.wait_until_owned(Instant::now() + Duration::from_secs(30)),
         "daemon never took the fixture store"
     );
     DashboardPty {
