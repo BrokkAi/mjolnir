@@ -47,14 +47,18 @@ impl DaemonStorage {
     // This module compiles into each test binary, and only the terminal tests
     // start a daemon in the background.
     #[allow(dead_code)]
-    pub fn wait_until_owned(&self, deadline: Instant) -> Result<bool> {
-        while !self.store_is_owned()? {
+    pub fn wait_until_owned(&self, deadline: Instant) -> bool {
+        // Metadata is published only after the daemon owns the store. Taking
+        // the lock to probe startup can instead lock out that daemon's one
+        // admission attempt, making an otherwise isolated fixture fail.
+        let metadata = self.data.join("daemon.json");
+        while !self.daemon_pid(&metadata).is_some_and(process_exists) {
             if Instant::now() >= deadline {
-                return Ok(false);
+                return false;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        Ok(true)
+        true
     }
 
     /// Stop whichever daemon owns this store, so the storage can be removed.
