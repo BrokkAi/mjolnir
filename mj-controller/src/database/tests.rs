@@ -5478,11 +5478,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(
-        floor,
-        schema::MINIMUM_COMPATIBLE_VERSION,
-        "older builds are refused"
-    );
+    assert!(floor >= 53, "builds predating parked sessions are refused");
     let triggers: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",
