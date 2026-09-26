@@ -1055,6 +1055,141 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
     )));
 }
 
+/// #1132: Kimi refused its stored OAuth token, journalled the failure, and
+/// then completed the ACP prompt with no session updates at all. Mjolnir
+/// reported `prompt_unanswered` and suggested resending, which only repeats
+/// the failure. When Kimi journalled a failure for the turn, that failure is
+/// the turn's outcome: its warning and its diagnostic are the authentication
+/// error, and credential sync treats it as one.
+#[tokio::test]
+async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session.join("state.json"),
+        serde_json::json!({"id":SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId":SESSION_ID,"sessionDir":session})
+        ),
+    )
+    .unwrap();
+    std::fs::write(&wire, "").unwrap();
+    let root = temp.path().join("relay");
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "continue", prompt("continue"));
+    durable.claim_pending_commands(true).unwrap();
+    let started = durable
+        .operational_state()
+        .active_prompt
+        .unwrap()
+        .started_at_ms;
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
+    monitor
+        .as_mut()
+        .unwrap()
+        .attach(SESSION_ID.into(), &relay)
+        .await
+        .unwrap();
+    // What Kimi Code 2.0.2 journals for the turn, as in the issue.
+    let records = [
+        serde_json::json!({"type":"agent.turn.started","turnId":3,"queueItemId":"q","time":started,"kind":"event"}),
+        serde_json::json!({"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"promptId":"msg_3","turnId":3,"time":started}),
+        serde_json::json!({"type":"agent.turn.ended","turnId":3,"outcome":"failed","errorMessage":"OAuthUnauthorizedError: Stored token for \"kimi-code\" was rejected; re-login required.","time":started + 2,"kind":"event"}),
+        serde_json::json!({"type":"turn.ended","agentId":"main","turnId":3,"reason":"failed","error":{"code":"internal","message":"Stored token for \"kimi-code\" was rejected; re-login required.","name":"OAuthUnauthorizedError","retryable":false},"durationMs":3,"time":started + 3}),
+        serde_json::json!({"type":"prompt.completed","agentId":"main","promptId":"msg_3","reason":"failed","time":started + 4}),
+    ];
+    std::fs::write(
+        &wire,
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+
+    // What the ACP runtime emits for a prompt that completed with no updates.
+    let unanswered = format!(
+        "{}: Kimi Code ended the turn without producing any message, thought or tool call, so this prompt may never have been acted on.",
+        mj_core::acp::PROMPT_EMPTY_RESPONSE_MARKER
+    );
+    let events = [
+        RuntimeEvent::Warning {
+            message: unanswered.clone(),
+        },
+        RuntimeEvent::PromptFinished {
+            request_id: "continue".into(),
+            stop_reason: mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into(),
+            usage: None,
+            diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                message: unanswered,
+                code: Some(mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into()),
+                http_status: None,
+                reset_at: None,
+            }),
+        },
+    ];
+    for mut event in events {
+        unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
+            .await
+            .unwrap();
+        unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    }
+    drop(relay);
+
+    let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let events = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    let warnings = events
+        .iter()
+        .filter_map(|event| match &event.observation {
+            RelayObservation::Warning { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warnings,
+        ["prompt failed: Stored token for \"kimi-code\" was rejected; re-login required."]
+    );
+    let completed = events
+        .iter()
+        .find(|event| matches!(event.observation, RelayObservation::CommandCompleted { .. }))
+        .expect("the prompt completed");
+    let RelayObservation::CommandCompleted {
+        outcome:
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason,
+                diagnostic: Some(diagnostic),
+                ..
+            },
+        ..
+    } = &completed.observation
+    else {
+        panic!("{completed:?}");
+    };
+    assert_eq!(stop_reason, "error");
+    assert_eq!(
+        diagnostic.message,
+        "Stored token for \"kimi-code\" was rejected; re-login required."
+    );
+    assert_eq!(
+        mj_core::credentials::relay_event_credential_sync_reason(completed),
+        Some(mj_core::credentials::CredentialSyncReason::AuthenticationFailure)
+    );
+}
+
 /// Kimi's ACP prompt response carries no usage, so a completed Kimi turn is
 /// only accounted for if the native wire records reach the durable relay
 /// (#1064).

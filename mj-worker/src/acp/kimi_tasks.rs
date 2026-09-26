@@ -365,7 +365,8 @@ struct TaskTracker {
 
 #[derive(Debug, Clone)]
 struct NativeTurn {
-    id: Value,
+    /// The turn's `turnId`, when the record that opened it had one.
+    id: Option<Value>,
     started_at_ms: i64,
     ended: bool,
     diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
@@ -688,30 +689,52 @@ fn parse_line(tracker: &mut TaskTracker, line: &[u8], line_number: u64, path: &P
     let Some(event_type) = record.get("type").and_then(Value::as_str) else {
         return Ok(());
     };
-    if matches!(event_type, "turn.started" | "turn.ended") {
-        if record.get("agentId").and_then(Value::as_str) != Some("main") {
+    // Kimi Code 2.0.2 opens a main-agent turn in its journal with
+    // `turn.prompt`: its `turn.started` event is observable only and never
+    // written to `wire.jsonl` (#1132). `turn.started` is still read in case a
+    // build journals it.
+    if matches!(event_type, "turn.prompt" | "turn.started" | "turn.ended") {
+        // The main agent's records say `agentId: "main"`; an earlier Kimi
+        // wrote no `agentId` into the main agent's own stream at all.
+        if record
+            .get("agentId")
+            .is_some_and(|agent| agent.as_str() != Some("main"))
+        {
             return Ok(());
         }
-        let Some(id) = record
+        // An earlier Kimi wrote no `turnId` on the prompt record either.
+        let id = record
             .get("turnId")
             .filter(|id| id.is_u64() || id.is_string())
-        else {
-            return Ok(());
-        };
-        if event_type == "turn.started" {
-            // A start always invalidates the preceding failure, even if malformed.
+            .cloned();
+        if event_type != "turn.ended" {
+            // A second opener of the turn already open adds nothing.
+            if id.is_some()
+                && tracker
+                    .turn
+                    .as_ref()
+                    .is_some_and(|turn| !turn.ended && turn.id == id)
+            {
+                return Ok(());
+            }
+            // An opener always invalidates the preceding failure, even if
+            // malformed.
             tracker.turn = record
                 .get("time")
                 .and_then(Value::as_i64)
                 .map(|time| NativeTurn {
-                    id: id.clone(),
+                    id,
                     started_at_ms: time,
                     ended: false,
                     diagnostic: None,
                     usage: BTreeMap::new(),
                     usage_unreadable: false,
                 });
-        } else if let Some(turn) = tracker.turn.as_mut().filter(|turn| turn.id == *id) {
+        } else if let Some(turn) = tracker
+            .turn
+            .as_mut()
+            .filter(|turn| turn.id.is_none() || id.is_none() || turn.id == id)
+        {
             turn.ended = true;
             turn.diagnostic = if record.get("reason").and_then(Value::as_str) == Some("failed") {
                 record
@@ -1098,6 +1121,68 @@ mod tests {
         assert!(follower.turn_diagnostic_since(290).is_none());
     }
 
+    /// #1132: Kimi Code 2.0.2 journals no `turn.started`; that event is
+    /// observable only and never reaches `wire.jsonl`. The durable record that
+    /// opens a main-agent turn is `turn.prompt`. These are the records of a
+    /// turn whose stored OAuth token was refused, in the order Kimi writes
+    /// them (keys and shapes from a real session wire stream and the issue).
+    #[test]
+    fn a_turn_opened_by_its_prompt_record_carries_the_native_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.jsonl");
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"agent.turn.started","turnId":0,"queueItemId":"q","time":1000,"kind":"event"}),
+                json!({"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"promptId":"msg_1","turnId":0,"time":1001}),
+                json!({"type":"agent.turn.ended","turnId":0,"outcome":"failed","errorMessage":"OAuthUnauthorizedError: Stored token for \"kimi-code\" was rejected; re-login required.","time":1003,"kind":"event"}),
+                json!({"type":"turn.ended","agentId":"main","turnId":0,"reason":"failed","error":{"code":"internal","message":"Stored token for \"kimi-code\" was rejected; re-login required.","name":"OAuthUnauthorizedError","retryable":false},"durationMs":3,"time":1004}),
+                json!({"type":"prompt.completed","agentId":"main","promptId":"msg_1","reason":"failed","time":1005}),
+            ],
+        );
+        let follower = KimiWireFollower::open(&path).unwrap();
+        assert_eq!(follower.turn_settled_since(1000), Some(true));
+        let diagnostic = follower
+            .turn_diagnostic_since(1000)
+            .expect("the refused login is the turn's failure");
+        assert_eq!(
+            diagnostic.message,
+            "Stored token for \"kimi-code\" was rejected; re-login required."
+        );
+        assert!(mj_core::credentials::turn_diagnostic_reports_auth_failure(
+            &diagnostic
+        ));
+        assert!(follower.turn_diagnostic_since(1002).is_none());
+
+        // An earlier Kimi wrote neither `agentId` nor, on the prompt, a
+        // `turnId` (a real wire stream from 2026-09-05).
+        let older = temp.path().join("older.jsonl");
+        append_jsonl(
+            &older,
+            &[
+                json!({"type":"turn.prompt","input":[],"origin":{"kind":"user"},"time":2000}),
+                json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":10,"output":2,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":2001}),
+                json!({"type":"turn.ended","turnId":1,"reason":"completed","durationMs":1,"time":2002}),
+            ],
+        );
+        let follower = KimiWireFollower::open(&older).unwrap();
+        assert_eq!(follower.turn_settled_since(2000), Some(true));
+        assert_eq!(follower.turn_usage_since(2000).unwrap().output_tokens, 2);
+
+        // A child agent's records in the main stream are not the main turn's.
+        let child = temp.path().join("child.jsonl");
+        append_jsonl(
+            &child,
+            &[
+                json!({"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"turnId":4,"time":3000}),
+                json!({"type":"turn.prompt","agentId":"agent-2","input":[],"origin":{"kind":"user"},"turnId":0,"time":3001}),
+                json!({"type":"turn.ended","agentId":"agent-2","turnId":0,"reason":"failed","error":{"message":"quota exhausted"}}),
+            ],
+        );
+        let follower = KimiWireFollower::open(&child).unwrap();
+        assert_eq!(follower.turn_settled_since(3000), Some(false));
+        assert!(follower.turn_diagnostic_since(3000).is_none());
+    }
     #[test]
     fn resolve_uses_last_matching_index_row_and_validates_state() {
         let (temp, session_id, session_dir) = session_fixture();

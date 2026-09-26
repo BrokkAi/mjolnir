@@ -431,7 +431,7 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 7] = [
+const AUTH_FAILURE_PHRASES: [&str; 8] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
@@ -442,6 +442,10 @@ const AUTH_FAILURE_PHRASES: [&str; 7] = [
     // OpenAI, when it refuses an API key (#1160): "401 Unauthorized:
     // Incorrect API key provided: sk-...".
     "incorrect api key provided",
+    // Kimi, when its stored OAuth token is refused (#1132): "Stored token for
+    // \"kimi-code\" was rejected; re-login required." Its error name,
+    // `OAuthUnauthorizedError`, is an identifier below.
+    "re-login required",
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",

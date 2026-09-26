@@ -906,3 +906,41 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
     );
     assert_eq!(rejected.refusal("codex4"), None);
 }
+
+/// #1132: Kimi's refusal of its stored OAuth token, as its journal states it:
+/// the turn's error message, and the agent's error line with the error name.
+/// A sub-agent child whose turn failed this way failed on its login.
+#[test]
+fn a_kimi_token_refusal_is_an_auth_failure() {
+    const MESSAGE: &str = "Stored token for \"kimi-code\" was rejected; re-login required.";
+    assert!(auth_failure_signature(HarnessKind::Kimi, MESSAGE));
+    assert!(auth_failure_signature(
+        HarnessKind::Kimi,
+        &format!("OAuthUnauthorizedError: {MESSAGE}")
+    ));
+    let diagnostic = crate::diagnostic::TurnDiagnostic::from_provider(&serde_json::json!({
+        "code": "internal",
+        "message": MESSAGE,
+        "name": "OAuthUnauthorizedError",
+        "retryable": false,
+    }))
+    .unwrap();
+    assert!(turn_diagnostic_reports_auth_failure(&diagnostic));
+    let turn = crate::state::MaterializedTurnOutcome {
+        diagnostic: Some(diagnostic),
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 2,
+        completed_at_ms: 2,
+        outcome: crate::state::TurnOutcomeKind::Completed {
+            stop_reason: "error".into(),
+        },
+    };
+    assert!(crate::subagent::turn_failed_on_login(&turn));
+    assert!(!auth_failure_signature(
+        HarnessKind::Kimi,
+        "The token was rejected by the linter; see the log."
+    ));
+}
