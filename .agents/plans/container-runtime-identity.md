@@ -13,8 +13,8 @@ Container sessions must report the identity of the coding bridge and provider th
 - [x] (2026-09-26) Added and ran the real controller-to-worker regression: the old selection failed with the exact shell digest reported in #1166; the fix passes for both Codex and Claude.
 - [x] (2026-09-26) Added shared preparation for primary/reviewer launches, absolute bridge/provider selection, recognition of persisted built-in shell launchers, and pinned managed installation fallback.
 - [x] (2026-09-26) Five container regressions and six runtime/ACP guard tests pass. Covered provider changes, fixed PATH/provider selection, old launchers, pinned fallback/cache reuse/leases, custom wrappers, stale discovery, and refusal before native session load or goal recovery. Reviewer startup and excluded-credential regressions also pass (13 focused tests total); rustfmt and diff checks pass.
-- [ ] Review, fix findings, open a PR, and let CI perform broad validation before merging.
-- [ ] Prepare and publish a patch release from an exactly validated commit, including crates.io, npm, and Homebrew.
+- [x] (2026-09-26) Reviewed and fixed PR #1167, resolved both macOS fixture failures, and merged as `c10723233dca0b8f61b7643764373726fcd4e636` after all 30 combined PR/candidate checks passed or were appropriately skipped. Issue #1166 is closed and its in-progress label removed.
+- [x] (2026-09-26) Published v2.23.1 from the exact green commit to GitHub, crates.io, npm latest, and Homebrew. All publication workflows succeeded; Homebrew installation checks passed on Linux and macOS.
 
 ## Surprises & Discoveries
 
@@ -30,7 +30,7 @@ Decision (2026-09-26, Codex): Use a patch release because this repairs the runti
 
 ## Outcomes & Retrospective
 
-Investigation confirmed the issue. Implementation, PR validation, and publication remain pending.
+The issue was reproduced and fixed. PR #1167 is reviewed and merged after complete CI, including macOS. Release v2.23.1 is published on GitHub, crates.io, npm latest, and Homebrew. Public registry checks confirm 2.23.1, and Homebrew installation checks pass on Linux and macOS. No implementation or publication work remains for #1166.
 
 ## Context and Orientation
 
@@ -89,3 +89,14 @@ CI finding: macOS reached the new fallback-installation test with a valid manage
 Second macOS CI finding: all container/controller tests now pass (1,819 controller tests), but older reviewer fixtures use `/bin/false`, absent on macOS. Shared preparation now validates that formerly unused placeholder. Resolve `false` through PATH in the fixture so it is valid on both Unix platforms, then validate the reviewer module and rerun CI. Production behavior remains unchanged by these portability fixes.
 
 The full reviewer module passes locally after the portable placeholder correction: 26 tests, including lifecycle, recovery, cancellation, concurrent roles, and payloads larger than the pipe buffer.
+
+Release checkpoint: `v2.23.1` points to `07e76c4d45bb005ae005d2932d53d783d1963ced`. Exact-commit CI: https://github.com/BrokkAi/mjolnir/actions/runs/36252142016. PR CI, including all macOS build/test/Clippy checks: https://github.com/BrokkAi/mjolnir/actions/runs/36252145115. Both succeeded before tagging. The tag deliberately names the independently validated commit rather than the later merge commit.
+
+Publication completed (2026-09-26):
+
+- GitHub release: https://github.com/BrokkAi/mjolnir/releases/tag/v2.23.1. All three archives and their checksums are published. Release workflow: https://github.com/BrokkAi/mjolnir/actions/runs/36254212898.
+- crates.io publication: https://github.com/BrokkAi/mjolnir/actions/runs/36256512150. The public sparse index confirms `brokk-mjolnir` 2.23.1 is present and not yanked.
+- npm publication: https://github.com/BrokkAi/mjolnir/actions/runs/36256518116. All platform packages are readable and `@brokkai/mjolnir` latest resolves to 2.23.1.
+- Homebrew update: `BrokkAi/homebrew-tap` commit `4ae16cdc708998555758794d59402dd8edf64ffa`, generated with the repository script. Ruby syntax and diff checks pass; the Homebrew ownership marker is retained. Linux and macOS installation checks succeeded: https://github.com/BrokkAi/homebrew-tap/actions/runs/36256584312.
+
+Post-merge CI observation: the first master macOS run hit a SQLite lock error in the existing build-cache environment test. Its retry passed the main test suite, CLI build, and desktop build before a newer master push cancelled the remaining run. That later master work is outside this release; the tagged commit and its full PR checks had already succeeded independently. The completed plan is committed on the task branch without changing the release tag or interrupting the newer master validation.
