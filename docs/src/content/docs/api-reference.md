@@ -315,6 +315,52 @@ viewer's own form does it. `launch_branch` selects the branch checked out in an
 isolated clone; otherwise the remote default is used. `launch_base` records a
 separate Git revision for the session's diff base. A bundle session resolves
 it in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`.
+For an exact starting revision on a bundle-backed session, supply a separate
+`checkout` object instead of `launch_base` or `launch_branch`:
+
+```json
+{
+  "workspace_id": "workspace-1",
+  "profile_id": "codex",
+  "target_id": "builder",
+  "bundle_id": "product",
+  "checkout": {
+    "repository_id": "project",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "branch": "town/run-123"
+  }
+}
+```
+
+`repository_id` must name a repository in the configured bundle, even for a
+single-repository bundle. Only that repository uses the selection; others start
+at their remote defaults. `commit` must be a full commit object ID, not a branch,
+tag, abbreviated SHA, or revision expression. Mjolnir fetches the exact object
+from origin if needed and refuses an unavailable commit. A moving remote branch
+cannot change the selected revision.
+
+`branch` is optional: omitted leaves HEAD detached; supplied creates a new local
+branch without an upstream. Preparation never pushes or modifies the source
+checkout. Existing branches, dirty workspaces, invalid selections, and conflicting
+legacy selectors fail visibly. Exact checkout requires a bundle-backed session;
+it cannot be combined with `project_directory` or `create_managed_worktree: false`.
+
+Session creation still returns its ID before preparation finishes. Wait for
+readiness or inspect the session's failure before prompting. Readiness guarantees
+that preparation verified the selected commit, branch, and clean working tree.
+Session receipts retain the immutable `checkout` selection alongside the session
+and bundle IDs; while provisioning, this records intent, not completed work.
+After prompting or resuming a checkpoint, the current checkout can differ: use
+the diff endpoint's repository metadata to inspect it. Resume preserves saved
+work instead of resetting to the original selection.
+
+Reuse the same bundle and workspace IDs for successive dispatches; each dispatch
+gets its own session checkout. Interrupted preparation retains its session and
+failure outcome. Retrying preparation may continue only the same selection in an
+unchanged checkout; it refuses to overwrite work. Cleanup follows ordinary
+session suspension/destruction and ACP exit policy. Repeating HTTP creation makes
+a new session rather than retrying the previous one.
+
 Everything else is optional. `idempotency_key` is no
 longer accepted: a request that still carries it is rejected as an unknown
 field.

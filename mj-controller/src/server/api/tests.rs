@@ -1446,6 +1446,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         ControllerAction::New {
             launch_base: None,
             launch_branch: None,
+            checkout: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1489,6 +1490,55 @@ async fn start_forwards_the_launch_base_to_the_controller() {
         panic!("expected a New action, got {:?}", request.action);
     };
     assert_eq!(launch_base.as_deref(), Some("origin/main"));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[test]
+fn session_receipt_retains_exact_checkout_identity() {
+    let (config, mut state) = sample_config_state();
+    let checkout = mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: "a".repeat(40),
+        branch: Some("town/run-123".into()),
+    };
+    state.sessions.get_mut("session-1").unwrap().checkout = Some(checkout.clone());
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let receipt = ApiSession::from(&snapshot.sessions[0]);
+    assert_eq!(receipt.checkout, Some(checkout));
+    assert_eq!(receipt.id, "session-1");
+}
+
+#[tokio::test]
+async fn start_forwards_exact_checkout() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let checkout = mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: "a".repeat(40),
+        branch: Some("town/run-123".into()),
+    };
+    let extra = format!(
+        ",\"checkout\":{}",
+        serde_json::to_string(&checkout).unwrap()
+    );
+    let response = tokio::spawn(app.oneshot(start_request(start_body(&extra))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        checkout: received, ..
+    } = &request.action
+    else {
+        panic!("expected New")
+    };
+    assert_eq!(received.as_ref(), Some(&checkout));
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1701,6 +1751,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
         ControllerAction::New {
             launch_base: None,
             launch_branch: None,
+            checkout: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),

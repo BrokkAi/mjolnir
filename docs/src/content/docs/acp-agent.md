@@ -45,6 +45,26 @@ program does. It connects to your daemon and starts it if it is not running, so
 the first session may take a moment while the daemon comes up. `mj api-info`
 reports the daemon it reached.
 
+To start a bundle repository at a recorded full commit on a new private branch:
+
+```sh
+mj acp --workspace town --profile codex-work --target builder --bundle product \
+  --checkout-repository project \
+  --checkout-commit 0123456789abcdef0123456789abcdef01234567 \
+  --checkout-branch town/run-123
+```
+
+Both `--checkout-repository` and `--checkout-commit` are required together with
+`--bundle`. Omitting `--checkout-branch` leaves HEAD detached. The repository ID
+is its configured name within the bundle; other repositories use their defaults.
+See the [exact checkout contract](/api-reference/#create-a-session) for failure,
+retry, and receipt semantics. `session/new` waits for preparation and reports a
+failure before a prompt can run. Its successful session ID is the Mjolnir session
+ID, usable with the HTTP session endpoint to read the retained `checkout`
+selection. Ownership and `--on-exit` also apply to sessions whose preparation is
+still running or failed; creating a session through HTTP does not let another
+adapter attach to it.
+
 ## What a session becomes
 
 `session/new` creates an ordinary Mjolnir session and answers with its id, so the

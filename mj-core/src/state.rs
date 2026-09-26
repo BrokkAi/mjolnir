@@ -1306,15 +1306,19 @@ pub struct SessionRecord {
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
-    /// The Git revision the session was asked to start at, as the caller typed
-    /// it. None starts at HEAD for a managed worktree and at the remote
-    /// default branch for a bundle session. The resolved commit lands in
-    /// `managed_worktree.base_commit` or in the clone's `mj.baseCommit`.
+    /// Diff baseline as supplied by the caller. A raw managed worktree also
+    /// starts here; a bundle checkout keeps its selected remote branch tip.
+    /// The resolved baseline lands in `managed_worktree.base_commit` or the
+    /// clone's `mj.baseCommit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_base: Option<String>,
     /// Branch selected for a new isolated checkout, independently of its base commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_branch: Option<String>,
+    /// Immutable exact starting selection for one bundle repository. Resume
+    /// preserves checkpointed work rather than applying this selection again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<crate::remote_git::ExactCheckout>,
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationAssessment>,

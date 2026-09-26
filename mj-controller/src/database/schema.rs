@@ -627,6 +627,26 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_parked_session_state(connection)?;
     }
 
+    // Breaking: older daemons cannot enforce exact checkout preparation on
+    // admitted sessions, so they must not recover or provision these records.
+    if version < 54 {
+        let add_column =
+            if super::legacy_schema::table_has_column(connection, "sessions", "checkout_json")? {
+                ""
+            } else {
+                "ALTER TABLE sessions ADD COLUMN checkout_json TEXT;"
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE schema_compatibility SET minimum_compatible_version = 54 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (54, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 54;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -850,8 +870,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 53 admits the `parked` session state.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 53;
+    /// `SCHEMA_VERSION`. Migration 54 adds exact checkout preparation.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 54;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

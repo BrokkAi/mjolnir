@@ -537,6 +537,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
     SessionLaunchOptions {
         launch_base: None,
         launch_branch: None,
+        checkout: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,
@@ -634,6 +635,44 @@ fn muse_registration_rejects_more_than_one_workspace_root_before_persisting() {
 
     assert!(error.to_string().contains("one workspace root"));
     assert!(controller.state.sessions.is_empty());
+}
+
+#[test]
+fn registration_rejects_exact_checkout_without_a_valid_repository_and_unambiguous_options() {
+    for case in ["missing_repository", "short_sha", "base", "branch", "raw"] {
+        let mut controller = Controller {
+            config: registration_config(),
+            state: State::default(),
+        };
+        controller
+            .config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
+        let mut options = launch_options(Vec::new());
+        options.checkout = Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: "a".repeat(40),
+            branch: Some("town/run-123".into()),
+        });
+        let target = if case == "raw" { "local" } else { "podman" };
+        match case {
+            "missing_repository" => {
+                options.checkout.as_mut().unwrap().repository_id = "absent".into()
+            }
+            "short_sha" => options.checkout.as_mut().unwrap().commit = "abcdef0".into(),
+            "base" => options.launch_base = Some("HEAD".into()),
+            "branch" => options.launch_branch = Some("main".into()),
+            "raw" => options.project_directory = Some(PathBuf::from("/project")),
+            _ => unreachable!(),
+        }
+        assert!(
+            controller
+                .register_session_with_resources("codex", "project", target, "exact", options)
+                .is_err(),
+            "{case}"
+        );
+        assert!(controller.state.sessions.is_empty());
+    }
 }
 
 /// MJ_DATA_DIR is process-global, so every test that reaches the

@@ -362,6 +362,7 @@ fn validate_action_against(
             create_managed_worktree,
             launch_base: _,
             launch_branch: _,
+            checkout: _,
             mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {
