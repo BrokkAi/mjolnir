@@ -40,6 +40,11 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
 }
 
 impl NpmBridge {
+    pub fn matches_launcher(&self, command: &std::path::Path, args: &[String]) -> bool {
+        (command == std::path::Path::new(self.command) && args.is_empty())
+            || self.is_legacy_launcher(command, args)
+    }
+
     /// Keep launch descriptions usable by older workers, including reviewers on
     /// a busy worker that cannot upgrade yet. New workers resolve this before ACP.
     pub fn bootstrap_script(&self) -> String {

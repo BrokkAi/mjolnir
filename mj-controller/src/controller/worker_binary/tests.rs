@@ -5226,6 +5226,11 @@ mod container_runtime {
         let temp = tempfile::tempdir().unwrap();
         installed_bridge(temp.path(), HarnessKind::Codex);
         let mut launch = container_launch(temp.path(), HarnessKind::Codex);
+        // An empty selector can be meaningful to a wrapper. It does not give
+        // Mjolnir enough provenance to accept an identity constraint.
+        launch
+            .environment
+            .insert("CODEX_PATH".into(), String::new());
         launch.environment.insert(
             "PATH".into(),
             format!("{}:/bin", launch.environment["PATH"]),
@@ -5318,6 +5323,12 @@ mod container_runtime {
             launch
                 .environment
                 .insert("INSTALL_LOG".into(), install_log.display().to_string());
+            // The controller's preparation command must install before it
+            // starts or takes control of a worker, including ambient targets.
+            mj_worker::worker_runtime::prepare_managed_harness(launch.clone())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&install_log).unwrap(), b"x");
             let prepared = prepare(&launch).await;
             let identity = prepared.runtime_identity().await.unwrap();
             assert!(identity.id.is_some(), "{identity:?}");
@@ -5335,6 +5346,120 @@ mod container_runtime {
             let again = prepare(&launch).await;
             assert_eq!(again.runtime_identity().await.unwrap(), identity);
             assert_eq!(std::fs::read(install_log).unwrap(), b"x");
+        }
+    }
+
+    #[test]
+    fn container_runtime_prepares_before_startup_and_preserves_the_live_worker_on_upgrade_failure()
+    {
+        use targets::TargetLocator;
+        struct PreparationExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+            fail_prepare: bool,
+        }
+        impl CommandExecutor for PreparationExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                if self.fail_prepare
+                    && command.purpose == "prepare exact container harness before worker upgrade"
+                {
+                    bail!("test preparation connection failed");
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let session = mj_core::state::new_session_id().unwrap();
+        let container_id = targets::resource_name(&session).unwrap();
+        let ssh = SshTarget {
+            destination: "user@host.test".into(),
+            ssh_args: Vec::new(),
+        };
+        let locators = [
+            TargetLocator::LocalDocker {
+                container_id: container_id.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::LocalPodman {
+                container_id: container_id.clone(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            TargetLocator::AppleContainer {
+                container_id: container_id.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::SshDocker {
+                container_id: container_id.clone(),
+                ssh: ssh.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::SshPodman {
+                container_id,
+                ssh,
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+        ];
+        let launch = container_launch(temp.path(), HarnessKind::Codex);
+        let worker = temp.path().join("worker");
+        std::fs::write(&worker, stamped_worker(b"new worker")).unwrap();
+        for locator in locators {
+            let root = targets::worker_root(&locator, &session).unwrap();
+            let executor = PreparationExecutor {
+                commands: RefCell::new(Vec::new()),
+                fail_prepare: false,
+            };
+            prepare_installed_managed_harness(&executor, &locator, &root, &launch).unwrap();
+            let commands = executor.commands.borrow();
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0].args.join(" ").contains("prepare-harness"));
+            drop(commands);
+            for fail_prepare in [false, true] {
+                let executor = PreparationExecutor {
+                    commands: RefCell::new(Vec::new()),
+                    fail_prepare,
+                };
+                let result = prepare_managed_harness_for_upgrade(
+                    &executor, &locator, &session, &worker, &launch,
+                );
+                assert_eq!(result.is_err(), fail_prepare);
+                let commands = executor.commands.borrow();
+                let prepare = commands
+                    .iter()
+                    .find(|command| {
+                        command.purpose == "prepare exact container harness before worker upgrade"
+                    })
+                    .unwrap();
+                assert!(prepare.args.join(" ").contains("harness-prepare-"));
+                let stage = commands
+                    .iter()
+                    .find(|command| {
+                        command.purpose == "stage container harness launch configuration"
+                    })
+                    .unwrap();
+                assert!(stage.args.join(" ").contains("harness-prepare-"));
+                for command in commands.iter() {
+                    let rendered = command.args.join(" ");
+                    assert!(!rendered.contains(&format!("'{root}/hel'")));
+                    assert!(!rendered.contains(&format!("'{root}/launch.json'")));
+                    assert!(!command.args.contains(&format!("{root}/hel")));
+                    assert!(!command.args.contains(&format!("{root}/launch.json")));
+                    assert!(!rendered.contains("control.sock"));
+                    assert!(!rendered.contains("kill"));
+                }
+                assert_eq!(
+                    commands
+                        .iter()
+                        .any(|command| command.purpose
+                            == "remove container harness preparation staging"),
+                    !fail_prepare
+                );
+            }
         }
     }
 }

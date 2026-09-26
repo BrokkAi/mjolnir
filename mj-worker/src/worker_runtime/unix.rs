@@ -716,18 +716,14 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
     let mut environment = config.target_environment.clone();
     environment.extend(config.environment);
     config.environment = environment;
-    let prepared = super::harness::resolve(
-        config.harness_runtime,
-        config.harness,
-        config.execution_policy,
-        &config.environment,
-    )
-    .await
-    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
-    if config.harness_runtime == mj_core::worker_launch::HarnessRuntimePolicy::Managed
-        && prepared.is_none()
-    {
-        bail!("managed harness preparation produced no installation");
+    if config.requires_harness_preparation() {
+        super::prepare_harness_launch(
+            config.harness,
+            config.harness_runtime,
+            config.execution_policy,
+            AcpSupervisorSpec::from(&config),
+        )
+        .await?;
     }
     Ok(())
 }

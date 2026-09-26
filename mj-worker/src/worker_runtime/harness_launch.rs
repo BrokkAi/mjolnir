@@ -68,10 +68,8 @@ pub async fn prepare_harness_launch(
         environment.insert("PATH".into(), path.clone());
         spec.environment.insert("PATH".into(), path);
     }
-    let bridge = npm_bridge(harness).filter(|bridge| {
-        (spec.command == Path::new(bridge.command) && spec.args.is_empty())
-            || bridge.is_legacy_launcher(&spec.command, &spec.args)
-    });
+    let bridge =
+        npm_bridge(harness).filter(|bridge| bridge.matches_launcher(&spec.command, &spec.args));
     let mut selected_policy = policy;
     if policy == HarnessRuntimePolicy::Ambient
         && let Some(bridge) = bridge
@@ -137,7 +135,9 @@ pub async fn prepare_harness_launch(
         // Freeze the explicit provider selection as well as the bridge. Unknown
         // provider metadata still yields an unavailable identity during inspection.
         if harness == HarnessKind::Codex
-            && let Some(provider) = environment.get("CODEX_PATH")
+            && let Some(provider) = environment
+                .get("CODEX_PATH")
+                .filter(|path| !path.is_empty())
         {
             let provider = Path::new(provider);
             let provider = if provider.is_relative() && provider.components().count() > 1 {
