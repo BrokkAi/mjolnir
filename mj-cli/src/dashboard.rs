@@ -22,7 +22,7 @@ mod workspace_settings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -30,7 +30,6 @@ use crossterm::event::{
 };
 use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::{Config, config_path};
-use mj_core::credentials::CredentialSyncHandle;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
 use mj_core::subagent::SubagentRecord;
 
@@ -43,7 +42,6 @@ use mj_controller::session_manager::{
     SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
 };
 use mj_controller::targets::DeploymentCapacityTarget;
-use mj_controller::worker_client::CredentialSyncCoordinator;
 use mj_core::workspace::{ConversationLayout, PaneSizes};
 use mj_tui::tile_layout::PaneId;
 use mj_tui::{
@@ -68,11 +66,10 @@ use crate::import::{
     PendingDashboardImport, spawn_dashboard_import,
 };
 use crate::pollers::{
-    CapacityPollUpdate, CredentialSyncNotices, CredentialSyncSignalTracker, Feed, LifecycleUpdate,
-    QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget, ResourcePollUpdate, RuntimeStateUpdate,
-    WorkerDiagnosisTracker, WorkerPollTarget, apply_worker_poll_update,
-    complete_manual_quota_refresh, dashboard_worker_targets, projected_queued_prompts,
-    quota_refresh_profiles, refresh_dashboard_poll_targets, schedule_due_credential_syncs,
+    CapacityPollUpdate, Feed, LifecycleUpdate, QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget,
+    ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker, WorkerPollTarget,
+    apply_worker_poll_update, complete_manual_quota_refresh, dashboard_worker_targets,
+    projected_queued_prompts, quota_refresh_profiles, refresh_dashboard_poll_targets,
     session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
     spawn_quota_refresher, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
@@ -349,11 +346,6 @@ pub(crate) struct DashboardContext {
     pub(crate) lifecycle_updates_tx: UnboundedSender<LifecycleUpdate>,
     lifecycle: Feed<UnboundedReceiver<LifecycleUpdate>>,
     pub(crate) lifecycle_operations: BTreeMap<String, ActiveLifecycleOperation>,
-
-    credential_sync: Feed<CredentialSyncCoordinator>,
-    credential_sync_handle: CredentialSyncHandle,
-    credential_sync_signals: CredentialSyncSignalTracker,
-    credential_sync_notices: CredentialSyncNotices,
 
     resource_targets_tx: watch::Sender<Vec<ResourcePollTarget>>,
     resource_triggers_tx: Sender<String>,
@@ -755,9 +747,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
                 context.runtime_state.accept(update);
-            }
-            result = context.credential_sync.wait(), if context.credential_sync.is_open() => {
-                context.credential_sync.accept(result);
             }
             update = context.resource.wait(), if context.resource.is_open() => {
                 context.resource.accept(update);
@@ -1535,8 +1524,6 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<LifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
-        let credential_sync = CredentialSyncCoordinator::spawn();
-        let credential_sync_handle = credential_sync.handle();
         let (resource_targets_tx, resource_triggers_tx, resource_updates_rx) =
             spawn_dashboard_resource_poller();
         let (capacity_targets_tx, capacity_triggers_tx, capacity_updates_rx) =
@@ -1547,7 +1534,6 @@ impl DashboardContext {
             &controller,
             &worker_targets_tx,
             &resource_targets_tx,
-            &credential_sync_handle,
             &lifecycle_operations.keys().cloned().collect(),
         );
         let capacity_targets = controller.deployment_capacity_targets();
@@ -1631,10 +1617,6 @@ impl DashboardContext {
             lifecycle_updates_tx,
             lifecycle: Feed::new(lifecycle_updates_rx),
             lifecycle_operations,
-            credential_sync: Feed::new(credential_sync),
-            credential_sync_handle,
-            credential_sync_signals: CredentialSyncSignalTracker::default(),
-            credential_sync_notices: CredentialSyncNotices::default(),
             resource_targets_tx,
             resource_triggers_tx,
             resource: Feed::new(resource_updates_rx),

@@ -72,7 +72,6 @@ pub fn refresh_dashboard_poll_targets(
     controller: &Controller,
     worker_targets_tx: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
     resource_targets_tx: &tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
-    credential_sync: &CredentialSyncHandle,
     excluded_sessions: &std::collections::BTreeSet<String>,
 ) {
     let worker_targets = dashboard_worker_targets_excluding(controller, excluded_sessions);
@@ -80,9 +79,6 @@ pub fn refresh_dashboard_poll_targets(
     let mut resource_targets = dashboard_resource_targets(controller);
     resource_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
     resource_targets_tx.send_replace(resource_targets);
-    let mut credential_targets = credential_sync_targets(controller);
-    credential_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
-    credential_sync.set_targets(credential_targets);
 }
 
 pub fn spawn_aws_resource_options_resolution(

@@ -33,12 +33,6 @@ impl DashboardContext {
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
         self.drain_runtime_config();
-        schedule_due_credential_syncs(
-            &mut self.credential_sync_signals,
-            &self.credential_sync_handle,
-            Instant::now(),
-        );
-        self.drain_credential_results();
         self.drain_resource_updates();
         self.drain_capacity_updates();
         self.drain_aws_resource_options();
@@ -58,7 +52,6 @@ impl DashboardContext {
             self.runtime_notices.take_delivered(),
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
-            self.credential_sync.take_delivered(),
             self.resource.take_delivered(),
             self.capacity.take_delivered(),
             self.aws_options.take_delivered(),
@@ -166,10 +159,6 @@ impl DashboardContext {
                     self.dashboard.begin_quota_refresh(profile_ids)
                 }
                 QuotaUpdate::Report(outcome) => {
-                    if outcome.credentials_changed {
-                        self.credential_sync_handle
-                            .sync_profile_now(&outcome.report.profile_id, None);
-                    }
                     self.dashboard.apply_quota(outcome.report);
                 }
                 QuotaUpdate::Finished { generation } => {
@@ -198,13 +187,6 @@ impl DashboardContext {
                     None
                 }
             };
-            if let Some(snapshot) = update.view.snapshot.as_ref()
-                && let Some(session) = self.controller.state.sessions.get(&session_id).cloned()
-                && let Some(signal) = snapshot.latest_credential_sync_signal.clone()
-            {
-                self.credential_sync_signals
-                    .observe(&session_id, &session.last_profile, signal);
-            }
             let materialized = update
                 .view
                 .snapshot
@@ -495,24 +477,6 @@ impl DashboardContext {
         self.refresh_chat_context();
         self.controller_changed = true;
         self.refresh_poll_targets();
-    }
-
-    pub(crate) fn drain_credential_results(&mut self) {
-        while let Some(result) = self.credential_sync.next_ready() {
-            crate::pollers::log_credential_sync_actions(&result);
-            let harness = self
-                .controller
-                .config
-                .profiles
-                .get(&result.profile_id)
-                .map(|profile| profile.kind);
-            if let Some(notice) =
-                self.credential_sync_notices
-                    .notice(&result, harness, &self.controller.state)
-            {
-                self.dashboard.set_notice(notice);
-            }
-        }
     }
 
     pub(crate) fn drain_resource_updates(&mut self) {

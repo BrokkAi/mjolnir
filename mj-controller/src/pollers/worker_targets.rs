@@ -99,3 +99,16 @@ pub(super) fn target_syncs_github_token(target: Option<&mj_core::state::TargetLo
             Some(mj_core::state::TargetLocator::LocalBare { .. })
         )
 }
+
+/// Revalidate a copied target while holding background admission: a lifecycle
+/// may have completed since the dashboard published its target list.
+pub fn credential_sync_target_is_current(
+    mut controller: crate::controller::Controller,
+    candidate: &CredentialSyncTarget,
+) -> bool {
+    controller
+        .state
+        .sessions
+        .retain(|id, _| id == &candidate.session_id);
+    credential_sync_targets(&controller).contains(candidate)
+}

@@ -87,6 +87,40 @@ struct RecoveryGateState {
 }
 
 impl RecoveryGate {
+    /// Run disposable background work under the same admission as recovery
+    /// and worker replacement. Lifecycle reservations preempt it before they
+    /// touch the worker. Dropping the future also releases admission.
+    pub async fn run_background<T>(
+        self: &Arc<Self>,
+        session_id: &str,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        let cancelled = self.try_start(session_id)?;
+        struct Admission<'a> {
+            gate: &'a RecoveryGate,
+            session_id: &'a str,
+        }
+        impl Drop for Admission<'_> {
+            fn drop(&mut self) {
+                self.gate.finish(self.session_id);
+            }
+        }
+        let _admission = Admission {
+            gate: self,
+            session_id,
+        };
+        let cancellation = async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation => None,
+            result = work => Some(result),
+        }
+    }
+
     pub fn reserve(self: &Arc<Self>, session_id: &str) -> RecoveryReservation {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         *state.reservations.entry(session_id.to_owned()).or_default() += 1;
@@ -225,5 +259,67 @@ impl RecoveryObserver {
     /// instead of waiting behind it.
     pub fn cancel_busy(&self, session_id: &str) {
         self.gate.cancel_busy(session_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_reservation_preempts_background_work_before_releasing_admission() {
+        let gate = Arc::new(RecoveryGate::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.run_background("child", async {
+                    started_tx.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                })
+                .await
+            }
+        });
+        started_rx.await.unwrap();
+        let reservation = gate.reserve("child");
+        assert!(gate.is_busy("child"));
+        gate.cancel_busy("child");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        assert!(!gate.is_busy("child"));
+        assert!(
+            gate.run_background("child", async { panic!("reserved worker accessed") })
+                .await
+                .is_none()
+        );
+        assert_eq!(gate.run_background("other", async { 7 }).await, Some(7));
+        drop(reservation);
+        assert_eq!(gate.run_background("child", async { 9 }).await, Some(9));
+    }
+
+    #[tokio::test]
+    async fn aborting_background_task_releases_worker_admission() {
+        let gate = Arc::new(RecoveryGate::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.run_background("child", async {
+                    started_tx.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                })
+                .await
+            }
+        });
+        started_rx.await.unwrap();
+        assert!(gate.run_background("child", async { 1 }).await.is_none());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(gate.run_background("child", async { 2 }).await, Some(2));
     }
 }

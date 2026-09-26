@@ -352,7 +352,7 @@ impl RuntimeState {
 
     /// Record something the daemon did on its own, for every attached surface
     /// to report once.
-    pub(super) fn push_notice(&self, session_id: &str, text: impl Into<String>) {
+    pub(crate) fn push_notice(&self, session_id: &str, text: impl Into<String>) {
         const RETAINED_NOTICES: usize = 32;
 
         let notice = RuntimeNotice {

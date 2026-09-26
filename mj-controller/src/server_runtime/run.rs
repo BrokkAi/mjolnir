@@ -104,7 +104,8 @@ pub async fn run_server(
     } = worker;
     worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
     publish_capacity_targets(&controller, &capacity_targets_tx, &mut capacity_state);
-    let mut credential_sync = CredentialSyncCoordinator::spawn();
+    let mut credential_sync =
+        CredentialSyncCoordinator::spawn_guarded(daemon_runtime.worker_background_gate());
     let credential_sync_handle = credential_sync.handle();
     credential_sync_handle.set_targets(credential_sync_targets(&controller));
     let mut credential_sync_signals = CredentialSyncSignalTracker::default();
@@ -834,6 +835,7 @@ pub async fn run_server(
                             .map(|profile| profile.kind);
                         if let Some(notice) = credential_sync_notices.notice(&result, harness, &controller.state) {
                             eprintln!("Mjolnir: {notice}");
+                            daemon_runtime.push_notice("", notice);
                         }
                     }
                 }

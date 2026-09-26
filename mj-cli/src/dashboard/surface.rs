@@ -367,7 +367,6 @@ impl DashboardContext {
             &self.controller,
             &self.worker_targets_tx,
             &self.resource_targets_tx,
-            &self.credential_sync_handle,
             &self.lifecycle_operations.keys().cloned().collect(),
         );
     }

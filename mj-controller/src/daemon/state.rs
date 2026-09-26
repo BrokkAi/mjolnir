@@ -1,6 +1,10 @@
 use super::*;
 
 impl RuntimeState {
+    pub(crate) fn worker_background_gate(&self) -> Arc<crate::recovery_gate::RecoveryGate> {
+        self.recovery_observer.gate.clone()
+    }
+
     pub(super) fn new(
         session_manager: SessionManagerControl,
         controller: Controller,

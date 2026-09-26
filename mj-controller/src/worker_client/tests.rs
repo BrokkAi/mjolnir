@@ -1172,3 +1172,25 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
         );
     }
 }
+
+#[tokio::test]
+async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result() {
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let _reservation = gate.reserve(SESSION_ID);
+    let profile = tempfile::tempdir().unwrap();
+    let target = CredentialSyncTarget {
+        session_id: SESSION_ID.into(),
+        profile_id: "work".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        profile_home: profile.path().to_path_buf(),
+        authenticates_with_api_key: false,
+        sync_github_token: false,
+        spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
+    };
+    let result =
+        credential_sync::reconcile_profile_guarded(&[target], Some(SESSION_ID), Some(&gate)).await;
+    assert!(
+        result.is_empty(),
+        "deferral must not report an unchanged or failed login"
+    );
+}

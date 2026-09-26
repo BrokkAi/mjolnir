@@ -1102,7 +1102,10 @@ fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
             session_id: "018f9dd2-a3b4".into(),
             reason: CredentialSyncReason::AuthenticationFailure,
         }),
-        outcomes: Vec::new(),
+        outcomes: vec![CredentialSyncOutcome {
+            session_id: "018f9dd2-a3b4".into(),
+            outcome: Ok(Vec::new()),
+        }],
         ..pushed
     };
     let notice = notices
@@ -1129,7 +1132,10 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
             reason: CredentialSyncReason::AuthenticationFailure,
         }),
         failure: None,
-        outcomes: Vec::new(),
+        outcomes: vec![CredentialSyncOutcome {
+            session_id: "018f9dd2-a3b4".into(),
+            outcome: Ok(Vec::new()),
+        }],
     };
 
     let claude = CredentialSyncNotices::default()
@@ -1856,13 +1862,21 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             None,
             Some(Ok(vec![CredentialSyncAction::Pushed])),
         ),
-        triggered(CredentialSyncReason::AuthenticationFailure, None, None),
+        triggered(
+            CredentialSyncReason::AuthenticationFailure,
+            None,
+            Some(Ok(Vec::new())),
+        ),
         triggered(
             CredentialSyncReason::EmptyPromptResponse,
             None,
             Some(Ok(vec![CredentialSyncAction::Pushed])),
         ),
-        triggered(CredentialSyncReason::EmptyPromptResponse, None, None),
+        triggered(
+            CredentialSyncReason::EmptyPromptResponse,
+            None,
+            Some(Ok(Vec::new())),
+        ),
         CredentialSyncResult {
             profile_id: "claude".into(),
             trigger: None,
@@ -1889,4 +1903,51 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
         notice.starts_with("Session 790051c5 returned no response"),
         "{notice}"
     );
+}
+
+#[test]
+fn credential_sync_rejects_targets_captured_before_parking_or_replacement() {
+    let running = podman_controller(SessionState::Running);
+    let target = credential_sync_targets(&running).pop().unwrap();
+    assert!(credential_sync_target_is_current(running, &target));
+    assert!(!credential_sync_target_is_current(
+        podman_controller(SessionState::Parked),
+        &target,
+    ));
+    let mut replaced = podman_controller(SessionState::Running);
+    replaced
+        .state
+        .sessions
+        .get_mut(&target.session_id)
+        .unwrap()
+        .target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "b".repeat(64),
+        workspace_storage: Default::default(),
+    });
+    assert!(!credential_sync_target_is_current(replaced, &target));
+}
+
+#[test]
+fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
+    use mj_core::credentials::CredentialSyncResult;
+    for reason in [
+        CredentialSyncReason::AuthenticationFailure,
+        CredentialSyncReason::EmptyPromptResponse,
+    ] {
+        let result = CredentialSyncResult {
+            profile_id: "work".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "parked-child".into(),
+                reason,
+            }),
+            failure: None,
+            outcomes: Vec::new(),
+        };
+        assert!(
+            CredentialSyncNotices::default()
+                .notice(&result, None, &State::default())
+                .is_none()
+        );
+    }
 }

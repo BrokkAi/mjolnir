@@ -6,7 +6,16 @@ pub struct CredentialSyncCoordinator {
 }
 
 impl CredentialSyncCoordinator {
+    #[cfg(test)]
     pub fn spawn() -> Self {
+        Self::spawn_inner(None)
+    }
+
+    pub fn spawn_guarded(gate: Arc<crate::recovery_gate::RecoveryGate>) -> Self {
+        Self::spawn_inner(Some(gate))
+    }
+
+    fn spawn_inner(gate: Option<Arc<crate::recovery_gate::RecoveryGate>>) -> Self {
         let (targets_tx, mut targets_rx) = watch::channel(Vec::new());
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
         let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
@@ -101,9 +110,15 @@ impl CredentialSyncCoordinator {
                     // and panics with "A Tokio 1.x context was found, but it
                     // is being shutdown".
                     let triggered_by = trigger.cause.as_ref().map(|cause| cause.session_id.clone());
+                    let gate = gate.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
-                            reconcile_profile(&targets, triggered_by.as_deref()).await
+                            reconcile_profile_guarded(
+                                &targets,
+                                triggered_by.as_deref(),
+                                gate.as_ref(),
+                            )
+                            .await
                         })
                         .await;
                         let (failure, outcomes) = match joined {
@@ -158,6 +173,14 @@ impl CredentialSyncCoordinator {
     }
 }
 
+#[cfg(test)]
+pub(super) async fn reconcile_profile(
+    targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
+) -> Vec<CredentialSyncOutcome> {
+    reconcile_profile_guarded(targets, triggered_by, None).await
+}
+
 /// Reconcile one profile with every live session that runs it.
 ///
 /// A pull makes every other session's copy stale by definition, so the pass
@@ -169,9 +192,10 @@ impl CredentialSyncCoordinator {
 /// `triggered_by`, the session whose failure asked for this sync: that it was
 /// reached and had nothing to change is what shows the profile's own login
 /// is the one the provider refused.
-pub(super) async fn reconcile_profile(
+pub(super) async fn reconcile_profile_guarded(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
+    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
 ) -> Vec<CredentialSyncOutcome> {
     // The token lookup may run `gh auth token`, a synchronous child process,
     // so it goes to the blocking pool rather than stalling a scheduler thread.
@@ -188,12 +212,47 @@ pub(super) async fn reconcile_profile(
     for pass in 0..2 {
         let mut pulled = false;
         for target in targets {
-            match reconcile_session(target, github_token.as_deref()).await {
-                Ok(actions)
+            let result = match gate {
+                Some(gate) => gate
+                    .run_background(&target.session_id, async {
+                        let candidate = target.clone();
+                        let current = tokio::task::spawn_blocking(move || {
+                            // Read only: cancellation may leave this blocking
+                            // read finishing after admission has been released.
+                            let controller = crate::controller::Controller {
+                                config: mj_core::config::Config::load()?,
+                                state: crate::database::load_state()?,
+                            };
+                            Ok::<_, anyhow::Error>(
+                                crate::pollers::credential_sync_target_is_current(
+                                    controller, &candidate,
+                                ),
+                            )
+                        })
+                        .await
+                        .context("reload credential sync target")??;
+                        if !current {
+                            return Ok(None);
+                        }
+                        reconcile_session(target, github_token.as_deref())
+                            .await
+                            .map(Some)
+                    })
+                    .await
+                    .unwrap_or(Ok(None)),
+                None => reconcile_session(target, github_token.as_deref())
+                    .await
+                    .map(Some),
+            };
+            match result {
+                // Deferral is not a successful credential check: in particular
+                // it must not mark an authentication-triggered login refused.
+                Ok(None) => {}
+                Ok(Some(actions))
                     if actions.is_empty()
                         && (triggered_by != Some(target.session_id.as_str())
                             || outcomes.contains_key(&target.session_id)) => {}
-                Ok(actions) => {
+                Ok(Some(actions)) => {
                     pulled |= actions.contains(&CredentialSyncAction::Pulled);
                     outcomes.insert(
                         target.session_id.clone(),

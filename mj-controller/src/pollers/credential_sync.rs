@@ -138,8 +138,8 @@ impl CredentialSyncNotices {
         state: &State,
     ) -> Option<String> {
         let advice = setup_token_advice(&result.profile_id, harness);
-        // Event-triggered syncs always speak: the upstream per-session
-        // cooldown, not this dedup, is what keeps them rare.
+        // Completed event-triggered syncs always speak: the upstream
+        // per-session cooldown, not this dedup, is what keeps them rare.
         if let Some(trigger) = &result.trigger {
             let session_id = &trigger.session_id;
             let session = state.session_notice_name(session_id);
@@ -159,6 +159,15 @@ impl CredentialSyncNotices {
                         session, result.profile_id
                     ),
                 });
+            }
+            // A lifecycle can defer or preempt reconciliation. With no
+            // result for this session, we have not checked its credentials.
+            if !result
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.session_id == *session_id)
+            {
+                return None;
             }
             // The first ~80 columns are all most people read before a notice
             // scrolls off, so the profile leads and the advice trails.
