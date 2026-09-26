@@ -773,6 +773,49 @@ pub fn suspend_warning(not_handed_back: usize) -> Option<String> {
     }
 }
 
+/// The same warning naming the children by their listed titles, for a
+/// person choosing whether to suspend: up to three by name, then how many
+/// more. The API keeps [`suspend_warning`]'s count.
+#[must_use]
+pub fn suspend_warning_naming(titles: &[String]) -> Option<String> {
+    match titles.len() {
+        0 => None,
+        1 => Some(format!(
+            "Sub-agent {} has not handed back; suspending stops it",
+            quoted_titles(titles)
+        )),
+        _ => Some(format!(
+            "Sub-agents {} have not handed back; suspending stops them",
+            quoted_titles(titles)
+        )),
+    }
+}
+
+/// Titles in quotes, in a sentence: `"a"`, `"a" and "b"`, `"a", "b" and
+/// "c"`. Past three, the rest are counted: `"a", "b", "c" and 2 more`.
+#[must_use]
+pub fn quoted_titles(titles: &[String]) -> String {
+    const NAMED: usize = 3;
+    let mut named = titles
+        .iter()
+        .take(NAMED)
+        .map(|title| format!("\"{title}\""))
+        .collect::<Vec<_>>();
+    let last = if titles.len() > NAMED {
+        format!("{} more", titles.len() - NAMED)
+    } else {
+        match named.pop() {
+            Some(last) => last,
+            None => return String::new(),
+        }
+    };
+    if named.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", named.join(", "))
+    }
+}
+
 /// Whether a child had handed back its report for the parent's newest task:
 /// it is not working, a finished turn answers the parent's newest prompt, and
 /// that answer is final. The answer is the report the child handed back, or,
@@ -1314,6 +1357,46 @@ mod tests {
         assert_eq!(
             crate::relay::strip_hidden_prompt_context(&format!("{note}\nuser text")),
             "user text"
+        );
+    }
+
+    #[test]
+    fn the_suspend_confirmation_names_up_to_three_children_and_counts_the_rest() {
+        let titles = |count: usize| {
+            ["Alpha", "Bravo", "Charlie", "Delta", "Echo"][..count]
+                .iter()
+                .map(|title| (*title).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(suspend_warning_naming(&titles(0)), None);
+        assert_eq!(
+            suspend_warning_naming(&titles(1)).as_deref(),
+            Some("Sub-agent \"Alpha\" has not handed back; suspending stops it")
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(2)).as_deref(),
+            Some("Sub-agents \"Alpha\" and \"Bravo\" have not handed back; suspending stops them")
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(3)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\" and \"Charlie\" have not handed back; \
+                 suspending stops them"
+            )
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(4)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 1 more have not handed \
+                 back; suspending stops them"
+            )
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(5)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 2 more have not handed \
+                 back; suspending stops them"
+            )
         );
     }
 

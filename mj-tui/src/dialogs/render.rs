@@ -1287,7 +1287,9 @@ pub(crate) fn confirmation_body(
                     Style::default().fg(theme::palette().warning),
                 ));
             }
-            if let Some(warning) = mj_core::subagent::suspend_warning(*children_not_handed_back) {
+            if let Some(warning) =
+                mj_core::subagent::suspend_warning_naming(children_not_handed_back)
+            {
                 lines.push(Line::styled(
                     format!("{warning}."),
                     Style::default().fg(theme::palette().warning),

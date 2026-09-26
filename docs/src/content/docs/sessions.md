@@ -203,8 +203,10 @@ itself:
 - When a sub-agent has not handed back yet, Mjolnir says so: "2 sub-agents
   have not handed back; suspending stops them". The terminal and the web
   viewer ask for confirmation first when they can see a sub-agent still at
-  work. `mj suspend` prints the warning when the suspend is accepted, and the
-  API returns it in its answer.
+  work; the terminal names up to three of them, then counts the rest
+  ("Sub-agents "Alpha", "Bravo", "Charlie" and 2 more have not handed
+  back"). `mj suspend` prints the warning when the suspend is accepted, and
+  the API returns it in its answer.
 - The sub-agents stop only after the session's recovery copy is verified, so
   a suspend that fails before that point leaves them running.
 - A sub-agent that cannot be stopped normally, for example because its target

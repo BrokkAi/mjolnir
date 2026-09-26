@@ -307,8 +307,9 @@ pub(crate) enum Confirmation {
     },
     SuspendSession {
         session_id: String,
-        /// Sub-agents still at their task, which the suspend stops.
-        children_not_handed_back: usize,
+        /// Listed titles of the sub-agents still at their task, which the
+        /// suspend stops.
+        children_not_handed_back: Vec<String>,
         interrupting: bool,
         unverified_clone: bool,
     },

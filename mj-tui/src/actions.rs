@@ -1603,7 +1603,7 @@ impl DashboardState {
                     let interrupting =
                         self.attention_level(&session.id) == crate::AttentionLevel::Working;
                     let unverified_clone = session.publication_state().is_some();
-                    if !interrupting && children_not_handed_back == 0 && !unverified_clone {
+                    if !interrupting && children_not_handed_back.is_empty() && !unverified_clone {
                         return DashboardAction::Suspend {
                             session_id: session.id.clone(),
                             acknowledge_unpublished_work: false,

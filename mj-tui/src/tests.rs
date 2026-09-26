@@ -5234,8 +5234,9 @@ fn a_subagent_question_marks_its_parent_for_attention() {
 }
 
 /// A suspend stops the parent's sub-agents without a checkpoint of their own.
-/// It asks first only when one of them is still at its task, and says that
-/// suspending stops it; an idle child has handed back and stops silently.
+/// It asks first only when one of them is still at its task, and says, by
+/// its listed title, that suspending stops it (R15-4); an idle child has
+/// handed back and stops silently.
 #[test]
 fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -5246,6 +5247,12 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
         .get_mut(&parent)
         .unwrap()
         .project_directory = Some("/srv/project".into());
+    dashboard
+        .state
+        .sessions
+        .get_mut("child-session")
+        .unwrap()
+        .session_title_override = Some("sleep-100".into());
     dashboard.focus_sessions();
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     assert_eq!(
@@ -5271,7 +5278,6 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
         Mode::Confirm(dialog) if matches!(
             dialog.confirmation,
             crate::dialogs::Confirmation::SuspendSession {
-                children_not_handed_back: 1,
                 interrupting: false,
                 ..
             }
@@ -5282,7 +5288,7 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
 ",
     );
     assert!(
-        dialog.contains("1 sub-agent has not handed back; suspending stops it."),
+        dialog.contains("Sub-agent \"sleep-100\" has not handed back; suspending stops it."),
         "{dialog}"
     );
     assert_eq!(
@@ -5508,4 +5514,57 @@ fn a_sub_agent_stopped_by_its_parents_suspend_reads_stopping() {
     );
     let screen = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(screen.contains("Transition · Destroying"), "{screen}");
+}
+
+/// R15-4: the suspend confirmation names the sub-agents still at their task,
+/// by listed title, up to three, and counts the rest.
+#[test]
+fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard
+        .state
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .project_directory = Some("/srv/project".into());
+    let template = dashboard.state.sessions["child-session"].clone();
+    let relation = dashboard.state.subagents["child-session"].clone();
+    let mut state = dashboard.state.clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    for (position, title) in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut child = template.clone();
+        child.id = format!("child-{position}");
+        child.session_title_override = Some(title.into());
+        child.created_at = format!("2026-09-0{}T00:00:00Z", position + 1);
+        let mut relation = relation.clone();
+        relation.child_session_id = child.id.clone();
+        state.subagents.insert(child.id.clone(), relation);
+        state.sessions.insert(child.id.clone(), child);
+    }
+    dashboard.set_state(state);
+    for position in 0..5 {
+        dashboard
+            .session_details
+            .get_mut(&format!("child-{position}"))
+            .unwrap()
+            .current_turn_started_at = Some(1);
+    }
+    dashboard.focus_sessions();
+    dashboard.select_active_session(&parent);
+
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    let dialog = drawn(&mut dashboard, 160, 40).join(" ");
+    assert!(
+        dialog.contains(
+            "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 2 more have not handed back;"
+        ),
+        "{dialog}"
+    );
 }

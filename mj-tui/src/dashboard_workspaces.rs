@@ -130,15 +130,13 @@ impl DashboardState {
             self.clamp_selections();
             let titles = children
                 .iter()
-                .map(|child| format!("\"{}\"", child.title))
+                .map(|child| child.title.clone())
                 .collect::<Vec<_>>();
-            self.set_notice(match titles.as_slice() {
-                [title] => format!("Sub-agent {title} was stopped by the suspend"),
-                [rest @ .., last] => format!(
-                    "Sub-agents {} and {last} were stopped by the suspend",
-                    rest.join(", ")
-                ),
-                [] => continue,
+            let named = mj_core::subagent::quoted_titles(&titles);
+            self.set_notice(if titles.len() == 1 {
+                format!("Sub-agent {named} was stopped by the suspend")
+            } else {
+                format!("Sub-agents {named} were stopped by the suspend")
             });
             self.stopped_by_suspend.reopen = Some(parent_id);
         }
