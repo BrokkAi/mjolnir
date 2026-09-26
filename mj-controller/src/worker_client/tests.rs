@@ -1130,3 +1130,45 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
     let periodic = reconcile_profile(std::slice::from_ref(&target), None).await;
     assert!(periodic.is_empty(), "{periodic:?}");
 }
+
+/// #1160: after `mj login` rewrote codex4's login, it was not clear that live
+/// sessions got it. The next periodic sync pushes the new file to every live
+/// session of the profile that still holds the old one, a sub-agent child as
+/// much as any other, without waiting for another failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let before = "2026-09-25T20:00:00.000Z";
+    let sessions = ["child-in-parent-container", "sibling"];
+    let targets = sessions
+        .iter()
+        .map(|session| {
+            codex_sync_target(home.path(), session, before, &scratch.path().join(session))
+        })
+        .collect::<Vec<_>>();
+    // `mj login` at 22:49:05Z.
+    let login = codex_login("2026-09-25T22:49:05.000Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+
+    let outcomes = reconcile_profile(&targets, None).await;
+
+    assert_eq!(
+        outcomes,
+        sessions
+            .iter()
+            .map(|session| CredentialSyncOutcome {
+                session_id: (*session).into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            })
+            .collect::<Vec<_>>()
+    );
+    for session in sessions {
+        assert_eq!(
+            std::fs::read(scratch.path().join(session)).unwrap(),
+            login,
+            "{session}"
+        );
+    }
+}

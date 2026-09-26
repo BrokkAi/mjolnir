@@ -3622,6 +3622,76 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     }
 }
 
+/// #1160: a sub-agent child in its parent's container on a remote machine
+/// runs from a staged home of its own, named after the child, and the
+/// launch tells its worker which file there holds the login. That file is
+/// where a credential sync push lands, so a login refreshed by `mj login`
+/// reaches the child and not its parent's home.
+#[test]
+fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.last_profile = "codex4".into();
+    child.project_directory = None;
+    child.container_workspace = Some(parent_workspace.clone());
+    let template = mj_core::config::TargetTemplate::SshPodman {
+        ssh: mj_core::config::SshConnection {
+            host: "morannon".into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+
+    let (launch, _, target_home) = worker_launch_config(
+        &child,
+        &profile,
+        Some(&bundle),
+        &targets::TargetLocator::SshPodman {
+            borrowed_from: Some(parent_id.into()),
+            ssh: SshTarget {
+                destination: "morannon".into(),
+                ssh_args: Vec::new(),
+            },
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &mj_core::state::TargetRuntimeSettings::from(&template),
+    )
+    .unwrap();
+
+    assert_eq!(launch.harness_home, PathBuf::from(&target_home));
+    assert_eq!(
+        launch.harness_home,
+        PathBuf::from(format!("/var/lib/hel/profiles/{child_id}")),
+        "the child's staged home is its own, not its parent's"
+    );
+    assert_eq!(launch.environment["CODEX_HOME"], target_home);
+    assert_eq!(launch.authentication_marker.as_deref(), Some("auth.json"));
+    assert_eq!(
+        launch.cwd,
+        PathBuf::from(format!("/workspace/{parent_id}/project")),
+        "the child works in its parent's checkout"
+    );
+}
+
 #[test]
 fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     let project = tempfile::tempdir().unwrap();

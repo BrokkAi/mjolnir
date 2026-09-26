@@ -898,6 +898,108 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
     }
 }
 
+/// #1160: after `mj login` for codex4, the refreshed login has to reach every
+/// live session of the profile, including a sub-agent child that runs inside
+/// another session's container on a remote machine. Every such session is on
+/// the credential sync's list, and the child's entry reaches the child's own
+/// worker inside its parent's container, where its staged home is.
+#[test]
+fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_container() {
+    use mj_core::state::TargetLocator;
+
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt"}"#).unwrap();
+    let mut controller = podman_controller(SessionState::Running);
+    controller.config.profiles.insert(
+        "codex4".into(),
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    controller.config.targets.insert(
+        "morannon-podman".into(),
+        mj_core::config::TargetTemplate::SshPodman {
+            ssh: mj_core::config::SshConnection {
+                host: "morannon".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            container: mj_core::config::ContainerTemplate {
+                build_cache: None,
+                image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".into(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+            },
+        },
+    );
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let sibling_id = "2123456789abcdef0123456789abcdef";
+    let parent_container = "c".repeat(64);
+    let on_morannon = |borrowed_from: Option<&str>, container_id: &str| TargetLocator::SshPodman {
+        borrowed_from: borrowed_from.map(str::to_owned),
+        host: "morannon".into(),
+        container_id: container_id.into(),
+        workspace_storage: Default::default(),
+    };
+    // A Claude parent on morannon, its Codex child in the same container,
+    // and another codex4 session in a container of its own.
+    let mut parent = controller.state.sessions.remove(parent_id).unwrap();
+    parent.harness_kind = mj_core::config::HarnessKind::Claude;
+    parent.target_template_id = "morannon-podman".into();
+    parent.target = Some(on_morannon(None, &parent_container));
+    let mut child = parent.clone();
+    child.id = child_id.into();
+    child.harness_kind = mj_core::config::HarnessKind::Codex;
+    child.last_profile = "codex4".into();
+    child.target = Some(on_morannon(Some(parent_id), &parent_container));
+    let mut sibling = child.clone();
+    sibling.id = sibling_id.into();
+    sibling.target = Some(on_morannon(None, &"d".repeat(64)));
+    for session in [parent, child, sibling] {
+        controller
+            .state
+            .sessions
+            .insert(session.id.clone(), session);
+    }
+
+    let targets = credential_sync_targets(&controller)
+        .into_iter()
+        .filter(|target| target.profile_id == "codex4")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [child_id, sibling_id]
+    );
+    for target in &targets {
+        assert_eq!(target.profile_home, home.path());
+        assert!(!target.authenticates_with_api_key);
+    }
+    let child_command = std::iter::once(targets[0].spec.program.clone())
+        .chain(targets[0].spec.args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(child_command.contains("morannon"), "{child_command}");
+    assert!(child_command.contains(&parent_container), "{child_command}");
+    assert!(
+        child_command.contains(&format!("workers/{child_id}")),
+        "{child_command}"
+    );
+}
+
 #[test]
 fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
     use mj_core::state::TargetLocator;
