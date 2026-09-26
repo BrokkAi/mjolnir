@@ -69,6 +69,9 @@ pub(crate) fn attention_level(
             return AttentionLevel::Failed;
         }
         SessionState::Disconnected => return AttentionLevel::Unreachable,
+        // A parked sub-agent is idle by definition: its turn ended, its parent
+        // was told, and it has no worker to report anything else.
+        SessionState::Parked => return AttentionLevel::Idle,
         SessionState::Stopped
         | SessionState::Provisioning
         | SessionState::Checkpointing
@@ -585,7 +588,74 @@ impl DashboardState {
     }
 
     /// The attention level of one session, wherever it lives.
+    ///
+    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
+    /// waiting too. The child has no row outside the Sub-agents view, so
+    /// without this nothing a person normally looks at would show that the
+    /// child needs them (R11-1).
     pub fn attention_level(&self, session_id: &str) -> AttentionLevel {
+        let own = self.own_attention_level(session_id);
+        if own < AttentionLevel::Waiting && self.subagent_question(session_id).is_some() {
+            AttentionLevel::Waiting
+        } else {
+            own
+        }
+    }
+
+    /// The listed titles of this parent's Mjolnir sub-agents that are still
+    /// working or waiting on a question, oldest first. That is what the
+    /// dashboard can see of a child that has not handed back its report; a
+    /// child that finished its turn is taken to have handed it back.
+    pub(crate) fn subagents_not_handed_back(&self, parent_id: &str) -> Vec<String> {
+        let mut children = self
+            .state
+            .subagents
+            .values()
+            .filter(|record| record.parent_session_id == parent_id)
+            .filter(|record| {
+                matches!(
+                    self.own_attention_level(&record.child_session_id),
+                    AttentionLevel::Working | AttentionLevel::Waiting
+                )
+            })
+            .filter_map(|record| self.state.sessions.get(&record.child_session_id))
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            (left.created_at.as_str(), left.id.as_str())
+                .cmp(&(right.created_at.as_str(), right.id.as_str()))
+        });
+        children
+            .into_iter()
+            .map(|child| child.listed_title().to_owned())
+            .collect()
+    }
+
+    /// The first of this parent's Mjolnir sub-agents that is waiting on a
+    /// question, with that question.
+    pub(crate) fn subagent_question(
+        &self,
+        parent_id: &str,
+    ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
+        self.state
+            .subagents
+            .values()
+            .filter(|record| record.parent_session_id == parent_id)
+            .filter(|record| {
+                self.own_attention_level(&record.child_session_id) == AttentionLevel::Waiting
+            })
+            .find_map(|record| {
+                let child = self.state.sessions.get(&record.child_session_id)?;
+                let question = self
+                    .session_details
+                    .get(&child.id)?
+                    .pending_elicitations
+                    .first()?;
+                Some((child, question))
+            })
+    }
+
+    /// The attention level from the session's own facts alone.
+    fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
         let Some(session) = self.state.sessions.get(session_id) else {
             return AttentionLevel::Inactive;
         };

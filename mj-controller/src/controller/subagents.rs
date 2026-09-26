@@ -23,9 +23,132 @@ pub struct RegisterSubagentRequest {
     pub working_directory: PathBuf,
     pub initial_prompt: String,
     pub request_key: String,
+    /// The absolute directory on the parent's target that holds its
+    /// children's report directories, from [`Controller::prepare_subagent_report_root`].
+    /// `None` registers a child without one.
+    pub report_root: Option<String>,
+}
+
+/// Creates a report directory on a target and prints its absolute path.
+///
+/// `$1` is the directory, which may be relative to the login home the way an
+/// SSH or EC2 workspace is. `$2`, when not empty, is a repository whose
+/// `info/exclude` must list [`mj_core::subagent::PROJECT_REPORT_ROOT_DIR`], so a
+/// report root inside a bare project never shows in `git status`. A directory
+/// that is not a repository has no status to keep clean. The absolute path is
+/// what the parent and child are told, because neither runs in the login home.
+const PREPARE_REPORT_DIR_SCRIPT: &str = r#"set -eu
+cd
+mkdir -p -- "$1"
+if [ -n "$2" ] && exclude=$(git -C "$2" rev-parse --git-path info/exclude 2>/dev/null); then
+  case "$exclude" in /*) ;; *) exclude="$2/$exclude" ;; esac
+  line="/$3/"
+  if ! grep -qxF -- "$line" "$exclude" 2>/dev/null; then
+    mkdir -p -- "$(dirname -- "$exclude")"
+    if [ -s "$exclude" ] && [ -n "$(tail -c 1 -- "$exclude")" ]; then
+      printf '
+' >> "$exclude"
+    fi
+    printf '%s
+' "$line" >> "$exclude"
+  fi
+fi
+cd -- "$1"
+pwd -P
+"#;
+
+/// The argv that runs [`PREPARE_REPORT_DIR_SCRIPT`] for `directory`, adding
+/// the exclude line to `exclude_in` when given.
+fn prepare_report_dir_argv(directory: &str, exclude_in: Option<&str>) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        PREPARE_REPORT_DIR_SCRIPT.into(),
+        "sh".into(),
+        directory.into(),
+        exclude_in.unwrap_or_default().into(),
+        mj_core::subagent::PROJECT_REPORT_ROOT_DIR.into(),
+    ]
+}
+
+/// Run [`PREPARE_REPORT_DIR_SCRIPT`] on `backend` and return the absolute
+/// directory it printed.
+fn prepare_report_dir(
+    executor: &impl mj_core::targets::CommandExecutor,
+    backend: &mj_core::targets::TargetLocator,
+    session_id: &str,
+    directory: &str,
+    exclude_in: Option<&str>,
+) -> Result<String> {
+    let command = mj_core::targets::command_on_locator(
+        backend,
+        session_id,
+        prepare_report_dir_argv(directory, exclude_in),
+        "create the sub-agent report directory",
+    )?;
+    let output = super::execute_checked(executor, command)?;
+    let absolute = String::from_utf8(output.stdout)
+        .context("the sub-agent report directory is not UTF-8")?
+        .trim_end_matches('\n')
+        .to_owned();
+    ensure!(
+        absolute.starts_with('/'),
+        "the target did not report an absolute sub-agent report directory: {absolute:?}"
+    );
+    Ok(absolute)
 }
 
 impl Controller {
+    /// Create the directory that holds a parent's children's report
+    /// directories on the parent's target, and return its absolute path.
+    ///
+    /// It sits outside every repository: under the workspace root that a
+    /// bundle session's repositories are checked out below, or, for a bare
+    /// project whose workspace root is the user's own directory, inside the
+    /// project under a path its `info/exclude` lists.
+    pub fn prepare_subagent_report_root(
+        &self,
+        parent_session_id: &str,
+        executor: &impl mj_core::targets::CommandExecutor,
+    ) -> Result<String> {
+        let parent = self
+            .state
+            .sessions
+            .get(parent_session_id)
+            .with_context(|| format!("unknown parent session {parent_session_id}"))?;
+        let locator = parent
+            .target
+            .as_ref()
+            .context("parent session has no live target")?;
+        let backend = super::backend::backend_locator(locator, parent, &self.config)?;
+        let (root, exclude_in) = subagent_report_root(parent, &backend);
+        prepare_report_dir(
+            executor,
+            &backend,
+            parent_session_id,
+            &root,
+            exclude_in.as_deref(),
+        )
+    }
+
+    /// Create a registered child's own report directory on its target. A
+    /// child registered without one has nothing to create.
+    pub(super) fn prepare_subagent_report_dir(
+        &self,
+        session_id: &str,
+        backend: &mj_core::targets::TargetLocator,
+        executor: &impl mj_core::targets::CommandExecutor,
+    ) -> Result<()> {
+        if crate::database::load_subagent(session_id)?.is_none() {
+            return Ok(());
+        }
+        let Some(directory) = crate::database::load_subagent_report(session_id)?.report_dir else {
+            return Ok(());
+        };
+        prepare_report_dir(executor, backend, session_id, &directory, None)?;
+        Ok(())
+    }
+
     /// Register a child without provisioning another target or checkout.
     pub fn register_subagent(
         &mut self,
@@ -96,18 +219,7 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        let occupied = crate::database::list_subagents(&parent.id)?
-            .into_iter()
-            .filter(|child| {
-                self.subagent_occupies_slot(&child.child_session_id)
-                    .unwrap_or(true)
-            })
-            .count();
-        ensure!(
-            occupied < self.config.subagents.max_concurrent,
-            "parent session already has the maximum {} active sub-agents",
-            self.config.subagents.max_concurrent
-        );
+        self.ensure_subagent_slot_available(&parent.id, None)?;
 
         let child_id = new_session_id()?;
         let target = borrowed_locator(
@@ -159,15 +271,18 @@ impl Controller {
             checkpoint: None,
         };
         let handback_tool = child_gets_handback_tool(profile.kind);
+        let report_dir = request
+            .report_root
+            .as_deref()
+            .map(|root| format!("{}/{child_id}", root.trim_end_matches('/')));
         // The first prompt names the tool only when the child will have it.
-        let initial_prompt = if handback_tool {
-            format!(
+        let initial_prompt = match (handback_tool, &report_dir) {
+            (true, Some(report_dir)) => format!(
                 "{}\n\n{}",
-                mj_core::subagent::HANDBACK_PROMPT_NOTE,
+                mj_core::subagent::handback_prompt_note(report_dir),
                 request.initial_prompt
-            )
-        } else {
-            request.initial_prompt
+            ),
+            _ => request.initial_prompt,
         };
         let relation = SubagentRecord {
             child_session_id: child_id.clone(),
@@ -184,6 +299,9 @@ impl Controller {
             handback_tool,
         };
         crate::database::save_subagent_session(&session, &relation)?;
+        if let Some(report_dir) = &report_dir {
+            crate::database::record_subagent_report_dir(&child_id, report_dir)?;
+        }
         self.state.sessions.insert(child_id, session);
         self.state
             .subagents
@@ -191,49 +309,145 @@ impl Controller {
         Ok(relation)
     }
 
+    /// Refuse to start another child process tree for `parent_session_id`
+    /// when it already has the maximum number of live children.
+    ///
+    /// `starting` is the child a `send_input` is about to start again from
+    /// parked; it is not counted against itself. A spawn passes `None`.
+    ///
+    /// Every child whose worker may be holding processes in the parent's
+    /// container counts, idle or not: those processes are what the cap
+    /// protects (#1161). A parked, stopped, failed or lost child holds none.
     pub fn ensure_subagent_slot_available(
         &self,
         parent_session_id: &str,
-        child_id: &str,
+        starting: Option<&str>,
     ) -> Result<()> {
-        let occupied = crate::database::list_subagents(parent_session_id)?
+        let live = crate::database::list_subagents(parent_session_id)?
             .into_iter()
-            .filter(|child| child.child_session_id != child_id)
-            .filter(|child| {
-                self.subagent_occupies_slot(&child.child_session_id)
-                    .unwrap_or(true)
+            .filter(|child| Some(child.child_session_id.as_str()) != starting)
+            .filter_map(|child| {
+                let session = self.state.sessions.get(&child.child_session_id)?;
+                session.state.has_live_worker().then(|| LiveSubagent {
+                    child_session_id: child.child_session_id.clone(),
+                    title: session.listed_title().to_owned(),
+                    state: live_subagent_state(session),
+                })
             })
-            .count();
-        ensure!(
-            occupied < self.config.subagents.max_concurrent,
-            "parent session already has the maximum {} active sub-agents",
-            self.config.subagents.max_concurrent
-        );
+            .collect::<Vec<_>>();
+        let maximum = self.config.subagents.max_concurrent;
+        ensure!(live.len() < maximum, "{}", slot_refusal(&live, maximum));
         Ok(())
     }
+}
 
-    fn subagent_occupies_slot(&self, child_id: &str) -> Result<bool> {
-        let Some(session) = self.state.sessions.get(child_id) else {
-            return Ok(false);
-        };
-        if matches!(
-            session.state,
-            SessionState::Provisioning | SessionState::Closing | SessionState::Checkpointing
-        ) {
-            return Ok(true);
-        }
-        if !session.state.is_active() {
-            return Ok(false);
-        }
-        Ok(
-            crate::database::load_materialized_session_summary(child_id)?.is_none_or(|summary| {
-                !matches!(
+/// One child that holds processes on its parent's target, as a cap refusal
+/// names it.
+struct LiveSubagent {
+    child_session_id: String,
+    title: String,
+    state: &'static str,
+}
+
+/// The word a cap refusal uses for a live child's state. An idle child is
+/// told apart from a working one, because only an idle child can be closed
+/// without losing work.
+fn live_subagent_state(session: &SessionRecord) -> &'static str {
+    match session.state {
+        SessionState::Provisioning => "starting",
+        SessionState::Checkpointing => "checkpointing",
+        SessionState::Closing | SessionState::Destroying => "stopping",
+        SessionState::Disconnected => "disconnected",
+        _ => match crate::database::load_materialized_session_summary(&session.id) {
+            Ok(Some(summary))
+                if matches!(
                     summary.execution,
                     mj_core::state::MaterializedExecutionState::Idle
-                )
-            }),
-        )
+                ) =>
+            {
+                "idle"
+            }
+            _ => "running",
+        },
     }
+}
+
+/// The refusal a parent model reads when it asks for one child too many: how
+/// many are live, the maximum, which ones they are, and how a slot frees up.
+fn slot_refusal(live: &[LiveSubagent], maximum: usize) -> String {
+    let listed = live
+        .iter()
+        .map(|child| {
+            format!(
+                "{} \"{}\" ({})",
+                mj_core::state::short_id(&child.child_session_id),
+                child.title,
+                child.state
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "this session already has {} live sub-agents and the maximum is {maximum}. \
+         Live sub-agents: {listed}. A sub-agent frees its slot when it hands back its \
+         report (it is then parked and holds no processes until you send it input) or \
+         when you close it.",
+        live.len()
+    )
+}
+
+/// Whether a sub-agent child has handed back its report for its parent's
+/// newest task, from what the store holds; see
+/// [`mj_core::subagent::has_handed_back`]. A session that is not a child, or
+/// that has never finished a turn, has not.
+pub fn subagent_has_handed_back(child_session_id: &str) -> Result<bool> {
+    let Some(relation) = crate::database::load_subagent(child_session_id)? else {
+        return Ok(false);
+    };
+    // A child is parked only once its turn ended and its parent was told, so
+    // whatever the parent was going to get from it, it has.
+    if crate::database::load_session_state(child_session_id)? == Some(SessionState::Parked) {
+        return Ok(true);
+    }
+    let Some((execution, active_turn, last_turn)) =
+        crate::database::load_materialized_turn_outcome(child_session_id)?
+    else {
+        return Ok(false);
+    };
+    let report = crate::database::load_subagent_report(child_session_id)?;
+    let working = active_turn.is_some()
+        || !matches!(execution, mj_core::state::MaterializedExecutionState::Idle);
+    Ok(mj_core::subagent::has_handed_back(
+        relation.handback_tool,
+        &report,
+        working,
+        last_turn.as_ref(),
+        mj_core::clock::epoch_millis(),
+    ))
+}
+
+/// What a parent's record keeps about a child its suspend stops: the child's
+/// listed title, one line of its task, and whether it had handed back.
+pub fn stopped_subagent(
+    state: &mj_core::state::State,
+    child_session_id: &str,
+) -> Result<mj_core::subagent::StoppedSubagent> {
+    let relation = state
+        .subagents
+        .get(child_session_id)
+        .with_context(|| format!("unknown sub-agent session {child_session_id}"))?;
+    let title = state
+        .sessions
+        .get(child_session_id)
+        .map_or(relation.task_name.as_str(), SessionRecord::listed_title)
+        .to_owned();
+    let report_dir = crate::database::load_subagent_report(child_session_id)?.report_dir;
+    Ok(mj_core::subagent::StoppedSubagent {
+        child_session_id: child_session_id.to_owned(),
+        title,
+        task: mj_core::subagent::task_summary(&relation.initial_prompt, report_dir.as_deref()),
+        handed_back: subagent_has_handed_back(child_session_id)?,
+    })
 }
 
 fn sibling_path(path: &Path, parent_id: &str, child_id: &str) -> Result<PathBuf> {
@@ -328,9 +542,124 @@ fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
     }
 }
 
+/// Where a parent's children keep their report directories, before the target
+/// resolves it, and the repository whose `info/exclude` must list it.
+fn subagent_report_root(
+    parent: &SessionRecord,
+    backend: &mj_core::targets::TargetLocator,
+) -> (String, Option<String>) {
+    match &parent.project_directory {
+        Some(project) => {
+            let project = project.to_string_lossy().trim_end_matches('/').to_owned();
+            (
+                format!("{project}/{}", mj_core::subagent::PROJECT_REPORT_ROOT_DIR),
+                Some(project),
+            )
+        }
+        None => {
+            let workspace =
+                super::network_git::workspace_root(backend, parent.container_workspace.as_deref());
+            (
+                format!(
+                    "{}/{}",
+                    workspace.trim_end_matches('/'),
+                    mj_core::subagent::REPORT_ROOT_DIR
+                ),
+                None,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_prepare_script(directory: &Path, exclude_in: Option<&Path>) -> String {
+        let argv = prepare_report_dir_argv(
+            &directory.to_string_lossy(),
+            exclude_in
+                .map(|path| path.to_string_lossy().into_owned())
+                .as_deref(),
+        );
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the report directory script");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A bare project's report root is inside the project, so the script
+    /// lists it in the repository's `info/exclude` exactly once and the
+    /// project's `git status` stays clean.
+    #[test]
+    fn the_report_directory_script_creates_the_directory_and_keeps_git_status_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        // An exclude file without a trailing newline must not have its last
+        // line joined to the new one.
+        std::fs::write(project.join(".git/info/exclude"), "*.tmp").unwrap();
+        let root = project.join(mj_core::subagent::PROJECT_REPORT_ROOT_DIR);
+        let printed = run_prepare_script(&root, Some(&project));
+        assert_eq!(
+            Path::new(&printed),
+            root.canonicalize().unwrap(),
+            "the script prints the absolute directory"
+        );
+        run_prepare_script(&root, Some(&project));
+        std::fs::write(root.join("report.md"), "details").unwrap();
+        let exclude = std::fs::read_to_string(project.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude, "*.tmp\n/.mj/agents/\n");
+        assert_eq!(git(&["status", "--porcelain", "--ignored=no"]), "");
+
+        // Outside a repository there is no exclude to write.
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let reports = plain.join(".mj/agents/child");
+        run_prepare_script(&reports, Some(&plain));
+        assert!(reports.is_dir());
+    }
+
+    #[test]
+    fn a_report_root_is_under_the_workspace_or_inside_a_bare_project() {
+        let mut parent = super::super::test_support::checkpoint_test_session("parent-1");
+        let backend = mj_core::targets::TargetLocator::LocalBare {
+            worker_root: "/var/lib/hel/workers/parent-1".into(),
+        };
+        parent.project_directory = None;
+        assert_eq!(
+            subagent_report_root(&parent, &backend),
+            ("/var/lib/hel/workers/parent-1/.mj-agents".to_owned(), None)
+        );
+        parent.project_directory = Some("/home/dev/project/".into());
+        assert_eq!(
+            subagent_report_root(&parent, &backend),
+            (
+                "/home/dev/project/.mj/agents".to_owned(),
+                Some("/home/dev/project".to_owned())
+            )
+        );
+    }
 
     #[test]
     fn a_container_child_borrows_its_parents_container() {
@@ -406,6 +735,113 @@ mod tests {
             "this session uses native sub-agents"
         );
         assert!(ensure_parent_may_delegate(&parent(Some(true))).is_ok());
+    }
+
+    /// #1161: idle children held the processes that exhausted their parent's
+    /// container, yet did not count against the cap. Every child that holds
+    /// processes counts now; a parked one does not. The refusal is what the
+    /// parent model reads, so it names the live children and how to free a
+    /// slot.
+    #[test]
+    fn the_cap_counts_every_child_holding_processes_and_names_them() {
+        const MARKER: &str = "MJ_TEST_SUBAGENT_CAP_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::test_support::IsolatedTest::new(super::super::test_support::test_name(
+                module_path!(),
+                "the_cap_counts_every_child_holding_processes_and_names_them",
+            ))
+            .env(MARKER, "1")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let parent = super::super::test_support::checkpoint_test_session("parent-1");
+        crate::database::save_session(&parent).unwrap();
+        let children = [
+            ("aaaaaaaa-idle", "Audit the lockfile", SessionState::Running),
+            ("bbbbbbbb-busy", "Run the suite", SessionState::Running),
+            ("cccccccc-park", "Map the parser", SessionState::Parked),
+            ("dddddddd-done", "Old task", SessionState::Stopped),
+        ];
+        for (id, title, state) in children {
+            let mut child = super::super::test_support::checkpoint_test_session(id);
+            child.state = state;
+            child.session_title_override = Some(title.into());
+            crate::database::save_subagent_session(
+                &child,
+                &SubagentRecord {
+                    child_session_id: id.into(),
+                    parent_session_id: "parent-1".into(),
+                    task_name: title.into(),
+                    profile_id: "codex".into(),
+                    model: None,
+                    effort: None,
+                    working_directory: PathBuf::new(),
+                    initial_prompt: "do it".into(),
+                    request_key: format!("request-{id}"),
+                    created_at: "2026-09-25T00:00:00Z".into(),
+                    noticed_turn: None,
+                    handback_tool: true,
+                },
+            )
+            .unwrap();
+        }
+        let mut controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: crate::database::load_state().unwrap(),
+        };
+        controller.config.subagents.max_concurrent = 2;
+
+        // Two live children fill a cap of two, idle or not.
+        let refusal = controller
+            .ensure_subagent_slot_available("parent-1", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("already has 2 live sub-agents and the maximum is 2"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("aaaaaaaa \"Audit the lockfile\"")
+                && refusal.contains("bbbbbbbb \"Run the suite\""),
+            "the refusal names every live child: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Map the parser") && !refusal.contains("Old task"),
+            "parked and stopped children hold no processes: {refusal}"
+        );
+        assert!(
+            refusal.contains("hands back")
+                && refusal.contains("parked")
+                && refusal.contains("close it"),
+            "the refusal says how a slot frees up: {refusal}"
+        );
+        // Starting the parked child again is refused the same way.
+        assert!(
+            controller
+                .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
+                .is_err()
+        );
+        // Input to a live child starts nothing, so the cap never refuses it.
+        controller
+            .ensure_subagent_slot_available("parent-1", Some("aaaaaaaa-idle"))
+            .unwrap();
+
+        // Once one live child is parked, a spawn and a restart both fit.
+        controller
+            .state
+            .sessions
+            .get_mut("aaaaaaaa-idle")
+            .unwrap()
+            .state = SessionState::Parked;
+        controller
+            .ensure_subagent_slot_available("parent-1", None)
+            .unwrap();
+        controller
+            .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
+            .unwrap();
     }
 
     #[test]

@@ -55,7 +55,7 @@ impl CollectionGit {
 }
 
 impl GitCommandRunner for CollectionGit {
-    fn run(&self, _repository: &Path, command: &GitCommand) -> Result<GitOutput> {
+    fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
         self.commands.lock().unwrap().push(command.clone());
         let arguments = command
             .arguments
@@ -63,6 +63,14 @@ impl GitCommandRunner for CollectionGit {
             .map(|argument| argument.to_string_lossy())
             .collect::<Vec<_>>();
         let (status, stdout) = match arguments.first().map(|argument| argument.as_ref()) {
+            // The collected directory is its checkout's top level.
+            Some("rev-parse")
+                if arguments
+                    .iter()
+                    .any(|argument| argument == "--show-toplevel") =>
+            {
+                (0, format!("{}\n\n", repository.display()).into_bytes())
+            }
             Some("remote") => (0, b"https://token@github.com/example/repo.git\n".to_vec()),
             Some("rev-parse") => (0, format!("{}\n", "b".repeat(40)).into_bytes()),
             Some("merge-base") => (0, format!("{}\n", "b".repeat(40)).into_bytes()),
@@ -161,6 +169,7 @@ fn repository(id: &str) -> RepositorySnapshot {
             stash_stack: Vec::new(),
             id: id.to_string(),
             relative_destination: PathBuf::from(id),
+            checkout_subdirectory: None,
             origin: format!("https://github.com/example/{id}.git"),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -182,6 +191,7 @@ fn checkpoint_bundle(head: &str, contents: impl Into<Vec<u8>>) -> CheckpointRepo
             stash_stack: Vec::new(),
             id: "project".into(),
             relative_destination: "project".into(),
+            checkout_subdirectory: None,
             origin: "https://github.com/example/project.git".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -1387,7 +1397,7 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
     assert_eq!(paths, vec![PathBuf::from("note.txt")]);
-    assert_eq!(runner.commands().len(), 10);
+    assert_eq!(runner.commands().len(), 11);
 }
 
 #[test]
@@ -1449,7 +1459,7 @@ fn git_collection_builds_independent_payloads_concurrently() {
     assert_eq!(snapshot.committed_bundle, b"bundle");
     assert_eq!(snapshot.staged_patch, b"staged");
     assert_eq!(snapshot.unstaged_patch, b"unstaged");
-    assert_eq!(runner.commands().len(), 11);
+    assert_eq!(runner.commands().len(), 12);
 }
 
 /// Checkpoint work runs with nobody watching the terminal it inherits, so
@@ -2280,6 +2290,36 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
     assert_ne!(git_line(repository.path(), &["rev-parse", "HEAD"]), base);
     let rewritten = session_diff_details(&SystemGit, repository.path(), None, None).unwrap();
     assert_eq!(rewritten.head_descends_from_base, Some(false));
+}
+
+/// A session working in a subdirectory of its checkout is asked for its diff
+/// from that subdirectory, and its work is the whole checkout's, as its
+/// checkpoint is.
+#[test]
+fn a_session_diff_from_a_subdirectory_covers_the_whole_checkout() {
+    let repository = tempfile::tempdir().unwrap();
+    let root = repository.path();
+    initialize_repository(root);
+    commit_file(root, "tracked.txt", b"base\n", "base");
+    fs::create_dir(root.join("docs")).unwrap();
+    commit_file(root, "docs/guide.md", b"guide\n", "docs");
+    let base = git_line(root, &["rev-parse", "HEAD"]);
+    fs::write(root.join("tracked.txt"), b"edited at the root\n").unwrap();
+    fs::write(root.join("notes.txt"), b"untracked at the root\n").unwrap();
+    fs::write(root.join("docs/draft.md"), b"untracked in docs\n").unwrap();
+
+    let details = session_diff_details(&SystemGit, &root.join("docs"), Some(&base), None).unwrap();
+    for line in [
+        "+edited at the root",
+        "+untracked at the root",
+        "+untracked in docs",
+    ] {
+        assert!(
+            details.diff.contains(line),
+            "{line} missing: {}",
+            details.diff
+        );
+    }
 }
 
 #[test]

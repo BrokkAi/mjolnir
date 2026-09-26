@@ -866,9 +866,11 @@ impl ViewerLifecycleCategory {
     pub(super) const fn of(state: SessionState) -> Self {
         match state {
             SessionState::Provisioning => Self::Starting,
-            SessionState::Running | SessionState::Disconnected | SessionState::Checkpointing => {
-                Self::Live
-            }
+            // A parked sub-agent stays on the dashboard with its parent.
+            SessionState::Running
+            | SessionState::Disconnected
+            | SessionState::Checkpointing
+            | SessionState::Parked => Self::Live,
             SessionState::Closing | SessionState::Destroying => Self::Suspending,
             SessionState::Stopped => Self::Suspended,
             SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
@@ -893,6 +895,8 @@ pub enum ViewerOperationKind {
     Move,
     Suspend,
     Destroy,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stop,
     Cleanup,
     Checkpoint,
 }
@@ -905,6 +909,7 @@ impl ViewerOperationKind {
             Self::Move => Some(SessionTransitionKind::Moving),
             Self::Suspend => Some(SessionTransitionKind::Suspending),
             Self::Destroy | Self::Cleanup => Some(SessionTransitionKind::Destroying),
+            Self::Stop => Some(SessionTransitionKind::Stopping),
             // Checkpointing is an ordinary live-session operation. It must
             // not replace a readable conversation with a placeholder.
             Self::Checkpoint => None,

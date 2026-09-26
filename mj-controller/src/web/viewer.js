@@ -1065,6 +1065,7 @@ function operationLabel(operation, now) {
     move: 'Moving',
     suspend: 'Suspending',
     destroy: 'Destroying',
+    stop: 'Stopping',
     cleanup: 'Cleaning up',
     checkpoint: 'Checkpointing',
   }[operation.kind] || String(operation.kind || 'Operation').replace(/-/g, ' ');
@@ -1077,6 +1078,9 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (pendingLifecycleActions.has(`suspend:${session.id}`)) return 'Suspending…';
   if (session.launch_error) return session.launch_error;
   if (session.configuration_issue) return 'Needs configuration repair';
+  // A sub-agent whose turn ended: idle, with its processes stopped until its
+  // parent sends it more input.
+  if (session.state === 'parked') return 'Parked';
   if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
@@ -6397,13 +6401,17 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'suspend') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
-    const activeChildren = (session?.subagent_session_ids || [])
+    // A suspend stops the sub-agents without a checkpoint. Only the ones
+    // still at their task lose anything; an idle one has handed back.
+    const workingChildren = (session?.subagent_session_ids || [])
       .map(id => snapshot.sessions.find(item => item.id === id))
-      .filter(child => child && ['live', 'starting', 'suspending'].includes(child.lifecycle));
+      .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
+      .length;
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
       + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
-      + (activeChildren.length ? `\n\nThis also suspends ${activeChildren.length} active sub-agent(s) first.` : '');
+      + (workingChildren === 1 ? '\n\n1 sub-agent has not handed back; suspending stops it.' : '')
+      + (workingChildren > 1 ? `\n\n${workingChildren} sub-agents have not handed back; suspending stops them.` : '');
     if (!confirm(question)) return false;
   }
   if (dataset.action === 'destroy') {

@@ -126,7 +126,15 @@ pub(in crate::controller) fn preflight_harness(
     ) {
         return Ok(());
     }
-    let script = "if ! command -v node >/dev/null 2>&1; then echo 'Node.js is missing from PATH; install Node.js 22 or newer in the target environment' >&2; exit 127; fi; if ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'Node.js 22 or newer is required in the target environment' >&2; exit 1; fi; if ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null; then echo 'npm is missing or unusable; install npm in the target environment' >&2; exit 127; fi";
+    // Mjolnir installs its own pinned copy of the agent with Node.js and npm,
+    // so the agent's own command is not a prerequisite. When Node.js or npm
+    // is missing, though, the failure first says whether the agent itself is
+    // missing too, because that is what a person on a fresh machine needs to
+    // hear (launch finding R13-1).
+    let cli = profile.kind.cli_binary_name();
+    let script = format!(
+        "status=0; if ! command -v node >/dev/null 2>&1; then echo 'Node.js is missing from PATH; install Node.js 22 or newer in the target environment' >&2; status=127; elif ! node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)'; then echo 'Node.js 22 or newer is required in the target environment' >&2; status=1; elif ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null; then echo 'npm is missing or unusable; install npm in the target environment' >&2; status=127; fi; if [ \"$status\" -ne 0 ] && ! command -v {cli} >/dev/null 2>&1; then exit {HARNESS_CLI_MISSING_STATUS}; fi; exit \"$status\""
+    );
     let mut args = if profile.environment.contains_key("PATH") {
         vec![
             "-c".to_owned(),
@@ -135,7 +143,7 @@ pub(in crate::controller) fn preflight_harness(
             profile.environment["PATH"].clone(),
         ]
     } else {
-        vec!["-lc".to_owned(), script.to_owned()]
+        vec!["-lc".to_owned(), script]
     };
     let (command, destination) = match template {
         TargetTemplate::LocalBare => (CommandSpec::new("sh", args), "local host".to_owned()),
@@ -146,10 +154,33 @@ pub(in crate::controller) fn preflight_harness(
         }
         _ => unreachable!(),
     };
-    execute_checked(executor, command.purpose("preflight managed harness Node.js and npm"))
-        .with_context(|| format!("{} launch preflight failed on {destination}; Node.js 22+ and npm must be available on the target PATH", profile.kind.display_name()))?;
-    Ok(())
+    let command = command.purpose("preflight managed harness Node.js and npm");
+    let output = executor.execute(&command)?;
+    if output.status == 0 {
+        return Ok(());
+    }
+    let detail = crate::controller::command_error_detail(&output.stderr);
+    let failure = if detail.is_empty() {
+        anyhow::anyhow!("{} failed with status {}", command.purpose, output.status)
+    } else {
+        anyhow::anyhow!(detail)
+    };
+    let name = profile.kind.display_name();
+    Err(if output.status == HARNESS_CLI_MISSING_STATUS {
+        failure.context(format!(
+            "{name} is not installed on {destination}: `{cli}` is not on PATH. {}, sign in to it, then retry the launch",
+            profile.kind.install_advice()
+        ))
+    } else {
+        failure.context(format!(
+            "{name} launch preflight failed on {destination}; Node.js 22+ and npm must be available on the target PATH"
+        ))
+    })
 }
+
+/// The exit status the harness preflight script uses when Node.js or npm is
+/// unusable and the agent's own command is missing as well.
+const HARNESS_CLI_MISSING_STATUS: i32 = 3;
 
 pub(super) fn ensure_node_script() -> &'static str {
     "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi"

@@ -443,6 +443,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
                     remote_workspace: false,
                     id: repository.id.clone(),
                     relative_destination: repository.destination.clone(),
+                    checkout_subdirectory: None,
                     origin: repository.source_label(),
                     base_commit: String::new(),
                     head_commit: if repository.id == "one" {
@@ -512,6 +513,7 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
             remote_workspace: false,
             id: "project".into(),
             relative_destination: "project".into(),
+            checkout_subdirectory: None,
             origin: "https://github.com/archived/should-not-be-contacted.git".into(),
             base_commit: prerequisite.clone(),
             head_commit: head.clone(),
@@ -1669,17 +1671,29 @@ enum FreshNativeOpening {
     Unexplained,
 }
 
+/// Whether the suspend before a [`fresh_native_resume`] stopped a sub-agent.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoppedSubagents {
+    None,
+    One,
+}
+
 /// Run [`fresh_native_resume`] for Claude and for Codex, each alone in a child
 /// of this test binary: the durable store it writes is process-global.
 #[cfg(unix)]
-fn fresh_native_resume_for_each_harness(test: &str, opening: FreshNativeOpening) {
+fn fresh_native_resume_for_each_harness(
+    test: &str,
+    opening: FreshNativeOpening,
+    stopped_subagents: StoppedSubagents,
+) {
     if let Some(harness) = std::env::var_os(FRESH_NATIVE_RESUME_CHILD) {
         let harness = match harness.to_str() {
             Some("claude") => mj_core::config::HarnessKind::Claude,
             Some("codex") => mj_core::config::HarnessKind::Codex,
             other => panic!("unexpected harness {other:?}"),
         };
-        fresh_native_resume(harness, opening);
+        fresh_native_resume(harness, opening, stopped_subagents);
         return;
     }
     for harness in ["claude", "codex"] {
@@ -1706,7 +1720,11 @@ fn fresh_native_resume_for_each_harness(test: &str, opening: FreshNativeOpening)
 /// archived native session: a restart, the warning, and a `session_opened`
 /// with a new identity.
 #[cfg(unix)]
-fn fresh_native_resume(harness: mj_core::config::HarnessKind, opening: FreshNativeOpening) {
+fn fresh_native_resume(
+    harness: mj_core::config::HarnessKind,
+    opening: FreshNativeOpening,
+    stopped_subagents: StoppedSubagents,
+) {
     use crate::controller::checkpoint::tests::{
         LATCH_RELAY_ANSWER, LATCH_RELAY_ANSWER_PROMPTS, LATCH_RELAY_FRESH_NATIVE,
         LATCH_RELAY_REPLACED_UNUSED, LATCH_RELAY_ROOT, LATCH_RELAY_SESSION,
@@ -1813,6 +1831,16 @@ exit 0
     session.checkpoint = Some(checkpoint.clone());
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&archived_projection).unwrap();
+    let stopped = mj_core::subagent::StoppedSubagent {
+        child_session_id: "11111111111111111111111111111111".into(),
+        title: "Fix the parser".into(),
+        task: Some("Fix the off-by-one in the parser.".into()),
+        handed_back: false,
+    };
+    if stopped_subagents == StoppedSubagents::One {
+        crate::database::record_stopped_subagents(session_id, std::slice::from_ref(&stopped))
+            .unwrap();
+    }
     let mut controller = Controller {
         config,
         state: State {
@@ -1869,6 +1897,23 @@ exit 0
                 durable.sessions[session_id].native_session_id.as_deref(),
                 Some("fresh-native")
             );
+            if stopped_subagents == StoppedSubagents::One {
+                // The relay holds the note for the first prompt, so the
+                // record has let the child go.
+                let relay_state =
+                    std::fs::read_to_string(worker_root.join(mj_core::relay::RELAY_STATE_FILE))
+                        .unwrap();
+                assert!(
+                    relay_state.contains("<mj-stopped-subagents>")
+                        && relay_state.contains("Fix the parser"),
+                    "{relay_state}"
+                );
+                assert!(
+                    crate::database::load_stopped_subagents(session_id)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
 
             // The resumed session takes a prompt and answers it.
             let answered = runtime.block_on(async {
@@ -1911,6 +1956,13 @@ exit 0
                     projection.transcript
                 );
                 assert_eq!(mentions(projection, "[session restarted]"), 1);
+                // The person sees one line about the stopped sub-agent.
+                assert_eq!(
+                    mentions(projection, "Suspend stopped 1 sub-agent"),
+                    usize::from(stopped_subagents == StoppedSubagents::One),
+                    "{:#?}",
+                    projection.transcript
+                );
             }
         }
         FreshNativeOpening::Unexplained => {
@@ -1919,6 +1971,13 @@ exit 0
                 format!("{error:#}").contains("expected native-session"),
                 "{error:#}"
             );
+            // Nothing was delivered, so the next resume still tells the model.
+            if stopped_subagents == StoppedSubagents::One {
+                assert_eq!(
+                    crate::database::load_stopped_subagents(session_id).unwrap(),
+                    std::slice::from_ref(&stopped)
+                );
+            }
             assert_eq!(
                 controller.state.sessions[session_id]
                     .native_session_id
@@ -1956,6 +2015,7 @@ fn a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_ope
     fresh_native_resume_for_each_harness(
         "a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened",
         FreshNativeOpening::ReplacesUnused,
+        StoppedSubagents::None,
     );
 }
 
@@ -1968,6 +2028,32 @@ fn a_resume_that_opens_another_native_session_without_cause_is_refused() {
     fresh_native_resume_for_each_harness(
         "a_resume_that_opens_another_native_session_without_cause_is_refused",
         FreshNativeOpening::Unexplained,
+        StoppedSubagents::None,
+    );
+}
+
+/// A parent whose suspend stopped a sub-agent tells its model on the first
+/// prompt after the resume, through the relay's hidden context, and tells the
+/// person in one conversation line. The record forgets the child once the
+/// relay has the note.
+#[cfg(unix)]
+#[test]
+fn a_resume_tells_the_agent_and_the_person_which_sub_agents_the_suspend_stopped() {
+    fresh_native_resume_for_each_harness(
+        "a_resume_tells_the_agent_and_the_person_which_sub_agents_the_suspend_stopped",
+        FreshNativeOpening::ReplacesUnused,
+        StoppedSubagents::One,
+    );
+}
+
+/// A resume that fails keeps the list, so the next resume tells the model.
+#[cfg(unix)]
+#[test]
+fn a_failed_resume_keeps_the_stopped_sub_agents_for_the_next_one() {
+    fresh_native_resume_for_each_harness(
+        "a_failed_resume_keeps_the_stopped_sub_agents_for_the_next_one",
+        FreshNativeOpening::Unexplained,
+        StoppedSubagents::One,
     );
 }
 

@@ -382,6 +382,7 @@ fn config(generation: u64) -> ReviewerLaunchConfig {
         bridge_command: "/bin/false".into(),
         bridge_args: Vec::new(),
         environment: Default::default(),
+        excluded_environment: Vec::new(),
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         model: None,
         effort: None,

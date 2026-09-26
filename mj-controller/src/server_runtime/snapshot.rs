@@ -145,6 +145,7 @@ pub(super) fn viewer_operation(
             | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Suspend,
             crate::daemon::RuntimeLifecycleKind::DestroyStopped
             | crate::daemon::RuntimeLifecycleKind::ForceDestroy => ViewerOperationKind::Destroy,
+            crate::daemon::RuntimeLifecycleKind::StopSubagent => ViewerOperationKind::Stop,
             crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Cleanup,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
@@ -225,6 +226,7 @@ pub(super) fn session_capabilities(
             matches!(
                 op.kind,
                 crate::server::ViewerOperationKind::Destroy
+                    | crate::server::ViewerOperationKind::Stop
                     | crate::server::ViewerOperationKind::Cleanup
             )
         }),
@@ -456,24 +458,6 @@ pub(super) fn viewer_snapshot(
             name: workspace.name.clone(),
         })
         .collect();
-    // The published list comes from the workspace table, which omits an
-    // empty `default` and can predate a session created since (`mj new`
-    // makes one without any dashboard opening its workspace). The browser
-    // draws its tabs from this list, so a session whose workspace is missing
-    // would have no tab at all. List each such workspace by its id.
-    for session in &snapshot.sessions {
-        if !session.workspace_id.is_empty()
-            && !snapshot
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.id == session.workspace_id)
-        {
-            snapshot.workspaces.push(crate::server::ViewerWorkspace {
-                id: session.workspace_id.clone(),
-                name: session.workspace_id.clone(),
-            });
-        }
-    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -514,7 +498,7 @@ pub(super) fn viewer_snapshot(
     for session in &mut snapshot.sessions {
         session.move_recovery = move_recoveries.get(&session.id).cloned();
         if let Some(record) = controller.state.sessions.get(&session.id)
-            && let Some(source) = project_sources.source(record, &controller.config)
+            && let Some(source) = project_sources.source(record, controller)
         {
             session.set_project_source(source);
         }
@@ -617,12 +601,20 @@ pub(super) fn viewer_snapshot(
             mj_core::relay::RelayExecutionState::Closing => crate::server::ViewerChatPhase::Closing,
             mj_core::relay::RelayExecutionState::Closed => crate::server::ViewerChatPhase::Closed,
         };
+        // A parked sub-agent is idle: its turn ended and its worker is
+        // stopped until its parent sends it more input.
         session.is_idle = activity_state.is_idle()
             && controller
                 .state
                 .sessions
                 .get(&session.id)
-                .is_some_and(|record| record.state == mj_core::state::SessionState::Running)
+                .is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        mj_core::state::SessionState::Running
+                            | mj_core::state::SessionState::Parked
+                    )
+                })
             && session.operation.is_none();
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {

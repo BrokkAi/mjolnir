@@ -1,5 +1,24 @@
 use super::*;
 
+/// What the dashboard did about sub-agents whose parent's suspend stopped
+/// them, for the host to finish: their conversations go without saving a
+/// draft, since their records are gone, and the parent's conversation opens
+/// where the view went back to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StoppedBySuspend {
+    pub sessions: Vec<String>,
+    pub reopen: Option<String>,
+}
+
+/// A sub-agent whose record left because its parent's suspend stopped it.
+pub(crate) struct SubagentStoppedBySuspend {
+    session_id: String,
+    parent_id: String,
+    title: String,
+    /// Its conversation, or its own sub-agents, were on screen.
+    shown: bool,
+}
+
 impl DashboardState {
     /// The workspace currently used as the Sessions-pane filter.
     pub fn active_workspace_id(&self) -> Option<&str> {
@@ -40,6 +59,96 @@ impl DashboardState {
         self.selected_session_id = Some(parent_id);
         self.set_current_session(None);
         self.clamp_selections();
+    }
+
+    /// The active sub-agents that `next` no longer has because their parent's
+    /// suspend, or its discard, stopped them: the parent is still there, and
+    /// it is being suspended or already is.
+    pub(crate) fn subagents_stopped_by_suspend(
+        &self,
+        next: &State,
+    ) -> Vec<SubagentStoppedBySuspend> {
+        self.state
+            .subagents
+            .values()
+            .filter(|relation| !next.sessions.contains_key(&relation.child_session_id))
+            .filter_map(|relation| {
+                let child = self
+                    .state
+                    .sessions
+                    .get(&relation.child_session_id)
+                    .filter(|child| child.state.is_active())?;
+                let parent = next.sessions.get(&relation.parent_session_id)?;
+                let suspending = matches!(
+                    parent.state,
+                    SessionState::Closing | SessionState::Destroying | SessionState::Stopped
+                ) || self.session_operation_kind(&parent.id)
+                    == Some(SessionOperationKind::Suspending);
+                let shown = [
+                    self.subagent_parent_id.as_deref(),
+                    self.selected_session_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .chain(self.pane_sessions.values().map(String::as_str))
+                .any(|id| id == child.id);
+                suspending.then(|| SubagentStoppedBySuspend {
+                    session_id: child.id.clone(),
+                    parent_id: parent.id.clone(),
+                    title: child.listed_title().to_owned(),
+                    shown,
+                })
+            })
+            .collect()
+    }
+
+    /// Takes the sub-agents stopped by their parent's suspend off the view
+    /// (R15-1). Their records are gone, so a Sub-agents view that showed them
+    /// would fall to an empty list: it goes back to the parent's scope with
+    /// the parent selected, and says what happened instead.
+    pub(crate) fn leave_subagents_stopped_by_suspend(
+        &mut self,
+        stopped: Vec<SubagentStoppedBySuspend>,
+    ) {
+        let parents = stopped
+            .iter()
+            .map(|child| child.parent_id.clone())
+            .collect::<BTreeSet<_>>();
+        for parent_id in parents {
+            let children = stopped
+                .iter()
+                .filter(|child| child.parent_id == parent_id)
+                .collect::<Vec<_>>();
+            let in_view = children.iter().any(|child| child.shown)
+                || self.subagent_parent_id.as_deref() == Some(parent_id.as_str());
+            if !in_view {
+                continue;
+            }
+            self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+            self.selected_session_id = Some(parent_id.clone());
+            self.set_current_session(None);
+            self.clamp_selections();
+            let titles = children
+                .iter()
+                .map(|child| child.title.clone())
+                .collect::<Vec<_>>();
+            let named = mj_core::subagent::quoted_titles(&titles);
+            self.set_notice(if titles.len() == 1 {
+                format!("Sub-agent {named} was stopped by the suspend")
+            } else {
+                format!("Sub-agents {named} were stopped by the suspend")
+            });
+            self.stopped_by_suspend.reopen = Some(parent_id);
+        }
+        self.stopped_by_suspend
+            .sessions
+            .extend(stopped.into_iter().map(|child| child.session_id));
+    }
+
+    /// What the host has to finish for sub-agents a suspend stopped since it
+    /// last asked.
+    pub fn take_stopped_by_suspend(&mut self) -> StoppedBySuspend {
+        std::mem::take(&mut self.stopped_by_suspend)
     }
 
     /// Records that a handler took responsibility for the current event.

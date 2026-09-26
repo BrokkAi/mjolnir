@@ -825,24 +825,122 @@ fn every_session_is_pushed_the_managed_skills_too() {
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
 
     let target = skills_sync_target(home.path());
-    let archive = canonical_session_skills(&target).unwrap();
-    assert_eq!(
-        archive,
-        mj_core::skills::session_skills(target.harness, home.path()).unwrap()
-    );
-    for managed in mj_core::skills::managed_skills(target.harness) {
+    for format in [
+        mj_core::skills::SkillsArchiveFormat::Plain,
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    ] {
+        let archive = canonical_session_skills(&target, format).unwrap();
+        assert_eq!(
+            archive,
+            mj_core::skills::session_skills(target.harness, home.path(), format).unwrap()
+        );
+        for managed in mj_core::skills::managed_skills(target.harness) {
+            assert!(
+                archive.entries().contains(&managed),
+                "{} is missing",
+                managed.path
+            );
+        }
         assert!(
-            archive.entries().contains(&managed),
-            "{} is missing",
-            managed.path
+            archive
+                .entries()
+                .iter()
+                .any(|entry| entry.path == "skills/review/SKILL.md")
         );
     }
-    assert!(
-        archive
-            .entries()
-            .iter()
-            .any(|entry| entry.path == "skills/review/SKILL.md")
-    );
+}
+
+/// Plays a worker for one skills push: it reports a stale tree, then installs
+/// whatever archive it is sent, keeps a copy at the path in its third
+/// argument, and reports the fingerprint of the archive's uncompressed
+/// content, as a worker does.
+#[cfg(unix)]
+const SKILLS_FORMAT_RELAY: &str = r#"
+import base64, gzip, hashlib, json, sys
+protocol, session, received = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "skills-format-fixture", "session_id": session}}
+    elif method == "skills_state":
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": "stale"}}
+    elif method == "install_skills":
+        archive = base64.b64decode(req["request"]["params"]["data"])
+        with open(received, "wb") as out:
+            out.write(archive)
+        body = archive[8:]
+        if archive[:8] == b"HELSKIL2":
+            body = gzip.decompress(body)
+        fingerprint = hashlib.sha256(b"HELSKIL1" + body).hexdigest()
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": fingerprint}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+/// A worker from before relay protocol 23 reads only the uncompressed
+/// `HELSKIL1` archive, whose limits count raw bytes. The controller sends it
+/// that format and leaves out the 2.3 MB page it could not take; a current
+/// worker gets a compressed archive with the page. Either way the push
+/// succeeds only if the worker's fingerprint of what it received matches the
+/// controller's.
+#[cfg(unix)]
+#[tokio::test]
+async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/viz/demos")).unwrap();
+    std::fs::write(home.path().join("skills/viz/SKILL.md"), "viz").unwrap();
+    std::fs::write(
+        home.path().join("skills/viz/demos/sunspot-pretty.html"),
+        "<tr><td>1749-01</td><td>96.7</td></tr>\n".repeat(60_000),
+    )
+    .unwrap();
+
+    for (protocol, magic, carries_page) in [
+        (22, b"HELSKIL1", false),
+        (RELAY_PROTOCOL_VERSION, b"HELSKIL2", true),
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let received = scratch.path().join("received");
+        let mut target = skills_sync_target(home.path());
+        target.authenticates_with_api_key = true;
+        target.spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                SKILLS_FORMAT_RELAY.to_owned(),
+                protocol.to_string(),
+                SESSION_ID.to_owned(),
+                received.to_string_lossy().into_owned(),
+            ],
+        )
+        .purpose("skills archive format fixture");
+
+        let actions = reconcile_session(&target, None).await.unwrap();
+
+        assert_eq!(
+            actions,
+            [CredentialSyncAction::SkillsPushed],
+            "protocol {protocol}"
+        );
+        let archive = std::fs::read(&received).unwrap();
+        assert!(archive.starts_with(magic), "protocol {protocol}");
+        let sent = mj_core::skills::SkillsArchive::decode(&archive).unwrap();
+        assert!(
+            sent.entries()
+                .iter()
+                .any(|entry| entry.path == "skills/viz/SKILL.md"),
+            "protocol {protocol}"
+        );
+        assert_eq!(
+            sent.entries()
+                .iter()
+                .any(|entry| entry.path == "skills/viz/demos/sunspot-pretty.html"),
+            carries_page,
+            "protocol {protocol}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -911,6 +1009,166 @@ for line in sys.stdin:
                 .await
                 .unwrap(),
             1
+        );
+    }
+}
+
+/// Plays a worker for a credential sync: it reports the credential copy and
+/// the skills fingerprint it is given, and keeps any credential file it is
+/// sent at the path in its last argument.
+#[cfg(unix)]
+const CREDENTIAL_RELAY: &str = r#"
+import base64, hashlib, json, sys
+protocol, session, fingerprint, freshness, skills, received = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "credential-fixture", "session_id": session}}
+    elif method == "credential_state":
+        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": fingerprint, "freshness_epoch_ms": freshness}}
+    elif method == "skills_state":
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": skills}}
+    elif method == "install_credentials":
+        data = base64.b64decode(req["request"]["params"]["data"])
+        with open(received, "wb") as out:
+            out.write(data)
+        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": None}}
+    else:
+        break
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+/// A ChatGPT login as Codex writes it, refreshed at `refreshed`.
+#[cfg(unix)]
+fn codex_login(refreshed: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {"access_token": format!("access-{refreshed}")},
+        "last_refresh": refreshed,
+    }))
+    .unwrap()
+}
+
+/// A sync target for one session of the Codex profile in `home`, whose worker
+/// is [`CREDENTIAL_RELAY`] holding a login refreshed at `session_refreshed`.
+/// A file the sync pushes lands at `received`.
+#[cfg(unix)]
+fn codex_sync_target(
+    home: &std::path::Path,
+    session_id: &str,
+    session_refreshed: &str,
+    received: &std::path::Path,
+) -> CredentialSyncTarget {
+    let mut target = CredentialSyncTarget {
+        session_id: session_id.into(),
+        profile_id: "codex4".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        profile_home: home.to_path_buf(),
+        authenticates_with_api_key: false,
+        sync_github_token: false,
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+    };
+    let skills = canonical_session_skills(&target, mj_core::skills::SkillsArchiveFormat::Gzip)
+        .unwrap()
+        .state()
+        .fingerprint;
+    let session = CredentialSnapshot::of(
+        mj_core::config::HarnessKind::Codex,
+        &codex_login(session_refreshed),
+    );
+    target.spec = CommandSpec::new(
+        "python3",
+        [
+            "-c".to_owned(),
+            CREDENTIAL_RELAY.to_owned(),
+            RELAY_PROTOCOL_VERSION.to_string(),
+            session_id.to_owned(),
+            session.fingerprint,
+            session.freshness_epoch_ms.unwrap_or_default().to_string(),
+            skills,
+            received.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose("credential sync fixture");
+    target
+}
+
+/// #1160: a sync that a session's auth failure asked for says whether it
+/// reached that session, even when the session's login already matched the
+/// profile's. That match is what shows the profile's own login is the one the
+/// provider refused, so a spawn on the profile can be refused at once. A
+/// periodic sync still leaves sessions that agreed out of its outcomes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("received");
+    std::fs::write(
+        home.path().join("auth.json"),
+        codex_login("2026-09-25T20:00:00.000Z"),
+    )
+    .unwrap();
+    let target = codex_sync_target(
+        home.path(),
+        SESSION_ID,
+        "2026-09-25T20:00:00.000Z",
+        &received,
+    );
+
+    let triggered = reconcile_profile(std::slice::from_ref(&target), Some(SESSION_ID)).await;
+    assert_eq!(
+        triggered,
+        [CredentialSyncOutcome {
+            session_id: SESSION_ID.into(),
+            outcome: Ok(Vec::new()),
+        }]
+    );
+    assert!(!received.exists(), "nothing was pushed");
+
+    let periodic = reconcile_profile(std::slice::from_ref(&target), None).await;
+    assert!(periodic.is_empty(), "{periodic:?}");
+}
+
+/// #1160: after `mj login` rewrote codex4's login, it was not clear that live
+/// sessions got it. The next periodic sync pushes the new file to every live
+/// session of the profile that still holds the old one, a sub-agent child as
+/// much as any other, without waiting for another failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let before = "2026-09-25T20:00:00.000Z";
+    let sessions = ["child-in-parent-container", "sibling"];
+    let targets = sessions
+        .iter()
+        .map(|session| {
+            codex_sync_target(home.path(), session, before, &scratch.path().join(session))
+        })
+        .collect::<Vec<_>>();
+    // `mj login` at 22:49:05Z.
+    let login = codex_login("2026-09-25T22:49:05.000Z");
+    std::fs::write(home.path().join("auth.json"), &login).unwrap();
+
+    let outcomes = reconcile_profile(&targets, None).await;
+
+    assert_eq!(
+        outcomes,
+        sessions
+            .iter()
+            .map(|session| CredentialSyncOutcome {
+                session_id: (*session).into(),
+                outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            })
+            .collect::<Vec<_>>()
+    );
+    for session in sessions {
+        assert_eq!(
+            std::fs::read(scratch.path().join(session)).unwrap(),
+            login,
+            "{session}"
         );
     }
 }

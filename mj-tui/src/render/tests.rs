@@ -3540,6 +3540,32 @@ fn active_session_with_no_turn_in_flight_reads_idle() {
     assert!(text.contains("Idle"), "{text}");
 }
 
+/// #1161: a parked sub-agent's turn ended and its worker is stopped. It
+/// needs nothing from anyone, so it is idle (and drawn with the idle
+/// symbol), and its row says
+/// "Parked" rather than a clock that would never move.
+#[test]
+fn a_parked_sub_agent_is_idle_and_reads_parked() {
+    let mut session = stopped_session();
+    session.state = SessionState::Parked;
+    let detail = SessionDetail {
+        last_activity_at_ms: Some(1_000_000),
+        ..SessionDetail::default()
+    };
+
+    let attention = crate::dashboard_sessions::attention_level(
+        Some(&detail),
+        None,
+        session.state,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(attention, crate::AttentionLevel::Idle);
+    let text = session_metadata_text(&session, Some(&detail), None, 1_480, &config());
+    assert!(text.contains("Parked"), "{text}");
+}
+
 #[test]
 fn provisioning_clock_uses_elapsed_seconds_since_state_update() {
     let mut session = stopped_session();
@@ -3852,6 +3878,91 @@ fn empty_config_renders_onboarding_with_the_workspace_name() {
         dashboard.handle_key(key(KeyCode::Char('e'))),
         DashboardAction::None
     );
+}
+
+/// With no coding agent installed, the panel said "Settings can create an
+/// enabled agent profile from this machine.", which Settings could not do
+/// (launch finding R13-4). It now says what the look for agents found and
+/// where the quickstart explains the next step.
+#[test]
+fn get_started_says_when_no_agent_was_found_on_this_machine() {
+    let mut dashboard = DashboardState::new(
+        Config::default().with_local_targets(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    dashboard.set_installed_agents(Vec::new());
+
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+
+    assert!(rendered.contains("Get started"), "{rendered}");
+    assert!(
+        rendered.contains("No coding agent was found on this machine."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Install Codex, Claude Code, Kimi Code, Grok Build, or Muse Code, and sign in to it once."
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Then press ctrl+b s for Settings and choose Detect profiles."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("https://mjolnir.brokk.ai/quickstart/#if-no-coding-agent-is-installed"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Settings can create"), "{rendered}");
+}
+
+#[test]
+fn get_started_names_the_agents_found_on_this_machine() {
+    let mut dashboard = DashboardState::new(
+        Config::default().with_local_targets(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    dashboard.set_installed_agents(vec![HarnessKind::Claude, HarnessKind::Codex]);
+
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+
+    assert!(
+        rendered.contains("Found on this machine: Codex, Claude Code."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Press ctrl+b s for Settings and choose Detect profiles to add them."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("No coding agent was found"),
+        "{rendered}"
+    );
+}
+
+/// Until the look for agents answers, the panel claims nothing about what is
+/// installed.
+#[test]
+fn get_started_claims_nothing_about_this_machine_before_the_look_finishes() {
+    let mut dashboard = DashboardState::new(
+        Config::default().with_local_targets(),
+        State::default(),
+        BTreeMap::new(),
+    );
+
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+
+    assert!(
+        rendered.contains("No agent profile is set up yet."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Press ctrl+b s for Settings to add one."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("was found"), "{rendered}");
 }
 
 #[test]

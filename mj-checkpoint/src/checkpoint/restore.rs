@@ -88,6 +88,7 @@ pub fn restore_checkpoint_with_native_state(
             image_store.restore_artifact(relative_path, archive.payload(descriptor)?)?;
         }
     }
+    restore_subagent_reports(&archive, &spec.workspace_root)?;
     for queued in &seed.queued_prompts {
         let blocks: Vec<agent_client_protocol::schema::v1::ContentBlock> = queued
             .content
@@ -120,7 +121,9 @@ pub fn restore_checkpoint_with_native_state(
             let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
                 continue;
             };
-            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR) {
+            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
+                || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
+            {
                 continue;
             }
             let native_data = archive.payload(descriptor)?;
@@ -187,11 +190,40 @@ pub(super) fn restore_repositories_from_archive(
     for repository in &archive.manifest.repositories {
         let id = &repository.metadata.id;
         let snapshot = archived_repository_snapshot(archive, repository)?;
-        let path = workspace_root.join(&repository.metadata.relative_destination);
+        let path = checkout_top_level(
+            &workspace_root.join(&repository.metadata.relative_destination),
+            &repository.metadata,
+        )
+        .with_context(|| format!("restore repository {id:?}"))?;
         restore_git_snapshot(git, &path, &snapshot)
             .with_context(|| format!("restore repository {id:?}"))?;
     }
     Ok(())
+}
+
+/// The top level of the checkout a repository's session directory belongs to.
+///
+/// A session working in a subdirectory of its checkout is described by that
+/// subdirectory, while its snapshot covers the whole checkout, so the restore
+/// climbs back out of the subdirectory the snapshot recorded.
+fn checkout_top_level(
+    directory: &Path,
+    metadata: &crate::archive::RepositoryMetadata,
+) -> Result<PathBuf> {
+    let Some(subdirectory) = &metadata.checkout_subdirectory else {
+        return Ok(directory.to_path_buf());
+    };
+    ensure!(
+        directory.ends_with(subdirectory),
+        "{} is not the checkout subdirectory {} the checkpoint was taken from",
+        directory.display(),
+        subdirectory.display()
+    );
+    directory
+        .ancestors()
+        .nth(subdirectory.components().count())
+        .map(Path::to_path_buf)
+        .with_context(|| format!("{} has no checkout above it", directory.display()))
 }
 
 pub(super) fn archived_repository_snapshot(
@@ -392,6 +424,36 @@ pub(super) fn restored_native_artifact_bytes(
 /// follows links and reports a dangling symlink as missing, so the destination
 /// is inspected with `symlink_metadata` and, on Unix, opened with `O_NOFOLLOW`
 /// so the check cannot be raced.
+/// Put a checkpoint's sub-agent report files back beside the repositories,
+/// whether or not the harness's own history is restored: the parent reads
+/// them with its own tools. A file already there is newer than the archive's
+/// copy and is kept.
+fn restore_subagent_reports(
+    archive: &crate::archive::VerifiedArchive,
+    workspace_root: &Path,
+) -> Result<()> {
+    for descriptor in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
+            continue;
+        };
+        let Ok(report) = relative_path.strip_prefix(mj_core::subagent::ARCHIVE_REPORT_DIR) else {
+            continue;
+        };
+        let relative = Path::new(mj_core::subagent::REPORT_ROOT_DIR).join(report);
+        validate_relative_path(&relative)?;
+        if fs::symlink_metadata(workspace_root.join(&relative)).is_ok() {
+            continue;
+        }
+        write_private_file(
+            workspace_root,
+            &relative,
+            archive.payload(descriptor)?,
+            0o600,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_private_file(
     root: &Path,
     relative: &Path,

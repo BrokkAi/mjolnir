@@ -30,8 +30,8 @@ use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
 use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
-    BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard, SessionLaunchOptions,
-    SessionResumeOptions,
+    BeforeClose, BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard,
+    SessionLaunchOptions, SessionResumeOptions,
 };
 use crate::review_host::TurnReviewHost;
 use crate::session_manager::{
@@ -112,6 +112,7 @@ pub struct RuntimeState {
     sessions: Mutex<BTreeMap<String, RuntimeSessionView>>,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
+    workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -213,6 +214,16 @@ enum LifecycleKind {
     /// contains every one of its commits. Surfaces see it as a destroy.
     ArchiveStopped,
     ForceDestroy,
+    /// A sub-agent stopped because its parent is being suspended: the
+    /// teardown of `ForceDestroy`, owned by the parent's suspend, so it is
+    /// shown as a stop and cannot be cancelled on its own.
+    StopSubagent,
+    /// A sub-agent whose turn ended and whose parent was told is having its
+    /// worker stopped, keeping everything else (#1161).
+    Park,
+    /// A parked sub-agent's worker is being started again for its parent's
+    /// `send_input`.
+    Unpark,
     Cleanup,
 }
 
@@ -229,6 +240,9 @@ impl LifecycleKind {
             LifecycleKind::DestroyStopped => "destroy",
             LifecycleKind::ArchiveStopped => "archive",
             LifecycleKind::ForceDestroy => "force destroy",
+            LifecycleKind::StopSubagent => "stop",
+            LifecycleKind::Park => "park",
+            LifecycleKind::Unpark => "restart",
             LifecycleKind::Cleanup => "cleanup",
         }
     }
@@ -238,9 +252,15 @@ impl LifecycleKind {
 /// session manager must stop polling it. A graceful close needs the manager's
 /// relay lease through checkpointing and sealing; once the durable state says
 /// `Destroying`, that lease has been released and target teardown is exclusive.
+///
+/// A park needs the session actor: it takes the actor's connection to admit
+/// the park only while the worker is idle. Once the record says `Parked` the
+/// manager drops the session on its own. An unpark owns the target, so no
+/// actor races the worker it is starting.
 fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     match kind {
         LifecycleKind::Suspend => state == Some(SessionState::Destroying),
+        LifecycleKind::Park => false,
         LifecycleKind::Move => !matches!(
             state,
             Some(
@@ -257,10 +277,18 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// Whether a running lifecycle can still be cancelled. A graceful close has a
 /// point of no return: once the durable state says `Destroying`, the verified
 /// checkpoint is sealed and the record has already committed to losing its
-/// target, so stopping the teardown only strands the target. Every other
-/// lifecycle stays cancellable while it runs.
+/// target, so stopping the teardown only strands the target. A sub-agent's
+/// stop belongs to its parent's suspend, which is what a person cancels.
+/// Every other lifecycle stays cancellable while it runs.
+///
+/// A park and an unpark belong to the parent's sub-agent tools: a person ends
+/// either by closing the child, which waits for them.
 fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying))
+    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying)
+        || matches!(
+            kind,
+            LifecycleKind::StopSubagent | LifecycleKind::Park | LifecycleKind::Unpark
+        ))
 }
 
 /// How a stop request has to be carried out, given the durable record.
@@ -445,6 +473,10 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,
             LifecycleKind::ForceDestroy => Self::ForceDestroy,
+            // A park is shown as the sub-agent stop it is, and an unpark as
+            // the resume it is; neither needs a wire kind of its own.
+            LifecycleKind::StopSubagent | LifecycleKind::Park => Self::StopSubagent,
+            LifecycleKind::Unpark => Self::Resume,
             LifecycleKind::Cleanup => Self::Cleanup,
         }
     }
@@ -459,6 +491,7 @@ mod lifecycle;
 mod resume;
 mod snapshot;
 mod state;
+mod subagent_park;
 mod support;
 mod views;
 use support::*;

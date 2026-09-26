@@ -379,11 +379,15 @@ pub(super) async fn transcript(
     }))
 }
 
+/// Suspend a session. Its active Mjolnir sub-agents are stopped without a
+/// checkpoint and the session is suspended alone; the answer warns when some
+/// of those sub-agents have not handed back their reports. Accepting the
+/// suspend is not finishing it.
 pub(super) async fn suspend(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
     request: Option<Json<SuspendRequest>>,
-) -> Result<StatusCode, ApiFailure> {
+) -> Result<(StatusCode, Json<SuspendSessionResponse>), ApiFailure> {
     let (active_children, publication_state) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
@@ -396,18 +400,10 @@ pub(super) async fn suspend(
                     .iter()
                     .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
-            .count();
+            .cloned()
+            .collect::<Vec<_>>();
         (active_children, session.publication_state)
     };
-    if active_children > 0
-        && !request
-            .as_ref()
-            .is_some_and(|r| r.acknowledge_active_subagents)
-    {
-        return Err(ApiFailure::conflict(format!(
-            "session has {active_children} sub-agent(s); retry with acknowledge_active_subagents=true to suspend children first"
-        )));
-    }
     // The controller re-checks publication after its checkpoint; this is only
     // an early refusal that avoids a needless checkpoint.
     if publication_state.is_some()
@@ -419,24 +415,55 @@ pub(super) async fn suspend(
             "publication status is unverified for this live clone; retry with acknowledge_unpublished_work=true to suspend it",
         ));
     }
-    backend(&state)?.cancel_start(session_id.clone()).await?;
-    send_action(
+    let backend = backend(&state)?.clone();
+    // Counted before the suspend is sent, which is what stops the children.
+    let mut not_handed_back = 0;
+    for child_id in &active_children {
+        let handed_back = backend
+            .subagent_handed_back(child_id.clone())
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    %session_id,
+                    %child_id,
+                    error = format!("{error:#}"),
+                    "could not tell whether a sub-agent handed back; warning about it"
+                );
+                false
+            });
+        if !handed_back {
+            not_handed_back += 1;
+        }
+    }
+    backend.cancel_start(session_id.clone()).await?;
+    let status = send_action(
         &state,
         ControllerAction::Suspend {
-            session_id,
+            session_id: session_id.clone(),
             acknowledge_unpublished_work: request
                 .as_ref()
                 .is_some_and(|r| r.acknowledge_unpublished_work),
         },
     )
-    .await
+    .await?;
+    Ok((
+        status,
+        Json(SuspendSessionResponse {
+            session_id,
+            stopped_subagents: active_children.len(),
+            subagents_not_handed_back: not_handed_back,
+            warning: mj_core::subagent::suspend_warning(not_handed_back),
+        }),
+    ))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SuspendRequest {
-    #[serde(default)]
-    pub(super) acknowledge_active_subagents: bool,
+    /// Older clients send this to suspend a parent with active sub-agents.
+    /// A suspend now always stops them, so it is accepted and ignored.
+    #[serde(default, rename = "acknowledge_active_subagents")]
+    _acknowledge_active_subagents: bool,
     #[serde(default)]
     pub(super) acknowledge_unpublished_work: bool,
 }

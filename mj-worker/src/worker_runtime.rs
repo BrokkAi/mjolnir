@@ -86,6 +86,10 @@ pub struct AcpSupervisorSpec {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub environment: std::collections::BTreeMap<String, String>,
+    /// Variables removed from the bridge's environment after the login
+    /// environment is merged in, as the launch description names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_environment: Vec<String>,
     pub cwd: PathBuf,
     /// Shared advisory lock the supervisor holds for the complete lifetime of
     /// a managed harness process tree.
@@ -105,6 +109,33 @@ impl AcpSupervisorSpec {
     pub(crate) fn write_spec(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_vec_pretty(self)?;
         mj_core::config::atomic_write(path, &body)
+    }
+}
+
+/// Remove the variables a launch excludes from the harness environment it is
+/// about to write into a bridge spec, and say once, at info, which of them the
+/// target had set. `environment` is the merged session environment, login
+/// environment included; `overrides` is what the spec carries.
+pub(crate) fn exclude_from_harness_environment(
+    harness: mj_core::config::HarnessKind,
+    excluded: &[String],
+    environment: &std::collections::BTreeMap<String, String>,
+    overrides: &mut std::collections::BTreeMap<String, String>,
+) {
+    let present = excluded
+        .iter()
+        .filter(|name| environment.contains_key(*name) || overrides.contains_key(*name))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !present.is_empty() {
+        tracing::info!(
+            harness = harness.display_name(),
+            removed = present.join(", "),
+            "removed API key settings from the harness environment: this profile signs in with ChatGPT and must not fall back to an API key"
+        );
+    }
+    for name in excluded {
+        overrides.remove(name);
     }
 }
 

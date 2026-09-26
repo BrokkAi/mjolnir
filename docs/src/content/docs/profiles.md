@@ -248,6 +248,15 @@ transcript across harnesses; it is not a model-token claim.
 For the complete field and validation table, see the
 [Configuration reference](/configuration/).
 
+A Codex profile that signs in with ChatGPT never gets an API key. Mjolnir
+removes `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` and
+`OPENAI_BASE_URL` from its harness environment on every target, wherever they
+were set: in the profile or target settings, in the target's shell profile, or
+in a container image. Otherwise Codex could use the key in place of the login.
+The worker log says when it removed one. A profile signs in with ChatGPT unless
+its `config.toml` names a custom model provider or its `auth.json` records
+`"auth_mode": "apikey"`. Those profiles keep the variables.
+
 ### PATH discovery
 
 Mjolnir-owned workers and bridges use non-login shells. On every bare runtime,
@@ -358,7 +367,9 @@ Mjolnir then adds its own files to the staged home:
 - the managed `mj` skill (see [Managed skills](#managed-skills));
 - the session's replica of its project memory, under `projects/`;
 - for a Claude session with Mjolnir sub-agents, or a Claude sub-agent, the
-  `mj-agents` MCP server in `.claude.json`;
+  `mj-agents` MCP server in `.claude.json`, and an allow rule in
+  `settings.json` for each of its tools, so Claude never asks before a
+  sub-agent hands back its report or a parent starts or waits for one;
 - for a Codex profile with a custom provider, the generated `models.json` and
   the `config.toml` line that points at it;
 - for Kimi Code on a target other than this machine, the `mj-memory` MCP server
@@ -452,24 +463,44 @@ a directory that links back into itself once, so a linked skill is part of both
 the staged and the synced tree. It writes only into the session's staged home,
 never into your own `skills/` directory.
 
-The sync has these limits:
+The whole tree travels as one gzip-compressed archive, base64-encoded, in a
+single 8 MiB relay frame. The size limits apply to compressed sizes:
 
-- **1 MiB per file** (`MAX_SKILLS_FILE_BYTES`). A larger file, or one that
-  cannot be read, is left out of the sync, and the rest of the tree still
-  syncs. The daemon and each session's worker log a warning that names the file
-  the first time they skip it, and log later skips only at debug level. Launch
+- **1 MiB per file, compressed** (`MAX_SKILLS_FILE_BYTES`). Mjolnir measures a
+  file by compressing it on its own; a file of 1 MiB or less always fits. A
+  larger file that is still over 1 MiB once compressed, or a file that cannot
+  be read, is left out of the sync, and the rest of the tree still syncs. The
+  daemon and each session's worker log a warning the first time they skip a
+  file, with the file in its `path` field: `skills file is <size> bytes and
+  compresses to <compressed> bytes, above the 1048576 byte limit; leaving it
+  out of skills sync`. Later skips are logged only at debug level. Launch
   staging has no file size limit, so a new session starts with the file; the
   next push of a changed tree removes it from the session.
-- **4 MiB per tree** (`MAX_SKILLS_ARCHIVE_BYTES`), counting file contents,
-  paths, and a few bytes per file. The whole tree travels as one archive,
-  base64-encoded, in a single 8 MiB relay frame. Base64 makes 4 MiB about
-  5.3 MiB, which leaves room in the frame for the rest of the message.
+- **4 MiB per tree, compressed** (`MAX_SKILLS_ARCHIVE_BYTES`), counting file
+  contents, paths, and a few bytes per file. Base64 makes 4 MiB about 5.3 MiB,
+  which leaves room in the frame for the rest of the message.
+- **64 MiB per tree, uncompressed** (`MAX_SKILLS_TREE_BYTES`). This limit
+  keeps a small archive from expanding into more memory than a worker should
+  use. Real skills reach the compressed limit long before it. A single file
+  larger than this is left out without being read.
 - **1024 files per tree** (`MAX_SKILLS_FILES`).
 
+In practice, text compresses well, so skills with several megabytes of
+Markdown, HTML, or scripts fit. For example, a 2.2 MB HTML demo page compresses
+to about 300 KB. A checked-in binary, such as an image, an archive, or a model
+file, hardly compresses at all, so one over 1 MiB is still left out.
+
 Directories a harness keeps for itself do not count toward these limits. A
-tree over 4 MiB or 1024 files is not trimmed: reconciliation fails for every
-session of that profile, credential sync included, until the tree is back
-within the limits.
+tree over either per-tree size limit, or with more than 1024 files, is not
+trimmed: reconciliation fails for every session of that profile, credential
+sync included, until the tree is back within the limits.
+
+A session whose worker comes from a release before compressed archives (relay
+protocol 23) reads only the uncompressed format. Until that worker is replaced
+at the session's next quiet point after the upgrade, Mjolnir sends it the tree
+uncompressed, with the limits counting raw sizes: 1 MiB per file and 4 MiB per
+tree. A file over 1 MiB is left out of that session, and the daemon's warning
+says it is `above the 1048576 byte limit of an uncompressed skills archive`.
 
 ### Managed skills
 

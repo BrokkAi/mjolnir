@@ -32,7 +32,7 @@ import urllib.request
 
 TIMEOUT = 20.0
 # Match the Codex spec in mj-core/src/harness_runtime.rs when updating that pin.
-MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.13.2_codex-0.156.1"
+MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.13.3_codex-0.156.1"
 
 
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
@@ -492,7 +492,7 @@ session_id = "reliability-native"
 prompts = 0
 
 if sys.argv[1:] == ["--version"]:
-    print("@brokkai/codex-acp 1.13.2")
+    print("@brokkai/codex-acp 1.13.3")
     raise SystemExit(0)
 
 log_path = os.environ["MJ_FAKE_ACP_LOG"]
@@ -1381,7 +1381,7 @@ pull_policy = "never"
             raise ScenarioFailure(
                 f"a swallowed prompt was reported as success: {report!r}"
             )
-        if "error (prompt_unanswered)" not in report:
+        if not report.startswith("error") or "(failed: prompt unanswered)" not in report:
             raise ScenarioFailure(f"wait did not name the unanswered turn: {report!r}")
         if "may never have been acted on" not in report:
             raise ScenarioFailure(f"wait did not explain the unanswered turn: {report!r}")

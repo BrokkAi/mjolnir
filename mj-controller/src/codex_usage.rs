@@ -335,7 +335,14 @@ fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, Quer
         command
             .args(["app-server", "--stdio"])
             .current_dir(&cwd)
-            .envs(&env)
+            .envs(&env);
+        // This probe reads a ChatGPT login's rate limits and refreshes that
+        // login. An API key from the profile's environment or the daemon's own
+        // would let Codex use the key instead (#1160).
+        for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
+            command.env_remove(name);
+        }
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -767,6 +774,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// The quota probe reads a ChatGPT login's rate limits (#1160). An API key
+    /// in the profile's environment, or in the daemon's own, must not reach
+    /// the Codex it starts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_quota_probe_starts_codex_without_an_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let seen = temp.path().join("seen");
+        let (mut env, _log) = fake_codex_env(
+            &temp,
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"${{OPENAI_API_KEY-unset}}\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_ACCESS_TOKEN-unset}}\" \"${{OPENAI_BASE_URL-unset}}\" > {}\nexit 1\n",
+                mj_core::targets::posix_quote(&seen.to_string_lossy())
+            ),
+        );
+        for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
+            env.insert(name.to_owned(), "sk-svcacct-test".to_owned());
+        }
+        let mut client = None;
+
+        let _ = refresh(&mut client, temp.path().to_path_buf(), env).await;
+
+        assert_eq!(
+            std::fs::read_to_string(seen).expect("the fake codex ran"),
+            "unset|unset|unset|unset\n"
+        );
+    }
+
     #[tokio::test]
     async fn refresh_uses_one_initialized_client_for_repeated_queries() {
         let temp = tempfile::tempdir().expect("tempdir");

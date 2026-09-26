@@ -564,6 +564,7 @@ impl ReviewEnvironment for FakeEnvironment {
             bridge_command: std::path::PathBuf::from("/bin/false"),
             bridge_args: Vec::new(),
             environment: Default::default(),
+            excluded_environment: Vec::new(),
             execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             model: None,
             effort: None,

@@ -1312,9 +1312,24 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
             working_directory: PathBuf::new(),
             initial_prompt: "Review calc.py".into(),
             request_key: "review-calc".into(),
+            report_root: Some("/reports".into()),
         })
         .unwrap();
     let child_id = child.child_session_id;
+    // The child is told its own directory under the parent's report root, and
+    // the store remembers it for the parent's wait.
+    let report_dir = format!("/reports/{child_id}");
+    assert!(
+        child.initial_prompt.contains(&report_dir),
+        "{}",
+        child.initial_prompt
+    );
+    assert_eq!(
+        crate::database::load_subagent_report(&child_id)
+            .unwrap()
+            .report_dir,
+        Some(report_dir)
+    );
     assert_eq!(
         controller.state.sessions[&child_id].project_directory,
         Some(clone),
@@ -1609,6 +1624,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
             working_directory: "/workspace/project".into(),
             initial_prompt: "test child".into(),
             request_key: "durable-child".into(),
+            report_root: None,
         })
         .unwrap();
     assert_eq!(

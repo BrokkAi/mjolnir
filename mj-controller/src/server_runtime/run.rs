@@ -19,9 +19,12 @@ pub async fn run_server(
     profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
-    let mut phone_workspaces = workspace_updates.borrow_and_update().clone();
+    workspace_updates.borrow_and_update();
     let mut quotas = std::collections::BTreeMap::new();
     let subagent_quota_reports = Arc::new(std::sync::Mutex::new(quotas.clone()));
+    let rejected_logins = Arc::new(std::sync::Mutex::new(
+        mj_core::credentials::RejectedLogins::default(),
+    ));
     let (quota_profiles_tx, mut quota_updates_rx) = spawn_quota_refresher();
     let mut quota_batch = QuotaRefreshBatch::default();
     let mut published_quota_profiles = std::collections::BTreeMap::new();
@@ -62,7 +65,7 @@ pub async fn run_server(
         crate::pollers::spawn_dashboard_capacity_poller();
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(viewer_snapshot(
         &controller,
-        &phone_workspaces,
+        &workspace_updates.borrow().clone(),
         &quotas,
         &PhoneSessionViews {
             native_agents: &native_agents,
@@ -142,6 +145,7 @@ pub async fn run_server(
             daemon_runtime.clone(),
         )
         .with_quota_reports(subagent_quota_reports.clone())
+        .with_rejected_logins(rejected_logins.clone())
         .with_profile_catalog(profile_catalog.clone()),
     );
     options.set_subagent_backend(api_backend.clone());
@@ -286,7 +290,7 @@ pub async fn run_server(
                     .collect();
                 let snapshot = viewer_snapshot(
                     &controller,
-                    &phone_workspaces,
+                    &workspace_updates.borrow().clone(),
                     &quotas,
                     &PhoneSessionViews {
                         native_agents: &native_agents,
@@ -424,7 +428,7 @@ pub async fn run_server(
                         );
                         break;
                     }
-                    phone_workspaces = workspace_updates.borrow_and_update().clone();
+                    workspace_updates.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!(revision);
                 }
@@ -583,8 +587,12 @@ pub async fn run_server(
                             let turn = outcome.completed_ordinal;
                             let child_id = relation.child_session_id.clone();
                             let parent_id = relation.parent_session_id.clone();
-                            let task_name = relation.task_name.clone();
-                            let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
+                            // The notice names the child as every listing does.
+                            let child_title = controller
+                                .state
+                                .sessions
+                                .get(&child_id)
+                                .map_or_else(|| relation.task_name.clone(), |child| child.listed_title().to_owned());
                             let handback_tool = relation.handback_tool;
                             let last_turn = outcome.clone();
                             let in_flight = snapshot
@@ -622,9 +630,8 @@ pub async fn run_server(
                                             .record_subagent_completion_notice(
                                                 parent_id,
                                                 &child_id,
-                                                &task_name,
-                                                turn,
-                                                &outcome_name,
+                                                &child_title,
+                                                &last_turn,
                                             )
                                             .await?;
                                     }
@@ -633,6 +640,15 @@ pub async fn run_server(
                                         move || crate::database::mark_subagent_turn_noticed(&child_id, turn)
                                     })
                                     .await??;
+                                    // The parent has been told this turn
+                                    // ended and nothing else is queued, so
+                                    // the child gives its processes back until
+                                    // the parent sends it more input (#1161).
+                                    // The park checks again, under the
+                                    // child's lifecycle, that it is idle.
+                                    if !reminded && in_flight.is_empty() {
+                                        backend.park_subagent(&child_id).await;
+                                    }
                                     anyhow::Ok(())
                                 }
                                 .await;
@@ -788,6 +804,12 @@ pub async fn run_server(
                     );
                     while let Some(result) = credential_sync.try_result() {
                         crate::pollers::log_credential_sync_actions(&result);
+                        if let Some(profile) = controller.config.profiles.get(&result.profile_id) {
+                            rejected_logins
+                                .lock()
+                                .expect("refused logins lock poisoned")
+                                .observe(&result, profile);
+                        }
                         let harness = controller
                             .config
                             .profiles
@@ -1395,8 +1417,9 @@ pub async fn run_server(
                     let action_id = next_action_id;
                     if let ControllerAction::Suspend { session_id, .. } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
-                        let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
-                            phone_workspaces[0].id.clone()
+                        let workspaces = workspace_updates.borrow().clone();
+                        let workspace_id = if workspace_id.is_empty() && workspaces.len() == 1 {
+                            workspaces[0].id.clone()
                         } else {
                             workspace_id.clone()
                         };

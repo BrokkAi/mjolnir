@@ -314,6 +314,10 @@ pub enum RuntimeLifecycleKind {
     ForceStop,
     DestroyStopped,
     ForceDestroy,
+    /// A sub-agent stopped and removed because its parent is being
+    /// suspended. The same teardown as `ForceDestroy`, which surfaces call a
+    /// stop, as the suspend does.
+    StopSubagent,
     Cleanup,
 }
 
@@ -637,9 +641,6 @@ pub enum DaemonAction {
         session_id: String,
         /// See [`DaemonAction::DestroyStoppedSession`].
         delete_branch: bool,
-    },
-    ForceDeleteWorkspace {
-        workspace_id: String,
     },
     CancelLifecycle {
         session_id: String,
@@ -1873,16 +1874,6 @@ impl DaemonClient {
         }
     }
 
-    pub async fn force_delete_workspace(&mut self, workspace_id: String) -> Result<()> {
-        match self
-            .request(DaemonAction::ForceDeleteWorkspace { workspace_id })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected force-delete-workspace reply {reply:?}"),
-        }
-    }
-
     pub async fn cancel_lifecycle(&mut self, session_id: String) -> Result<()> {
         match self
             .request(DaemonAction::CancelLifecycle { session_id })
@@ -1989,7 +1980,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 36;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

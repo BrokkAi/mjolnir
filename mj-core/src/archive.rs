@@ -28,6 +28,14 @@ pub fn is_context_boundary(stable_id: &str) -> bool {
 pub const ARCHIVE_SCHEMA_VERSION_CONTEXT: u32 = 5;
 /// Git refs and stash entries are preserved in independently owned clones.
 pub const ARCHIVE_SCHEMA_VERSION_CLONE_REFS: u32 = 6;
+/// Sub-agent report files, restored beside the repositories rather than into
+/// the harness home. It supersedes every earlier schema: an archive that
+/// carries reports declares it whatever else it carries.
+pub const ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS: u32 = 7;
+/// A repository captured from a subdirectory of its checkout, whose untracked
+/// files are named from the checkout's top level. An older build would unpack
+/// them inside the subdirectory. It supersedes every earlier schema.
+pub const ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY: u32 = 8;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -67,6 +75,15 @@ pub struct TargetManifest {
 pub struct RepositoryMetadata {
     pub id: String,
     pub relative_destination: PathBuf,
+    /// Where the directory at `relative_destination` sits inside its Git
+    /// checkout, when it is not the checkout's top level. The snapshot still
+    /// covers the whole checkout: its untracked files are named from the top
+    /// level, and a restore works from the directory this path leads up to.
+    /// Absent for a top-level directory, and in archives written before a
+    /// subdirectory was captured this way; those carry only the
+    /// subdirectory's untracked files, named from the subdirectory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_subdirectory: Option<PathBuf>,
     pub origin: String,
     /// Explicit push destinations configured for `origin`. An empty list
     /// means Git's normal push fallback (the fetch URL), and is omitted from

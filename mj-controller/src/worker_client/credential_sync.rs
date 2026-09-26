@@ -100,9 +100,12 @@ impl CredentialSyncCoordinator {
                     // polling its connect timeouts through runtime shutdown
                     // and panics with "A Tokio 1.x context was found, but it
                     // is being shutdown".
+                    let triggered_by = trigger.cause.as_ref().map(|cause| cause.session_id.clone());
                     tokio::spawn(async move {
-                        let joined =
-                            tokio::spawn(async move { reconcile_profile(&targets).await }).await;
+                        let joined = tokio::spawn(async move {
+                            reconcile_profile(&targets, triggered_by.as_deref()).await
+                        })
+                        .await;
                         let (failure, outcomes) = match joined {
                             Ok(outcomes) => (None, outcomes),
                             Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
@@ -161,8 +164,14 @@ impl CredentialSyncCoordinator {
 /// runs again once with the new canonical bytes. Two passes are enough: the
 /// second cannot pull anything the first did not already see unless a harness
 /// refreshed mid-cycle, and that lands in the next cycle.
+///
+/// A session that already agreed is left out of the outcomes, except
+/// `triggered_by`, the session whose failure asked for this sync: that it was
+/// reached and had nothing to change is what shows the profile's own login
+/// is the one the provider refused.
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
     // The token lookup may run `gh auth token`, a synchronous child process,
     // so it goes to the blocking pool rather than stalling a scheduler thread.
@@ -180,7 +189,10 @@ pub(super) async fn reconcile_profile(
         let mut pulled = false;
         for target in targets {
             match reconcile_session(target, github_token.as_deref()).await {
-                Ok(actions) if actions.is_empty() => {}
+                Ok(actions)
+                    if actions.is_empty()
+                        && (triggered_by != Some(target.session_id.as_str())
+                            || outcomes.contains_key(&target.session_id)) => {}
                 Ok(actions) => {
                     pulled |= actions.contains(&CredentialSyncAction::Pulled);
                     outcomes.insert(
@@ -218,17 +230,21 @@ pub(super) async fn reconcile_profile(
 
 /// The skills tree this session should converge to: the profile's own skills
 /// plus Mjolnir's managed skills, exactly as launch staging writes them into
-/// the session's staged home.
+/// the session's staged home, collected for the archive format the session's
+/// worker reads.
 pub(super) fn canonical_session_skills(
     target: &CredentialSyncTarget,
+    format: mj_core::skills::SkillsArchiveFormat,
 ) -> Result<mj_core::skills::SkillsArchive> {
-    mj_core::skills::session_skills(target.harness, &target.profile_home).with_context(|| {
-        format!(
-            "collect canonical skills for profile {} from {}",
-            target.profile_id,
-            target.profile_home.display()
-        )
-    })
+    mj_core::skills::session_skills(target.harness, &target.profile_home, format).with_context(
+        || {
+            format!(
+                "collect canonical skills for profile {} from {}",
+                target.profile_id,
+                target.profile_home.display()
+            )
+        },
+    )
 }
 
 /// Returns every action taken; an empty list means the copies already agree.
@@ -238,18 +254,33 @@ pub(super) async fn reconcile_session(
 ) -> Result<Vec<CredentialSyncAction>> {
     let canonical_path = harness_authentication_marker(target.harness, &target.profile_home);
     let (canonical, canonical_bytes) = read_credential_file(target.harness, &canonical_path)?;
-    let canonical_skills = canonical_session_skills(target)?;
     let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
-    let result = reconcile_connected(
-        &mut client,
-        target,
-        &canonical_path,
-        &canonical,
-        &canonical_bytes,
-        &canonical_skills,
-        github_token,
-    )
-    .await;
+    // Which limits the canonical tree is collected with depends on the
+    // archive format the worker reads, known only once it has said hello.
+    // Collection reads and compresses the whole tree, so it runs off the
+    // scheduler threads. A tree that cannot be collected still fails the
+    // whole reconciliation, credentials included.
+    let skills_target = target.clone();
+    let format = client.skills_archive_format();
+    let canonical_skills =
+        tokio::task::spawn_blocking(move || canonical_session_skills(&skills_target, format))
+            .await
+            .unwrap_or_else(|error| Err(anyhow!("skills collection task stopped: {error}")));
+    let result = match canonical_skills {
+        Ok(canonical_skills) => {
+            reconcile_connected(
+                &mut client,
+                target,
+                &canonical_path,
+                &canonical,
+                &canonical_bytes,
+                &canonical_skills,
+                github_token,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     // Detach even when the exchange failed; the worker and harness keep
     // running either way. A failed detach only leaks a short-lived proxy, so it
     // is reported rather than turned into a sync failure.
@@ -391,10 +422,11 @@ pub(super) async fn reconcile_github_token(
     }
 }
 
-/// Converge the session's synced skills trees onto the canonical archive.
-/// Returns true when a push happened. Workers old enough to predate skills
-/// sync answer the unknown method with `InvalidRequest`; those sessions are
-/// skipped quietly until their target is re-provisioned.
+/// Converge the session's synced skills trees onto the canonical archive,
+/// which was collected for the archive format `client`'s worker reads and is
+/// sent in that format. Returns true when a push happened. Workers old enough
+/// to predate skills sync answer the unknown method with `InvalidRequest`;
+/// those sessions are skipped quietly until their target is re-provisioned.
 pub(super) async fn reconcile_skills(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
@@ -416,7 +448,9 @@ pub(super) async fn reconcile_skills(
     if session == canonical_state {
         return Ok(false);
     }
-    let installed = client.install_skills(&canonical.encode()).await?;
+    let installed = client
+        .install_skills(&canonical.encode(client.skills_archive_format()))
+        .await?;
     if installed != canonical_state {
         bail!(
             "session {} skills fingerprint {} does not match the canonical {} after install",

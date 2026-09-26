@@ -250,8 +250,10 @@ impl RuntimeState {
         }
         let revision = self.revisions.current();
         let moves = blocking(crate::database::load_move_operations).await?;
-        let workspace_names = blocking(crate::database::list_workspaces)
-            .await?
+        let workspace_names = self
+            .workspaces()
+            .borrow()
+            .clone()
             .into_iter()
             .map(|workspace| (workspace.id, workspace.name))
             .collect();

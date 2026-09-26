@@ -61,6 +61,14 @@ pub(super) enum SourceTargetDisposition {
     RetainForInPlaceSwap,
 }
 
+/// Work a close runs once the session is about to close: its checkpoint is
+/// verified and recorded, and its relay is not sealed yet. A daemon suspend
+/// stops the session's sub-agents here, so a close that fails at its
+/// checkpoint leaves them running. When this fails, the close does not
+/// proceed: the session returns to its previous state with its relay
+/// unsealed.
+pub type BeforeClose = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
 impl Controller {
     /// Checkpoint, ask the harness to close, and only then tear down the exact
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
@@ -84,6 +92,7 @@ impl Controller {
                 None,
                 SourceTargetDisposition::Destroy,
                 true,
+                None,
             )
             .await?
         {
@@ -98,6 +107,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         acknowledge_unpublished_work: bool,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         self.suspend_session_controlled_with_manager(
             session_id,
@@ -106,6 +116,7 @@ impl Controller {
             None,
             SourceTargetDisposition::Destroy,
             acknowledge_unpublished_work,
+            before_close,
         )
         .await
     }
@@ -128,10 +139,12 @@ impl Controller {
             Some((operation, preparation)),
             disposition,
             true,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn suspend_session_controlled_with_manager(
         &mut self,
         session_id: &str,
@@ -143,6 +156,7 @@ impl Controller {
         )>,
         disposition: SourceTargetDisposition,
         acknowledge_unpublished_work: bool,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -208,9 +222,13 @@ impl Controller {
                 .is_some_and(|result| result.state != mj_core::state::PublicationState::Published)
         {
             latched.relay.cancel_abandoned_barrier().await?;
-            self.state
-                .sessions
-                .insert(session_id.to_owned(), previous.clone());
+            // The relay is still open, so the session is running again. Left
+            // `Closing`, the record would be an interrupted close, which the
+            // next start finishes without the acknowledgement.
+            let mut restored = previous.clone();
+            restored.state = state_after_unsealed_close(&previous);
+            restored.updated_at = now();
+            self.state.sessions.insert(session_id.to_owned(), restored);
             self.persist_session_transition_or_restore(
                 session_id,
                 &previous,
@@ -251,6 +269,29 @@ impl Controller {
             operation.checkpoint = Some(artifact.metadata.clone());
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
+        }
+        if let Some(before_close) = before_close
+            && let Err(error) = before_close.await
+        {
+            // The session stays live: dropping the barrier resumes dispatch,
+            // and the record keeps the checkpoint it just verified.
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cancel:#}"),
+                    "could not release the checkpoint barrier of a close that did not proceed"
+                );
+            }
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = state_after_unsealed_close(&previous);
+            record.last_error = Some(format!("{error:#}"));
+            record.updated_at = now();
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "restore a session whose close did not proceed past its checkpoint",
+            )?;
+            return Err(error);
         }
         prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
         // A stopping session will not checkpoint again, so this is its last
@@ -324,11 +365,19 @@ impl Controller {
     /// installed checkpoint gate. If it had not, take a fresh checkpoint;
     /// the previously installed archive may have become stale after EOF
     /// released its barrier.
+    ///
+    /// The daemon also closes every live session this way, because it marks
+    /// the record `Closing` before the close starts. So the fresh checkpoint's
+    /// publication check uses `acknowledge_unpublished_work` as the caller
+    /// sent it. A relay already sealed was checked by the close that sealed
+    /// it, and that close can only go forward.
     pub async fn recover_interrupted_close_managed(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        acknowledge_unpublished_work: bool,
+        before_close: Option<BeforeClose>,
     ) -> Result<bool> {
         let (state, verified) = {
             let session = self
@@ -347,6 +396,9 @@ impl Controller {
         };
         if state == SessionState::Destroying {
             let verified = verified.context("destroying session has no verified checkpoint")?;
+            if let Some(before_close) = before_close {
+                before_close.await?;
+            }
             return self.destroy_after_verified_checkpoint(session_id, &verified, executor);
         }
         ensure!(
@@ -373,13 +425,18 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
-                        true,
+                        acknowledge_unpublished_work,
+                        before_close,
                     )
                     .await;
             }
         }
         lease.release();
         let verified = verified.context("closed relay has no verified checkpoint")?;
+        // The relay is sealed already, so this close can only go forward.
+        if let Some(before_close) = before_close {
+            before_close.await?;
+        }
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
     }
 
@@ -816,7 +873,12 @@ impl Controller {
         let mut deferred = false;
         if let Some(locator) = &session.target {
             let backend = backend_locator(locator, session, &self.config)?;
-            if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
+            // A sub-agent borrows its parent's target: only its own worker and
+            // private state go, as they do when a live child's close finishes.
+            // A parked child reaches this, with its worker already stopped.
+            if self.state.subagents.contains_key(session_id) {
+                targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
+            } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                 plan.execute(executor)?;
                 deferred = true;
             } else {
@@ -1022,6 +1084,10 @@ impl Controller {
 pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
     match session.state {
         SessionState::Provisioning => true,
+        // A parked sub-agent's worker is stopped. A child is never resumed on
+        // its own, so its close keeps no archive; its conversation and report
+        // are already in the store.
+        SessionState::Parked => true,
         SessionState::Closing
         | SessionState::Destroying
         | SessionState::Error
@@ -1097,14 +1163,22 @@ fn apply_close_checkpoint_failure(
              resume from its checkpoint, or explicitly destroy it with mj destroy: {error:#}"
         ));
     } else {
-        record.state = if previous.state == SessionState::Closing {
-            SessionState::Running
-        } else {
-            previous.state
-        };
+        record.state = state_after_unsealed_close(previous);
     }
     record.last_checkpoint_error = Some(format!("{error:#}"));
     record.updated_at = updated_at;
+}
+
+/// The state a session goes back to when its close stops before sealing the
+/// relay. `Closing` there is only the intent of this close, or of one
+/// interrupted before it sealed the relay, and the relay is still open, so the
+/// session is running.
+fn state_after_unsealed_close(previous: &SessionRecord) -> SessionState {
+    if previous.state == SessionState::Closing {
+        SessionState::Running
+    } else {
+        previous.state
+    }
 }
 
 fn apply_interrupted_close_error(

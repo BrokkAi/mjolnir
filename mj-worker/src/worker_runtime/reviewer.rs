@@ -807,7 +807,17 @@ impl ReviewerRole {
             environment.extend(managed.environment.clone());
         }
 
-        let session_environment = mj_core::login_environment::with_overrides(&environment).await?;
+        let mut session_environment =
+            mj_core::login_environment::with_overrides(&environment).await?;
+        super::exclude_from_harness_environment(
+            config.harness,
+            &config.excluded_environment,
+            &session_environment,
+            &mut environment,
+        );
+        for name in &config.excluded_environment {
+            session_environment.remove(name);
+        }
         // A Codex reviewer needs its recorded model at launch for the same
         // reason the primary session does. The ACP runtime further down pins
         // it into the spec below before every bridge start; this value is what
@@ -829,6 +839,7 @@ impl ReviewerRole {
                 |managed| managed.args.clone(),
             ),
             environment,
+            excluded_environment: config.excluded_environment.clone(),
             cwd: self.placement.cwd.clone(),
             harness_lease: managed_harness
                 .as_ref()

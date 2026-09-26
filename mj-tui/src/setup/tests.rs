@@ -770,6 +770,54 @@ fn detection_adds_conflicting_installations_to_the_draft_without_losing_settings
     assert_eq!(dashboard.config, original, "discovery only edits the draft");
 }
 
+/// On a machine with no coding agent, Detect profiles said "No agent
+/// installation was found that this draft does not already have." "Draft" is
+/// an internal word, and the sentence gave no next step (launch finding
+/// R13-4).
+#[test]
+fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
+
+    dashboard.setup_discovered(
+        generation,
+        Ok(detection(DetectScope::Profiles, Config::default())),
+    );
+
+    let notice = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone()
+        .expect("detection reports what it did");
+    assert_eq!(
+        notice,
+        "No coding agent installation was found on this machine. Install Codex, Claude Code, \
+         Kimi Code, Grok Build, or Muse Code, sign in to it once, and choose Detect profiles again."
+    );
+}
+
+/// An agent that is installed but already has a profile is not "not found".
+#[test]
+fn detecting_profiles_that_all_exist_says_each_agent_already_has_one() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let original = dashboard.config.clone();
+    dashboard.begin_setup();
+    let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
+
+    dashboard.setup_discovered(generation, Ok(detection(DetectScope::Profiles, original)));
+
+    let notice = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone()
+        .expect("detection reports what it did");
+    assert_eq!(
+        notice,
+        "Every coding agent found on this machine already has a profile."
+    );
+}
+
 fn detection(scope: DetectScope, config: Config) -> crate::setup::SetupDetection {
     crate::setup::SetupDetection {
         scope,
@@ -831,7 +879,7 @@ fn detecting_runtimes_names_what_it_added_and_what_it_skipped() {
         .clone()
         .expect("detection reports what it did");
     assert!(
-        notice.starts_with("No usable runtime was found"),
+        notice.starts_with("Every usable runtime found on this machine is already listed."),
         "{notice}"
     );
 }

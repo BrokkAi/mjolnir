@@ -4583,6 +4583,22 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// #1161: a parked sub-agent is idle with its worker stopped; its card says
+/// so rather than showing an idle clock that belongs to a live session.
+#[test]
+fn embedded_viewer_labels_a_parked_sub_agent_parked() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const session = { lifecycle: 'live', state: 'parked', is_idle: true, activity_details: { kind: 'idle' } };
+if (sessionActivityLabel(session, 60000) !== 'Parked') throw Error('a parked child is not labelled Parked');
+"#;
+    run_viewer_script("parked-subagent", &format!("{setup}\n{source}\n{checks}"));
+}
+
 #[test]
 fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
     let source = viewer_source(

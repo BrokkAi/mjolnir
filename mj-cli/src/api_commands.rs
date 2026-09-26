@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::server::api::{
-    ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest, WaitOutcome,
-    WaitRequest, WaitResponse,
+    ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
+    WaitOutcome, WaitRequest, WaitResponse,
 };
 
 use mj_client::daemon::WikiSessionStatus;
@@ -746,14 +746,19 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut summary = outcome_name(response.outcome).to_owned();
-    if let Some(stop_reason) = &response.stop_reason {
-        summary.push_str(&format!(" ({stop_reason})"));
-    }
     // The same number `mj prompt` printed and `mj wait --turn` takes. The
     // turn's position in the conversation is a different count, and printing
     // it here as well made one turn look like two (F-12); it stays in --json.
     if let Some(turn_id) = response.turn_id {
         summary.push_str(&format!(" turn {turn_id}"));
+    }
+    // How the turn ended, in the words `mj sessions` and the sub-agent notice
+    // use; the harness's own spelling (`EndTurn`) stays in --json (R12-1).
+    if let Some(stop_reason) = &response.stop_reason {
+        let ended = mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: stop_reason.clone(),
+        };
+        summary.push_str(&format!(" ({ended})"));
     }
     if let Some(elapsed_ms) = response.elapsed_ms {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
@@ -802,6 +807,31 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     {
         lines.push(String::new());
         lines.push(final_message.clone());
+    }
+    lines
+}
+
+/// What `mj sessions --session` prints for one session, one line per entry.
+fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {}  {}",
+        session.id, session.state, session.title
+    )];
+    // Silence is reported, never acted on. A turn waiting on a long build
+    // is quiet and healthy, so this says what is true and leaves the
+    // decision — keep waiting, or `mj interrupt-turn` — to the reader.
+    if let Some(note) = session
+        .activity_state
+        .as_ref()
+        .and_then(|state| mj_core::activity::silence_note(state, now_ms))
+    {
+        lines.push(format!("running, {note}"));
+    }
+    if let Some(error) = &session.error {
+        lines.push(format!("error: {error}"));
+    }
+    if let Some(outcome) = &session.last_turn_outcome {
+        lines.push(format!("last turn {}", outcome.outcome));
     }
     lines
 }
@@ -927,20 +957,8 @@ pub(crate) async fn sessions(
         if args.json {
             return print_json(&session);
         }
-        println!("{}  {}  {}", session.id, session.state, session.title);
-        // Silence is reported, never acted on. A turn waiting on a long build
-        // is quiet and healthy, so this says what is true and leaves the
-        // decision — keep waiting, or `mj interrupt-turn` — to the reader.
-        if let Some(note) = session.activity_state.as_ref().and_then(|state| {
-            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
-        }) {
-            println!("running, {note}");
-        }
-        if let Some(error) = &session.error {
-            println!("error: {error}");
-        }
-        if let Some(outcome) = &session.last_turn_outcome {
-            println!("last turn {:?}", outcome.outcome);
+        for line in session_report_lines(&session, mj_core::clock::epoch_millis()) {
+            println!("{line}");
         }
         return Ok(());
     }
@@ -1018,16 +1036,24 @@ fn wiki_session_lines(info: &mj_client::daemon::WikiSessionInfo) -> Vec<String> 
 /// Save a recovery copy and release the environment. Acceptance is not completion.
 pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
     let session = suspend_session_id(&args)?;
-    ApiClient::connect()
+    let accepted = ApiClient::connect()
         .await?
         .suspend(session, args.acknowledge_unpublished_work)
         .await
         .map_err(name_suspend_flags)?;
     if args.json {
-        print_json(
-            &serde_json::json!({"session_id": session, "accepted": true, "operation": "suspend"}),
-        )
+        print_json(&serde_json::json!({
+            "session_id": session,
+            "accepted": true,
+            "operation": "suspend",
+            "stopped_subagents": accepted.stopped_subagents,
+            "subagents_not_handed_back": accepted.subagents_not_handed_back,
+            "warning": accepted.warning,
+        }))
     } else {
+        if let Some(warning) = &accepted.warning {
+            eprintln!("warning: {warning}");
+        }
         println!("suspension accepted for {session}");
         println!("`mj wait --session {session}` returns once the session is suspended");
         Ok(())
@@ -1548,7 +1574,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "quota_limit (QuotaLimit) turn 8");
+        assert_eq!(lines[0], "quota_limit turn 8 (failed: quota limit reached)");
         assert_eq!(
             lines
                 .iter()
@@ -1572,7 +1598,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "error (harness_inactive)");
+        assert_eq!(lines[0], "error (failed: harness inactive)");
 
         // F-12: `mj prompt` printed "turn 8" and `mj wait` "turn 1" for the
         // same turn. The wait names it by the number the prompt printed.
@@ -1600,6 +1626,119 @@ mod tests {
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
         );
+    }
+
+    /// Launch finding R11-3: `mj sessions --session` printed `last turn
+    /// Completed { stop_reason: "EndTurn" }`, Rust's debug form. It says how
+    /// the turn ended in words.
+    #[test]
+    fn one_session_names_how_its_last_turn_ended_in_words() {
+        let with_outcome = |outcome: serde_json::Value| {
+            let mut session = wait_response("finished", serde_json::json!({})).session;
+            session.last_turn_outcome = Some(
+                serde_json::from_value(serde_json::json!({
+                    "command_id": "prompt-1",
+                    "accepted_ordinal": 16,
+                    "completed_ordinal": 46,
+                    "completed_at_ms": 0,
+                    "outcome": outcome,
+                }))
+                .unwrap(),
+            );
+            session_report_lines(&session, 0)
+        };
+        let finished =
+            with_outcome(serde_json::json!({"kind": "completed", "stop_reason": "EndTurn"}));
+        assert_eq!(
+            finished,
+            ["s1  running  t", "last turn completed, end of turn"]
+        );
+        for (outcome, words) in [
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "end_turn"}),
+                "completed, end of turn",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "Cancelled"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "interrupted", "message": "Interrupted by the user"}),
+                "interrupted",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "MaxTokens"}),
+                "failed: max tokens",
+            ),
+            (
+                serde_json::json!({"kind": "completed", "stop_reason": "max_turn_requests"}),
+                "failed: max turn requests",
+            ),
+            (
+                serde_json::json!({"kind": "rejected", "message": "the session is closing\nmore detail"}),
+                "failed: the session is closing",
+            ),
+        ] {
+            assert_eq!(with_outcome(outcome)[1], format!("last turn {words}"),);
+        }
+    }
+
+    /// Launch finding R12-1: `mj wait` printed the harness's stop reason as
+    /// the API returns it, "finished (EndTurn) turn 16 in 5.3s", while `mj
+    /// sessions` and the parent's sub-agent notice said "completed, end of
+    /// turn". `mj wait` and `mj prompt --wait` use the same words, placed as
+    /// the notice places them; `--json` keeps the stop reason unchanged.
+    #[test]
+    fn a_wait_says_how_the_turn_ended_in_the_words_mj_sessions_uses() {
+        let finished = wait_response(
+            "finished",
+            serde_json::json!({"stop_reason": "EndTurn", "turn_id": 16, "elapsed_ms": 5300}),
+        );
+        assert_eq!(
+            wait_report_lines(&finished)[0],
+            "finished turn 16 (completed, end of turn) in 5.3s"
+        );
+        assert_eq!(
+            serde_json::to_value(&finished).unwrap()["stop_reason"],
+            "EndTurn",
+            "--json prints the stop reason as the API returns it"
+        );
+        for (outcome, stop_reason, words) in [
+            ("finished", "end_turn", "completed, end of turn"),
+            (
+                "input_required",
+                "awaiting_input",
+                "completed, waiting for input",
+            ),
+            ("cancelled", "Cancelled", "interrupted"),
+            ("quota_limit", "QuotaLimit", "failed: quota limit reached"),
+            ("error", "MaxTokens", "failed: max tokens"),
+            ("error", "prompt_unanswered", "failed: prompt unanswered"),
+        ] {
+            let response = wait_response(
+                outcome,
+                serde_json::json!({"stop_reason": stop_reason, "turn_id": 2}),
+            );
+            assert_eq!(
+                wait_report_lines(&response)[0],
+                format!("{outcome} turn 2 ({words})")
+            );
+            // The same words `mj sessions --session` prints for that turn.
+            let mut session = response.session.clone();
+            session.last_turn_outcome = Some(
+                serde_json::from_value(serde_json::json!({
+                    "command_id": "prompt-1",
+                    "completed_ordinal": 3,
+                    "completed_at_ms": 0,
+                    "outcome": {"kind": "completed", "stop_reason": stop_reason},
+                }))
+                .unwrap(),
+            );
+            assert_eq!(
+                session_report_lines(&session, 0)[1],
+                format!("last turn {words}")
+            );
+        }
     }
 
     /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with

@@ -129,27 +129,34 @@ impl RuntimeState {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
     ) -> Result<()> {
-        let children = blocking({
-            let session_id = session_id.clone();
-            move || {
-                let controller = Controller::load()?;
-                Ok(active_child_session_ids(&controller.state, &session_id))
-            }
-        })
-        .await?;
-        for child_id in children {
-            Box::pin(self.suspend_session(child_id.clone()))
-                .await
-                .with_context(|| {
-                    format!("suspend sub-agent {child_id} before discarding parent changes")
-                })?;
-        }
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
                 operation_session_id,
                 LifecycleKind::ForceStop,
                 move |state, session_id, cancelled| async move {
+                    // Refuse before anything stops when the copy changed.
+                    blocking({
+                        let session_id = session_id.clone();
+                        let checkpoint = checkpoint.clone();
+                        move || {
+                            ensure!(
+                                Controller::load()?
+                                    .state
+                                    .sessions
+                                    .get(&session_id)
+                                    .and_then(|s| s.checkpoint.as_ref())
+                                    == Some(&checkpoint),
+                                "the recovery copy changed; review it before discarding changes"
+                            );
+                            Ok(())
+                        }
+                    })
+                    .await?;
+                    // The parent is about to go back to an older recovery
+                    // copy, and its sub-agents stop exactly as they do when
+                    // it is suspended.
+                    state.stop_subagents_for_suspend(&session_id).await?;
                     blocking(move || {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
@@ -176,8 +183,12 @@ impl RuntimeState {
                     .await
                 },
             )
-            .await?;
-        let _ = result; // The lifecycle supervisor owns the cleanup handoff.
+            .await;
+        if result.is_err() {
+            self.tell_live_parent_about_stopped_subagents(&session_id)
+                .await;
+        }
+        let _ = result?; // The lifecycle supervisor owns the cleanup handoff.
         Ok(())
     }
 
@@ -448,9 +459,13 @@ impl RuntimeState {
         for child_id in children {
             // A sub-agent borrows its parent's worker and never owns a managed
             // worktree, so it has no branch of its own to keep.
-            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
-                .await
-                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+            Box::pin(self.force_destroy_indexed_session(
+                child_id.clone(),
+                BranchDisposition::Keep,
+                LifecycleKind::ForceDestroy,
+            ))
+            .await
+            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
         self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
@@ -502,7 +517,7 @@ impl RuntimeState {
     /// pass, then indexes the sessions on their own. A destroy is never
     /// refused for this: when the index cannot take the sessions, the log
     /// says why and the destroy goes ahead.
-    async fn index_before_destroy(self: &Arc<Self>, session_id: &str) {
+    pub(super) async fn index_before_destroy(self: &Arc<Self>, session_id: &str) {
         use crate::sessionwiki::IndexedBeforeDestroy;
         let outcome = self
             .wiki()
@@ -586,15 +601,19 @@ impl RuntimeState {
         branch: BranchDisposition,
     ) -> Result<()> {
         self.index_before_destroy(&session_id).await;
-        self.force_destroy_indexed_session(session_id, branch).await
+        self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
+            .await
     }
 
     /// [`Self::force_destroy_session`] once the session and its sub-agents
-    /// have been indexed.
-    async fn force_destroy_indexed_session(
+    /// have been indexed. `kind` is `ForceDestroy`, or `StopSubagent` for a
+    /// sub-agent its parent's suspend stops; its own sub-agents go the same
+    /// way.
+    pub(super) async fn force_destroy_indexed_session(
         self: &Arc<Self>,
         session_id: String,
         branch: BranchDisposition,
+        kind: LifecycleKind,
     ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
@@ -608,9 +627,13 @@ impl RuntimeState {
         .await?;
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
-                .await
-                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+            Box::pin(self.force_destroy_indexed_session(
+                child_id.clone(),
+                BranchDisposition::Keep,
+                kind,
+            ))
+            .await
+            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
         self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
@@ -623,7 +646,7 @@ impl RuntimeState {
         }
         self.run_lifecycle(
             session_id,
-            LifecycleKind::ForceDestroy,
+            kind,
             move |state, session_id, cancelled| async move {
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();
@@ -651,56 +674,6 @@ impl RuntimeState {
             },
         )
         .await?;
-        Ok(())
-    }
-
-    /// Force-delete a workspace: destroy every active session in it (see
-    /// [`RuntimeState::force_destroy_session`]), drop its detached drafts, and
-    /// remove the workspace row. Stopped histories stay globally resumable.
-    ///
-    /// In-flight resumes into the workspace still refuse the deletion because
-    /// they have not yet claimed a durable session workspace. A session that
-    /// fails to destroy stops the sequence with the remainder named, so the
-    /// operation can be retried without losing progress.
-    pub async fn force_delete_workspace(self: &Arc<Self>, workspace_id: String) -> Result<()> {
-        ensure!(
-            !self.workspace_has_active_resume(&workspace_id),
-            "workspace has a session resume in progress"
-        );
-        let sessions = blocking({
-            let workspace_id = workspace_id.clone();
-            move || {
-                let controller = Controller::load()?;
-                Ok(active_sessions_for_force_destruction(
-                    &controller,
-                    &workspace_id,
-                ))
-            }
-        })
-        .await?;
-        for (index, session_id) in sessions.iter().enumerate() {
-            // Deleting a workspace removes Mjolnir's own copies, not the
-            // user's work: the branches stay in their source repositories.
-            if let Err(error) = self
-                .force_destroy_session(session_id.clone(), BranchDisposition::Keep)
-                .await
-            {
-                let remaining = sessions.len() - index - 1;
-                // The verb agrees with the count as well as the noun.
-                let remaining = if remaining == 1 {
-                    "1 session in the workspace remains".to_owned()
-                } else {
-                    format!("{remaining} sessions in the workspace remain")
-                };
-                bail!("force-destroying session {session_id} failed: {error:#}; {remaining}");
-            }
-        }
-        blocking({
-            let workspace_id = workspace_id.clone();
-            move || crate::database::force_delete_workspace(&workspace_id)
-        })
-        .await?;
-        refresh_runtime_workspaces(self).await?;
         Ok(())
     }
 }

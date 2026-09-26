@@ -307,7 +307,9 @@ pub(crate) enum Confirmation {
     },
     SuspendSession {
         session_id: String,
-        active_children: usize,
+        /// Listed titles of the sub-agents still at their task, which the
+        /// suspend stops.
+        children_not_handed_back: Vec<String>,
         interrupting: bool,
         unverified_clone: bool,
     },
@@ -925,6 +927,10 @@ impl DashboardState {
         configured_origin: String,
         launch: DashboardAction,
     ) {
+        // This dialog is a result of the resume check. Moving the generation
+        // on ends the check, so any other result sent under it is dropped
+        // instead of replacing this dialog or launching behind it.
+        self.invalidate_session_preflight();
         self.mode = Mode::RepositoryOrigin(RepositoryOriginDialog {
             session_id,
             repository_id,
@@ -1009,11 +1015,17 @@ impl DashboardState {
     }
 
     /// Keep launch errors independent of the transient shared status line.
+    ///
+    /// The status line still said "Launching … via …" after a failure, since
+    /// only a successful launch replaced it (launch finding R13-8). The
+    /// failure replaces it now, with the dialog's own first sentence, while
+    /// the details stay in the dialog.
     pub fn show_launch_failure(
         &mut self,
         error: impl Into<String>,
         retry: Option<DashboardAction>,
     ) {
+        self.set_failure_notice("The session could not start.");
         let previous = Box::new(self.mode.clone());
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::LaunchFailed {
             error: error.into(),
@@ -1127,6 +1139,10 @@ impl DashboardState {
         receipt: mj_core::state::ResumeRepositorySourceReceipt,
         preview: mj_core::state::RawConversionPreview,
     ) {
+        // This confirmation is a result of the resume check. Moving the
+        // generation on ends the check, so any other result sent under it is
+        // dropped instead of opening a second confirmation over this one.
+        self.invalidate_session_preflight();
         let previous = Box::new(self.mode.clone());
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConvertRawCheckout {
             launch: Box::new(launch),
@@ -1504,7 +1520,16 @@ impl DashboardState {
                     self.begin_setup();
                     DashboardAction::None
                 } else if index == 1 {
-                    retry.map(|action| *action).unwrap_or(DashboardAction::None)
+                    let retry = retry.map(|action| *action).unwrap_or(DashboardAction::None);
+                    // A retried restore holds its archive as the wizard's
+                    // Resume does, so reopening the archive cannot start a
+                    // second restore beside it.
+                    if let DashboardAction::RestoreArchivedSession { wiki_id, .. } = &retry
+                        && !self.claim_archive_restore(wiki_id)
+                    {
+                        return DashboardAction::None;
+                    }
+                    retry
                 } else {
                     DashboardAction::None
                 }

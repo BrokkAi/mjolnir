@@ -1269,7 +1269,7 @@ pub(crate) fn confirmation_body(
         ),
         Confirmation::SuspendSession {
             session_id,
-            active_children,
+            children_not_handed_back,
             interrupting,
             unverified_clone,
         } => {
@@ -1287,15 +1287,13 @@ pub(crate) fn confirmation_body(
                     Style::default().fg(theme::palette().warning),
                 ));
             }
-            if *active_children > 0 {
-                lines.push(Line::raw(format!(
-                    "This also suspends {} first.",
-                    crate::widgets::counted(
-                        *active_children,
-                        "active sub-agent",
-                        "active sub-agents"
-                    )
-                )));
+            if let Some(warning) =
+                mj_core::subagent::suspend_warning_naming(children_not_handed_back)
+            {
+                lines.push(Line::styled(
+                    format!("{warning}."),
+                    Style::default().fg(theme::palette().warning),
+                ));
             }
             (" Suspend session? ", lines)
         }

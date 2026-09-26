@@ -163,15 +163,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 RelayCommand::ContinueAuthorizedWork { attempt, .. } => {
                     snapshot.continuation.attempts = *attempt;
                     snapshot.continuation.completed_command_id = None;
+                    snapshot.continuation.harness_turn = None;
                 }
                 RelayCommand::SetQuotaRecovery { recovery, .. } => {
                     snapshot.continuation.quota_recovery = recovery.as_deref().cloned();
                 }
-                RelayCommand::ResumeAfterQuota { .. } => {
+                RelayCommand::ResumeAfterQuota { .. }
+                | RelayCommand::GoalControl {
+                    action: crate::goal::GoalControlAction::Resume,
+                } if matches!(command, RelayCommand::ResumeAfterQuota { .. })
+                    || crate::continuation::is_quota_goal_resume(command_id) =>
+                {
                     if let Some(recovery) = &mut snapshot.continuation.quota_recovery {
                         recovery.submitted = true;
                     }
                     snapshot.continuation.completed_command_id = None;
+                    snapshot.continuation.harness_turn = None;
                     snapshot.continuation.suppressed = false;
                 }
                 RelayCommand::Cancel
@@ -185,7 +192,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
                 _ => {}
             }
-            if cancels_capacity_retry(command)
+            // A quota goal resume is automatic work, not the user taking over.
+            let user_control = !crate::continuation::is_quota_goal_resume(command_id);
+            if (cancels_capacity_retry(command) && user_control)
                 || matches!(
                     command,
                     RelayCommand::CancelTurnFor { .. }
@@ -369,6 +378,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 | RelayCommand::ResumeAfterQuota { .. }
                         ))
                     .then(|| command_id.clone());
+                snapshot.continuation.harness_turn = None;
                 if crate::state::classify_prompt_completion(stop_reason)
                     != crate::state::PromptCompletion::Finished
                 {
@@ -892,6 +902,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.checkpoint_ready_digest = Some(event.digest.clone());
         }
         RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            // The agent moved on by itself, so a pending resume is moot. The
+            // new turn gets its own check when it ends, which schedules again
+            // if the quota still blocks it.
             if snapshot
                 .continuation
                 .quota_recovery
@@ -899,8 +912,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .is_some_and(|r| !r.submitted)
             {
                 snapshot.continuation.quota_recovery = None;
-                snapshot.continuation.quota_suppressed = true;
             }
+            // Codex also reports native starts inside our own prompts; only a
+            // start with no prompt in flight is a turn of the harness's own.
+            snapshot.continuation.autonomous_turn_started =
+                snapshot.active_prompt.is_none().then_some(event.ordinal);
             snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
                 started_at_ms: *started_at_ms,
@@ -911,7 +927,24 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.execution = RelayExecutionState::Running;
             }
         }
-        RelayObservation::HarnessTurnSettled { .. } => {
+        RelayObservation::HarnessTurnSettled {
+            prompt_in_flight, ..
+        } => {
+            let started = snapshot.continuation.autonomous_turn_started.take();
+            if let Some(turn) = &snapshot.harness_turn
+                && !*prompt_in_flight
+                && started == Some(turn.first_ordinal)
+                && snapshot.continuation.user_command_id.is_some()
+            {
+                let id = crate::continuation::harness_turn_id(turn.first_ordinal);
+                snapshot.continuation.completed_command_id = Some(id.clone());
+                snapshot.continuation.harness_turn = Some(crate::continuation::HarnessCompletion {
+                    id,
+                    start_position: turn.first_ordinal,
+                    settled_ordinal: event.ordinal,
+                    settled_at_ms: event.recorded_at_ms,
+                });
+            }
             snapshot.harness_turn = None;
             if snapshot.active_prompt.is_none()
                 && snapshot.execution == RelayExecutionState::Running

@@ -100,6 +100,94 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
     }
 }
 
+/// #1160: a Codex profile that signs in with ChatGPT must never be able to use
+/// an API key. It loses every variable Codex would take a credential or an
+/// address from; a profile that uses an API key keeps them.
+#[test]
+fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
+    let environment = || {
+        BTreeMap::from([
+            ("OPENAI_API_KEY".to_owned(), "sk-svcacct-test".to_owned()),
+            ("CODEX_API_KEY".to_owned(), "sk-test".to_owned()),
+            ("CODEX_ACCESS_TOKEN".to_owned(), "token".to_owned()),
+            (
+                "OPENAI_BASE_URL".to_owned(),
+                "https://example.invalid/v1".to_owned(),
+            ),
+            ("RUST_LOG".to_owned(), "info".to_owned()),
+        ])
+    };
+    let profile = |kind: HarnessKind, home: &Path| HarnessProfile {
+        enabled: true,
+        kind,
+        home: home.to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
+
+    // A ChatGPT login, as `codex login` writes it.
+    let chatgpt = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        chatgpt.path().join("auth.json"),
+        r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"a"}}"#,
+    )
+    .expect("write login");
+    let chatgpt = profile(HarnessKind::Codex, chatgpt.path());
+    assert_eq!(chatgpt.codex_login(), Some(CodexLogin::ChatGpt));
+    let mut launched = environment();
+    assert_eq!(
+        chatgpt.exclude_harness_environment(&mut launched),
+        every_name
+    );
+    assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
+
+    // A profile with no login yet has no key of its own either.
+    let fresh = profile(HarnessKind::Codex, Path::new("/does/not/exist"));
+    assert_eq!(fresh.codex_login(), Some(CodexLogin::ChatGpt));
+    let mut launched = environment();
+    assert_eq!(fresh.exclude_harness_environment(&mut launched), every_name);
+    assert_eq!(launched.keys().collect::<Vec<_>>(), ["RUST_LOG"]);
+
+    // `codex login --with-api-key` stores the key and says so.
+    let api_key = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        api_key.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#,
+    )
+    .expect("write login");
+    let api_key = profile(HarnessKind::Codex, api_key.path());
+    assert_eq!(api_key.codex_login(), Some(CodexLogin::ApiKey));
+    let mut launched = environment();
+    assert!(
+        api_key
+            .exclude_harness_environment(&mut launched)
+            .is_empty()
+    );
+    assert_eq!(launched, environment());
+
+    // A custom provider authenticates however its configuration says.
+    let provider = tempfile::tempdir().expect("temporary home");
+    let provider = zai_profile(provider.path(), BTreeMap::new());
+    assert_eq!(provider.codex_login(), None);
+    let mut launched = environment();
+    assert!(
+        provider
+            .exclude_harness_environment(&mut launched)
+            .is_empty()
+    );
+    assert_eq!(launched, environment());
+
+    // Other harnesses do not read these variables for their own login.
+    let claude = tempfile::tempdir().expect("temporary home");
+    let claude = profile(HarnessKind::Claude, claude.path());
+    assert_eq!(claude.codex_login(), None);
+    let mut launched = environment();
+    assert!(claude.exclude_harness_environment(&mut launched).is_empty());
+    assert_eq!(launched, environment());
+}
+
 #[test]
 fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     let home = tempfile::tempdir().expect("temporary home");
@@ -1828,6 +1916,43 @@ fn an_older_config_version_is_still_rejected() {
         error.contains("unsupported Mjolnir config version 0"),
         "{error}"
     );
+}
+
+/// A hand-written config.toml without its `version` line stopped `mj` with
+/// the raw TOML error "missing field `version`", which did not say what to
+/// add (launch finding R14-4, reverify-14 tmux/026).
+#[test]
+fn a_config_without_a_version_names_the_line_to_add() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "[profiles.codex]\nkind = \"codex\"\nhome = \"/nonexistent\"\n",
+    )
+    .unwrap();
+
+    let error = Config::load_from(&path).unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "{}: config.toml needs a `version = {CONFIG_VERSION}` line at the top (the current \
+             configuration schema); see https://mjolnir.brokk.ai/configuration/",
+            path.display()
+        )
+    );
+
+    // Any other parse error keeps the parser's words after the file's path.
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[profiles.codex\n"),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.starts_with(&format!("parse Mjolnir config {}: ", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("TOML parse error"), "{error}");
 }
 
 #[test]

@@ -573,6 +573,60 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: the directory on the parent's target where a child writes
+    // the details its report points to. A nullable column only this build
+    // reads, like `awaited_ordinal`.
+    if version < 51 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "subagent_handbacks",
+            "report_dir",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE subagent_handbacks ADD COLUMN report_dir TEXT;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (51, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 51;
+             COMMIT;"
+        ))?;
+    }
+
+    // Compatible: adds one table that only this build reads. It lists the
+    // sub-agents a parent's suspend stopped until the parent's model has been
+    // told. It is not a column of `sessions` because a full state save
+    // rewrites every session row from whatever copy the saving controller
+    // holds, which could drop the list or bring back one already delivered.
+    // Rows go with their parent's session row.
+    if version < 52 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS stopped_subagents (
+                 parent_session_id TEXT NOT NULL
+                     REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 child_session_id TEXT NOT NULL,
+                 record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+                 PRIMARY KEY(parent_session_id, child_session_id)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (52, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 52;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: a sub-agent whose turn ended can be stored as `parked`. The
+    // `sessions.state` constraint has to be rebuilt to admit it, and an older
+    // reader panics on a state it does not know, so the floor rises with the
+    // revision.
+    if version < 53 {
+        migrate_parked_session_state(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -584,6 +638,71 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             SCHEMA_VERSION
         );
     }
+    Ok(())
+}
+
+/// Migration 53: rebuild `sessions` so its `state` constraint admits
+/// `'parked'`. SQLite cannot alter a CHECK constraint, so the table is copied
+/// into one declared with the new constraint, the way migration 32
+/// (`migrate_zcode_harness_kind`) did. The table's own stored definition is
+/// edited, so every column later migrations added is kept as it is. A store
+/// whose constraint already admits the value is only stamped.
+fn migrate_parked_session_state(connection: &Connection) -> Result<()> {
+    const BEFORE: &str = "'stopped','lost',";
+    const AFTER: &str = "'stopped','parked','lost',";
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        let sql: String = transaction.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='sessions'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (_, definition) = sql
+            .split_once('(')
+            .context("missing sessions table definition")?;
+        if !definition.contains(AFTER) {
+            ensure!(
+                definition.matches(BEFORE).count() == 1,
+                "unexpected sessions state constraint"
+            );
+            let definition = definition.replace(BEFORE, AFTER);
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name='sessions'
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE sessions_parked_v53 ({definition};
+                 INSERT INTO sessions_parked_v53 SELECT * FROM sessions;
+                 DROP TABLE sessions;
+                 ALTER TABLE sessions_parked_v53 RENAME TO sessions;"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+            ensure!(
+                !transaction
+                    .prepare("PRAGMA foreign_key_check")?
+                    .exists([])?,
+                "foreign key violation in the parked-state migration"
+            );
+        }
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 53
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (53, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 53;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate the sessions state constraint for parked sub-agents")?;
+    restored.context("restore foreign key enforcement after the parked-state migration")?;
     Ok(())
 }
 
@@ -731,8 +850,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 49 adds sub-agent handback records.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 49;
+    /// `SCHEMA_VERSION`. Migration 53 admits the `parked` session state.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 53;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

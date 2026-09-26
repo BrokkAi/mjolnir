@@ -226,7 +226,12 @@ where
         .as_deref()
         .map(crate::worker_runtime::harness::acquire_supervisor_lease)
         .transpose()?;
-    let environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    // Removed after the merge, so a value the target's login environment sets
+    // is removed as well (#1160).
+    for name in &spec.excluded_environment {
+        environment.remove(name);
+    }
     let mut command = tokio::process::Command::new(&spec.command);
     command
         .args(&spec.args)

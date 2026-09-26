@@ -1,5 +1,8 @@
 use super::*;
 
+/// How long creating a parent's report root on its target may take.
+const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl RuntimeState {
     pub(super) async fn start_create_session(
         self: &Arc<Self>,
@@ -17,6 +20,16 @@ impl RuntimeState {
         let _upgrade_work = crate::upgrade::activity("subagent admission")?;
         let relation = blocking(move || {
             let mut controller = Controller::load()?;
+            let mut request = request;
+            // The parent's report root is made before the child exists, so the
+            // child's first prompt can name its own directory under it. A
+            // request run again after a restart finds the same root.
+            let executor = CancellableProcessExecutor::with_timeout(REPORT_ROOT_TIMEOUT);
+            request.report_root = Some(
+                controller
+                    .prepare_subagent_report_root(&request.parent_session_id, &executor)
+                    .context("create the sub-agent report directory")?,
+            );
             controller.register_subagent(request)
         })
         .await?;

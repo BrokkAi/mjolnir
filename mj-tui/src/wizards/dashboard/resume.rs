@@ -1,5 +1,13 @@
 use super::*;
 
+/// The answer to a second restore of an archive whose first has not
+/// reported back.
+pub(super) const ARCHIVE_RESTORE_IN_FLIGHT: &str = "Restore already started.";
+
+/// The answer to a second Resume press while the first press's check is
+/// still running.
+const RESUME_IN_FLIGHT: &str = "Resume already started.";
+
 impl DashboardState {
     pub(in crate::wizards) fn advance_resume_wizard(
         &mut self,
@@ -153,17 +161,35 @@ impl DashboardState {
             return action;
         }
         if wizard.source == ResumeSource::Archive {
+            if !self.claim_archive_restore(&wizard.session_id) {
+                self.mode = Mode::Resume(wizard);
+                return DashboardAction::None;
+            }
             // A restored archive has no checkpoint and no repositories to
             // preflight: it starts as a new session and the summary follows.
+            // With nothing left to check, the wizard closes now, as a live
+            // resume's does once its launch starts. The dashboard loop shows
+            // "Launching …" when the session registers. A failure opens the
+            // launch-failure dialog, whose Retry sends this restore again.
             let action = DashboardAction::RestoreArchivedSession {
                 workspace_id: wizard.workspace_id.clone(),
                 wiki_id: wizard.session_id.clone(),
                 profile_id,
                 target_template_id,
             };
-            self.mode = Mode::Resume(wizard);
+            self.cancel_modal();
             return action;
         }
+        // The wizard stays open while the attached directories and the
+        // checkpoint's repositories are checked, so Resume can be pressed
+        // again before the check reports back. A second check would race
+        // the first to open the same dialog or start the same launch.
+        if self.resume_preflight_in_flight() {
+            self.notices.set(RESUME_IN_FLIGHT);
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
+        }
+        self.resume_preflight_generation = Some(self.session_preflight_generation());
         let launch = DashboardAction::ResumeSession {
             workspace_id: wizard.workspace_id.clone(),
             session_id: wizard.session_id.clone(),
@@ -185,6 +211,49 @@ impl DashboardState {
                 mounts,
                 launch: Box::new(preflight),
             }
+        }
+    }
+
+    /// Marks the restore of the archived transcript `wiki_id` as started.
+    /// Answers false, with a notice, when one already is: each restore makes
+    /// a new session, so a second one would be a duplicate.
+    pub(crate) fn claim_archive_restore(&mut self, wiki_id: &str) -> bool {
+        if self.archive_restores_in_flight.insert(wiki_id.to_owned()) {
+            return true;
+        }
+        self.notices.set(ARCHIVE_RESTORE_IN_FLIGHT);
+        false
+    }
+
+    /// Whether a restore of `wiki_id` has been sent and not reported back.
+    pub(crate) fn archive_restore_in_flight(&self, wiki_id: &str) -> bool {
+        self.archive_restores_in_flight.contains(wiki_id)
+    }
+
+    /// Ends the restore that `launch` sent, once the daemon has registered
+    /// its session or refused it. Any other launch is left alone.
+    pub fn finish_archive_restore(&mut self, launch: &DashboardAction) {
+        if let DashboardAction::RestoreArchivedSession { wiki_id, .. } = launch {
+            self.archive_restores_in_flight.remove(wiki_id);
+        }
+    }
+
+    /// Whether a live resume's check has been sent and has not reported
+    /// back.
+    pub(crate) fn resume_preflight_in_flight(&self) -> bool {
+        self.resume_preflight_generation == Some(self.session_preflight_generation())
+    }
+
+    /// Ends a live resume's check that has failed, so Resume can start
+    /// another, and moves the generation on so that any other result sent
+    /// under the same generation is dropped. The other results end the
+    /// check the same way: Ready closes the wizard, and the conversion and
+    /// origin dialogs move the generation on when they open. Does nothing
+    /// when no resume check is in flight, so a new-session check that shares
+    /// the failure path is left alone.
+    pub fn end_resume_preflight(&mut self) {
+        if self.resume_preflight_in_flight() {
+            self.invalidate_session_preflight();
         }
     }
 
@@ -288,6 +357,7 @@ impl DashboardState {
             }
             _ => {}
         }
+        self.end_resume_preflight();
     }
 
     pub fn finish_session_mount_preflight(&mut self) {

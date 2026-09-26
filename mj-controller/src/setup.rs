@@ -148,28 +148,61 @@ pub enum SetupOutcome {
 /// Give an unconfigured terminal installation a local Codex profile and target
 /// without making remote/container setup a prerequisite for explicit session
 /// creation. This only writes configuration; it never creates a session.
+///
+/// Only when Codex is on this machine, though: its home exists or the `codex`
+/// command is on PATH. Otherwise nothing is written. The dashboard then opens
+/// on the Get started panel, which says no agent was found, and the next
+/// launch after Codex is installed adds the profile (launch finding R13-1).
 pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        let config = Config::load_from(config_path)?;
-        if config.is_unconfigured() {
-            let kind = HarnessKind::Codex;
-            let home = std::env::var_os(kind.home_env())
-                .map(|value| kind.home_from_environment(value))
-                .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
-                .context("locate Codex home for the default local profile")?;
-            let home = std::path::absolute(home).context("resolve Codex profile home")?;
-            Config::update_to(config_path, |fresh| {
-                if fresh.is_unconfigured() {
-                    configure_local_startup(fresh, home);
-                }
-                Ok(())
-            })?;
-        }
+        let kind = HarnessKind::Codex;
+        initialize_local_startup_config_with(
+            config_path,
+            || {
+                std::env::var_os(kind.home_env())
+                    .map(|value| kind.home_from_environment(value))
+                    .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
+                    .context("locate Codex home for the default local profile")
+            },
+            || {
+                crate::targets::program_on_path(
+                    kind.cli_binary_name(),
+                    std::env::var_os("PATH").as_deref(),
+                )
+            },
+        )?;
     }
     // Local bare targets are unsupported on Windows; retain explicit setup.
     #[cfg(not(unix))]
     let _ = config_path;
+    Ok(())
+}
+
+/// [`initialize_local_startup_config`] with the two facts it reads from this
+/// machine supplied: where the Codex home would be, and whether the `codex`
+/// command is installed.
+#[cfg(unix)]
+fn initialize_local_startup_config_with(
+    config_path: &Path,
+    codex_home: impl FnOnce() -> Result<PathBuf>,
+    codex_on_path: impl FnOnce() -> bool,
+) -> Result<()> {
+    let config = Config::load_from(config_path)?;
+    if !config.is_unconfigured() {
+        return Ok(());
+    }
+    let home = codex_home()?;
+    if !home.exists() && !codex_on_path() {
+        return Ok(());
+    }
+    let home = std::path::absolute(home).context("resolve Codex profile home")?;
+    Config::update_to(config_path, |fresh| {
+        if fresh.is_unconfigured() {
+            configure_local_startup(fresh, home);
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -890,7 +923,7 @@ fn run_setup_dialog_inner(
     }
 
     writeln!(output, "Writing {}...", config_path.display())?;
-    Config::update_to(config_path, |latest| {
+    let (written, ()) = Config::update_to(config_path, |latest| {
         apply_setup_additions(latest, &additions)
     })?;
     // A failed smoke test is a fixable prerequisite, not a reason to abandon
@@ -910,11 +943,29 @@ fn run_setup_dialog_inner(
         output,
         "Advanced users can edit TOML for extra profiles, virtual monorepos, SSH, and AWS."
     )?;
-    writeln!(
-        output,
-        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
-    )?;
+    writeln!(output, "{}", setup_next_step(&written))?;
     Ok(SetupOutcome::Written)
+}
+
+/// Setup's last line: what to do next with the configuration it wrote. With
+/// no enabled profile the dashboard has no Sessions pane to press n in, so
+/// the first step is an agent to run (launch finding R13-3).
+fn setup_next_step(config: &Config) -> String {
+    if config.enabled_profiles().next().is_some() {
+        return "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
+            .to_owned();
+    }
+    match config
+        .keybinds()
+        .labels(mj_core::config::KeyAction::OpenSettings)
+        .into_iter()
+        .next()
+    {
+        Some(key) => format!(
+            "Install a coding agent, then run `mj` and open Settings ({key}) to add its profile."
+        ),
+        None => "Install a coding agent, then run `mj` and open Settings from the command palette to add its profile.".to_owned(),
+    }
 }
 
 /// Setup only adds entries. Existing identifiers may belong to live sessions.
@@ -1006,7 +1057,8 @@ fn write_discovered_homes(output: &mut impl Write, homes: &[DiscoveredHome]) -> 
     if homes.is_empty() {
         writeln!(
             output,
-            "  No existing Codex, Claude Code, Kimi Code, or Grok Build homes found."
+            "  No existing {} homes found.",
+            HarnessKind::every_display_name_or()
         )?;
     }
     for home in homes {
@@ -1395,7 +1447,7 @@ fn write_summary(
     {
         writeln!(
             output,
-            "  raw localhost target using configured harness homes directly"
+            "  localhost target; each session runs from a staged copy of its profile home"
         )?;
     }
     for (runtime, image) in runtimes {

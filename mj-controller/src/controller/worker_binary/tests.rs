@@ -358,6 +358,70 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
     check().unwrap();
 }
 
+/// On a host with neither Codex nor Node.js, the launch failed with "Codex
+/// launch preflight failed on local host; Node.js 22+ and npm must be
+/// available on the target PATH: Node.js is missing from PATH", which never
+/// says Codex is missing (launch finding R13-1). The failure now starts by
+/// saying so, with the install command `mj login` gives.
+#[cfg(unix)]
+#[test]
+fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = |kind| HarnessProfile {
+        enabled: true,
+        kind,
+        home: directory.path().into(),
+        environment: std::collections::BTreeMap::from([(
+            "PATH".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )]),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let failure = |kind| {
+        format!(
+            "{:#}",
+            preflight_harness(
+                &mj_core::config::TargetTemplate::LocalBare,
+                &profile(kind),
+                &ProcessExecutor,
+            )
+            .unwrap_err()
+        )
+    };
+
+    let codex = failure(HarnessKind::Codex);
+    assert!(
+        codex.starts_with(
+            "Codex is not installed on local host: `codex` is not on PATH. Install it with \
+             `npm install -g @openai/codex` (Node.js 22 or newer), sign in to it, then retry \
+             the launch: Node.js is missing from PATH"
+        ),
+        "{codex}"
+    );
+    let claude = failure(HarnessKind::Claude);
+    assert!(
+        claude.starts_with(
+            "Claude Code is not installed on local host: `claude` is not on PATH. Install it \
+             with `npm install -g @anthropic-ai/claude-code`, sign in to it, then retry the \
+             launch: Node.js is missing from PATH"
+        ),
+        "{claude}"
+    );
+
+    // With the agent's own command installed, only Node.js is missing, and
+    // the failure says that as before.
+    mj_core::test_hooks::install_fake_command(directory.path(), "codex", "#!/bin/sh\nexit 0\n");
+    let codex = failure(HarnessKind::Codex);
+    assert!(
+        codex.starts_with(
+            "Codex launch preflight failed on local host; Node.js 22+ and npm must be available \
+             on the target PATH: Node.js is missing from PATH"
+        ),
+        "{codex}"
+    );
+}
+
 #[test]
 fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() {
     use mj_core::config::HarnessKind;
@@ -2786,7 +2850,12 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     stage_profile(&profile, staged.path()).unwrap();
     stage_managed_skills(profile.kind, staged.path()).unwrap();
 
-    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let expected = mj_core::skills::session_skills(
+        profile.kind,
+        home.path(),
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    )
+    .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
     assert_eq!(installed.fingerprint(), expected.fingerprint());
     assert_eq!(installed, expected);
@@ -2862,7 +2931,12 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "{kind:?} {relative}"
             );
         }
-        let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+        let expected = mj_core::skills::session_skills(
+            profile.kind,
+            home.path(),
+            mj_core::skills::SkillsArchiveFormat::Gzip,
+        )
+        .unwrap();
         let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
         assert_eq!(installed, expected, "{kind:?}");
     }
@@ -2873,7 +2947,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
 /// through the link; the session's worker then failed every skills poll on the
 /// large file, and the sync's own copy of the home did not read through the
 /// link at all. Stage and sync now agree, so the first sync neither fails nor
-/// removes the linked skill.
+/// removes the linked skill. A large file that compresses under the per-file
+/// limit is part of both trees; one that does not is left out of both.
 #[cfg(unix)]
 #[test]
 fn staging_and_sync_agree_on_linked_and_oversized_skills() {
@@ -2881,10 +2956,14 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     std::fs::create_dir_all(outside.path().join("viz/demos")).unwrap();
     std::fs::write(outside.path().join("viz/SKILL.md"), "viz skill\n").unwrap();
     std::fs::write(
-        outside.path().join("viz/demos/large.html"),
-        vec![b'x'; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 1],
+        outside.path().join("viz/demos/sunspot-pretty.html"),
+        "<tr><td>1749-01</td><td>96.7</td></tr>\n".repeat(60_000),
     )
     .unwrap();
+    let mut incompressible =
+        vec![0; usize::try_from(mj_core::skills::MAX_SKILLS_FILE_BYTES).unwrap() + 200_000];
+    getrandom::fill(&mut incompressible).unwrap();
+    std::fs::write(outside.path().join("viz/demos/large.bin"), incompressible).unwrap();
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review skill\n").unwrap();
@@ -2903,7 +2982,12 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     stage_profile(&profile, staged.path()).unwrap();
     stage_managed_skills(profile.kind, staged.path()).unwrap();
 
-    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let expected = mj_core::skills::session_skills(
+        profile.kind,
+        home.path(),
+        mj_core::skills::SkillsArchiveFormat::Gzip,
+    )
+    .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
     assert_eq!(installed, expected);
     assert!(
@@ -2914,10 +2998,17 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         "the linked skill is part of the canonical tree"
     );
     assert!(
+        expected
+            .entries()
+            .iter()
+            .any(|entry| entry.path == "skills/viz/demos/sunspot-pretty.html"),
+        "the large page compresses under the limit and is part of both sides"
+    );
+    assert!(
         !expected
             .entries()
             .iter()
-            .any(|entry| entry.path == "skills/viz/demos/large.html"),
+            .any(|entry| entry.path == "skills/viz/demos/large.bin"),
         "the oversized file is left out of both sides"
     );
 }
@@ -3357,6 +3448,250 @@ fn a_child_opens_its_parents_container_workspace() {
     );
 }
 
+/// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
+/// environment sets an API key.
+fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::HarnessProfile {
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::json!({"auth_mode": auth_mode, "OPENAI_API_KEY": null}).to_string(),
+    )
+    .unwrap();
+    mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.to_path_buf(),
+        environment: BTreeMap::from([
+            ("OPENAI_API_KEY".to_owned(), "sk-svcacct-profile".to_owned()),
+            ("PROFILE_SETTING".to_owned(), "kept".to_owned()),
+        ]),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    }
+}
+
+/// The launch config of one session of `profile` on this machine, in its own
+/// container, and as a sub-agent child in its parent's container. Every target
+/// sets `CODEX_API_KEY` and `OPENAI_BASE_URL` in its own environment.
+fn launches_on_every_target(
+    profile: &mj_core::config::HarnessProfile,
+) -> Vec<(&'static str, mj_core::worker_launch::WorkerLaunchConfig)> {
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let container = mj_core::config::TargetTemplate::LocalPodman {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let with_target_keys = |template: &mj_core::config::TargetTemplate| {
+        let mut settings = mj_core::state::TargetRuntimeSettings::from(template);
+        settings
+            .environment
+            .insert("CODEX_API_KEY".into(), "sk-target".into());
+        settings.environment.insert(
+            "OPENAI_BASE_URL".into(),
+            "https://example.invalid/v1".into(),
+        );
+        settings
+    };
+
+    let project = tempfile::tempdir().unwrap();
+    let mut local = crate::controller::test_support::checkpoint_test_session(parent_id);
+    local.target_template_id = "localhost".into();
+    local.project_directory = Some(project.path().to_path_buf());
+    let local_root = format!("/home/me/.local/share/hel/workers/{parent_id}");
+    local.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: local_root.clone().into(),
+    });
+    let localhost = worker_launch_config(
+        &local,
+        profile,
+        None,
+        &targets::TargetLocator::LocalBare {
+            worker_root: local_root,
+        },
+        parent_id,
+        None,
+        &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
+    )
+    .unwrap()
+    .0;
+
+    let mut parent = crate::controller::test_support::checkpoint_test_session(parent_id);
+    parent.project_directory = None;
+    parent.container_workspace = Some(parent_workspace.clone());
+    let in_container = worker_launch_config(
+        &parent,
+        profile,
+        Some(&bundle),
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &with_target_keys(&container),
+    )
+    .unwrap()
+    .0;
+
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.project_directory = None;
+    child.container_workspace = Some(parent_workspace.clone());
+    let as_child = worker_launch_config(
+        &child,
+        profile,
+        Some(&bundle),
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: Some(parent_id.into()),
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &with_target_keys(&container),
+    )
+    .unwrap()
+    .0;
+    vec![
+        ("localhost", localhost),
+        ("container", in_container),
+        ("sub-agent", as_child),
+    ]
+}
+
+/// #1160: eleven Codex children of a ChatGPT profile died on their first
+/// request, some with a service-account API key the ChatGPT backend rejected.
+/// A ChatGPT profile's harness environment carries no such key on any target,
+/// and the launch tells the worker to remove the same variables from the
+/// target's own login environment, which only the worker sees.
+#[test]
+fn a_chatgpt_codex_launch_carries_no_api_key_on_any_target() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&profile) {
+        for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
+            assert!(
+                !launch.environment.contains_key(name),
+                "{target}: the harness environment still sets {name}"
+            );
+        }
+        assert_eq!(
+            launch.excluded_environment,
+            mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned),
+            "{target}: the worker is not told what to remove"
+        );
+        assert_eq!(launch.environment["PROFILE_SETTING"], "kept", "{target}");
+    }
+}
+
+/// A Codex profile that signs in with an API key keeps the variables that
+/// carry it, whether `codex login --with-api-key` stored it or a custom
+/// provider names it.
+#[test]
+fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "apikey");
+    for (target, launch) in launches_on_every_target(&profile) {
+        assert_eq!(
+            launch.environment["OPENAI_API_KEY"], "sk-svcacct-profile",
+            "{target}"
+        );
+        assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let profile = zai_profile(home.path());
+    for (target, launch) in launches_on_every_target(&profile) {
+        assert_eq!(
+            launch.environment["ZAI_API_KEY"], "coding-plan-key",
+            "{target}"
+        );
+        assert_eq!(launch.environment["CODEX_API_KEY"], "sk-target", "{target}");
+        assert!(launch.excluded_environment.is_empty(), "{target}");
+    }
+}
+
+/// #1160: a sub-agent child in its parent's container on a remote machine
+/// runs from a staged home of its own, named after the child, and the
+/// launch tells its worker which file there holds the login. That file is
+/// where a credential sync push lands, so a login refreshed by `mj login`
+/// reaches the child and not its parent's home.
+#[test]
+fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.last_profile = "codex4".into();
+    child.project_directory = None;
+    child.container_workspace = Some(parent_workspace.clone());
+    let template = mj_core::config::TargetTemplate::SshPodman {
+        ssh: mj_core::config::SshConnection {
+            host: "morannon".into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+
+    let (launch, _, target_home) = worker_launch_config(
+        &child,
+        &profile,
+        Some(&bundle),
+        &targets::TargetLocator::SshPodman {
+            borrowed_from: Some(parent_id.into()),
+            ssh: SshTarget {
+                destination: "morannon".into(),
+                ssh_args: Vec::new(),
+            },
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        parent_id,
+        Some(&parent_workspace),
+        &mj_core::state::TargetRuntimeSettings::from(&template),
+    )
+    .unwrap();
+
+    assert_eq!(launch.harness_home, PathBuf::from(&target_home));
+    assert_eq!(
+        launch.harness_home,
+        PathBuf::from(format!("/var/lib/hel/profiles/{child_id}")),
+        "the child's staged home is its own, not its parent's"
+    );
+    assert_eq!(launch.environment["CODEX_HOME"], target_home);
+    assert_eq!(launch.authentication_marker.as_deref(), Some("auth.json"));
+    assert_eq!(
+        launch.cwd,
+        PathBuf::from(format!("/workspace/{parent_id}/project")),
+        "the child works in its parent's checkout"
+    );
+}
+
 #[test]
 fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     let project = tempfile::tempdir().unwrap();
@@ -3768,6 +4103,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -3870,6 +4206,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::from([("CODEX_HOME".into(), "/configured/profile/home".into())]),
+        excluded_environment: Vec::new(),
         cwd: "/workspace/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -3957,6 +4294,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -4657,4 +4995,85 @@ fn the_staged_claude_profile_names_the_sub_agent_role() {
         assert_eq!(args[..2], ["worker", "subagent-mcp"]);
         assert_eq!(args[args.len() - 2..], ["--role", role.id()], "{args:?}");
     }
+}
+
+/// Launch finding R11-1: a Claude child on a model without Auto mode ran in
+/// Accept edits, and Claude asked a person before it would run the child's own
+/// `handback`, so the child could not report without one. The staged settings
+/// allow every tool the role's `mj-agents` server lists, whatever the mode, and
+/// keep the person's own settings and rules.
+#[test]
+fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
+    use mj_core::subagent::SubagentMcpRole;
+
+    let allowed = |stage: &Path| -> (serde_json::Value, Vec<String>) {
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(stage.join("settings.json")).unwrap()).unwrap();
+        let allow = settings["permissions"]["allow"]
+            .as_array()
+            .expect("the staged settings have an allow list")
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect();
+        (settings, allow)
+    };
+
+    // A child's only tool is handback.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    let (settings, allow) = allowed(stage.path());
+    assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
+    assert_eq!(
+        settings["permissions"]["deny"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(settings["model"], "opus");
+
+    // A profile with no settings file gets one.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
+
+    // A parent delegates without asking; a rule the person already has is
+    // kept once, in its place.
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(
+        stage.path().join("settings.json"),
+        r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
+    )
+    .unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent).unwrap();
+    let (_, allow) = allowed(stage.path());
+    assert_eq!(allow[0], "mcp__mj-agents__wait");
+    assert_eq!(
+        allow
+            .iter()
+            .filter(|rule| *rule == "mcp__mj-agents__wait")
+            .count(),
+        1,
+        "{allow:?}"
+    );
+    for tool in [
+        "list_profiles",
+        "spawn",
+        "list_agents",
+        "send_input",
+        "wait",
+        "interrupt",
+        "close",
+    ] {
+        assert!(
+            allow.contains(&format!("mcp__mj-agents__{tool}")),
+            "{tool}: {allow:?}"
+        );
+    }
+    assert!(
+        !allow.iter().any(|rule| rule.ends_with("__handback")),
+        "a parent has no handback: {allow:?}"
+    );
 }

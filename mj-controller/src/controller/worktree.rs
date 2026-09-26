@@ -939,8 +939,7 @@ pub(super) fn raw_checkout_snapshot(
     // Bundling "everything not on origin" only works when origin refs exist:
     // every bundle prerequisite then sits on the remote the container clones.
     mj_checkpoint::checkpoint::repair_origin_refs(git, checkout, RAW_CONVERSION_REPOSITORY_ID)?;
-    mj_checkpoint::checkpoint::reject_dirty_submodules(git, checkout)
-        .with_context(|| format!("checkout {}", checkout.display()))?;
+    reject_dirty_submodules_for_move(git, checkout)?;
     let boundary = origin_boundary_commit(git, checkout)?;
     let history = if managed_clone {
         mj_checkpoint::archive::GitHistoryMode::CloneFrom(
@@ -1037,12 +1036,12 @@ fn git_runner_stdout(
 pub(super) fn raw_conversion_preview(
     session: &SessionRecord,
     conversion: &RawToWorkspaceConversion,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
     let checkout = conversion.checkout.as_path();
     // A dirty submodule cannot be captured, so say so now rather than failing
     // after the session has been stopped.
-    reject_dirty_submodules_in_checkout(executor, checkout)?;
+    reject_dirty_submodules_for_move(&ExecutorGit(executor), checkout)?;
     let default_branch = mj_core::remote_git::default_branch(&conversion.source, executor)?;
     let position = read_checkout_position(executor, &ManagedWorktreeTarget::Local, checkout)?;
     let unpushed_commits = unpushed_commit_count(executor, checkout)?;
@@ -1080,29 +1079,62 @@ pub(super) fn raw_conversion_preview(
     })
 }
 
-fn reject_dirty_submodules_in_checkout(
-    executor: &impl CommandExecutor,
+/// The conversion snapshot carries each gitlink as the commit it points to,
+/// so uncommitted work in a submodule would not arrive. A gitlink with no
+/// `.gitmodules` entry never blocks the move; it is logged because its files
+/// stay behind.
+fn reject_dirty_submodules_for_move(
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
     checkout: &Path,
 ) -> Result<()> {
-    let listed = managed_git_stdout(
-        executor,
-        &ManagedWorktreeTarget::Local,
-        checkout,
-        [
-            "submodule",
-            "foreach",
-            "--recursive",
-            "--quiet",
-            "git status --porcelain",
-        ],
-        "inspect submodules",
-    )?;
-    ensure!(
-        listed.trim().is_empty(),
-        "{} has a dirty submodule, which cannot move into a target; commit or discard the submodule's changes first",
-        checkout.display()
-    );
+    let inspection = mj_checkpoint::checkpoint::inspect_submodules(git, checkout)
+        .with_context(|| format!("checkout {}", checkout.display()))?;
+    for gitlink in &inspection.unregistered {
+        tracing::warn!(
+            checkout = %checkout.display(),
+            gitlink = %gitlink.display(),
+            "gitlink has no .gitmodules entry; the move carries the commit it points to, not its files"
+        );
+    }
+    if let Some(dirty) = inspection.dirty_summary() {
+        bail!(
+            "{}: {dirty}, which cannot move into a target; commit or stash them first",
+            checkout.display()
+        );
+    }
     Ok(())
+}
+
+/// Runs the checkpoint library's submodule inspection in a local checkout
+/// through a controller executor, so it keeps the caller's cancellation and
+/// deadline.
+struct ExecutorGit<'a, E>(&'a E);
+
+impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for ExecutorGit<'_, E> {
+    fn run(
+        &self,
+        repository: &Path,
+        command: &mj_checkpoint::archive::GitCommand,
+    ) -> Result<mj_checkpoint::archive::GitOutput> {
+        ensure!(
+            command.stdin.is_empty() && command.env.is_empty(),
+            "an executor Git command takes no standard input or extra environment"
+        );
+        let output = self.0.execute(&managed_git_command(
+            &ManagedWorktreeTarget::Local,
+            repository,
+            command
+                .arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+            "inspect submodules",
+        ))?;
+        Ok(mj_checkpoint::archive::GitOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
 
 /// Commits the conversion archive has to carry. A checkout whose origin refs

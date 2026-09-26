@@ -584,6 +584,7 @@ fn restore_rewrites_grok_cwd_key_and_session_summary_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -822,6 +823,7 @@ fn restore_rewrites_claude_project_artifacts_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -863,6 +865,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
             stash_stack: Vec::new(),
             id: "app".into(),
             relative_destination: "app".into(),
+            checkout_subdirectory: None,
             origin: "owner/app".into(),
             push_urls: Vec::new(),
             remote_workspace: false,
@@ -1379,6 +1382,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
         environment: Default::default(),
+        excluded_environment: Vec::new(),
         cwd: spec.workspace_root.join("app"),
         additional_directories: Vec::new(),
         native_session_id: Some(NATIVE.into()),
@@ -1403,6 +1407,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         &spec.session,
         &spec.relay_root,
         &spec.harness_home,
+        &spec.workspace_root,
         false,
         &NoNativeCheckpointState,
     )
@@ -1446,6 +1451,7 @@ fn checkpoint_collects_memory_from_a_legacy_worker_launch_config() {
         &spec.session,
         &spec.relay_root,
         &spec.harness_home,
+        &spec.workspace_root,
         false,
         &NoNativeCheckpointState,
     )
@@ -1703,6 +1709,105 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     );
 }
 
+/// A session whose project is a subdirectory of its checkout still owns the
+/// whole checkout: Stop deletes a managed worktree, so work anywhere in it has
+/// to travel in the archive and come back at the same place in the checkout.
+#[test]
+fn a_subdirectory_session_restores_work_across_its_whole_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, archive_path) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    fs::create_dir_all(repository.join("docs")).unwrap();
+    fs::write(repository.join("docs/guide.md"), b"guide").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "docs"]);
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    let checkout = temp.path().join("clones/session");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "mj/session",
+            &checkout.to_string_lossy(),
+            "HEAD",
+        ],
+    );
+    fs::write(checkout.join("README.md"), b"edited at the root").unwrap();
+    fs::write(checkout.join("docs/guide.md"), b"staged in docs").unwrap();
+    git(&checkout, &["add", "docs/guide.md"]);
+    fs::write(checkout.join("notes.txt"), b"untracked at the root").unwrap();
+    fs::write(checkout.join("docs/draft.md"), b"untracked in docs").unwrap();
+    // The controller describes a subdirectory project by its parent and its
+    // own name, so the repository the worker captures is `<checkout>/docs`.
+    spec.workspace_root = checkout.clone();
+    spec.repositories[0].relative_destination = "docs".into();
+    spec.repositories[0].capture = CheckpointRepositoryCapture::DeltaFrom { base_commit: base };
+    export_checkpoint(&spec).unwrap();
+    // An older build would unpack the untracked files inside `docs`; the
+    // schema makes it refuse the archive instead.
+    assert_eq!(
+        read_archive_verified(&archive_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
+    );
+
+    let assert_restored = |restored: &Path| {
+        let read = |path: &str| fs::read_to_string(restored.join(path)).ok();
+        let files =
+            ["notes.txt", "docs/draft.md", "draft.md", "README.md"].map(|path| (path, read(path)));
+        assert_eq!(
+            files,
+            [
+                ("notes.txt", Some("untracked at the root".to_owned())),
+                ("docs/draft.md", Some("untracked in docs".to_owned())),
+                ("draft.md", None),
+                ("README.md", Some("edited at the root".to_owned())),
+            ],
+            "work in {}",
+            restored.display()
+        );
+        assert_eq!(
+            git(restored, &["diff", "--cached", "--name-only"]),
+            "docs/guide.md",
+            "the staged change is staged again"
+        );
+    };
+
+    // Stop removes the managed worktree. An in-place resume recreates it from
+    // the retained branch and restores the archive through the project
+    // directory, in the same parent-and-name layout the export used.
+    git(
+        &repository,
+        &["worktree", "remove", "--force", &checkout.to_string_lossy()],
+    );
+    git(
+        &repository,
+        &["worktree", "add", &checkout.to_string_lossy(), "mj/session"],
+    );
+    restore_repositories(&archive_path, &checkout, &SystemGit).unwrap();
+    assert_restored(&checkout);
+
+    // A restore onto a named branch is handed the checkout's top level.
+    let other = temp.path().join("clones/other");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "mj/other",
+            &other.to_string_lossy(),
+            "mj/session",
+        ],
+    );
+    restore_single_repository_onto_branch(&archive_path, &other, "mj/other", &SystemGit).unwrap();
+    assert_restored(&other);
+}
+
 fn copy_archive_with_schema(source: &Path, destination: &Path, schema_version: u32) {
     let source = File::open(source).unwrap();
     let mut archive = zip::ZipArchive::new(source).unwrap();
@@ -1883,6 +1988,47 @@ fn a_checkpoint_excludes_everything_the_reviewer_owns() {
         !native.is_empty(),
         "the primary's native session must still be exported"
     );
+}
+
+/// R18: a checkout that records a nested repository as a bare gitlink, with
+/// no `.gitmodules` entry, could not be suspended: the submodule check failed
+/// on a gitlink Git has no URL for. The gitlink is now recorded as the
+/// commit it points to.
+#[test]
+fn a_gitlink_without_a_gitmodules_entry_does_not_block_the_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let repository = spec.workspace_root.join("app");
+    let nested = repository.join("vendor/tool");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    git(
+        &nested,
+        &[
+            "-c",
+            "user.email=hel@example.test",
+            "-c",
+            "user.name=Hel Test",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "tool",
+        ],
+    );
+    let head = git(&nested, &["rev-parse", "HEAD"]);
+    git(
+        &repository,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},vendor/tool"),
+        ],
+    );
+    git(&repository, &["commit", "-q", "-m", "record the tool"]);
+
+    export_checkpoint(&spec).expect("an unregistered gitlink is recorded, not refused");
 }
 
 #[test]
@@ -2793,4 +2939,121 @@ fn parallel_repository_collection_preserves_manifest_order() {
         .map(|repository| repository.metadata.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(repository_ids, ["app", "worker"]);
+}
+
+/// A child's report files sit beside the repositories, outside all of them, so
+/// no repository capture sees them. The checkpoint carries them itself and puts
+/// them back even when the harness history is not restored.
+#[test]
+fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let reports = spec
+        .workspace_root
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1");
+    fs::create_dir_all(reports.join("logs")).unwrap();
+    fs::write(reports.join("findings.md"), b"full findings").unwrap();
+    fs::write(reports.join("logs/test.log"), b"test output").unwrap();
+    export_checkpoint(&spec).unwrap();
+    assert_eq!(
+        read_archive_verified(&spec.output_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        crate::archive::ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
+    );
+
+    let restored_workspace = temp.path().join("restored-workspace");
+    fs::create_dir_all(&restored_workspace).unwrap();
+    // A file already on the target is newer than the archive's copy.
+    let kept = restored_workspace
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1/findings.md");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, b"newer findings").unwrap();
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: spec.output_path.clone(),
+            workspace_root: restored_workspace.clone(),
+            relay_root: temp.path().join("restored-report-relay"),
+            harness_home: temp.path().join("restored-report-harness"),
+            restore_repositories: false,
+            restore_native: false,
+            discard_queued_prompts: false,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored = restored_workspace
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("child-1");
+    assert_eq!(
+        fs::read(restored.join("logs/test.log")).unwrap(),
+        b"test output"
+    );
+    assert_eq!(
+        fs::read(restored.join("findings.md")).unwrap(),
+        b"newer findings"
+    );
+}
+
+#[test]
+fn subagent_reports_past_the_limit_keep_the_newest_files() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(
+        super::capture::collect_subagent_reports(temp.path())
+            .unwrap()
+            .is_empty(),
+        "no report directory, nothing to carry"
+    );
+    let reports = temp
+        .path()
+        .join(mj_core::subagent::REPORT_ROOT_DIR)
+        .join("c");
+    fs::create_dir_all(&reports).unwrap();
+    let half = (super::capture::MAX_SUBAGENT_REPORT_BYTES / 2 + 1) as usize;
+    let old = reports.join("old.log");
+    fs::write(&old, vec![b'o'; half]).unwrap();
+    File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    fs::write(reports.join("new.log"), vec![b'n'; half]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&old, reports.join("link.log")).unwrap();
+    let artifacts = super::capture::collect_subagent_reports(temp.path()).unwrap();
+    let paths = artifacts
+        .iter()
+        .map(|artifact| artifact.relative_path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [Path::new(mj_core::subagent::ARCHIVE_REPORT_DIR).join("c/new.log")]
+    );
+}
+
+#[test]
+fn a_report_written_after_the_prestage_changes_the_source_fingerprint() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = temp.path().join("harness");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&harness).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+    let before = super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap();
+    assert_eq!(
+        before,
+        super::capture::native_source_fingerprint(&harness).unwrap(),
+        "without reports the fingerprint is the harness home's own"
+    );
+    let reports = workspace.join(mj_core::subagent::REPORT_ROOT_DIR).join("c");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(reports.join("r.md"), b"report").unwrap();
+    assert_ne!(
+        super::capture::checkpoint_source_fingerprint(&harness, &workspace).unwrap(),
+        before
+    );
 }

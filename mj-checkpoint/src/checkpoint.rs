@@ -9,10 +9,12 @@ mod capture;
 mod harness_paths;
 mod native_scan;
 mod restore;
+mod submodules;
 pub use capture::*;
 pub use harness_paths::*;
 pub use native_scan::*;
 pub use restore::*;
+pub use submodules::*;
 
 use mj_core::hex::lower_hex;
 use std::collections::BTreeSet;
@@ -320,40 +322,6 @@ pub fn current_native_session_received_prompt(snapshot: &CanonicalSessionSnapsho
     snapshot.transcript.iter().any(|item| {
         item.position >= start && matches!(&item.body, CanonicalTranscriptBody::User { .. })
     })
-}
-
-/// Refuse a repository with modified submodule content. A snapshot records
-/// the superproject's gitlink, not the submodule's working tree, so dirty
-/// submodule work would be lost silently. Public for the same reason as
-/// [`repair_origin_refs`].
-pub fn reject_dirty_submodules(runner: &dyn GitCommandRunner, repository: &Path) -> Result<()> {
-    let output = runner.run(
-        repository,
-        &GitCommand {
-            arguments: [
-                "submodule",
-                "foreach",
-                "--recursive",
-                "--quiet",
-                "git status --porcelain",
-            ]
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-        },
-    )?;
-    ensure!(
-        output.status == 0,
-        "failed to inspect submodules: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    ensure!(
-        output.stdout.iter().all(u8::is_ascii_whitespace),
-        "dirty submodule is unsupported"
-    );
-    Ok(())
 }
 
 fn validate_relative_path(path: &Path) -> Result<()> {

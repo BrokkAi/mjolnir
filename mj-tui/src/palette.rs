@@ -147,6 +147,21 @@ fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
         .collect()
 }
 
+/// What the palette says a command does, for the session it would act on.
+///
+/// Open shows a harness-native child's or a stopped sub-agent's conversation
+/// without a composer, so it must not promise that you can type in it (R11-4).
+fn command_description(dashboard: &DashboardState, id: CommandId) -> &'static str {
+    if id == CommandId::OpenSession
+        && dashboard.command_session_id().is_some_and(|session| {
+            dashboard.is_native_agent(session) || dashboard.is_stopped_subagent(session)
+        })
+    {
+        return "Show the selected agent's conversation (read-only).";
+    }
+    spec(id).description
+}
+
 fn first_ready(entries: &[PaletteEntry]) -> usize {
     entries
         .iter()
@@ -863,7 +878,7 @@ pub(crate) fn render_palette(
 
     let description = palette.entries.get(palette.selected).map_or(
         "Try a command name or a word from its description.",
-        |entry| spec(entry.id).description,
+        |entry| command_description(dashboard, entry.id),
     );
     frame.render_widget(
         Paragraph::new(description).style(theme::muted()),
@@ -1098,6 +1113,40 @@ mod tests {
             DashboardAction::Open { session_id: id }
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
+    }
+
+    /// Launch finding R11-4: a native child's Open said "Show the selected
+    /// session's conversation and type in it.", but its pane is read-only
+    /// ("controlled by parent"), and so is a stopped sub-agent's. Open says
+    /// so for both, and keeps its description for a session you can type in.
+    #[test]
+    fn open_describes_a_read_only_conversation_as_read_only() {
+        let read_only = "Show the selected agent's conversation (read-only).";
+        let (mut dashboard, parent_id, _) = dashboard_with_finished_native_child();
+        assert_eq!(
+            command_description(&dashboard, CommandId::OpenSession),
+            spec(CommandId::OpenSession).description,
+            "the parent itself is a session you can type in"
+        );
+        dashboard.open_subagent_workspace(parent_id);
+        dashboard.focus_sessions();
+        dashboard.dispatch_command(CommandId::SessionActions);
+        let screen = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(screen.contains(read_only), "{screen}");
+        assert!(!screen.contains("type in it"), "{screen}");
+
+        let (mut dashboard, parent_id) = crate::test_support::dashboard_with_one_subagent();
+        let mut state = dashboard.state.clone();
+        state.sessions.get_mut("child-session").unwrap().state =
+            mj_core::state::SessionState::Stopped;
+        dashboard.set_state(state);
+        dashboard.open_subagent_workspace(parent_id);
+        dashboard.focus_sessions();
+        assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+        assert_eq!(
+            command_description(&dashboard, CommandId::OpenSession),
+            read_only
+        );
     }
 
     #[test]

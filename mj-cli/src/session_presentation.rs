@@ -46,6 +46,7 @@ pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperati
         RuntimeLifecycleKind::DestroyStopped
         | RuntimeLifecycleKind::ForceDestroy
         | RuntimeLifecycleKind::Cleanup => SessionOperationKind::Destroying,
+        RuntimeLifecycleKind::StopSubagent => SessionOperationKind::Stopping,
     }
 }
 
@@ -386,6 +387,16 @@ mod tests {
         assert_eq!(
             lifecycle_kind(RuntimeLifecycleKind::Cleanup),
             SessionOperationKind::Destroying
+        );
+        // A person's destroy is a destroy; a parent's suspend stops its
+        // sub-agents (R15-2).
+        assert_eq!(
+            lifecycle_kind(RuntimeLifecycleKind::ForceDestroy),
+            SessionOperationKind::Destroying
+        );
+        assert_eq!(
+            lifecycle_kind(RuntimeLifecycleKind::StopSubagent),
+            SessionOperationKind::Stopping
         );
     }
 }

@@ -148,6 +148,33 @@ impl KimiTaskMonitor {
     }
 }
 
+/// Wait, briefly, for the journal record that closes the turn of a prompt
+/// started at `started`.
+///
+/// Kimi flushes its records asynchronously, so they can trail the ACP prompt
+/// response. Normally the wait lasts only while Kimi is journalling the turn,
+/// so a build that journals no turns costs nothing. A prompt that ended with
+/// no session updates also waits for a turn not journalled yet: an early
+/// failure, such as a refused login, is exactly when the whole turn can still
+/// be in flight (#1132).
+async fn await_turn_end(
+    monitor: &mut KimiTaskMonitor,
+    relay: &Arc<Mutex<DurableRelay>>,
+    started: i64,
+    even_if_unjournalled: bool,
+) -> Result<()> {
+    for _ in 0..KIMI_TURN_END_POLLS {
+        match monitor.turn_settled_since(started) {
+            Some(true) => break,
+            None if !even_if_unjournalled => break,
+            _ => {}
+        }
+        tokio::time::sleep(KIMI_TURN_END_POLL_INTERVAL).await;
+        monitor.refresh(relay, true).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn prepare_kimi_runtime_event(
     monitor: &mut Option<KimiTaskMonitor>,
     relay: &Arc<Mutex<DurableRelay>>,
@@ -161,6 +188,33 @@ pub(crate) async fn prepare_kimi_runtime_event(
             native_session_id, ..
         } => monitor.attach(native_session_id.clone(), relay).await,
         RuntimeEvent::SessionConfigured { .. } => monitor.refresh(relay, true).await,
+        // The ACP runtime says this before it finishes a prompt that ended
+        // with no session updates. When Kimi journalled a failure for that
+        // turn, the failure is what happened, and it is what the person and
+        // the credential sync need to read (#1132).
+        RuntimeEvent::Warning { message }
+            if message.contains(mj_core::acp::PROMPT_EMPTY_RESPONSE_MARKER) =>
+        {
+            let started = relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .operational_state()
+                .active_prompt
+                .map(|prompt| prompt.started_at_ms);
+            let Some(started) = started else {
+                return Ok(());
+            };
+            monitor.refresh(relay, true).await?;
+            await_turn_end(monitor, relay, started, true).await?;
+            if let Some(native) = monitor
+                .follower
+                .as_ref()
+                .and_then(|follower| follower.turn_diagnostic_since(started))
+            {
+                *message = format!("prompt failed: {}", native.message);
+            }
+            Ok(())
+        }
         RuntimeEvent::PromptFinished {
             request_id,
             stop_reason,
@@ -175,18 +229,11 @@ pub(crate) async fn prepare_kimi_runtime_event(
                 .filter(|prompt| prompt.command_id == *request_id)
                 .map(|prompt| prompt.started_at_ms);
             monitor.refresh(relay, true).await?;
-            // Kimi flushes its wire records asynchronously, so the last step's
-            // usage can still be in flight when the prompt response arrives.
-            // Wait, briefly and only while Kimi is journalling this turn, for
-            // the turn end that follows every record of the turn.
+            // The last step's usage can still be in flight when the prompt
+            // response arrives; the turn end follows every record of the turn.
             if let Some(started) = started {
-                for _ in 0..KIMI_TURN_END_POLLS {
-                    if monitor.turn_settled_since(started) != Some(false) {
-                        break;
-                    }
-                    tokio::time::sleep(KIMI_TURN_END_POLL_INTERVAL).await;
-                    monitor.refresh(relay, true).await?;
-                }
+                let unanswered = stop_reason == mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
+                await_turn_end(monitor, relay, started, unanswered).await?;
             }
             // The ACP prompt response carries no usage, so the native records
             // are the only report of what the turn spent (#1064).

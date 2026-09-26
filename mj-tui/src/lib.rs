@@ -542,11 +542,6 @@ pub enum DashboardAction {
         generation: u64,
         workspace_id: String,
     },
-    DeleteWorkspace {
-        generation: u64,
-        workspace_id: String,
-        force: bool,
-    },
     RecoverWorkspaceDraft {
         generation: u64,
         draft_id: String,
@@ -578,6 +573,8 @@ pub enum SessionOperationKind {
     Moving,
     Suspending,
     Destroying,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stopping,
     Connecting,
     Importing,
 }
@@ -590,6 +587,7 @@ impl SessionOperationKind {
             Self::Moving => "Moving",
             Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
+            Self::Stopping => "Stopping",
             Self::Connecting => "Connecting",
             Self::Importing => "Importing",
         }
@@ -605,6 +603,7 @@ impl SessionOperationKind {
             Self::Moving => Some(SessionTransitionKind::Moving),
             Self::Suspending => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
+            Self::Stopping => Some(SessionTransitionKind::Stopping),
             Self::Connecting | Self::Importing => None,
         }
     }
@@ -753,6 +752,11 @@ pub struct DashboardState {
     pub(crate) state: State,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
+    /// The coding agents a look at this machine found, for the Get started
+    /// panel a dashboard without an agent profile shows. `None` until a look
+    /// has answered, so the panel claims nothing about the machine before it
+    /// knows.
+    pub(crate) installed_agents: Option<Vec<HarnessKind>>,
     pub(crate) session_details: BTreeMap<String, SessionDetail>,
     /// Sessions whose relay worker the controller currently cannot reach. Their
     /// summary band renders red so an unreachable target is obvious at a glance.
@@ -937,6 +941,17 @@ pub struct DashboardState {
     /// Monotonic identity for move preparation requests. This lives outside
     /// the wizard so a late reply cannot match a newly opened wizard.
     pub(crate) next_move_preparation_request_id: u64,
+    /// Archived transcripts, by wiki id, whose restore has been sent and has
+    /// not reported back yet. The restore wizard closes as soon as it sends
+    /// the restore, so this, not the wizard, is what keeps a second press or
+    /// a reopened wizard from restoring the same transcript twice.
+    pub(crate) archive_restores_in_flight: BTreeSet<String>,
+    /// The `session_preflight_generation` a live resume's check was sent
+    /// under. The check is in flight while that generation is current: every
+    /// result of the check, and closing the wizard, moves the generation on.
+    /// A restore's hold is the set above instead, because the restore wizard
+    /// closes, and moves the generation on, as soon as it sends the restore.
+    pub(crate) resume_preflight_generation: Option<u64>,
     pub(crate) notices: Notices,
     /// The attached workspace name, used by the first-run screen.
     pub(crate) workspace_name: String,
@@ -952,6 +967,9 @@ pub struct DashboardState {
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
     /// read-only because there is no worker to attach to.
     pub(crate) stopped_subagents: BTreeMap<String, stopped_subagents::StoppedSubagentPane>,
+    /// Sub-agents whose records left because their parent's suspend stopped
+    /// them, for the host to let their conversations go.
+    stopped_by_suspend: StoppedBySuspend,
     /// Dashboard-only state retained while the user switches tabs.
     workspace_views: BTreeMap<String, WorkspaceViewState>,
     /// A pane-size update from the controller may not overwrite a local edit
@@ -1017,6 +1035,7 @@ mod pane_controls;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
+pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
 mod stopped_subagents;
 
@@ -1034,6 +1053,7 @@ impl DashboardState {
             state,
             quotas,
             quota_refreshing: BTreeSet::new(),
+            installed_agents: None,
             session_details: BTreeMap::new(),
             unreachable_sessions: BTreeSet::new(),
             session_reviews: BTreeMap::new(),
@@ -1109,6 +1129,8 @@ impl DashboardState {
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
             next_move_preparation_request_id: 0,
+            archive_restores_in_flight: BTreeSet::new(),
+            resume_preflight_generation: None,
             notices: Notices::default(),
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),
@@ -1117,6 +1139,7 @@ impl DashboardState {
             subagent_parent_id: None,
             native_agents: BTreeMap::new(),
             stopped_subagents: BTreeMap::new(),
+            stopped_by_suspend: StoppedBySuspend::default(),
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_layouts_modified: BTreeSet::new(),

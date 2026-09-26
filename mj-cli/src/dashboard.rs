@@ -476,6 +476,27 @@ fn launch_repository_top_level() -> Option<std::path::PathBuf> {
     (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
 }
 
+/// Write the first-run configuration for an interactive dashboard, before
+/// the daemon starts.
+///
+/// The daemon reads the configuration when it starts. Written after that,
+/// the daemon's first snapshot carried the older configuration without the
+/// new profile; the dashboard took it, dropped the profile's quota refresh,
+/// then reloaded the file and got the profile back with no refresh on the
+/// way, so its row read "refreshing…" for good (launch finding R13-8).
+pub(crate) async fn initialize_first_run_config() -> Result<()> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(|| {
+        mj_controller::setup::initialize_local_startup_config(&config_path())
+    })
+    .await
+    .context("initialize startup configuration task failed")?
+}
+
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
@@ -492,12 +513,15 @@ pub(crate) async fn run_dashboard_for_workspace(
         return Ok(DashboardExit::Normal);
     }
 
-    tokio::task::spawn_blocking(|| {
-        mj_controller::setup::initialize_local_startup_config(&config_path())
-    })
-    .await
-    .context("initialize startup configuration task failed")??;
-    let Some(mut context) = DashboardContext::open(workspace_id, client_id, daemon_presence)?
+    let workspaces = crate::daemon::connect_or_start()
+        .await?
+        .list_workspaces()
+        .await?
+        .into_iter()
+        .map(|listing| listing.workspace)
+        .collect();
+    let Some(mut context) =
+        DashboardContext::open(workspace_id, client_id, daemon_presence, workspaces)?
     else {
         return Ok(DashboardExit::Normal);
     };
@@ -1189,6 +1213,25 @@ impl DashboardContext {
         self.begin_shutdown(true);
     }
 
+    /// Lets go of the conversations of sub-agents that their parent's
+    /// suspend stopped (R15-1). Their records are gone, so there is no draft
+    /// or read position to save, and trying would only report an unknown
+    /// session. The dashboard has already put the view back on the parent,
+    /// whose conversation opens in their place.
+    pub(crate) fn finish_sessions_stopped_by_suspend(&mut self) {
+        let stopped = self.dashboard.take_stopped_by_suspend();
+        for session_id in &stopped.sessions {
+            self.cancel_chat_open_for(session_id);
+            self.chats.remove(session_id);
+            self.transcript_positions.remove(session_id);
+            self.question_drafts.remove(session_id);
+            self.composer_drafts.discard(session_id);
+        }
+        if let Some(parent_id) = stopped.reopen {
+            self.open_chat_session(&parent_id);
+        }
+    }
+
     /// A removed workspace's composers must not be saved back on tab switch.
     pub(crate) fn discard_workspace_composers(&mut self, workspace_id: &str) {
         let sessions = self
@@ -1403,10 +1446,10 @@ impl DashboardContext {
         workspace_id: &str,
         client_id: &str,
         daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+        workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
     ) -> Result<Option<Self>> {
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
-        let workspaces = mj_controller::database::list_workspaces()?;
         let workspace_names = workspaces
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
@@ -1630,6 +1673,20 @@ impl DashboardContext {
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();
         context.request_quota_refresh();
+        // Without an agent profile the dashboard opens on the Get started
+        // panel, which says what a look at this machine found.
+        if context
+            .controller
+            .config
+            .enabled_profiles()
+            .next()
+            .is_none()
+        {
+            io::spawn_installed_agent_discovery(
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         Ok(Some(context))
     }
 }
@@ -1711,6 +1768,7 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
         kind,
         SessionOperationKind::Suspending
             | SessionOperationKind::Destroying
+            | SessionOperationKind::Stopping
             | SessionOperationKind::Moving
     ) {
         actions::mark_active_chat_retiring(active_chat, session_id);

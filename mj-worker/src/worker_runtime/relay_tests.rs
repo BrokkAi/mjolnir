@@ -58,6 +58,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
         environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),
+        excluded_environment: Vec::new(),
         cwd: ".local/share/hel/workspaces/session/repo".into(),
         additional_directories: Vec::new(),
         native_session_id: None,
@@ -395,36 +396,50 @@ fn skills_state_reports_an_empty_home_then_a_synced_tree() {
     assert_eq!(state.fingerprint, expected.fingerprint());
 }
 
+/// A worker installs a tree sent in either archive format: a current
+/// controller sends it compressed, and the uncompressed format is the one
+/// every earlier release wrote.
 #[test]
 fn install_skills_replaces_the_session_tree_and_reports_the_new_state() {
+    use mj_core::skills::SkillsArchiveFormat;
+
     let canonical = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(canonical.path().join("skills/review")).unwrap();
     std::fs::write(canonical.path().join("skills/review/SKILL.md"), b"v1").unwrap();
     let archive = mj_core::skills::collect_skills(HarnessKind::Codex, canonical.path()).unwrap();
 
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("skills/stale")).unwrap();
-    std::fs::write(home.path().join("skills/stale/SKILL.md"), b"old").unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
+    for format in [SkillsArchiveFormat::Plain, SkillsArchiveFormat::Gzip] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("skills/stale")).unwrap();
+        std::fs::write(home.path().join("skills/stale/SKILL.md"), b"old").unwrap();
+        let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &skills_install_request(&archive.encode()))
+        let state = skills_state_of(
+            unix::apply_credential_request(
+                &endpoint,
+                &skills_install_request(&archive.encode(format)),
+            )
             .unwrap(),
-    );
-    assert_eq!(state, archive.state());
-    assert_eq!(
-        std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
-        b"v1"
-    );
-    assert!(!home.path().join("skills/stale").exists());
+        );
+        assert_eq!(state, archive.state(), "{format:?}");
+        assert_eq!(
+            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
+            b"v1",
+            "{format:?}"
+        );
+        assert!(!home.path().join("skills/stale").exists(), "{format:?}");
 
-    let empty = mj_core::skills::SkillsArchive::default();
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &skills_install_request(&empty.encode()))
+        let empty = mj_core::skills::SkillsArchive::default();
+        let state = skills_state_of(
+            unix::apply_credential_request(
+                &endpoint,
+                &skills_install_request(&empty.encode(format)),
+            )
             .unwrap(),
-    );
-    assert!(!state.present);
-    assert!(!home.path().join("skills").exists());
+        );
+        assert!(!state.present, "{format:?}");
+        assert!(!home.path().join("skills").exists(), "{format:?}");
+    }
 }
 
 #[test]
@@ -871,6 +886,7 @@ fn launch_wires_require_the_new_baseline_shape() {
         command: "codex-acp".into(),
         args: Vec::new(),
         environment: BTreeMap::new(),
+        excluded_environment: Vec::new(),
         cwd: ".".into(),
         harness_lease: None,
     };
@@ -1037,6 +1053,141 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
         RelayObservation::CommandCompleted { outcome:mj_core::relay::RelayCommandOutcome::Prompt { stop_reason, diagnostic:Some(diagnostic), .. }, .. }
         if stop_reason == "QuotaLimit" && diagnostic.http_status == Some(403)
     )));
+}
+
+/// #1132: Kimi refused its stored OAuth token, journalled the failure, and
+/// then completed the ACP prompt with no session updates at all. Mjolnir
+/// reported `prompt_unanswered` and suggested resending, which only repeats
+/// the failure. When Kimi journalled a failure for the turn, that failure is
+/// the turn's outcome: its warning and its diagnostic are the authentication
+/// error, and credential sync treats it as one.
+#[tokio::test]
+async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session.join("state.json"),
+        serde_json::json!({"id":SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId":SESSION_ID,"sessionDir":session})
+        ),
+    )
+    .unwrap();
+    std::fs::write(&wire, "").unwrap();
+    let root = temp.path().join("relay");
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "continue", prompt("continue"));
+    durable.claim_pending_commands(true).unwrap();
+    let started = durable
+        .operational_state()
+        .active_prompt
+        .unwrap()
+        .started_at_ms;
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
+    monitor
+        .as_mut()
+        .unwrap()
+        .attach(SESSION_ID.into(), &relay)
+        .await
+        .unwrap();
+    // What Kimi Code 2.0.2 journals for the turn, as in the issue.
+    let records = [
+        serde_json::json!({"type":"agent.turn.started","turnId":3,"queueItemId":"q","time":started,"kind":"event"}),
+        serde_json::json!({"type":"turn.prompt","agentId":"main","input":[],"origin":{"kind":"user"},"promptId":"msg_3","turnId":3,"time":started}),
+        serde_json::json!({"type":"agent.turn.ended","turnId":3,"outcome":"failed","errorMessage":"OAuthUnauthorizedError: Stored token for \"kimi-code\" was rejected; re-login required.","time":started + 2,"kind":"event"}),
+        serde_json::json!({"type":"turn.ended","agentId":"main","turnId":3,"reason":"failed","error":{"code":"internal","message":"Stored token for \"kimi-code\" was rejected; re-login required.","name":"OAuthUnauthorizedError","retryable":false},"durationMs":3,"time":started + 3}),
+        serde_json::json!({"type":"prompt.completed","agentId":"main","promptId":"msg_3","reason":"failed","time":started + 4}),
+    ];
+    std::fs::write(
+        &wire,
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+
+    // What the ACP runtime emits for a prompt that completed with no updates.
+    let unanswered = format!(
+        "{}: Kimi Code ended the turn without producing any message, thought or tool call, so this prompt may never have been acted on.",
+        mj_core::acp::PROMPT_EMPTY_RESPONSE_MARKER
+    );
+    let events = [
+        RuntimeEvent::Warning {
+            message: unanswered.clone(),
+        },
+        RuntimeEvent::PromptFinished {
+            request_id: "continue".into(),
+            stop_reason: mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into(),
+            usage: None,
+            diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                message: unanswered,
+                code: Some(mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into()),
+                http_status: None,
+                reset_at: None,
+            }),
+        },
+    ];
+    for mut event in events {
+        unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
+            .await
+            .unwrap();
+        unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+    }
+    drop(relay);
+
+    let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let events = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    let warnings = events
+        .iter()
+        .filter_map(|event| match &event.observation {
+            RelayObservation::Warning { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warnings,
+        ["prompt failed: Stored token for \"kimi-code\" was rejected; re-login required."]
+    );
+    let completed = events
+        .iter()
+        .find(|event| matches!(event.observation, RelayObservation::CommandCompleted { .. }))
+        .expect("the prompt completed");
+    let RelayObservation::CommandCompleted {
+        outcome:
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                stop_reason,
+                diagnostic: Some(diagnostic),
+                ..
+            },
+        ..
+    } = &completed.observation
+    else {
+        panic!("{completed:?}");
+    };
+    assert_eq!(stop_reason, "error");
+    assert_eq!(
+        diagnostic.message,
+        "Stored token for \"kimi-code\" was rejected; re-login required."
+    );
+    assert_eq!(
+        mj_core::credentials::relay_event_credential_sync_reason(completed),
+        Some(mj_core::credentials::CredentialSyncReason::AuthenticationFailure)
+    );
 }
 
 /// Kimi's ACP prompt response carries no usage, so a completed Kimi turn is
@@ -4880,6 +5031,75 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
     assert_eq!(pinned["tui"], "never");
 }
 
+/// #1160: the controller leaves a ChatGPT Codex profile's API key settings out
+/// of the launch, but the worker adds the target's own login environment, which
+/// only it can see. The bridge's spec names the variables so the supervisor
+/// removes them from that as well, and never carries them itself.
+#[tokio::test]
+async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("relay");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.cwd = temp.path().to_owned();
+    config.excluded_environment = vec!["CODEX_API_KEY".into(), "OPENAI_API_KEY".into()];
+    // As a target setting would put it there, past the controller.
+    config
+        .environment
+        .insert("OPENAI_API_KEY".into(), "sk-svcacct-target".into());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unix::run_daemon(root.clone(), config),
+    )
+    .await
+    .expect("the scripted worker child must stop")
+    .expect_err("the test executable is not an ACP supervisor");
+    assert!(!format!("{result:#}").is_empty());
+
+    let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
+    assert_eq!(
+        spec.excluded_environment,
+        ["CODEX_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()]
+    );
+    assert!(!spec.environment.contains_key("OPENAI_API_KEY"));
+}
+
+/// The supervisor removes the excluded variables after it merges the login
+/// environment, so neither a launch setting nor a target's shell profile can
+/// hand the bridge an API key. Other variables pass through.
+#[tokio::test]
+async fn the_acp_bridge_never_sees_an_excluded_variable() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = temp.path().join("observed");
+    let script = format!(
+        "printf '%s|%s|%s\\n' \"${{OPENAI_API_KEY-unset}}\" \"${{CODEX_API_KEY-unset}}\" \"${{KEPT-unset}}\" > {}",
+        mj_core::targets::posix_quote(&observed.to_string_lossy())
+    );
+    let spec = AcpSupervisorSpec {
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), script],
+        environment: BTreeMap::from([
+            ("OPENAI_API_KEY".into(), "sk-svcacct-test".into()),
+            ("CODEX_API_KEY".into(), "sk-test".into()),
+            ("KEPT".into(), "yes".into()),
+        ]),
+        excluded_environment: mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT
+            .map(str::to_owned)
+            .to_vec(),
+        cwd: temp.path().to_owned(),
+        harness_lease: None,
+    };
+    let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
+
+    unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "unset|unset|yes\n"
+    );
+}
+
 #[tokio::test]
 async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open() {
     let temp = tempfile::tempdir().unwrap();
@@ -4887,6 +5107,7 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
         command: "/bin/sh".into(),
         args: vec!["-c".into(), "sleep 30 & exit 17".into()],
         environment: Default::default(),
+        excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
     };
@@ -4925,6 +5146,7 @@ async fn acp_bridge_keeps_the_configured_github_wrapper_and_drops_inherited_toke
             ("GH_TOKEN".into(), "stale-token".into()),
             ("GITHUB_TOKEN".into(), "also-stale".into()),
         ]),
+        excluded_environment: Vec::new(),
         cwd: temp.path().to_owned(),
         harness_lease: None,
     };
@@ -6086,6 +6308,7 @@ while True: time.sleep(1)
                 marker.to_string_lossy().into_owned(),
             ],
             environment: BTreeMap::new(),
+            excluded_environment: Vec::new(),
             cwd: root.path().to_owned(),
             harness_lease: None,
         };

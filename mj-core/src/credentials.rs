@@ -27,7 +27,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::{AuthScheme, HarnessKind, HarnessProfile};
-use crate::relay::{RelayEvent, RelayObservation};
+use crate::diagnostic::TurnDiagnostic;
+use crate::relay::{RelayCommandOutcome, RelayEvent, RelayObservation};
 use crate::targets::CommandSpec;
 
 /// Credential files are small JSON or YAML documents. The cap keeps a hostile or
@@ -430,10 +431,21 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 4] = [
+const AUTH_FAILURE_PHRASES: [&str; 8] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
+    // Codex, when its refresh token is rejected (R14-1): "Your access token
+    // could not be refreshed. Please log out and sign in again."
+    "access token could not be refreshed",
+    "log out and sign in again",
+    // OpenAI, when it refuses an API key (#1160): "401 Unauthorized:
+    // Incorrect API key provided: sk-...".
+    "incorrect api key provided",
+    // Kimi, when its stored OAuth token is refused (#1132): "Stored token for
+    // \"kimi-code\" was rejected; re-login required." Its error name,
+    // `OAuthUnauthorizedError`, is an identifier below.
+    "re-login required",
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
@@ -472,6 +484,32 @@ pub fn auth_failure_signature(_kind: HarnessKind, text: &str) -> bool {
     contains_auth_failure_signature(text)
 }
 
+/// [`auth_failure_signature`] for text whose harness is not known, such as a
+/// failed turn's recorded reason.
+pub fn text_reports_auth_failure(text: &str) -> bool {
+    contains_auth_failure_signature(text)
+}
+
+/// Error kinds a harness names beside a failed turn when the provider
+/// rejected its login. Codex sends `codexErrorInfo: "unauthorized"` (R14-1),
+/// and a turn's diagnostic keeps that kind as its code. Matched against the
+/// code only, never against free text, where "401 Unauthorized" is common.
+const AUTH_FAILURE_ERROR_KINDS: [&str; 1] = ["unauthorized"];
+
+/// Whether a failed turn's diagnostic says the provider rejected the
+/// session's login: by its error kind, or by an auth failure phrase in its
+/// message. A usage limit is never one, as in the worker's warning label.
+pub fn turn_diagnostic_reports_auth_failure(diagnostic: &TurnDiagnostic) -> bool {
+    if diagnostic.is_usage_limit() {
+        return false;
+    }
+    diagnostic.code.as_deref().is_some_and(|code| {
+        AUTH_FAILURE_ERROR_KINDS
+            .iter()
+            .any(|kind| code.eq_ignore_ascii_case(kind))
+    }) || contains_auth_failure_signature(&diagnostic.message)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSyncReason {
@@ -493,10 +531,24 @@ pub struct CredentialSyncCause {
 }
 
 /// Detect a reason for immediate credential reconciliation only in relay
-/// observations originating from the harness. Durable prompt commands are
+/// observations originating from the harness: its warnings, its agent text,
+/// and the diagnostic of a turn it failed. Durable prompt commands are
 /// deliberately excluded, so user text cannot trigger a sync.
+///
+/// The failed turn counts on its own because the worker leaves out a warning
+/// that only repeats the harness's last agent message (R14-1).
 pub fn relay_event_credential_sync_reason(event: &RelayEvent) -> Option<CredentialSyncReason> {
     match &event.observation {
+        RelayObservation::CommandCompleted {
+            outcome:
+                RelayCommandOutcome::Prompt {
+                    diagnostic: Some(diagnostic),
+                    ..
+                },
+            ..
+        } if turn_diagnostic_reports_auth_failure(diagnostic) => {
+            Some(CredentialSyncReason::AuthenticationFailure)
+        }
         RelayObservation::Warning { message } if contains_auth_failure_signature(message) => {
             Some(CredentialSyncReason::AuthenticationFailure)
         }
@@ -670,6 +722,73 @@ impl CredentialSyncResult {
                     .is_ok_and(|actions| actions.iter().copied().any(&wanted))
             })
             .count()
+    }
+}
+
+/// Profiles whose own stored login the provider has refused.
+///
+/// The credential sync is what learns it: a session reported an auth failure,
+/// the sync reached that session, and the profile's copy was no fresher than
+/// the session's, so there was nothing to push that could help. Each entry
+/// keeps the fingerprint the profile's credential file had at that moment and
+/// holds only while the file is unchanged, so `mj login`, or a fresher copy
+/// pulled from another session, ends it.
+#[derive(Debug, Default)]
+pub struct RejectedLogins {
+    profiles: std::collections::BTreeMap<String, (PathBuf, String)>,
+}
+
+impl RejectedLogins {
+    /// Take in one finished sync of `profile`.
+    pub fn observe(&mut self, result: &CredentialSyncResult, profile: &HarnessProfile) {
+        let Some(cause) = &result.trigger else {
+            return;
+        };
+        // An API-key profile has no login to redo, and the sync never
+        // compares its key.
+        if cause.reason != CredentialSyncReason::AuthenticationFailure
+            || result.failure.is_some()
+            || profile.auth_scheme().is_api_key()
+        {
+            return;
+        }
+        let reached = result.outcomes.iter().find_map(|outcome| {
+            (outcome.session_id == cause.session_id).then_some(&outcome.outcome)
+        });
+        let Some(Ok(actions)) = reached else {
+            return;
+        };
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                CredentialSyncAction::Pushed | CredentialSyncAction::Pulled
+            )
+        }) {
+            // A fresher copy was pushed, or the session's own became the
+            // profile's; either way the next turn may succeed.
+            return;
+        }
+        let marker = profile.authentication_marker();
+        if let Ok((snapshot, _)) = read_credential_file(profile.kind, &marker)
+            && snapshot.present
+        {
+            tracing::info!(
+                profile_id = %result.profile_id,
+                session_id = %cause.session_id,
+                "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
+            );
+            self.profiles
+                .insert(result.profile_id.clone(), (marker, snapshot.fingerprint));
+        }
+    }
+
+    /// Why a new session on this profile would fail to sign in, while its
+    /// login file is still the one the provider refused.
+    pub fn refusal(&self, profile_id: &str) -> Option<String> {
+        let (marker, refused) = self.profiles.get(profile_id)?;
+        let current = std::fs::read(marker).ok()?;
+        (credential_fingerprint(&current) == *refused)
+            .then(|| crate::subagent::login_invalid_reason(profile_id))
     }
 }
 

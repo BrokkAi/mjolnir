@@ -20,6 +20,7 @@ impl PendingControls {
         session: &SessionId,
         request_id: String,
         action: mj_core::goal::GoalControlAction,
+        expected: Option<GoalSnapshot>,
     ) {
         let connection = connection.clone();
         let session = session.clone();
@@ -27,7 +28,7 @@ impl PendingControls {
             // Explicit native resume may answer only when its turn finishes.
             // Do not impose recovery's short acknowledgement timeout here.
             let response = connection
-                .send_request(control_request(&session, action, None))
+                .send_request(control_request(&session, action, expected.as_ref()))
                 .block_task()
                 .await;
             match response {
@@ -53,6 +54,22 @@ impl PendingControls {
         })
         .await
     }
+}
+
+/// The identity an automatic quota goal resume sends, so the adapter restarts
+/// only the goal the usage limit stopped and never one whose budget is spent.
+/// A user's own `/goal resume` carries none.
+pub(super) fn control_identity(spec: &LaunchSpec, request_id: &str) -> Option<GoalSnapshot> {
+    mj_core::continuation::is_quota_goal_resume(request_id)
+        .then(|| {
+            spec.goal_recovery
+                .lock()
+                .expect("goal lock poisoned")
+                .state
+                .snapshot
+                .clone()
+        })
+        .flatten()
 }
 
 fn control_request(
@@ -142,6 +159,10 @@ pub(super) async fn prepare_control(
             "/goal {} is not supported by this adapter",
             action.as_str()
         ))
+    } else if mj_core::continuation::is_quota_goal_resume(request_id)
+        && !context.state.resumable_after_quota()
+    {
+        Some("the goal is no longer stopped by the usage limit".into())
     } else if model_pending && action == mj_core::goal::GoalControlAction::Resume {
         Some("Choose the replacement model before resuming the goal".into())
     } else {

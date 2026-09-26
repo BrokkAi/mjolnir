@@ -35,11 +35,19 @@ pub(super) fn dashboard_resource_targets(controller: &Controller) -> Vec<Resourc
 /// the session recorded as unreachable. Provisioning connects to its own
 /// worker when it is ready and then marks the session `Running`, which is when
 /// there is something here to poll.
+///
+/// `Parked` is excluded because a parked sub-agent's worker was stopped on
+/// purpose: polling it would find a dead worker, and the session manager's
+/// recovery would start it again. This predicate is what keeps the session
+/// manager, worker recovery and resource sampling away from parked children.
 pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bool {
     session.state.is_active()
         && !matches!(
             session.state,
-            SessionState::Error | SessionState::Provisioning | SessionState::Destroying
+            SessionState::Error
+                | SessionState::Provisioning
+                | SessionState::Destroying
+                | SessionState::Parked
         )
         && session.target.is_some()
 }

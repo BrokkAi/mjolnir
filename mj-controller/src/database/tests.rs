@@ -3221,7 +3221,7 @@ fn workspace_pane_sizes_survive_rename_and_cascade_through_both_deletions() {
         },
     )
     .unwrap();
-    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    close_workspace_at(&database, &force_deleted.id).unwrap();
     assert_eq!(
         workspace_pane_size_row_count(&database, &force_deleted.id),
         0
@@ -3384,7 +3384,7 @@ fn workspace_layouts_are_isolated_between_workspaces() {
 }
 
 #[test]
-fn workspace_layouts_cascade_through_both_deletions() {
+fn workspace_layouts_cascade_through_workspace_removal() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let deleted = create_workspace_at(&database, "Deleted").unwrap();
@@ -3394,7 +3394,7 @@ fn workspace_layouts_cascade_through_both_deletions() {
 
     let force_deleted = create_workspace_at(&database, "Force").unwrap();
     save_workspace_layout_to(&database, &force_deleted.id, &split_layout("c", "d")).unwrap();
-    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    close_workspace_at(&database, &force_deleted.id).unwrap();
     assert_eq!(workspace_layout_row_count(&database, &force_deleted.id), 0);
 }
 
@@ -3530,7 +3530,7 @@ fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
 }
 
 #[test]
-fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
+fn close_workspace_drops_drafts_and_preserves_stopped_histories() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Force").unwrap();
@@ -3558,7 +3558,7 @@ fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
     )
     .unwrap();
 
-    force_delete_workspace_at(&database, &workspace.id).unwrap();
+    close_workspace_at(&database, &workspace.id).unwrap();
 
     assert!(
         list_detached_drafts_at(&database, &workspace.id)
@@ -3598,7 +3598,7 @@ fn force_delete_workspace_drops_drafts_and_preserves_stopped_histories() {
 }
 
 #[test]
-fn force_delete_workspace_refuses_remaining_active_sessions() {
+fn close_workspace_refuses_remaining_active_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Active").unwrap();
@@ -3616,7 +3616,7 @@ fn force_delete_workspace_refuses_remaining_active_sessions() {
     )
     .unwrap();
 
-    let error = force_delete_workspace_at(&database, &workspace.id).unwrap_err();
+    let error = close_workspace_at(&database, &workspace.id).unwrap_err();
     assert!(
         error.to_string().contains("1 active sessions remain"),
         "{error:#}"
@@ -5269,6 +5269,90 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     );
 }
 
+/// A parent's suspend lists the children it stopped on the parent, in the
+/// order it stopped them. A suspend that runs again after a restart updates a
+/// child already listed instead of listing it twice, a full state save from
+/// any controller copy leaves the list alone, and the list goes with the
+/// parent's record.
+#[test]
+fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
+    use mj_core::subagent::StoppedSubagent;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, child) = subagent_pair(&path);
+    let stopped = |id: &str, handed_back: bool| StoppedSubagent {
+        child_session_id: id.into(),
+        title: format!("title {id}"),
+        task: Some("say ready".into()),
+        handed_back,
+    };
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+    record_stopped_subagents_to(
+        &path,
+        &parent.id,
+        &[stopped(&child.id, false), stopped("other-child", true)],
+    )
+    .unwrap();
+    record_stopped_subagents_to(&path, &parent.id, &[stopped(&child.id, true)]).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id).unwrap(),
+        [stopped(&child.id, true), stopped("other-child", true)]
+    );
+
+    // The child's own record is gone; a full save of that state keeps the list.
+    let mut state = load_state_from(&path).unwrap();
+    state.subagents.remove(&child.id);
+    state.sessions.remove(&child.id);
+    save_state_to(&path, &state).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    delete_session_from(&path, &parent.id).unwrap();
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Once the parent's relay has taken the note, only the children it named
+/// are forgotten: one listed after the note was built waits for the next.
+#[test]
+fn delivering_the_note_clears_only_the_sub_agents_it_named() {
+    use mj_core::subagent::StoppedSubagent;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let (parent, _child) = subagent_pair(&path);
+    let stopped = |id: &str| StoppedSubagent {
+        child_session_id: id.into(),
+        title: id.into(),
+        task: None,
+        handed_back: false,
+    };
+    record_stopped_subagents_to(&path, &parent.id, &[stopped("a"), stopped("b")]).unwrap();
+    clear_stopped_subagents_from(&path, &parent.id, &["a".to_owned()]).unwrap();
+    assert_eq!(
+        load_stopped_subagents_from(&path, &parent.id).unwrap(),
+        [stopped("b")]
+    );
+    clear_stopped_subagents_from(&path, &parent.id, &["b".to_owned(), "c".to_owned()]).unwrap();
+    assert!(
+        load_stopped_subagents_from(&path, &parent.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The ordinal of the parent's newest prompt is recorded only for a sub-agent
 /// child, and a late write for an older prompt never moves it back.
 #[test]
@@ -5290,5 +5374,82 @@ fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
         load_subagent_report_from(&path, &parent.id).unwrap(),
         mj_core::subagent::SubagentReport::default(),
         "a session that is not a child records nothing"
+    );
+}
+
+/// Migration 53 rebuilds `sessions` so its state constraint admits a parked
+/// sub-agent. The rebuild keeps every row, column and trigger of the table,
+/// and raises the compatibility floor: an older build reads a session state it
+/// does not know as a broken store, so it must refuse this one.
+#[test]
+fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("parked-migration.sqlite3");
+    let mut old = session("old-session", "project-1");
+    old.launch_branch = Some("main".into());
+    save_session_to(&database, &old).unwrap();
+
+    // Put the store back at revision 52, whose constraint has no `parked`.
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch(
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema
+            SET sql = replace(sql, '''stopped'',''parked'',''lost'',', '''stopped'',''lost'',')
+          WHERE type = 'table' AND name = 'sessions';
+         PRAGMA writable_schema = OFF;
+         DELETE FROM schema_migrations WHERE version >= 53;
+         UPDATE schema_compatibility SET minimum_compatible_version = 49;
+         PRAGMA user_version = 52;",
+    )
+    .unwrap();
+    drop(raw);
+    let raw = Connection::open(&database).unwrap();
+    assert!(
+        raw.execute("UPDATE sessions SET state = 'parked'", [])
+            .is_err(),
+        "the rolled-back store refuses the new state"
+    );
+    drop(raw);
+    schema::forget_verified_schema(&database);
+
+    let connection = open(&database).unwrap();
+    let state = schema::read_schema_state(&connection).unwrap();
+    assert_eq!(state.revision, SCHEMA_VERSION);
+    let floor: i64 = connection
+        .query_row(
+            "SELECT minimum_compatible_version FROM schema_compatibility",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 53, "older builds are refused");
+    let triggers: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(triggers, 2, "the table's own triggers are recreated");
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    drop(connection);
+
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(
+        loaded.sessions["old-session"].launch_branch.as_deref(),
+        Some("main")
+    );
+    let mut parked = loaded.sessions["old-session"].clone();
+    parked.state = SessionState::Parked;
+    save_lifecycle_session_to(&database, &parked).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["old-session"].state,
+        SessionState::Parked
     );
 }

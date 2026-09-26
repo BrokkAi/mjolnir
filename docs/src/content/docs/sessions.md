@@ -14,7 +14,7 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `◐` | Working, including reviews and background commands |
 | `!` | Waiting for your input or a review decision |
 | `✓` | Idle with unread activity, or a completed clean review |
-| `○` | Idle with no unread activity |
+| `○` | Idle with no unread activity, including a parked sub-agent (its row reads "Parked") |
 | `·` | Activity not yet available |
 | `?` | Disconnected or unreachable |
 | `×` | Failed or lost |
@@ -22,7 +22,7 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `↻` | Resuming |
 | `⇄` | Moving |
 | `▣` | Checkpointing |
-| `↓` | Suspending |
+| `↓` | Suspending, or a sub-agent stopping because its parent is suspending |
 | `■` | Suspended |
 | `⊗` | Destroying |
 
@@ -174,21 +174,103 @@ Select a live session, press `prefix+:`, and choose **Suspend session**. Suspend
 
 1. Freezes dispatch at a safe boundary.
 2. Captures and verifies a current recovery archive.
-3. Terminates the owning process group or remote worker.
-4. Retires the session's managed clone, container, or instance only after the worker has stopped.
-5. Leaves the session record and verified archive available to resume.
+3. Stops its Mjolnir sub-agents, if it has any (see below).
+4. Terminates the owning process group or remote worker.
+5. Retires the session's managed clone, container, or instance only after the worker has stopped.
+6. Leaves the session record and verified archive available to resume.
 
 If checkpoint creation or verification fails, suspension refuses teardown and
-reports the failure. Retry suspension after resolving it. When a recovery copy
+reports the failure. The session and its sub-agents keep running. Retry
+suspension after resolving it. When a recovery copy
 exists, the terminal also offers **Discard changes since checkpoint…**. A second
 confirmation shows the copy's timestamp and explains that newer work may be lost.
 The daemon verifies the selected recovery copy again before releasing the environment.
+Discarding changes stops the session's sub-agents the same way, just before
+the session goes back to that copy.
+
+### Parked sub-agents
+
+A sub-agent runs on its parent's target. In a container, every live
+sub-agent holds hundreds of processes and threads against the container's
+process limit, even when it is only waiting. So when a sub-agent's turn ends
+and its parent has been told, Mjolnir parks it:
+
+- Its worker and harness stop, so it holds no processes.
+- Its conversation, its report, and the files on its target stay. Its row
+  shows the idle symbol and reads "Parked". The parent's `wait` and
+  `list_agents` report it as finished, as before, with `"parked": true`.
+- Mjolnir parks a sub-agent only when nothing is queued for it. A sub-agent
+  that Mjolnir reminded to hand back its report is parked after the reminder
+  turn ends.
+- When the parent sends it input with `send_input`, Mjolnir starts it again in
+  place, waits until its harness has loaded its conversation, and then
+  delivers the input. That can take tens of seconds. If the start fails, the
+  sub-agent stays parked, and the parent is told what failed so it can try
+  again.
+- If parking fails, the sub-agent stays live and the failure is logged.
+
+A session may have at most `max_concurrent` live sub-agents (see
+[Sub-agents configuration](/configuration/#sub-agents-subagents)). A
+sub-agent counts while it holds processes, idle or not; a parked, stopped, or
+failed sub-agent does not. A `spawn`, or a `send_input` that would start a
+parked sub-agent, is refused over the limit. The refusal lists the live
+sub-agents with their state and says that a sub-agent frees its slot when it
+hands back or is closed.
+
+When a sub-agent cannot start because its container ran out of process slots,
+the parent is told that plainly, with the container's `pids.current` and
+`pids.max` when Mjolnir can read them, and is asked to close sub-agents it no
+longer needs.
+
+Closing a parked sub-agent does not start it: it ends the same way as closing
+an idle one, and the parent's `wait` then reports it as `"stopped"`.
+
+### Sub-agents and suspend
+
+A session that uses Mjolnir's sub-agents gets each child's work back as the
+report the child hands back. Suspending the session suspends only the session
+itself:
+
+- Each active sub-agent is stopped and removed, without a recovery copy of its
+  own. Its conversation is put into SessionWiki first, so
+  `mj sessions --session <child-id>` still finds it.
+- While a sub-agent stops, its row and its conversation say "Stopping".
+- A sub-agent that already handed back its report, or that is parked, is
+  stopped without a warning, since its report already reached the session. A
+  parked sub-agent is not started first.
+- When a sub-agent has not handed back yet, Mjolnir says so: "2 sub-agents
+  have not handed back; suspending stops them". The terminal and the web
+  viewer ask for confirmation first when they can see a sub-agent still at
+  work; the terminal names up to three of them, then counts the rest
+  ("Sub-agents "Alpha", "Bravo", "Charlie" and 2 more have not handed
+  back"). `mj suspend` prints the warning when the suspend is accepted, and
+  the API returns it in its answer.
+- The sub-agents stop only after the session's recovery copy is verified, so
+  a suspend that fails before that point leaves them running.
+- A sub-agent that cannot be stopped normally, for example because its target
+  cannot be reached, is removed anyway. It never makes the session's suspend
+  fail.
+
+When the session resumes, one line in its conversation lists the sub-agents
+the suspend stopped, and its agent is told on its first prompt: which
+sub-agents were stopped, what each was working on, whether each had handed
+back, and that the work not handed back was lost. The agent can start them
+again with `spawn` if it still needs that work. The agent is told once; if the
+session is suspended again before its next prompt, it is not told again. If a
+suspend or a discard fails after it stopped sub-agents and the session is
+still running, the session is told at once in the same way, without waiting
+for a resume.
 
 **Destroy session…** is a separate irreversible action in both terminal and web
-interfaces. It removes the environment, managed checkout, recovery archive, and
-session record. New managed clones have no branch in the source repository; their
-branches survive only in a published remote or the recovery archive. Older linked
-worktrees keep their managed branch by default and offer a choice to delete it.
+interfaces. It removes the environment, managed checkout, and recovery archive,
+so work that was not pushed or exported is lost. The conversation is archived,
+not deleted: `mj sessions --session <id>` then lists the session as `archived`,
+and `mj resume --wiki <id>` starts a new session from its conversation (see
+[Search and restore archived sessions](#search-and-restore-archived-sessions)).
+New managed clones have no branch
+in the source repository; their branches survive only in a published remote or
+the recovery archive. Older linked worktrees keep their managed branch by default
+and offer a choice to delete it.
 
 **Interrupt turn** leaves the environment available for further prompts.
 **Close pane** only dismisses a viewer; it does not interrupt or suspend a session.
@@ -526,6 +608,12 @@ Continuation also needs Jev: with `[jev] enabled = false` it does not run, whate
 
 The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
 
-Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, active goals, failed turns, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+Mjolnir checks every turn that ends, including a turn the agent starts on its own, for example when a background task it was waiting for finishes.
+
+Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, failed turns, sessions waiting on a question, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+
+When a background command, a sub-agent, or an active goal will still move the session on, a continuation waits. Mjolnir checks again when that work stops, or when Jev judges that the background work is idle, such as a command that only sleeps.
+
+When a turn ends at a subscription limit, Mjolnir schedules a continuation for one minute after the limit resets. This also applies to turns the agent started on its own, and to sessions with background work still running. If the usage limit stopped a Codex goal, Mjolnir resumes the goal instead. A goal that has used up its own token budget is never continued automatically; resume it yourself.
 
 The check uses user messages since the last context reset and recent assistant replies, including earlier exchanges that establish what “go ahead” refers to. It excludes tool history and generated prompts. Evidence has size limits; required user history is never clipped to fit. TypeSafe processes this text, through the public Jev proxy when no local TypeSafe key is configured. The proxy does not log or store message bodies.

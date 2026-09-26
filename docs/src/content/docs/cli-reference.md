@@ -270,6 +270,12 @@ and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
 
+The first line of a wait says how the turn ended in the same words as
+`mj sessions --session <id>`, for example
+`finished turn 16 (completed, end of turn) in 5.3s` or
+`error turn 4 (failed: harness inactive) in 30.3s`. With `--json`, the
+`stop_reason` field keeps the harness's own spelling, such as `EndTurn`.
+
 `mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores
 the verified checkpoint. Every selector is optional: the session's own record
@@ -306,7 +312,14 @@ session that should continue elsewhere.
 
 `mj suspend` saves a verified recovery copy and releases the environment. It
 reports acceptance; follow it with `mj wait --session <id>` to observe completion
-or a reported failure. For an independent clone whose work may be unpublished,
+or a reported failure. A session's active Mjolnir sub-agents are stopped
+without a recovery copy of their own, and only the session is suspended. When
+some of them have not handed back their reports, `mj suspend` prints a warning
+on standard error, such as `warning: 2 sub-agents have not handed back;
+suspending stops them`. With `--json` the answer carries `stopped_subagents`,
+`subagents_not_handed_back`, and `warning` (`null` when there is none). When the
+session resumes, its agent is told which sub-agents were stopped. For an
+independent clone whose work may be unpublished,
 pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
 still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
 keeps the session available for another prompt.

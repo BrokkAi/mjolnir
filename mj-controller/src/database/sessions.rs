@@ -125,8 +125,115 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
         .collect()
 }
 
+/// Record, on the parent's session, the sub-agents its suspend is about to
+/// stop. A child already listed keeps its place and takes the newer details,
+/// so a suspend that runs again after a restart lists each child once.
+pub fn record_stopped_subagents(
+    parent_session_id: &str,
+    stopped: &[mj_core::subagent::StoppedSubagent],
+) -> Result<()> {
+    let parent_session_id = parent_session_id.to_owned();
+    let stopped = stopped.to_vec();
+    submit_database_write("record_stopped_subagents", move |_| {
+        record_stopped_subagents_to(&database_path(), &parent_session_id, &stopped)
+    })
+}
+
+pub(super) fn record_stopped_subagents_to(
+    path: &Path,
+    parent_session_id: &str,
+    stopped: &[mj_core::subagent::StoppedSubagent],
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for child in stopped {
+        tx.execute(
+            "INSERT INTO stopped_subagents(parent_session_id, child_session_id, record_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(parent_session_id, child_session_id) DO UPDATE SET
+                 record_json = excluded.record_json",
+            params![
+                parent_session_id,
+                child.child_session_id,
+                serde_json::to_string(child)?
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The sub-agents a suspend of this session stopped and its model has not
+/// been told about yet, in the order they were recorded.
+pub fn load_stopped_subagents(
+    parent_session_id: &str,
+) -> Result<Vec<mj_core::subagent::StoppedSubagent>> {
+    load_stopped_subagents_from(&database_path(), parent_session_id)
+}
+
+pub(super) fn load_stopped_subagents_from(
+    path: &Path,
+    parent_session_id: &str,
+) -> Result<Vec<mj_core::subagent::StoppedSubagent>> {
+    let connection = open_reader(path)?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM stopped_subagents
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get::<_, String>(0))?
+        .map(|row| serde_json::from_str(&row?).context("decode stopped sub-agent record"))
+        .collect()
+}
+
+/// Forget the stopped sub-agents whose note the parent's relay has taken.
+/// Only the named children go, so a child listed after the note was built
+/// waits for the next one.
+pub fn clear_stopped_subagents(
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<()> {
+    let parent_session_id = parent_session_id.to_owned();
+    let child_session_ids = child_session_ids.to_vec();
+    submit_database_write("clear_stopped_subagents", move |_| {
+        clear_stopped_subagents_from(&database_path(), &parent_session_id, &child_session_ids)
+    })
+}
+
+pub(super) fn clear_stopped_subagents_from(
+    path: &Path,
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for child_session_id in child_session_ids {
+        tx.execute(
+            "DELETE FROM stopped_subagents
+             WHERE parent_session_id = ?1 AND child_session_id = ?2",
+            params![parent_session_id, child_session_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Everything recorded about one child's report. A child with nothing
 /// recorded yet reads as the empty report.
+/// One session's stored lifecycle state, or `None` when the store holds no
+/// such session.
+pub fn load_session_state(session_id: &str) -> Result<Option<SessionState>> {
+    let connection = open_reader(&database_path())?;
+    let stored = connection
+        .query_row(
+            "SELECT state FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored.as_deref().map(stored_session_state))
+}
+
 pub fn load_subagent_report(child_session_id: &str) -> Result<mj_core::subagent::SubagentReport> {
     load_subagent_report_from(&database_path(), child_session_id)
 }
@@ -140,7 +247,7 @@ pub(super) fn load_subagent_report_from(
         .query_row(
             "SELECT handback_command_id, handback_message, handback_recorded_at_ms,
                     reminder_command_id, reminder_for_command_id, reminder_sent_at_ms,
-                    reminder_failed_for_command_id, awaited_ordinal
+                    reminder_failed_for_command_id, awaited_ordinal, report_dir
              FROM subagent_handbacks WHERE child_session_id = ?1",
             [child_session_id],
             |row| {
@@ -153,6 +260,7 @@ pub(super) fn load_subagent_report_from(
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -166,6 +274,7 @@ pub(super) fn load_subagent_report_from(
         reminder_at,
         reminder_failed_for,
         awaited_ordinal,
+        report_dir,
     )) = row
     else {
         return Ok(mj_core::subagent::SubagentReport::default());
@@ -193,7 +302,34 @@ pub(super) fn load_subagent_report_from(
         },
         reminder_failed_for,
         awaited_ordinal: awaited_ordinal.and_then(|ordinal| u64::try_from(ordinal).ok()),
+        report_dir,
     })
+}
+
+/// Record the directory Mjolnir created for a child's report files. It is
+/// recorded only for a sub-agent child.
+pub fn record_subagent_report_dir(child_session_id: &str, report_dir: &str) -> Result<()> {
+    let child_session_id = child_session_id.to_owned();
+    let report_dir = report_dir.to_owned();
+    submit_database_write("record_subagent_report_dir", move |_| {
+        record_subagent_report_dir_to(&database_path(), &child_session_id, &report_dir)
+    })
+}
+
+pub(super) fn record_subagent_report_dir_to(
+    path: &Path,
+    child_session_id: &str,
+    report_dir: &str,
+) -> Result<()> {
+    open(path)?.execute(
+        "INSERT INTO subagent_handbacks(child_session_id, report_dir)
+         SELECT ?1, ?2 WHERE EXISTS (
+             SELECT 1 FROM subagent_sessions WHERE child_session_id = ?1
+         )
+         ON CONFLICT(child_session_id) DO UPDATE SET report_dir = excluded.report_dir",
+        params![child_session_id, report_dir],
+    )?;
+    Ok(())
 }
 
 /// Record that the parent gave a child a prompt, accepted at `ordinal`. It is

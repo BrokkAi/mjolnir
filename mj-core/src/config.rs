@@ -377,6 +377,8 @@ impl Config {
 }
 
 pub const CONFIG_VERSION: u32 = 13;
+/// The page that documents config.toml, schema version included.
+pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -906,6 +908,16 @@ impl Config {
             bail!(
                 "{} was written by a newer Mjolnir (config version {found}; this build supports \
                  {CONFIG_VERSION}). Update Mjolnir",
+                path.display()
+            );
+        }
+        // Every file Mjolnir writes starts with this line, so only a
+        // hand-written one lacks it. Serde's "missing field `version`" does
+        // not say which value to add (R14-4).
+        if document.get("version").is_none() {
+            bail!(
+                "{}: config.toml needs a `version = {CONFIG_VERSION}` line at the top (the \
+                 current configuration schema); see {CONFIGURATION_DOCUMENTATION_URL}",
                 path.display()
             );
         }

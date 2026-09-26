@@ -17,7 +17,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState};
+use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState, bounded_report};
 
 use crate::quota::ProfileQuota;
 
@@ -84,10 +84,29 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
-    /// Hand a changed workspace list to everything reading the daemon's, the
-    /// same republication the daemon's own workspace actions perform. A
-    /// backend built without a daemon has no one to publish to.
-    fn republish_workspaces(&self, _workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {}
+    /// Whether a park of this child is still running. A backend without a
+    /// daemon parks nothing.
+    fn subagent_park_running(&self, _session_id: &str) -> bool {
+        false
+    }
+
+    /// Stop an idle child's worker and keep everything else, once its parent
+    /// has been told its turn ended (#1161).
+    fn park_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { anyhow::bail!("parking a sub-agent is unavailable") })
+    }
+
+    /// Start a parked child's worker again. A child that is not parked needs
+    /// nothing.
+    fn unpark_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { anyhow::bail!("restarting a parked sub-agent is unavailable") })
+    }
+
+    /// Refresh the daemon's shared workspace feed before a new workspace is
+    /// returned to callers. Test backends without a daemon have no feed.
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Whether the index is stale enough that a query should ask for a sync.
     fn wiki_sync_is_stale(&self) -> bool {
@@ -164,8 +183,20 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move { self.suspend_session(session_id).await })
     }
 
-    fn republish_workspaces(&self, workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {
-        RuntimeState::publish_workspaces(self, workspaces);
+    fn subagent_park_running(&self, session_id: &str) -> bool {
+        RuntimeState::subagent_park_running(self, session_id)
+    }
+
+    fn park_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move { RuntimeState::park_subagent(&self, session_id).await })
+    }
+
+    fn unpark_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move { RuntimeState::unpark_subagent(&self, session_id).await })
+    }
+
+    fn refresh_workspaces(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(RuntimeState::refresh_workspaces(self))
     }
 
     fn wiki_sync_is_stale(&self) -> bool {
@@ -230,6 +261,9 @@ const START_POLL: Duration = Duration::from_secs(5);
 /// SSH is slow; a target that has stopped answering must not hold the caller's
 /// HTTP request open indefinitely.
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// How long a restarted sub-agent's session actor has to connect to the
+/// worker the restart already proved ready.
+const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -257,6 +291,9 @@ pub struct ApiBackend {
     /// sub-agent may run on so a child lands on the login with the most quota
     /// left, without making the parent reason about credential aliases.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    /// Profiles whose login the credential sync found refused; a spawn on one
+    /// is refused until its login file changes.
+    rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
     /// The capabilities `list_profiles` answers with and `spawn` chooses
     /// from. The catalogue discovers them in the background, so a call only
     /// ranks what it holds, waiting for a profile the pass has not published.
@@ -275,6 +312,7 @@ impl ApiBackend {
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
+            rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
             // care about profiles — reports that `list_profiles` has nothing
@@ -290,6 +328,14 @@ impl ApiBackend {
         quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
     ) -> Self {
         self.quota_reports = quota_reports;
+        self
+    }
+
+    pub fn with_rejected_logins(
+        mut self,
+        rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
+    ) -> Self {
+        self.rejected_logins = rejected_logins;
         self
     }
 
@@ -425,6 +471,7 @@ impl ApiBackend {
                         working_directory: working_directory.clone(),
                         initial_prompt: prompt,
                         request_key: request.request_id.clone(),
+                        report_root: None,
                     })
                     .await?;
                 // Registration completes the first prompt (it names the
@@ -439,11 +486,18 @@ impl ApiBackend {
                     },
                 )
                 .await?;
+                let report_dir = blocking("load sub-agent report directory", {
+                    let child_id = relation.child_session_id.clone();
+                    move || crate::database::load_subagent_report(&child_id)
+                })
+                .await?
+                .report_dir;
                 Ok(serde_json::json!({
                     "child_session_id":relation.child_session_id,
                     "task_name":relation.task_name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
+                    "report_dir":report_dir,
                 }))
             }
             SubagentToolAction::ListAgents => {
@@ -482,6 +536,8 @@ impl ApiBackend {
                             awaited_ordinal: None,
                             answered_ordinal: None,
                             failed_turn: None,
+                            login_failure: None,
+                            report_dir: None,
                         };
                         let (summary, progress) = summaries
                             .get(&relation.child_session_id)
@@ -496,12 +552,14 @@ impl ApiBackend {
                             self.exports.close_is_requested(&relation.child_session_id),
                             progress,
                         );
-                        serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "profile_id":relation.profile_id,
                             "state":state,
-                        })
+                        });
+                        mark_parked(&mut entry, record.as_ref());
+                        entry
                     })
                     .collect::<Vec<_>>();
                 Ok(serde_json::json!({"agents":agents}))
@@ -515,12 +573,35 @@ impl ApiBackend {
                 let parent_id = parent_session_id.to_owned();
                 let child_id = child_session_id.clone();
                 tokio::task::spawn_blocking(move || {
-                    Controller::load()?.ensure_subagent_slot_available(&parent_id, &child_id)
+                    Controller::load()?.ensure_subagent_slot_available(&parent_id, Some(&child_id))
                 })
                 .await??;
-                let turn_id = self
-                    .prompt(child_session_id.clone(), message.clone())
-                    .await?;
+                // A child that handed back is parked and holds no processes;
+                // its worker starts again here, before the prompt.
+                self.unpark_child(child_session_id).await?;
+                let turn_id = match self.prompt(child_session_id.clone(), message.clone()).await {
+                    Ok(turn_id) => turn_id,
+                    // A park that was finishing when this prompt arrived
+                    // rejects it without delivering it. Only then, and only
+                    // once, is the child started again and the prompt resent;
+                    // a prompt that may have landed is never sent twice.
+                    Err(error)
+                        if error
+                            .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
+                            .is_none()
+                            && self.unpark_child(child_session_id).await? =>
+                    {
+                        tracing::info!(
+                            parent_session_id,
+                            child_session_id = %child_session_id,
+                            error = format!("{error:#}"),
+                            "resending a prompt a sub-agent park turned away"
+                        );
+                        self.prompt(child_session_id.clone(), message.clone())
+                            .await?
+                    }
+                    Err(error) => return Err(error),
+                };
                 // Until a finished turn reaches this prompt, a wait on the
                 // child keeps waiting instead of reading the previous turn.
                 blocking("record sub-agent prompt", {
@@ -533,6 +614,7 @@ impl ApiBackend {
             SubagentToolAction::WaitAgents {
                 child_session_ids,
                 timeout_seconds,
+                return_when,
             } => {
                 for child_id in child_session_ids {
                     self.require_owned_child(parent_session_id, child_id)
@@ -576,19 +658,23 @@ impl ApiBackend {
                             starts.insert(id.clone(), status);
                         }
                     }
-                    let complete = summaries.iter().all(|(id, summary, progress)| {
-                        let record = self.exports.session_record(id);
-                        subagent_status(
-                            record.as_ref(),
-                            summary.as_ref(),
-                            starts.get(id),
-                            None,
-                            self.exports.close_is_requested(id),
-                            progress,
-                        )
-                        .2
-                    });
-                    if complete || tokio::time::Instant::now() >= deadline {
+                    let finished = summaries
+                        .iter()
+                        .map(|(id, summary, progress)| {
+                            let record = self.exports.session_record(id);
+                            subagent_status(
+                                record.as_ref(),
+                                summary.as_ref(),
+                                starts.get(id),
+                                None,
+                                self.exports.close_is_requested(id),
+                                progress,
+                            )
+                            .2
+                        })
+                        .collect::<Vec<_>>();
+                    let complete = finished.iter().all(|done| *done);
+                    if return_when.satisfied(&finished) || tokio::time::Instant::now() >= deadline {
                         // Only read now, and only here: this is the one answer
                         // that has to be the child's own report.
                         let ids: Vec<String> =
@@ -614,20 +700,18 @@ impl ApiBackend {
                                     self.exports.close_is_requested(&id),
                                     &progress,
                                 );
-                                serde_json::json!({
-                                    "child_session_id":id,
-                                    "report_source":report_source(&state, &progress.report),
-                                    "state":state,
-                                    "finished":finished,
-                                    "output":output,
-                                })
+                                let mut entry =
+                                    wait_agent_entry(&id, &state, output, finished, &progress);
+                                mark_parked(&mut entry, record.as_ref());
+                                entry
                             })
                             .collect::<Vec<_>>();
-                        let total = agents.len();
                         let unfinished = agents
                             .iter()
                             .filter(|agent| agent["finished"] != serde_json::Value::Bool(true))
-                            .count();
+                            .filter_map(|agent| agent["child_session_id"].as_str())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
                         // What the caller has waited, not what this execution
                         // has: a request picked up late, or executed again
                         // after a restart, already spent part of its budget.
@@ -654,9 +738,8 @@ impl ApiBackend {
                             "waited_seconds": waited_seconds,
                             "agents": agents,
                             "next_action": mj_core::subagent::next_action(
-                                complete,
-                                unfinished,
-                                total,
+                                child_session_ids,
+                                &unfinished,
                             ),
                         }));
                     }
@@ -666,6 +749,20 @@ impl ApiBackend {
             SubagentToolAction::InterruptAgent { child_session_id } => {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
+                // A parked child has nothing running to interrupt, and is not
+                // started just to be told to stop.
+                if self
+                    .exports
+                    .session_record(child_session_id)
+                    .is_some_and(|record| record.state == SessionState::Parked)
+                {
+                    return Ok(serde_json::json!({
+                        "child_session_id":child_session_id,
+                        "interrupted":false,
+                        "parked":true,
+                        "note":"This child is parked: its turn ended and it has nothing running.",
+                    }));
+                }
                 let handle = self
                     .session_handle(child_session_id.clone())
                     .await?
@@ -696,8 +793,11 @@ impl ApiBackend {
                 );
                 ensure!(
                     message.chars().count() <= mj_core::subagent::MAX_HANDBACK_CHARS,
-                    "a report can be at most {} characters; shorten it and call handback again",
-                    mj_core::subagent::MAX_HANDBACK_CHARS
+                    "a report can be at most {} characters and this one has {}. Write the details \
+                     to files in the report directory named in your first prompt, then call \
+                     handback again with a short report that lists their paths",
+                    mj_core::subagent::MAX_HANDBACK_CHARS,
+                    message.chars().count()
                 );
                 let record = blocking("load sub-agent record", {
                     let child_id = child_id.clone();
@@ -753,6 +853,58 @@ impl ApiBackend {
         }
     }
 
+    /// Start a parked child's worker again and wait until its session can
+    /// take a prompt. Returns whether there was a park to wait for or undo; a
+    /// running child with no park in progress needs nothing and returns
+    /// false. A failure leaves the child parked, and its message says what
+    /// failed, including a container out of process slots.
+    async fn unpark_child(&self, child_id: &str) -> Result<bool> {
+        let parked = self
+            .exports
+            .session_record(child_id)
+            .is_some_and(|record| record.state == SessionState::Parked)
+            || self.exports.subagent_park_running(child_id);
+        if !parked {
+            return Ok(false);
+        }
+        Arc::clone(&self.exports)
+            .unpark_subagent(child_id.to_owned())
+            .await
+            .context(
+                "could not start the parked sub-agent again; it is still parked, so you can retry",
+            )?;
+        if self
+            .exports
+            .session_record(child_id)
+            .is_none_or(|record| record.state != SessionState::Running)
+        {
+            return Ok(false);
+        }
+        let deadline = tokio::time::Instant::now() + UNPARK_ATTACH_TIMEOUT;
+        let mut handle = self
+            .sessions
+            .wait_for_session(child_id, UNPARK_ATTACH_TIMEOUT)
+            .await
+            .context("the restarted sub-agent did not reattach")?;
+        loop {
+            let view = handle.view();
+            if view.connected
+                && view
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+            {
+                return Ok(true);
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the restarted sub-agent was not ready for a prompt within {} seconds",
+                UNPARK_ATTACH_TIMEOUT.as_secs()
+            );
+            let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
+        }
+    }
+
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
         anyhow::ensure!(
             self.list_subagents(parent_id.to_owned())
@@ -770,13 +922,16 @@ impl ApiBackend {
     /// or start one. The child's output is not included — it is collected
     /// with `wait` and read in the child transcript; the notice only says
     /// what happened.
+    ///
+    /// `child_title` is the child's listed title. The turn is named by the
+    /// number the child's own `mj wait` and `mj prompt` print (its accepted
+    /// ordinal), and the outcome in words (R11-3).
     pub async fn record_subagent_completion_notice(
         &self,
         parent_session_id: String,
         child_session_id: &str,
-        task_name: &str,
-        turn: u64,
-        outcome: &str,
+        child_title: &str,
+        outcome: &mj_core::state::MaterializedTurnOutcome,
     ) -> Result<()> {
         ensure!(
             !matches!(
@@ -790,11 +945,16 @@ impl ApiBackend {
             .session(parent_session_id.clone())
             .await
             .with_context(|| format!("session {parent_session_id} is not running"))?;
+        let turn = match outcome.accepted_ordinal {
+            Some(turn) => format!("turn {turn}"),
+            None => "a turn".to_owned(),
+        };
         submit_notice(
             &handle,
             format!(
-                "Subagent {task_name:?} ({}) finished turn {turn} ({outcome}).",
-                mj_core::state::short_id(child_session_id)
+                "Subagent \"{child_title}\" ({}) finished {turn} ({}).",
+                mj_core::state::short_id(child_session_id),
+                outcome.outcome
             ),
         )
         .await?;
@@ -883,6 +1043,24 @@ impl ApiBackend {
                 .await?;
                 Ok(false)
             }
+        }
+    }
+
+    /// Park a child whose turn ended once its parent has been told: stop its
+    /// worker so it holds no processes in the parent's container, keeping its
+    /// record, conversation and report (#1161). A park never fails the parent
+    /// or the notice: a failure is logged and the child stays live, counting
+    /// toward its parent's cap.
+    pub async fn park_subagent(&self, child_session_id: &str) {
+        if let Err(error) = Arc::clone(&self.exports)
+            .park_subagent(child_session_id.to_owned())
+            .await
+        {
+            tracing::warn!(
+                child_session_id,
+                error = format!("{error:#}"),
+                "could not park a sub-agent whose turn ended; it stays live"
+            );
         }
     }
 
@@ -1008,6 +1186,13 @@ fn subagent_status(
     }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
+    // A parked child's worker was stopped only once it was idle, and nothing
+    // can move its stored projection until it is started again, so it is
+    // idle whatever that projection last said.
+    let idle = |summary: &mj_core::state::MaterializedSessionSummary| {
+        lifecycle == Some(SessionState::Parked)
+            || matches!(summary.execution, MaterializedExecutionState::Idle)
+    };
     match lifecycle {
         Some(SessionState::Error) => ("error".into(), recorded_cause, true),
         Some(SessionState::Lost) => ("lost".into(), None, true),
@@ -1025,7 +1210,7 @@ fn subagent_status(
             // with a prompt just given, or while it still owes its report and
             // Mjolnir is reminding it.
             Some(summary)
-                if matches!(summary.execution, MaterializedExecutionState::Idle)
+                if idle(summary)
                     && (progress.awaiting_prompt(match start {
                         Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
                         _ => None,
@@ -1033,14 +1218,31 @@ fn subagent_status(
             {
                 ("running".into(), summary.last_agent_message.clone(), false)
             }
-            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => {
-                match (&progress.report, &progress.failed_turn) {
-                    (ReportState::Delivered(message), _) => {
+            Some(summary) if idle(summary) => {
+                match (
+                    &progress.report,
+                    &progress.login_failure,
+                    &progress.failed_turn,
+                ) {
+                    (ReportState::Delivered(message), _, _) => {
                         ("completed".into(), Some(message.clone()), true)
                     }
+                    // A child whose profile could not sign in failed for a
+                    // reason its parent can fix, not for anything in its task
+                    // (#1160), so the answer names the profile and the fix.
+                    (_, Some(profile_id), _) => (
+                        "failed".into(),
+                        Some(format!(
+                            "profile {profile_id}: {}",
+                            mj_core::subagent::login_invalid_reason(profile_id)
+                        )),
+                        true,
+                    ),
                     // A turn that failed says so, with its reason: it is not a
                     // report, and the child can be given another prompt.
-                    (_, Some((state, reason))) => ((*state).to_owned(), Some(reason.clone()), true),
+                    (_, None, Some((state, reason))) => {
+                        ((*state).to_owned(), Some(reason.clone()), true)
+                    }
                     _ => (
                         "completed".into(),
                         finished_turn_message
@@ -1067,6 +1269,12 @@ pub(crate) struct ChildProgress {
     pub answered_ordinal: Option<u64>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
+    /// The child's profile, when that turn failed because the provider
+    /// refused the profile's login.
+    pub login_failure: Option<String>,
+    /// The directory on the parent's target where the child writes the
+    /// details its report points to.
+    pub report_dir: Option<String>,
 }
 
 impl ChildProgress {
@@ -1079,6 +1287,8 @@ impl ChildProgress {
             awaited_ordinal: None,
             answered_ordinal: None,
             failed_turn: None,
+            login_failure: None,
+            report_dir: None,
         }
     }
 
@@ -1096,8 +1306,8 @@ impl ChildProgress {
 /// `list_agents` apply this one rule; the session wait and the reminder apply
 /// the same report rule to the turn they saw.
 pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
-    let handback_tool =
-        crate::database::load_subagent(child_id)?.is_some_and(|record| record.handback_tool);
+    let subagent = crate::database::load_subagent(child_id)?;
+    let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
     let recorded = crate::database::load_subagent_report(child_id)?;
     let (active, last) = crate::database::load_materialized_turn_outcome(child_id)?
         .map(|(_, active, last)| (active, last))
@@ -1121,12 +1331,61 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         }
         _ => None,
     };
+    let login_failure = last
+        .as_ref()
+        .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
+        .and(subagent.map(|record| record.profile_id));
     Ok(ChildProgress {
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(|turn| turn.accepted_ordinal),
         failed_turn,
+        login_failure,
+        report_dir: recorded.report_dir,
     })
+}
+
+/// One child's entry in a `wait` answer. A handback is already within the
+/// cap; a last message that stands in for one is not, so every output is
+/// bounded here and marked when it was cut.
+fn wait_agent_entry(
+    id: &str,
+    state: &str,
+    output: Option<String>,
+    finished: bool,
+    progress: &ChildProgress,
+) -> serde_json::Value {
+    let output = output.map(|output| bounded_report(&output));
+    let mut agent = serde_json::json!({
+        "child_session_id":id,
+        "report_source":report_source(state, &progress.report),
+        "state":state,
+        "finished":finished,
+        "output":output.as_ref().map(|(output, _)| output),
+        "report_dir":progress.report_dir,
+    });
+    if output.is_some_and(|(_, truncated)| truncated) {
+        agent["truncated"] = serde_json::Value::Bool(true);
+    }
+    if state == "failed"
+        && let Some(profile_id) = &progress.login_failure
+    {
+        agent["failure"] = serde_json::json!({
+            "kind": "login_invalid",
+            "profile_id": profile_id,
+        });
+    }
+    agent
+}
+
+/// Say in a `wait` or `list_agents` entry that the child is parked: its turn
+/// ended and its worker is stopped, so it holds no processes, and the next
+/// `send_input` starts it again. Its state is reported as for any finished
+/// child; only a parked child carries the field.
+fn mark_parked(entry: &mut serde_json::Value, record: Option<&mj_core::state::SessionRecord>) {
+    if record.is_some_and(|record| record.state == SessionState::Parked) {
+        entry["parked"] = serde_json::Value::Bool(true);
+    }
 }
 
 /// Where a finished child's `output` came from: its handback, or the last
@@ -1662,9 +1921,7 @@ impl SubagentBackend for ApiBackend {
                 crate::database::create_or_get_workspace(&name)
             })
             .await??;
-            let workspaces =
-                tokio::task::spawn_blocking(crate::database::list_workspaces).await??;
-            self.exports.republish_workspaces(workspaces);
+            self.exports.refresh_workspaces().await?;
             Ok(workspace)
         })
     }
@@ -1674,7 +1931,24 @@ impl SubagentBackend for ApiBackend {
         parent_profile: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            let mut candidates = crate::server::api::SubagentCandidates::default();
+            let mut ids = self.profile_catalog.candidates(&parent_profile)?;
+            // A profile whose login the provider has refused would start a
+            // child that dies on its first request (#1160), so it is refused
+            // here, with the fix, until its login file changes.
+            {
+                let rejected = self
+                    .rejected_logins
+                    .lock()
+                    .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+                ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
+                    Some(reason) => {
+                        candidates.unavailable.push((profile_id.clone(), reason));
+                        false
+                    }
+                    None => true,
+                });
+            }
             // One discovery per profile, so a profile whose harness cannot be
             // discovered drops out on its own instead of failing the answer.
             let discoveries = futures::future::join_all(
@@ -1686,7 +1960,6 @@ impl SubagentBackend for ApiBackend {
                 .quota_reports
                 .lock()
                 .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
-            let mut candidates = crate::server::api::SubagentCandidates::default();
             for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
                 match discovery.map(|mut choices| choices.pop()) {
                     Ok(Some(choices)) => {
@@ -1714,7 +1987,7 @@ impl SubagentBackend for ApiBackend {
             }
             if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
                 bail!(
-                    "no sub-agent profile could be discovered: {}",
+                    "no sub-agent profile is available: {}",
                     candidates
                         .unavailable
                         .iter()

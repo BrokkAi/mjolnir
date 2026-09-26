@@ -1032,6 +1032,7 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
+    dashboard::initialize_first_run_config().await?;
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
     let selected = if let Some(resume) = &resume
@@ -1269,9 +1270,11 @@ fn push_workspace_list(message: &mut String, workspaces: Option<&[(String, u64)]
     message.push_str("\nCreate one with `mj workspaces create NAME`.");
 }
 
-fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
-    let base = std::env::current_dir()
-        .context("read current directory for workspace name")?
+/// The name plain `mj` gives the workspace it creates in `directory`: the
+/// folder's own name. `mj go` looks for a workspace by this name, so the two
+/// commands share one workspace per folder.
+fn workspace_name_for_directory(directory: &std::path::Path) -> String {
+    directory
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
@@ -1279,7 +1282,13 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
         .trim()
         .chars()
         .take(64)
-        .collect::<String>();
+        .collect::<String>()
+}
+
+fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
+    let base = workspace_name_for_directory(
+        &std::env::current_dir().context("read current directory for workspace name")?,
+    );
     // The store keeps the name `default` for sessions made before a
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
@@ -1464,18 +1473,10 @@ fn login_spawn_error(
     if error.kind() != io::ErrorKind::NotFound {
         return error.into();
     }
-    let install = match kind {
-        mj_core::config::HarnessKind::Codex => {
-            " Install it with `npm install -g @openai/codex` (Node.js 22 or newer),".to_owned()
-        }
-        mj_core::config::HarnessKind::Claude => {
-            " Install it with `npm install -g @anthropic-ai/claude-code`,".to_owned()
-        }
-        other => format!(" Install the {} CLI,", other.display_name()),
-    };
     anyhow::anyhow!(
-        "`{program}` is not installed or is not on PATH, so the {} login cannot run.{install} then run `mj login --profile {profile_id}` again.",
-        kind.display_name()
+        "`{program}` is not installed or is not on PATH, so the {} login cannot run. {}, then run `mj login --profile {profile_id}` again.",
+        kind.display_name(),
+        kind.install_advice()
     )
 }
 

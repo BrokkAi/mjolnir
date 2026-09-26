@@ -79,19 +79,25 @@ builds, and desktop dependencies.
 
 ## Quick start
 
-From a project directory:
+Mjolnir runs coding agents you already have, so install and sign in to at
+least one of them first. Then, from a project directory:
 
 ```sh
-mj go
+mj
 ```
 
-The first run asks you to pick a harness account and where the session should
-run. Each folder remembers its setup, and running `mj go` again returns you to
-your last conversation. Plain `mj` opens the full dashboard of workspaces,
-sessions, targets, and quota.
+This opens the dashboard of workspaces, sessions, targets, and quota. Press
+`ctrl+b c` to create a session: pick an agent profile and where the session
+runs. If no agent profile is set up yet, the dashboard says what it found on
+this machine and how to add one.
 
-`mj doctor` checks prerequisites and tells you how to fix anything missing. The
-[quickstart](https://mjolnir.brokk.ai/quickstart/) walks through a first
+- `mj setup` is optional. Run it before `mj` to find installed agents and
+  container runtimes from the shell.
+- `mj go` is a shortcut for later. Each folder remembers its setup, and
+  running `mj go` again returns you to that folder's last conversation.
+- `mj doctor` checks prerequisites and tells you how to fix anything missing.
+
+The [quickstart](https://mjolnir.brokk.ai/quickstart/) walks through a first
 session end to end.
 
 ## Documentation

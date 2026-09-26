@@ -52,7 +52,26 @@ pub(crate) async fn resolve_workspace(
 ) -> Result<String> {
     let workspaces = daemon.list_workspaces().await?;
     let legacy_name = GoPreferences::workspace_name(&mode.directory);
-    let existing = directory_workspace(&workspaces, mode.workspace_id.as_deref(), &legacy_name);
+    let dashboard_name = crate::workspace_name_for_directory(&mode.directory);
+    let this_directory = mode.directory.clone();
+    let bound_elsewhere = tokio::task::spawn_blocking(move || {
+        GoPreferences::load(&GoPreferences::path()).map(|preferences| {
+            preferences
+                .workspaces()
+                .filter(|binding| binding.directory != this_directory)
+                .map(|binding| binding.workspace_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+    })
+    .await
+    .context("load project workspace bindings task failed")??;
+    let existing = directory_workspace(
+        &workspaces,
+        mode.workspace_id.as_deref(),
+        &legacy_name,
+        &dashboard_name,
+        &bound_elsewhere,
+    );
     let base = GoPreferences::directory_label(&mode.directory);
     let name = available_workspace_name(
         &base,
@@ -101,10 +120,17 @@ pub(crate) fn saved_workspace_modes() -> Result<Vec<mj_tui::GoMode>> {
         .collect())
 }
 
+/// The workspace `mj go` opens for a folder, if one exists: the workspace
+/// go.json binds to the folder, one the first `mj go` created under its
+/// hashed name, or the one plain `mj` created and named after the folder
+/// (launch finding R13-10). A workspace bound to another folder is never
+/// borrowed, and a workspace that is only recent is not taken either.
 fn directory_workspace<'a>(
     workspaces: &'a [crate::daemon::WorkspaceListing],
     bound_id: Option<&str>,
     legacy_name: &str,
+    dashboard_name: &str,
+    bound_elsewhere: &std::collections::BTreeSet<String>,
 ) -> Option<&'a crate::daemon::WorkspaceListing> {
     bound_id
         .and_then(|id| workspaces.iter().find(|entry| entry.workspace.id == id))
@@ -112,6 +138,12 @@ fn directory_workspace<'a>(
             workspaces
                 .iter()
                 .find(|entry| entry.workspace.name == legacy_name)
+        })
+        .or_else(|| {
+            workspaces.iter().find(|entry| {
+                entry.workspace.name.to_lowercase() == dashboard_name.to_lowercase()
+                    && !bound_elsewhere.contains(&entry.workspace.id)
+            })
         })
 }
 
@@ -184,9 +216,8 @@ pub(crate) fn resolve_recipe(
 mod tests {
     use clap::Parser;
 
-    #[test]
-    fn directory_entry_ignores_recent_workspace_and_name_collisions() {
-        let entry = |id: &str, name: &str| crate::daemon::WorkspaceListing {
+    fn entry(id: &str, name: &str) -> crate::daemon::WorkspaceListing {
+        crate::daemon::WorkspaceListing {
             workspace: mj_core::workspace::WorkspaceRecord {
                 id: id.into(),
                 name: name.into(),
@@ -194,27 +225,60 @@ mod tests {
                 last_opened_at: String::new(),
                 session_count: 1,
             },
+        }
+    }
+
+    #[test]
+    fn directory_entry_ignores_recent_workspace_and_name_collisions() {
+        let nothing_bound = std::collections::BTreeSet::new();
+        let find = |workspaces, bound_id| {
+            super::directory_workspace(workspaces, bound_id, "legacy", "folder", &nothing_bound)
+                .map(|entry| entry.workspace.id.clone())
         };
         let workspaces = [
             entry("recent", "project"),
             entry("bound", "renamed by user"),
         ];
-        assert_eq!(
-            super::directory_workspace(&workspaces, Some("bound"), "legacy")
-                .unwrap()
-                .workspace
-                .id,
-            "bound"
-        );
-        assert!(super::directory_workspace(&workspaces, None, "legacy").is_none());
-        assert!(super::directory_workspace(&workspaces, Some("deleted"), "legacy").is_none());
+        assert_eq!(find(&workspaces, Some("bound")).as_deref(), Some("bound"));
+        assert!(find(&workspaces, None).is_none());
+        assert!(find(&workspaces, Some("deleted")).is_none());
         let legacy = [entry("original", "legacy")];
+        assert_eq!(find(&legacy, None).as_deref(), Some("original"));
+    }
+
+    /// Plain `mj` in `~/demo` created the workspace "demo"; `mj go` in the
+    /// same folder then created "demo (2)" beside it (launch finding R13-10).
+    /// `mj go` now reuses the workspace the dashboard named after the folder,
+    /// unless another folder's `mj go` already owns it.
+    #[test]
+    fn go_reuses_the_workspace_the_dashboard_named_after_the_folder() {
+        let workspaces = [entry("recent", "other"), entry("dashboard", "Demo")];
+        let nothing_bound = std::collections::BTreeSet::new();
         assert_eq!(
-            super::directory_workspace(&legacy, None, "legacy")
-                .unwrap()
-                .workspace
-                .id,
-            "original"
+            super::directory_workspace(&workspaces, None, "legacy", "demo", &nothing_bound)
+                .map(|entry| entry.workspace.id.as_str()),
+            Some("dashboard")
+        );
+
+        let bound_elsewhere = std::collections::BTreeSet::from(["dashboard".to_owned()]);
+        assert!(
+            super::directory_workspace(&workspaces, None, "legacy", "demo", &bound_elsewhere)
+                .is_none(),
+            "a workspace another folder is bound to is never borrowed"
+        );
+    }
+
+    /// The name `mj go` looks for is the one plain `mj` gives a workspace it
+    /// creates in that folder.
+    #[test]
+    fn the_dashboard_names_a_new_workspace_after_the_folder() {
+        assert_eq!(
+            crate::workspace_name_for_directory(std::path::Path::new("/home/user/demo")),
+            "demo"
+        );
+        assert_eq!(
+            crate::workspace_name_for_directory(std::path::Path::new("/")),
+            "workspace"
         );
     }
 

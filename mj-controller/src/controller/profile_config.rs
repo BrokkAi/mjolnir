@@ -290,10 +290,13 @@ fn probe_profile(
         },
         &executor,
     )?;
+    let mut environment = environment;
+    let excluded_environment = profile.exclude_harness_environment(&mut environment);
     let spec = ProfileProbeSpec {
         harness: profile.kind,
         profile_home: home,
         environment,
+        excluded_environment,
         cwd,
         model,
     };

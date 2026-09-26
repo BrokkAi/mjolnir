@@ -2325,7 +2325,16 @@ impl DashboardState {
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
                 populate_subagent_profile_choices(&mut dialog.draft);
-                dialog.notice = Some(detection_notice(scope, &added, &rejected_runtimes));
+                let found_any = match scope {
+                    DetectScope::Profiles => !config.profiles.is_empty(),
+                    DetectScope::Runtimes => !config.targets.is_empty(),
+                };
+                dialog.notice = Some(detection_notice(
+                    scope,
+                    found_any,
+                    &added,
+                    &rejected_runtimes,
+                ));
             }
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
@@ -2334,16 +2343,31 @@ impl DashboardState {
 }
 
 /// What the Settings screen says after a detection run: the entries it added
-/// by name, and for runtimes the ones it turned down and why.
-fn detection_notice(scope: DetectScope, added: &[String], rejected: &[RejectedRuntime]) -> String {
+/// by name, and for runtimes the ones it turned down and why. When it added
+/// nothing, it says whether it found nothing at all or found only what
+/// Settings already lists (launch finding R13-4).
+fn detection_notice(
+    scope: DetectScope,
+    found_any: bool,
+    added: &[String],
+    rejected: &[RejectedRuntime],
+) -> String {
     let mut sentences = Vec::new();
     if added.is_empty() {
-        sentences.push(match scope {
-            DetectScope::Profiles => {
-                "No agent installation was found that this draft does not already have.".to_owned()
+        sentences.push(match (scope, found_any) {
+            (DetectScope::Profiles, false) => format!(
+                "No coding agent installation was found on this machine. Install {}, sign in to \
+                 it once, and choose Detect profiles again.",
+                mj_core::config::HarnessKind::every_display_name_or()
+            ),
+            (DetectScope::Profiles, true) => {
+                "Every coding agent found on this machine already has a profile.".to_owned()
             }
-            DetectScope::Runtimes => {
-                "No usable runtime was found that this draft does not already have.".to_owned()
+            (DetectScope::Runtimes, false) => {
+                "No usable runtime was found on this machine.".to_owned()
+            }
+            (DetectScope::Runtimes, true) => {
+                "Every usable runtime found on this machine is already listed.".to_owned()
             }
         });
     } else {

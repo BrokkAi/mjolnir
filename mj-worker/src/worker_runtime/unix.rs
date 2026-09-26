@@ -470,11 +470,24 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         let state = relay.operational_state();
         acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
     };
+    // The person's own `!` shells above keep the target's settings; the
+    // harness, and the supervisor that starts it, do not get the variables
+    // this profile excludes (#1160).
+    super::exclude_from_harness_environment(
+        config.harness,
+        &config.excluded_environment,
+        &session_environment,
+        &mut config.environment,
+    );
+    for name in &config.excluded_environment {
+        session_environment.remove(name);
+    }
     let supervisor_path = root.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: config.bridge_command,
         args: config.bridge_args,
         environment: config.environment,
+        excluded_environment: config.excluded_environment.clone(),
         cwd: config.cwd.clone(),
         harness_lease: managed_harness
             .as_ref()

@@ -76,6 +76,16 @@ pub trait SubagentBackend: Send + Sync {
                 .await?
         })
     }
+    /// Whether a sub-agent child has handed back its report for its parent's
+    /// newest task; see [`crate::controller::subagent_has_handed_back`].
+    fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::controller::subagent_has_handed_back(&child_session_id)
+            })
+            .await?
+        })
+    }
     fn read_context_file(
         &self,
         session_id: String,

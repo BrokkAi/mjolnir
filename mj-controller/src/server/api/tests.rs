@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use axum::body::Body;
@@ -497,6 +497,8 @@ struct FakeBackend {
     live_view: Option<ManagedSessionView>,
     shutdown: tokio_util::sync::CancellationToken,
     event_queries: Mutex<Vec<(crate::database::ApiEventFilter, Option<u64>)>>,
+    /// Sub-agent children that have handed back their reports.
+    handed_back: BTreeSet<String>,
 }
 
 impl FakeBackend {
@@ -618,6 +620,9 @@ impl SubagentBackend for FakeBackend {
     }
     fn turn_state(&self, _session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>> {
         Box::pin(async { Ok(self.next_turn_state()) })
+    }
+    fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
+        Box::pin(async move { Ok(self.handed_back.contains(&child_session_id)) })
     }
     fn turn_summary(
         &self,
@@ -1906,30 +1911,83 @@ async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
-#[tokio::test]
-async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
-    let adjust = |snapshot: &mut ViewerSnapshot| {
-        let mut child = snapshot.sessions[0].clone();
-        child.id = "child-1".into();
-        child.state = "running".into();
-        child.subagent_session_ids.clear();
-        snapshot.sessions[0].subagent_session_ids = vec!["child-1".into()];
-        snapshot.sessions.push(child);
-    };
+/// A snapshot whose session-1 has one running sub-agent, child-1, and nothing
+/// to publish.
+fn with_a_running_subagent(snapshot: &mut ViewerSnapshot) {
+    let mut child = snapshot.sessions[0].clone();
+    child.id = "child-1".into();
+    child.state = "running".into();
+    child.subagent_session_ids.clear();
+    snapshot.sessions[0].subagent_session_ids = vec!["child-1".into()];
+    snapshot.sessions[0].publication_state = None;
+    snapshot.sessions.push(child);
+}
 
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), adjust);
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-
+/// Send a suspend with this body, let the controller accept it, and return
+/// the answer.
+async fn accepted_suspend(backend: FakeBackend, body: &'static str) -> serde_json::Value {
     let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), adjust);
+        api_app(Arc::new(backend), with_a_running_subagent);
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Suspend {
+            session_id: "session-1".into(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    json_body(response).await
+}
+
+/// A suspend stops the session's sub-agents instead of refusing until they
+/// are acknowledged. It says how many it stops and warns about the ones that
+/// have not handed back. An older client's acknowledgement changes nothing.
+#[tokio::test]
+async fn a_suspend_stops_sub_agents_and_warns_about_the_ones_still_at_work() {
+    for body in ["{}", r#"{"acknowledge_active_subagents":true}"#] {
+        assert_eq!(
+            accepted_suspend(FakeBackend::default(), body).await,
+            serde_json::json!({
+                "session_id": "session-1",
+                "stopped_subagents": 1,
+                "subagents_not_handed_back": 1,
+                "warning": "1 sub-agent has not handed back; suspending stops it",
+            }),
+            "{body}"
+        );
+    }
+    let handed_back = FakeBackend {
+        handed_back: BTreeSet::from(["child-1".to_owned()]),
+        ..FakeBackend::default()
+    };
+    assert_eq!(
+        accepted_suspend(handed_back, "{}").await,
+        serde_json::json!({
+            "session_id": "session-1",
+            "stopped_subagents": 1,
+            "subagents_not_handed_back": 0,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_forced_close_ignores_active_subagents() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), with_a_running_subagent);
     let response = tokio::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/destroy"))

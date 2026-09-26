@@ -373,6 +373,30 @@ impl HarnessKind {
         }
     }
 
+    /// How to install this harness's own CLI, as the start of a sentence:
+    /// "Install it with `npm install -g @openai/codex` (Node.js 22 or
+    /// newer)". `mj login` and launch preflight say it when the CLI is
+    /// missing.
+    pub fn install_advice(self) -> String {
+        match self {
+            Self::Codex => {
+                "Install it with `npm install -g @openai/codex` (Node.js 22 or newer)".to_owned()
+            }
+            Self::Claude => "Install it with `npm install -g @anthropic-ai/claude-code`".to_owned(),
+            other => format!("Install the {} CLI", other.display_name()),
+        }
+    }
+
+    /// Every harness by product name, in [`Self::ALL`] order, as a list that
+    /// ends with "or": "Codex, Claude Code, Kimi Code, Grok Build, or Muse
+    /// Code". Messages that say no agent was found use it, so each one names
+    /// every agent Mjolnir looks for.
+    pub fn every_display_name_or() -> String {
+        let names = Self::ALL.map(Self::display_name);
+        let (last, rest) = names.split_last().expect("ALL is not empty");
+        format!("{}, or {last}", rest.join(", "))
+    }
+
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex and Claude
     /// select their guardian mode explicitly.
@@ -783,5 +807,80 @@ pub enum AuthScheme {
 impl AuthScheme {
     pub const fn is_api_key(&self) -> bool {
         matches!(self, Self::ApiKey { .. })
+    }
+}
+
+/// The variables through which Codex takes a credential other than its own
+/// login file, or sends its requests somewhere other than OpenAI.
+///
+/// Read from the versions Mjolnir pins (codex-acp 1.13.2 with codex 0.156.1):
+/// the bridge's API-key login reads `CODEX_API_KEY` and then `OPENAI_API_KEY`;
+/// the codex binary lists `OPENAI_API_KEY`, `CODEX_API_KEY` and
+/// `CODEX_ACCESS_TOKEN` as the variables it accepts in place of `auth.json`;
+/// and `OPENAI_BASE_URL` sets the address of Codex's built-in OpenAI provider.
+pub const CODEX_CREDENTIAL_ENVIRONMENT: [&str; 4] = [
+    "CODEX_ACCESS_TOKEN",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+];
+
+/// How a Codex profile that talks to OpenAI itself signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexLogin {
+    /// A ChatGPT account: an OAuth grant in `auth.json` that Codex refreshes.
+    ChatGpt,
+    /// An OpenAI API key that `codex login --with-api-key` stored in
+    /// `auth.json`.
+    ApiKey,
+}
+
+impl HarnessProfile {
+    /// How this profile signs in to OpenAI. `None` for another harness, and
+    /// for a Codex profile whose `config.toml` names a custom model provider:
+    /// that profile authenticates however its provider says.
+    ///
+    /// Codex records the choice as `auth_mode` in `auth.json`: `"apikey"`
+    /// after `codex login --with-api-key` and `"chatgpt"` after a ChatGPT
+    /// login. Anything but `"apikey"`, a missing file included, counts as a
+    /// ChatGPT login, because such a profile has no API key of its own: a key
+    /// could only reach it from somewhere else.
+    pub fn codex_login(&self) -> Option<CodexLogin> {
+        if self.kind != HarnessKind::Codex || matches!(self.codex_provider(), Ok(Some(_))) {
+            return None;
+        }
+        let auth_mode = std::fs::read(harness_authentication_marker(self.kind, &self.home))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|login| login.get("auth_mode")?.as_str().map(str::to_owned));
+        Some(match auth_mode.as_deref() {
+            Some("apikey") => CodexLogin::ApiKey,
+            _ => CodexLogin::ChatGpt,
+        })
+    }
+
+    /// Remove from `environment` every variable this profile's harness must
+    /// never see, and return the names of all such variables, present or not.
+    ///
+    /// A Codex profile that signs in with ChatGPT uses that login and nothing
+    /// else. In #1160 such a profile's Codex sent an API key it found in its
+    /// environment to the ChatGPT backend, which rejected it, and the turn
+    /// died. The names travel in the launch description as well, because the
+    /// worker adds the target's own login environment later and has to remove
+    /// them from that too.
+    pub fn exclude_harness_environment(
+        &self,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Vec<String> {
+        if self.codex_login() != Some(CodexLogin::ChatGpt) {
+            return Vec::new();
+        }
+        CODEX_CREDENTIAL_ENVIRONMENT
+            .iter()
+            .map(|name| {
+                environment.remove(*name);
+                (*name).to_owned()
+            })
+            .collect()
     }
 }

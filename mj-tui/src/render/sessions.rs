@@ -256,7 +256,9 @@ pub(crate) fn drawn_session_rows_with_options(
                         SessionTransitionKind::Starting => glyphs.starting,
                         SessionTransitionKind::Resuming => glyphs.resuming,
                         SessionTransitionKind::Moving => glyphs.moving,
-                        SessionTransitionKind::Suspending => glyphs.stopping,
+                        SessionTransitionKind::Suspending | SessionTransitionKind::Stopping => {
+                            glyphs.stopping
+                        }
                         SessionTransitionKind::Destroying => glyphs.destroying,
                     })
                     .unwrap_or_else(|| facts.status_symbol(operation));
@@ -551,6 +553,10 @@ pub(crate) fn session_activity_line(
         )
     } else if facts.state == SessionState::Error {
         "Error".to_owned()
+    } else if facts.state == SessionState::Parked {
+        // A sub-agent whose turn ended: idle, with its processes stopped
+        // until its parent sends it more input.
+        "Parked".to_owned()
     } else if session.state == SessionState::Provisioning {
         let started_at = session_updated_at_epoch_seconds(session).unwrap_or(now_epoch_seconds);
         format!(
@@ -570,6 +576,11 @@ pub(crate) fn session_activity_line(
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
+    } else if attention == AttentionLevel::Waiting {
+        // Waiting with no question or review of its own: one of its Mjolnir
+        // sub-agents is waiting on a question (see
+        // `DashboardState::attention_level`).
+        "Sub-agent question".to_owned()
     } else if detail.is_some_and(|detail| {
         matches!(
             detail.activity.state().last_known(),
@@ -780,6 +791,7 @@ impl SessionRowFacts<'_> {
             SessionState::Checkpointing => glyphs.checkpointing,
             SessionState::Closing => glyphs.stopping,
             SessionState::Destroying => glyphs.destroying,
+            SessionState::Parked => glyphs.idle,
             SessionState::Lost
             | SessionState::Error
             | SessionState::DestroyedWithDataLoss

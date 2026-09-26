@@ -30,6 +30,8 @@ where
     // connection. A turn reads it before and after to learn whether the
     // harness answered the prompt at all (#970).
     let agent_output_count = AgentOutputCount::default();
+    let last_agent_message = LastAgentMessage::default();
+    let notification_last_agent_message = last_agent_message.clone();
     let grok_usage = grok_usage::Collector::default();
     let grok_notification_usage = grok_usage.clone();
     let grok_notification_events = events.clone();
@@ -249,6 +251,7 @@ where
                 // carrying nothing but the harness's own announcements is
                 // still recognized as unanswered (#970).
                 if mj_core::acp::session_update_is_agent_output(&update) {
+                    notification_last_agent_message.observe(&update);
                     notification_agent_output_count.mark();
                 }
                 let update = serde_json::to_value(update).map_err(|error| {
@@ -977,6 +980,7 @@ where
                 plan_implementation_slot,
                 opened,
                 agent_output_count,
+                last_agent_message,
                 claude_result_count,
                 session_updates_enabled,
                 resume_required,
@@ -1361,11 +1365,18 @@ fn turn_stall_transcript_message(harness: HarnessKind, reason: &str) -> String {
 /// that puts the session in the quota-blocked state with its notice, for Kimi
 /// and for Codex, whose bridge reports it as an internal error naming
 /// `usageLimitExceeded` (launch finding J-25).
+///
+/// There is no warning when it would only repeat the turn's last agent
+/// message: codex-acp streams Codex's own account of a failed turn as agent
+/// text and then fails the prompt with the same sentence, which showed it
+/// twice (R14-1). The turn's diagnostic still carries the error, and
+/// credential sync reads it there when the warning is left out.
 pub(super) fn prompt_error_outcome(
     harness: HarnessKind,
     error: &agent_client_protocol::Error,
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
-) -> (String, String) {
+    last_agent_message: &str,
+) -> (String, Option<String>) {
     let stop_reason = if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex)
         && diagnostic.is_usage_limit()
     {
@@ -1373,7 +1384,12 @@ pub(super) fn prompt_error_outcome(
     } else {
         PROMPT_ERROR_STOP_REASON.to_owned()
     };
-    (stop_reason, prompt_failure_warning(harness, error))
+    let warning = prompt_failure_warning(harness, error);
+    let repeated = readable_prompt_error(error).is_some_and(|line| {
+        warning == format!("prompt failed: {line}")
+            && single_spaced(last_agent_message).contains(&line)
+    });
+    (stop_reason, (!repeated).then_some(warning))
 }
 
 /// The warning a failed prompt leaves in the conversation.
@@ -1381,8 +1397,9 @@ pub(super) fn prompt_error_outcome(
 /// A bridge that puts its own sentence in the error's data (Codex does, with
 /// `message` and `codexErrorInfo`) gets that sentence on one line rather than
 /// "Internal error: " and the pretty-printed JSON; the caller logs the raw
-/// error. An error whose text carries an authentication code keeps that
-/// text, because credential sync reads the code from this warning.
+/// error. When the raw text carries an authentication code and that line
+/// does not, the warning keeps the raw text, because credential sync reads
+/// the code from this warning.
 pub(super) fn prompt_failure_warning(
     harness: HarnessKind,
     error: &agent_client_protocol::Error,
@@ -1397,12 +1414,16 @@ pub(super) fn prompt_failure_warning(
         return format!("prompt failed ({PROMPT_AUTH_REQUIRED_MARKER}): {error}");
     }
     let raw = error.to_string();
-    if mj_core::credentials::auth_failure_signature(harness, &raw) {
-        return format!("prompt failed: {raw}");
-    }
     match readable_prompt_error(error) {
-        Some(line) => format!("prompt failed: {line}"),
-        None => format!("prompt failed: {raw}"),
+        // The raw text is kept only for an authentication code the readable
+        // line would drop.
+        Some(line)
+            if mj_core::credentials::auth_failure_signature(harness, &line)
+                || !mj_core::credentials::auth_failure_signature(harness, &raw) =>
+        {
+            format!("prompt failed: {line}")
+        }
+        _ => format!("prompt failed: {raw}"),
     }
 }
 
@@ -1419,8 +1440,13 @@ fn readable_prompt_error(error: &agent_client_protocol::Error) -> Option<String>
             mj_core::diagnostic::codex_error_kind(data)?
         ),
     };
-    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = single_spaced(&line);
     (!line.is_empty()).then_some(line)
+}
+
+/// `text` with every run of whitespace, line breaks included, as one space.
+fn single_spaced(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// How much the agent has produced by working, over one ACP connection.
@@ -1442,6 +1468,43 @@ impl AgentOutputCount {
 
     pub(super) fn get(&self) -> u64 {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The text of the agent message the harness is streaming in this turn.
+///
+/// A failed prompt's warning is left out when it only repeats this message
+/// (R14-1). A thought or a tool call ends the message, as it ends the agent's
+/// row in the transcript, and each prompt starts with none.
+#[derive(Clone, Default)]
+pub(super) struct LastAgentMessage(Arc<Mutex<String>>);
+
+impl LastAgentMessage {
+    pub(super) fn observe(&self, update: &SessionUpdate) {
+        let mut message = self.0.lock().expect("last agent message lock poisoned");
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(text) = &chunk.content {
+                    message.push_str(&text.text);
+                }
+            }
+            SessionUpdate::AgentThoughtChunk(_) | SessionUpdate::ToolCall(_) => message.clear(),
+            _ => {}
+        }
+    }
+
+    pub(super) fn clear(&self) {
+        self.0
+            .lock()
+            .expect("last agent message lock poisoned")
+            .clear();
+    }
+
+    pub(super) fn text(&self) -> String {
+        self.0
+            .lock()
+            .expect("last agent message lock poisoned")
+            .clone()
     }
 }
 
@@ -1509,6 +1572,7 @@ pub(super) async fn drive_connection(
     plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     agent_output_count: AgentOutputCount,
+    last_agent_message: LastAgentMessage,
     claude_result_count: ClaudeResultCount,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
@@ -1529,6 +1593,7 @@ pub(super) async fn drive_connection(
         &plan_implementation_slot,
         opened,
         &agent_output_count,
+        &last_agent_message,
         &claude_result_count,
         &session_updates_enabled,
         resume_required,

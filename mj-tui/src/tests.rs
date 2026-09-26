@@ -1721,7 +1721,8 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
                 let area = frame.area();
                 let transcript = ratatui::layout::Rect::new(0, 0, area.width, 12);
                 let prompt = ratatui::layout::Rect::new(0, 12, area.width, 4);
-                dashboard.render_stopped_subagent(frame, "child-session", transcript, prompt);
+                let pane = dashboard.browse_pane();
+                dashboard.render_stopped_subagent(frame, pane, "child-session", transcript, prompt);
             })
             .unwrap();
         terminal.backend().to_string()
@@ -4898,9 +4899,10 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
         screen.contains("Reading calc.py") && screen.contains("Native agent"),
         "the child's stored transcript is drawn in its pane: {screen}"
     );
+    // The pane's title row names the child too; the row is in Sessions.
     let row = lines
         .iter()
-        .position(|line| line.contains("Review calc · completed"))
+        .position(|line| line.contains("Review calc · completed") && !line.contains("Conversation"))
         .expect("the child's row");
     let row_text = lines[row..row + 4].join("\n");
     assert!(
@@ -4920,6 +4922,37 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
             session_id: id.clone()
         }
     );
+}
+
+/// Launch finding R12-3 (also R11 tmux/012): a native child's pane header
+/// read "Browse | Conversation d · availability unknown". The pane chrome
+/// draws its label over the left of the title row and its chips over the
+/// right, and the native pane's own title started under the label, which
+/// covered " Review calc · complete". The title starts after the label, names
+/// the child first, and drops status words from the end when the row is
+/// short. At 80 columns the pane is 42 wide and the chrome leaves 7 columns,
+/// so the name itself is cut.
+#[test]
+fn a_native_child_pane_header_names_the_child_first() {
+    let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
+    dashboard.open_subagent_workspace(parent_id);
+    let browse = dashboard.browse_pane();
+    dashboard.set_pane_session(browse, Some(&id));
+    for (width, title) in [
+        (140, "Review calc · completed · availability unknown "),
+        (100, "Review calc · completed "),
+        (90, "Review calc "),
+        (80, "Rev…"),
+    ] {
+        let header = drawn(&mut dashboard, width, 40)
+            .into_iter()
+            .find(|line| line.contains("Browse | Conversation"))
+            .expect("the pane's title row");
+        assert!(
+            header.contains(&format!("Browse | Conversation  {title}─")),
+            "{width} columns: {header}"
+        );
+    }
 }
 
 #[test]
@@ -5126,32 +5159,118 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
     );
 }
 
+/// Launch finding R11-1: a Claude sub-agent sat on a permission question in
+/// the Sub-agents view while its parent's row read only "Working" with no
+/// attention mark, so nobody knew to look. A child's question marks its parent
+/// the way the parent's own question would: the row's symbol, the attention
+/// queue and a notification, and the row says whose question it is.
 #[test]
-fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let mut child = running_session();
-    child.id = "child".into();
-    dashboard.state.subagents.insert(
-        child.id.clone(),
-        mj_core::subagent::SubagentRecord {
-            child_session_id: child.id.clone(),
-            parent_session_id: "session-1".into(),
-            task_name: "child task".into(),
-            profile_id: child.last_profile.clone(),
-            model: None,
-            effort: None,
-            working_directory: Default::default(),
-            initial_prompt: "inspect".into(),
-            request_key: "request".into(),
-            created_at: child.created_at.clone(),
-            noticed_turn: None,
-            handback_tool: false,
-        },
-    );
-    dashboard.state.sessions.insert(child.id.clone(), child);
-    assert_eq!(dashboard.attention_level("session-1"), AttentionLevel::Idle);
+fn a_subagent_question_marks_its_parent_for_attention() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    dashboard
+        .state
+        .sessions
+        .get_mut("child-session")
+        .unwrap()
+        .acp_session_title = Some("Answer project codename".into());
+    set_working(&mut dashboard, &parent);
+    set_working(&mut dashboard, "child-session");
+    dashboard.set_current_session(None);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+    assert!(dashboard.notification_events(0).is_empty());
+
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations = vec![question("child-session")];
+
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
     assert_eq!(
-        chord(&mut dashboard, CommandId::SuspendSession),
+        dashboard
+            .attention_queue()
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [parent.as_str()],
+        "the queue lists top-level rows, so it leads to the parent"
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    let row = lines
+        .iter()
+        .position(|line| line.contains("ACP pretty name"))
+        .expect("the parent's row is drawn");
+    assert!(
+        lines[row].contains(&format!(
+            "{} ACP pretty name",
+            mj_chat::theme::glyphs().waiting
+        )),
+        "{}",
+        lines[row]
+    );
+    assert!(
+        lines[row + 1].contains("Sub-agent question"),
+        "{}",
+        lines[row + 1]
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].session_id, parent);
+    assert_eq!(due[0].level, AttentionLevel::Waiting);
+    assert_eq!(
+        due[0].body,
+        "Sub-agent \"Answer project codename\": Choose a path"
+    );
+
+    // Answering the child's question clears the parent's mark.
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .pending_elicitations
+        .clear();
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
+}
+
+/// A suspend stops the parent's sub-agents without a checkpoint of their own.
+/// It asks first only when one of them is still at its task, and says, by
+/// its listed title, that suspending stops it (R15-4); an idle child has
+/// handed back and stops silently.
+#[test]
+fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    // A raw project has no clone whose publication needs confirming.
+    dashboard
+        .state
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .project_directory = Some("/srv/project".into());
+    dashboard
+        .state
+        .sessions
+        .get_mut("child-session")
+        .unwrap()
+        .session_title_override = Some("sleep-100".into());
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::Suspend {
+            session_id: parent.clone(),
+            acknowledge_unpublished_work: false,
+        }
+    );
+
+    dashboard
+        .session_details
+        .get_mut("child-session")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(matches!(
@@ -5159,12 +5278,19 @@ fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
         Mode::Confirm(dialog) if matches!(
             dialog.confirmation,
             crate::dialogs::Confirmation::SuspendSession {
-                active_children: 1,
                 interrupting: false,
                 ..
             }
         )
     ));
+    let dialog = drawn(&mut dashboard, 120, 40).join(
+        "
+",
+    );
+    assert!(
+        dialog.contains("Sub-agent \"sleep-100\" has not handed back; suspending stops it."),
+        "{dialog}"
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None
@@ -5273,5 +5399,172 @@ fn working_session_suspension_confirms_and_cancel_is_safe() {
             session_id: "session-1".into(),
             acknowledge_unpublished_work: true,
         }
+    );
+}
+
+/// The records a snapshot brings once the parent's suspend has stopped its
+/// one sub-agent: the parent is closing and the child is gone.
+fn stopped_by_the_parents_suspend(
+    dashboard: &DashboardState,
+    parent: &str,
+) -> mj_core::state::State {
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut(parent).unwrap().state = SessionState::Closing;
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    state
+}
+
+/// R15-1: a suspend stopped the sub-agent whose conversation was open in its
+/// parent's Sub-agents view. The view fell to "No sessions yet" and the
+/// footer said "Could not save draft and read status for <child>: unknown
+/// session". It goes back to the parent's scope with the parent selected,
+/// and says what happened.
+#[test]
+fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+    dashboard.set_current_session(Some("child-session"));
+    assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+    let title = dashboard.state.sessions["child-session"]
+        .listed_title()
+        .to_owned();
+
+    dashboard.set_state(stopped_by_the_parents_suspend(&dashboard, &parent));
+
+    assert_eq!(dashboard.subagent_parent_id(), None);
+    assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
+    assert_eq!(
+        dashboard.notice(),
+        Some(format!("Sub-agent \"{title}\" was stopped by the suspend"))
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::render::render_sessions(frame, frame.area(), &dashboard);
+        })
+        .unwrap();
+    let rows = terminal.backend().to_string();
+    assert!(!rows.contains("No sessions yet"), "{rows}");
+}
+
+/// The host lets the stopped sub-agent's conversation go without saving a
+/// draft for a session that no longer exists, and opens the parent's.
+#[test]
+fn the_host_learns_which_conversations_a_suspend_took_away() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+
+    dashboard.set_state(stopped_by_the_parents_suspend(&dashboard, &parent));
+
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend {
+            sessions: vec!["child-session".into()],
+            reopen: Some(parent.clone()),
+        }
+    );
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend::default()
+    );
+}
+
+/// A sub-agent that leaves while its parent runs on, as a destroy removes
+/// one, was not stopped by a suspend: the view and the footer stay as they
+/// were.
+#[test]
+fn a_sub_agent_removed_while_its_parent_runs_is_not_reported_as_suspended() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+    let mut state = dashboard.state.clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+
+    dashboard.set_state(state);
+
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.notice(), None);
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend::default()
+    );
+}
+
+/// R15-2: a sub-agent that its parent's suspend is stopping reads
+/// "Stopping" in its row and in its conversation's header, as the suspend
+/// dialog and the docs say. Before, both said "Destroying". A destroy a
+/// person asked for still says "Destroying".
+#[test]
+fn a_sub_agent_stopped_by_its_parents_suspend_reads_stopping() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent);
+    dashboard.set_current_session(Some("child-session"));
+
+    dashboard.begin_session_operation("child-session".into(), SessionOperationKind::Stopping, None);
+    let screen = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(screen.contains("Transition · Stopping"), "{screen}");
+    assert!(!screen.contains("Destroying"), "{screen}");
+
+    dashboard.finish_session_operation("child-session");
+    dashboard.begin_session_operation(
+        "child-session".into(),
+        SessionOperationKind::Destroying,
+        None,
+    );
+    let screen = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(screen.contains("Transition · Destroying"), "{screen}");
+}
+
+/// R15-4: the suspend confirmation names the sub-agents still at their task,
+/// by listed title, up to three, and counts the rest.
+#[test]
+fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard
+        .state
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .project_directory = Some("/srv/project".into());
+    let template = dashboard.state.sessions["child-session"].clone();
+    let relation = dashboard.state.subagents["child-session"].clone();
+    let mut state = dashboard.state.clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    for (position, title) in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut child = template.clone();
+        child.id = format!("child-{position}");
+        child.session_title_override = Some(title.into());
+        child.created_at = format!("2026-09-0{}T00:00:00Z", position + 1);
+        let mut relation = relation.clone();
+        relation.child_session_id = child.id.clone();
+        state.subagents.insert(child.id.clone(), relation);
+        state.sessions.insert(child.id.clone(), child);
+    }
+    dashboard.set_state(state);
+    for position in 0..5 {
+        dashboard
+            .session_details
+            .get_mut(&format!("child-{position}"))
+            .unwrap()
+            .current_turn_started_at = Some(1);
+    }
+    dashboard.focus_sessions();
+    dashboard.select_active_session(&parent);
+
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    let dialog = drawn(&mut dashboard, 160, 40).join(" ");
+    assert!(
+        dialog.contains(
+            "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 2 more have not handed back;"
+        ),
+        "{dialog}"
     );
 }

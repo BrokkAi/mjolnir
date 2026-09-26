@@ -224,6 +224,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<mj_tui::SetupDetection, String>,
     },
+    /// The coding agents installed on this machine, for the Get started
+    /// panel of a dashboard with no agent profile.
+    InstalledAgents(std::result::Result<Vec<mj_core::config::HarnessKind>, String>),
     BuildCachePreviewed {
         generation: u64,
         key: serde_json::Value,
@@ -495,7 +498,7 @@ impl DashboardContext {
             DashboardIoUpdate::WorkspaceCloseCancelled { result } => {
                 self.dashboard.set_notice(match result {
                     Ok(()) => {
-                        "Workspace close cancellation requested; completed stops cannot be undone."
+                        "Workspace deletion cancellation requested; completed suspensions cannot be undone."
                             .into()
                     }
                     Err(error) => format!("Could not cancel workspace close: {error}"),
@@ -991,6 +994,7 @@ impl DashboardContext {
                         self.dashboard.set_state(self.controller.state.clone());
                         self.refresh_chat_context();
                         self.refresh_poll_targets();
+                        self.refresh_quotas_if_profiles_changed();
                     }
                     Err(error) => self
                         .dashboard
@@ -1088,6 +1092,12 @@ impl DashboardContext {
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }
+            DashboardIoUpdate::InstalledAgents(result) => match result {
+                Ok(agents) => self.dashboard.set_installed_agents(agents),
+                // The panel then keeps saying only that no profile is set
+                // up, which stays true.
+                Err(error) => tracing::warn!(%error, "could not look for installed coding agents"),
+            },
             DashboardIoUpdate::SetupSaved { generation, result } => {
                 let result = result.map(Config::with_local_targets);
                 if let Ok(config) = &result {
@@ -1311,6 +1321,7 @@ impl DashboardContext {
                                 self.dashboard.set_notice(format!(
                                     "Could not check checkpoint repositories: {error:#}"
                                 ));
+                                self.dashboard.end_resume_preflight();
                             }
                         }
                         launch => {
@@ -1331,6 +1342,7 @@ impl DashboardContext {
                         self.dashboard
                             .apply_remote_session_preflight(generation, Err(error.clone()));
                         self.dashboard.set_notice(error);
+                        self.dashboard.end_resume_preflight();
                     }
                 }
             }
@@ -1398,6 +1410,7 @@ impl DashboardContext {
                             self.dashboard.set_notice(format!(
                                 "Could not check checkpoint repositories: {error}"
                             ));
+                            self.dashboard.end_resume_preflight();
                         }
                     }
                 }
@@ -1438,6 +1451,10 @@ impl DashboardContext {
             DashboardCreateSessionUpdate::Registered(registered) => {
                 let registered = *registered;
                 let session_id = registered.session.id.clone();
+                // A restore has its session now; the archive may be restored
+                // again from here on.
+                self.dashboard
+                    .finish_archive_restore(&registered.retry_launch);
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
@@ -1487,6 +1504,7 @@ impl DashboardContext {
                 error,
                 retry_launch,
             } => {
+                self.dashboard.finish_archive_restore(&retry_launch);
                 self.dashboard
                     .show_launch_failure(error, Some(*retry_launch));
             }

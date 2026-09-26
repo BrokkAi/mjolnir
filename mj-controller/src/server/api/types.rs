@@ -203,6 +203,24 @@ pub struct ResumeSessionResponse {
     pub target_id: String,
 }
 
+/// What a suspend was accepted as. A suspend stops the session's active
+/// Mjolnir sub-agents without a checkpoint and suspends the session alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspendSessionResponse {
+    #[serde(default)]
+    pub session_id: String,
+    /// Active sub-agents the suspend stops.
+    #[serde(default)]
+    pub stopped_subagents: usize,
+    /// How many of those have not handed back their report.
+    #[serde(default)]
+    pub subagents_not_handed_back: usize,
+    /// "N sub-agents have not handed back; suspending stops them", when any
+    /// have not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StartSessionResponse {
     pub session_id: String,

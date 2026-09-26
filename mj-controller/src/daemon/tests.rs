@@ -1875,34 +1875,6 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
 }
 
 #[test]
-fn force_destruction_enumerates_only_the_workspaces_active_sessions_oldest_first() {
-    let mut oldest = runtime_test_session("oldest", "workspace-a", SessionState::Provisioning);
-    oldest.created_at = "2026-09-01T00:00:00Z".into();
-    let newest = runtime_test_session("newest", "workspace-a", SessionState::Error);
-    let elsewhere = runtime_test_session("elsewhere", "workspace-b", SessionState::Running);
-    let history = runtime_test_session("history", "workspace-a", SessionState::Stopped);
-    let controller = Controller {
-        config: Config::default(),
-        state: mj_core::state::State {
-            sessions: [oldest, newest, elsewhere, history]
-                .into_iter()
-                .map(|session| (session.id.clone(), session))
-                .collect(),
-            ..mj_core::state::State::default()
-        },
-    };
-
-    assert_eq!(
-        active_sessions_for_force_destruction(&controller, "workspace-a"),
-        vec!["oldest".to_owned(), "newest".to_owned()]
-    );
-    assert_eq!(
-        active_sessions_for_force_destruction(&controller, "workspace-b"),
-        vec!["elsewhere".to_owned()]
-    );
-}
-
-#[test]
 fn force_destroy_serializes_as_its_own_lifecycle_kind() {
     assert_eq!(
         serde_json::to_string(&RuntimeLifecycleKind::ForceDestroy).unwrap(),
@@ -3031,6 +3003,14 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     )
     .unwrap();
     let state = test_runtime_state_loading_the_store();
+    state.refresh_workspaces().await.unwrap();
+    assert!(
+        state
+            .workspaces()
+            .borrow()
+            .iter()
+            .any(|w| w.id == workspace.id)
+    );
     let admission = state
         .workspace_resume_gate(&workspace.id)
         .read_owned()
@@ -3056,7 +3036,20 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     drop(admission);
     // An unrelated workspace's resume must not prevent this close.
     let _other_resume = state.workspace_resume_gate("other").read_owned().await;
-    state.close_workspace(workspace.id.clone()).await.unwrap();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    assert!(matches!(
+        handle_action(
+            DaemonAction::DeleteWorkspace {
+                workspace_id: workspace.id.clone(),
+            },
+            &metadata,
+            &state,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
+        DaemonReply::Done
+    ));
     let stored = crate::database::load_state().unwrap();
     assert_eq!(stored.sessions[&history.id].state, SessionState::Stopped);
     assert!(stored.sessions[&history.id].draft_input.is_empty());
@@ -3068,6 +3061,96 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     assert!(
         crate::database::list_workspaces()
             .unwrap()
+            .iter()
+            .all(|w| w.id != workspace.id)
+    );
+    assert!(
+        state
+            .workspaces()
+            .borrow()
+            .iter()
+            .all(|w| w.id != workspace.id)
+    );
+    assert!(
+        !state
+            .runtime_snapshot("", 0, true)
+            .await
+            .unwrap()
+            .workspace_names
+            .contains_key(&workspace.id)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_deleted_tab() {
+    const TEST: &str =
+        "workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_deleted_tab";
+    const CHILD: &str = "MJ_TEST_WORKSPACE_FEED_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    let DaemonReply::Workspace(workspace) = handle_action(
+        DaemonAction::CreateWorkspace {
+            name: "Before".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap() else {
+        panic!("create did not return the workspace");
+    };
+    assert_eq!(state.workspaces().borrow()[0].id, workspace.id);
+
+    handle_action(
+        DaemonAction::RenameWorkspace {
+            workspace_id: workspace.id.clone(),
+            name: "After".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.workspaces().borrow()[0].name, "After");
+    assert_eq!(
+        state
+            .runtime_snapshot("", 0, true)
+            .await
+            .unwrap()
+            .workspace_names[&workspace.id],
+        "After"
+    );
+
+    // A refresh queued before deletion must read after the writer commits,
+    // rather than publish a workspace list captured before deletion.
+    let refresh_guard = state.workspace_refresh.lock().await;
+    let delayed = tokio::spawn({
+        let state = state.clone();
+        async move { state.refresh_workspaces().await }
+    });
+    tokio::task::yield_now().await;
+    crate::database::close_workspace(&workspace.id).unwrap();
+    drop(refresh_guard);
+    delayed.await.unwrap().unwrap();
+    assert!(
+        state
+            .workspaces()
+            .borrow()
             .iter()
             .all(|w| w.id != workspace.id)
     );
@@ -3278,51 +3361,1056 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     assert!(!restarted.close_is_requested(&session.id));
 }
 
+/// Suspending a parent stops its sub-agents instead of suspending them, and
+/// checkpoints only the parent. Each child is removed the way a destroy
+/// removes one, after SessionWiki has taken its conversation, and the parent's
+/// record lists what was stopped for its model. A child that cannot be
+/// stopped the ordinary way is removed anyway and never fails the parent.
 #[cfg(unix)]
 #[tokio::test]
-async fn failed_child_suspension_reports_the_child_on_the_retained_parent() {
-    const NAME: &str = "failed_child_suspension_reports_the_child_on_the_retained_parent";
-    const CHILD: &str = "MJ_TEST_SUSPENSION_CHILD_FAILURE";
+async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent() {
+    const NAME: &str = "suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent";
+    const CHILD: &str = "MJ_TEST_SUSPEND_STOPS_SUBAGENTS";
     if std::env::var_os(CHILD).is_none() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        // SessionWiki walks every harness store under the home directory, so
+        // the child process gets an empty home and an index of its own.
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
         crate::controller::test_support::IsolatedTest::new(
             crate::controller::test_support::test_name(module_path!(), NAME),
         )
         .env(CHILD, "1")
-        .isolated_store(root.path())
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    use mj_core::subagent::StoppedSubagent;
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parent suspension").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let finished_id = "11111111111111111111111111111111";
+    let stuck_id = "22222222222222222222222222222222";
+    // A parent with nothing to checkpoint yet, so its own suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+
+    // A child that finished its task and handed back its report.
+    let mut finished = runtime_test_session(finished_id, &workspace.id, SessionState::Running);
+    finished.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(finished_id),
+    });
+    finished.session_title_override = Some("Fix the parser".into());
+    let mut relation = runtime_test_subagent(finished_id, parent_id);
+    relation.initial_prompt = "Fix the off-by-one in the parser.".into();
+    relation.handback_tool = true;
+    crate::database::save_subagent_session(&finished, &relation).unwrap();
+    let mut conversation = mj_core::state::MaterializedSession::empty(finished_id);
+    conversation.applied_event_ordinal = 3;
+    conversation.applied_event_digest = format!("{:064x}", 3);
+    conversation.last_activity_at_ms = Some(1_700_000_000_003);
+    for (position, body) in [
+        mj_core::transcript::TranscriptBody::User {
+            content: vec![serde_json::json!({"type": "text", "text": "fix the parser"})],
+        },
+        mj_core::transcript::TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "fixed"}})],
+            streaming: false,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let position = position as u64 + 1;
+        let streamed = matches!(body, mj_core::transcript::TranscriptBody::Agent { .. });
+        conversation
+            .transcript
+            .push(Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: format!("item-{position}"),
+                position,
+                latest_content_event_ordinal: streamed.then_some(position),
+                created_at_ms: 1_700_000_000_000 + position as i64,
+                last_changed_at_ms: 1_700_000_000_000 + position as i64,
+                body,
+            }));
+    }
+    conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "task-1".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 3,
+        completed_at_ms: 1_700_000_000_003,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    });
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(
+        crate::database::record_subagent_handback(
+            finished_id,
+            &mj_core::subagent::SubagentHandback {
+                command_id: "task-1".into(),
+                message: "Fixed the parser.".into(),
+                recorded_at_ms: 1_700_000_000_002,
+            },
+        )
+        .unwrap()
+    );
+
+    // A child still at work on an SSH target whose settings are gone from
+    // the configuration, so the ordinary stop cannot reach it.
+    let mut stuck = runtime_test_session(stuck_id, &workspace.id, SessionState::Running);
+    stuck.title = "Review the docs".into();
+    stuck.target_template_id = "removed-target".into();
+    stuck.target = Some(mj_core::state::TargetLocator::SshBare {
+        host: "builder.invalid".into(),
+        workspace: PathBuf::from(format!(".local/share/hel/workspaces/{stuck_id}")),
+        worker_id: Some(stuck_id.into()),
+    });
+    crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
+        .unwrap();
+    // The index exists but has not seen either child yet.
+    sessionwiki::index::open().unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(parent_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    for child in [finished_id, stuck_id] {
+        assert!(
+            !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
+            "sub-agent {child} is removed, not suspended"
+        );
+    }
+    assert_eq!(
+        crate::database::load_stopped_subagents(parent_id).unwrap(),
+        [
+            StoppedSubagent {
+                child_session_id: finished_id.into(),
+                title: "Fix the parser".into(),
+                task: Some("Fix the off-by-one in the parser.".into()),
+                handed_back: true,
+            },
+            StoppedSubagent {
+                child_session_id: stuck_id.into(),
+                title: "Review the docs".into(),
+                task: Some("do the task".into()),
+                handed_back: false,
+            },
+        ]
+    );
+    // The removed child's conversation is still found by its id.
+    let found = state
+        .wiki_session(finished_id.to_owned())
+        .await
+        .unwrap()
+        .expect("the stopped sub-agent is found by its id");
+    assert_eq!(found.status, mj_client::daemon::WikiSessionStatus::Archived);
+}
+
+/// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
+/// runs in.
+#[cfg(unix)]
+const LIVE_PARENT_CHILD: &str = "MJ_TEST_LIVE_PARENT_CHILD";
+
+/// The sub-agent still at work in [`live_parent_with_a_working_sub_agent`].
+#[cfg(unix)]
+const WORKING_CHILD: &str = "33333333333333333333333333333333";
+
+/// Run the named test alone in a child of this test binary, with its own
+/// store and SessionWiki index, and with the stand-in relay advancing its own
+/// Close, so a sealed parent needs no harness behind it. Returns whether this
+/// process is that child.
+#[cfg(unix)]
+fn in_isolated_live_parent_test(name: &str) -> bool {
+    if std::env::var_os(LIVE_PARENT_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        name,
+    ))
+    .env(LIVE_PARENT_CHILD, "1")
+    .env(
+        crate::controller::checkpoint::tests::LATCH_CHECKPOINT_ONLY,
+        "1",
+    )
+    .isolated_store(directory.path())
+    .env(
+        mj_core::config::SESSION_INDEX_ENV,
+        directory.path().join("sessionwiki"),
+    )
+    .env("HOME", &home)
+    .env("XDG_DATA_HOME", home.join(".local/share"))
+    .env("XDG_CONFIG_HOME", home.join(".config"))
+    .run();
+    false
+}
+
+/// Whether the parent in [`live_parent_with_a_working_sub_agent`] already has
+/// a recovery copy.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentRecoveryCopy {
+    /// The unchanged relay lets a close reuse it, so the checkpoint succeeds.
+    Installed,
+    /// A close has to export one, and the export fails.
+    Missing,
+}
+
+#[cfg(unix)]
+struct LiveParent {
+    _directory: tempfile::TempDir,
+    relay_root: PathBuf,
+    channels: crate::session_manager::SessionManagerChannels,
+    state: Arc<RuntimeState>,
+}
+
+#[cfg(unix)]
+impl LiveParent {
+    fn relay_state(&self) -> String {
+        std::fs::read_to_string(self.relay_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap()
+    }
+
+    fn journal(&self) -> String {
+        std::fs::read_to_string(
+            self.relay_root
+                .join(mj_core::relay::RELAY_JOURNAL_DIR)
+                .join("active.jsonl"),
+        )
+        .unwrap()
+    }
+}
+
+/// A live parent with one Mjolnir sub-agent at work ("Review the docs"),
+/// served by the stand-in relay of the checkpoint suite. A suspend takes a
+/// real checkpoint of it. Without a recovery copy to reuse, the export runs
+/// `hel` in the parent's worker root, which fails the way a full disk does.
+#[cfg(unix)]
+async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy) -> LiveParent {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    // A LocalBare worker root ends in its session id.
+    let worker_root = directory.path().join(LATCH_RELAY_SESSION);
+    let relay_root = directory.path().join("relay");
+    let archives = directory.path().join("archives");
+    let checkout = directory.path().join("checkout");
+    for path in [&worker_root, &relay_root, &archives, &checkout] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    seed_live_session(directory.path(), &relay_root);
+    let hel = worker_root.join("hel");
+    std::fs::write(
+        &hel,
+        "#!/bin/sh\ncat >/dev/null\necho 'No space left on device' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let workspace = crate::database::create_workspace("Parent suspension").unwrap();
+    let mut parent = crate::controller::test_support::checkpoint_test_session(LATCH_RELAY_SESSION);
+    parent.workspace_id = workspace.id.clone();
+    parent.target_template_id = "removed-local".into();
+    parent.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    parent.project_directory = Some(checkout);
+    if recovery_copy == ParentRecoveryCopy::Installed {
+        parent.checkpoint = Some(
+            crate::controller::test_support::write_checkpoint_gate_archive(
+                &archives,
+                LATCH_RELAY_SESSION,
+                2,
+            ),
+        );
+    }
+    crate::database::save_session(&parent).unwrap();
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        LATCH_RELAY_SESSION,
+    ))
+    .unwrap();
+
+    let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
+    child.title = "Review the docs".into();
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: directory.path().join(WORKING_CHILD),
+    });
+    crate::database::save_subagent_session(
+        &child,
+        &runtime_test_subagent(WORKING_CHILD, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+
+    let (channels, state) = serve_live_session(&relay_root).await;
+    LiveParent {
+        _directory: directory,
+        relay_root,
+        channels,
+        state,
+    }
+}
+
+/// Seed the stand-in relay of a live session that has opened its native
+/// session, and give the controller the Codex profile the session uses.
+#[cfg(unix)]
+fn seed_live_session(directory: &Path, relay_root: &Path) {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+
+    let mut seed =
+        mj_worker::relay::DurableRelay::open(relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
+        native_session_id: "native-session".into(),
+        native_continuity_lost: false,
+        replaced_unused_native_session_id: None,
+        resumed: true,
+    })
+    .unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+        config_options: Vec::new(),
+    })
+    .unwrap();
+    drop(seed);
+
+    let profile_home = directory.join("profile");
+    std::fs::create_dir_all(&profile_home).unwrap();
+    Config::update(|config| {
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: profile_home,
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Serve the live session from the stand-in relay and start a daemon runtime
+/// over the store, which must already hold every record the test needs.
+#[cfg(unix)]
+async fn serve_live_session(
+    relay_root: &Path,
+) -> (
+    crate::session_manager::SessionManagerChannels,
+    Arc<RuntimeState>,
+) {
+    use crate::controller::checkpoint::tests::{
+        LATCH_RELAY_SESSION, ReleaseSupport, latch_relay_target,
+    };
+
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    (channels, state)
+}
+
+/// Marks the stand-in worker's run of [`stand_in_worker_exports_a_checkpoint`].
+#[cfg(unix)]
+const STAND_IN_EXPORT: &str = "MJ_TEST_STAND_IN_EXPORT";
+
+/// The worker's `export-checkpoint`, run from this test binary for the
+/// stand-in worker of [`live_clone_with_an_unpushed_commit`], because unit
+/// tests have no worker binary. It does nothing unless that stand-in runs it.
+#[cfg(unix)]
+#[test]
+fn stand_in_worker_exports_a_checkpoint() {
+    if std::env::var_os(STAND_IN_EXPORT).is_none() {
+        return;
+    }
+    // With `--nocapture` libtest writes `test <name> ... ` without a
+    // trailing newline before the body runs. End that line first so the
+    // result is a line of its own.
+    println!();
+    let exported =
+        mj_worker::checkpoint::export_from_spec_reader(&mut std::io::stdin().lock()).unwrap();
+    println!("{}", serde_json::to_string(&exported).unwrap());
+}
+
+#[cfg(unix)]
+struct LiveClone {
+    _source: tempfile::TempDir,
+    _directory: tempfile::TempDir,
+    checkout: PathBuf,
+    worker_root: PathBuf,
+    unpushed_commit: String,
+    relay_root: PathBuf,
+    channels: crate::session_manager::SessionManagerChannels,
+    state: Arc<RuntimeState>,
+}
+
+#[cfg(unix)]
+impl LiveClone {
+    /// Whether the session's relay was sealed by a close.
+    fn sealed(&self) -> bool {
+        let journal = std::fs::read_to_string(
+            self.relay_root
+                .join(mj_core::relay::RELAY_JOURNAL_DIR)
+                .join("active.jsonl"),
+        )
+        .unwrap();
+        journal.lines().any(|line| {
+            let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
+            matches!(
+                event.observation,
+                mj_core::relay::RelayObservation::CommandQueued {
+                    command: RelayCommand::Close { .. },
+                    ..
+                }
+            )
+        })
+    }
+}
+
+/// A live session on an isolated clone whose last commit is not on the
+/// clone's origin, served by the stand-in relay. Its stand-in worker runs the
+/// real checkpoint export, so a suspend checks the clone's publication against
+/// a real archive and a real origin.
+#[cfg(unix)]
+async fn live_clone_with_an_unpushed_commit() -> LiveClone {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    use crate::controller::test_support::{committed_repository, test_git};
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    // A LocalBare worker root ends in its session id, and its harness home is
+    // the worker root's `profile` directory.
+    let worker_root = directory.path().join(LATCH_RELAY_SESSION);
+    let relay_root = directory.path().join("relay");
+    for path in [&worker_root.join("profile"), &relay_root] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    seed_live_session(directory.path(), &relay_root);
+    let hel = worker_root.join("hel");
+    std::fs::write(
+        &hel,
+        format!(
+            "#!/bin/sh\n\
+             [ \"$1 $2\" = 'worker export-checkpoint' ] || \
+             {{ echo \"the stand-in worker only exports: $*\" >&2; exit 2; }}\n\
+             {STAND_IN_EXPORT}=1 '{program}' --exact '{test}' --nocapture | grep '^{{'\n",
+            program = std::env::current_exe().unwrap().display(),
+            test = crate::controller::test_support::test_name(
+                module_path!(),
+                "stand_in_worker_exports_a_checkpoint",
+            ),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The project's `master` is on its origin, and the session's clone has one
+    // commit of its own that is not.
+    let source = committed_repository();
+    let origin = directory.path().join("origin.git");
+    test_git(
+        directory.path(),
+        &["init", "--bare", "--initial-branch=master", "origin.git"],
+    );
+    test_git(
+        source.path(),
+        &["remote", "add", "origin", &origin.to_string_lossy()],
+    );
+    test_git(source.path(), &["push", "origin", "master"]);
+    let mut session =
+        crate::controller::test_support::managed_clone_session(source.path(), LATCH_RELAY_SESSION);
+    let checkout = session.project_directory.clone().unwrap();
+    test_git(&checkout, &["config", "user.name", "Hel Tests"]);
+    test_git(&checkout, &["config", "user.email", "hel@example.invalid"]);
+    std::fs::write(checkout.join("session.txt"), "work\n").unwrap();
+    test_git(&checkout, &["add", "."]);
+    test_git(&checkout, &["commit", "-m", "session work"]);
+    let unpushed_commit = test_git(&checkout, &["rev-parse", "HEAD"]);
+
+    let workspace = crate::database::create_workspace("Clone suspension").unwrap();
+    session.workspace_id = workspace.id.clone();
+    session.state = SessionState::Running;
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_session(&session).unwrap();
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        LATCH_RELAY_SESSION,
+    ))
+    .unwrap();
+
+    let (channels, state) = serve_live_session(&relay_root).await;
+    LiveClone {
+        _source: source,
+        _directory: directory,
+        checkout,
+        worker_root,
+        unpushed_commit,
+        relay_root,
+        channels,
+        state,
+    }
+}
+
+/// R2-3 and R13-5: a suspend of a live clone with unpushed work, sent
+/// without the acknowledgement, is refused by the controller's own check
+/// after its checkpoint, not only by the API's early refusal. The daemon
+/// closes a live session through the route that finishes an interrupted
+/// close, which acknowledged on the caller's behalf. The refused session is
+/// running again, not left `Closing` for the next start to close, with its
+/// relay open and its checkout and target in place, and a suspend that
+/// acknowledges then goes through.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_isolated_live_parent_test(
+        "a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let clone = live_clone_with_an_unpushed_commit().await;
+
+    let refusal = tokio::time::timeout(
+        Duration::from_secs(60),
+        clone
+            .state
+            .suspend_session_with_ack(LATCH_RELAY_SESSION.to_owned(), false),
+    )
+    .await
+    .unwrap()
+    .expect_err("a suspend without the acknowledgement must be refused");
+    assert!(
+        format!("{refusal:#}").contains("acknowledge_unpublished_work"),
+        "the refusal names the acknowledgement: {refusal:#}"
+    );
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running, "{record:?}");
+    assert!(record.target.is_some(), "{record:?}");
+    assert!(!clone.sealed(), "a refused suspend must not seal the relay");
+    assert!(clone.worker_root.is_dir());
+    assert_eq!(
+        crate::controller::test_support::test_git(&clone.checkout, &["rev-parse", "HEAD"]),
+        clone.unpushed_commit
+    );
+
+    // An internal suspend (workspace close, recovery, a sub-agent's
+    // teardown) acknowledges on its own, as a caller with the flag does.
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        clone.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Stopped, "{record:?}");
+    assert!(clone.sealed());
+    clone.channels.shutdown.shutdown().await.unwrap();
+}
+
+/// A suspend whose checkpoint fails leaves the parent's sub-agents running,
+/// and so has nothing to tell the parent or the person (R15-3). The children
+/// stop only once the parent's checkpoint is verified.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_isolated_live_parent_test(
+        "a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
+
+    let failure = tokio::time::timeout(
+        Duration::from_secs(60),
+        parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(failure.is_err());
+
+    let stored = crate::database::load_state().unwrap();
+    let record = &stored.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(record.state, SessionState::Running, "{record:?}");
+    assert!(
+        record
+            .last_checkpoint_error
+            .as_deref()
+            .is_some_and(|error| error.contains("No space left on device")),
+        "the checkpoint's export is what failed: {record:?}"
+    );
+    assert_eq!(stored.sessions[WORKING_CHILD].state, SessionState::Running);
+    assert!(stored.subagents.contains_key(WORKING_CHILD));
+    assert!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!parent.relay_state().contains("<mj-stopped-subagents>"));
+    assert!(!parent.journal().contains("Suspend stopped"));
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+/// A suspend still stops the parent's sub-agents and lists them, once the
+/// parent's checkpoint is verified, and then seals the parent's relay.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    use mj_core::subagent::StoppedSubagent;
+    if !in_isolated_live_parent_test(
+        "a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(
+        !stored.sessions.contains_key(WORKING_CHILD)
+            && !stored.subagents.contains_key(WORKING_CHILD),
+        "the sub-agent is removed, not suspended"
+    );
+    assert_eq!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION).unwrap(),
+        [StoppedSubagent {
+            child_session_id: WORKING_CHILD.into(),
+            title: "Review the docs".into(),
+            task: Some("do the task".into()),
+            handed_back: false,
+        }]
+    );
+    // The parent went through a checkpointed close: its relay was sealed.
+    let sealed = parent.journal().lines().any(|line| {
+        let event: mj_core::relay::RelayEvent = serde_json::from_str(line).unwrap();
+        matches!(
+            event.observation,
+            mj_core::relay::RelayObservation::CommandQueued {
+                command: RelayCommand::Close { .. },
+                ..
+            }
+        )
+    });
+    assert!(sealed, "{}", parent.journal());
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+/// Discarding the changes since a recovery copy stops the parent's
+/// sub-agents the same way a suspend does. It is offered after a failed
+/// suspend, which now leaves them running.
+#[cfg(unix)]
+#[tokio::test]
+async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_isolated_live_parent_test("discarding_changes_since_a_checkpoint_stops_the_sub_agents") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+    let checkpoint = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone()
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        parent
+            .state
+            .discard_since_checkpoint(LATCH_RELAY_SESSION.to_owned(), checkpoint),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(
+        !stored.sessions.contains_key(WORKING_CHILD)
+            && !stored.subagents.contains_key(WORKING_CHILD)
+    );
+    let stopped = crate::database::load_stopped_subagents(LATCH_RELAY_SESSION).unwrap();
+    assert_eq!(
+        stopped
+            .iter()
+            .map(|child| child.child_session_id.as_str())
+            .collect::<Vec<_>>(),
+        [WORKING_CHILD]
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+/// When a suspend fails with sub-agents already stopped and the parent still
+/// live, the parent is told at once: the relay holds the note for its next
+/// prompt and the conversation has the line, instead of both waiting for a
+/// later resume.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stopped() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    if !in_isolated_live_parent_test(
+        "a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stopped",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Missing).await;
+    // What a stop that failed partway leaves behind: a child already gone.
+    crate::database::record_stopped_subagents(
+        LATCH_RELAY_SESSION,
+        &[mj_core::subagent::StoppedSubagent {
+            child_session_id: "44444444444444444444444444444444".into(),
+            title: "Fix the parser".into(),
+            task: Some("Fix the off-by-one in the parser.".into()),
+            handed_back: false,
+        }],
+    )
+    .unwrap();
+
+    let failure = tokio::time::timeout(
+        Duration::from_secs(60),
+        parent.state.suspend_session(LATCH_RELAY_SESSION.to_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(failure.is_err());
+
+    let relay_state = parent.relay_state();
+    assert!(
+        relay_state.contains("<mj-stopped-subagents>") && relay_state.contains("Fix the parser"),
+        "{relay_state}"
+    );
+    assert!(
+        parent
+            .journal()
+            .contains("Suspend stopped 1 sub-agent: \\\"Fix the parser\\\" (had not handed back)."),
+        "{}",
+        parent.journal()
+    );
+    assert!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_empty()
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+/// R15-2: while a parent's suspend stopped a child, the child's row and
+/// header said "Destroying", and the dialog and the docs said "stopped".
+/// The child's own operation is a stop, which surfaces show as "Stopping",
+/// and it cannot be cancelled apart from the suspend that owns it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying() {
+    const NAME: &str = "a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying";
+    const CHILD: &str = "MJ_TEST_SUSPEND_SHOWS_STOPPING";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
         .run();
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Parent suspension").unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut parent = runtime_test_session("parent-suspend", &workspace.id, SessionState::Running);
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    // A parent with nothing to checkpoint yet, so its suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
     parent.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(&parent.id),
+        worker_root: root.path().join(parent_id),
     });
     crate::database::save_session(&parent).unwrap();
-    let mut child = runtime_test_session("child-suspend", &workspace.id, SessionState::Running);
+    let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
     child.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: root.path().join(&child.id),
+        worker_root: root.path().join(WORKING_CHILD),
     });
-    crate::database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id))
-        .unwrap();
+    crate::database::save_subagent_session(
+        &child,
+        &runtime_test_subagent(WORKING_CHILD, parent_id),
+    )
+    .unwrap();
+
     let state = test_runtime_state_loading_the_store();
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            state.suspend_session(parent.id.clone())
-        )
+    // A recovery copy in flight holds the child's stop at its start, where
+    // the operation is already visible.
+    state
+        .recovery_observer
+        .gate
+        .try_start(WORKING_CHILD)
+        .unwrap();
+    let suspend = tokio::spawn({
+        let state = state.clone();
+        async move { state.suspend_session(parent_id.to_owned()).await }
+    });
+    let stopping = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(view) = state
+                .active_lifecycles()
+                .into_iter()
+                .find(|view| view.session_id == WORKING_CHILD)
+            {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    state.recovery_observer.gate.finish(WORKING_CHILD);
+
+    assert_eq!(
+        serde_json::to_value(stopping.kind).unwrap(),
+        "stop_subagent",
+        "{stopping:?}"
+    );
+    assert!(!stopping.cancellable, "{stopping:?}");
+    tokio::time::timeout(Duration::from_secs(60), suspend)
         .await
         .unwrap()
-        .is_err()
-    );
-    let restored = crate::database::load_state().unwrap();
-    assert_eq!(restored.sessions[&parent.id].target, parent.target);
+        .unwrap()
+        .unwrap();
     assert!(
-        restored.sessions[&parent.id]
-            .public_error()
+        !crate::database::load_state()
             .unwrap()
-            .contains(&child.id)
+            .sessions
+            .contains_key(WORKING_CHILD)
     );
+}
+
+/// Run the named test alone, with a store and a SessionWiki index of its own
+/// and an empty home. Returns whether this process is that run.
+#[cfg(unix)]
+fn in_isolated_parked_test(name: &str) -> bool {
+    const PARKED_CHILD: &str = "MJ_TEST_PARKED_SUBAGENT_DAEMON_CHILD";
+    if std::env::var_os(PARKED_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        name,
+    ))
+    .env(PARKED_CHILD, "1")
+    .isolated_store(directory.path())
+    .env(
+        mj_core::config::SESSION_INDEX_ENV,
+        directory.path().join("sessionwiki"),
+    )
+    .env("HOME", &home)
+    .env("XDG_DATA_HOME", home.join(".local/share"))
+    .env("XDG_CONFIG_HOME", home.join(".config"))
+    .run();
+    false
+}
+
+/// A parked child on a bare target under `root`, whose worker root holds a
+/// `hel` that records any attempt to start it in `root/started`.
+#[cfg(unix)]
+fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str) -> SessionRecord {
+    use std::os::unix::fs::PermissionsExt;
+    let worker_root = root.join(child_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let hel = worker_root.join("hel");
+    std::fs::write(
+        &hel,
+        format!(
+            "#!/bin/sh\necho started >> {}\n",
+            root.join("started").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = runtime_test_session(child_id, workspace_id, SessionState::Parked);
+    child.target = Some(mj_core::state::TargetLocator::LocalBare { worker_root });
+    child.session_title_override = Some("Map the parser".into());
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+    child
+}
+
+/// #1161: a parent's suspend ends its parked children the way it ends live
+/// ones, without starting them first, and counts them as handed back, since
+/// a child is parked only after its parent was told its turn ended.
+#[cfg(unix)]
+#[tokio::test]
+async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_warning() {
+    if !in_isolated_parked_test(
+        "suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_warning",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parked children").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "44444444444444444444444444444444";
+    // A parent with nothing to checkpoint yet, so its own suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    // No handback tool and no finished turn on record: only being parked
+    // says this child's parent already has what it will get from it.
+    parked_child(root.path(), child_id, parent_id, &workspace.id);
+    assert!(crate::controller::subagent_has_handed_back(child_id).unwrap());
+    sessionwiki::index::open().unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(parent_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
+    assert!(
+        !stored.sessions.contains_key(child_id) && !stored.subagents.contains_key(child_id),
+        "the parked child is removed with its parent's suspend"
+    );
+    let stopped = crate::database::load_stopped_subagents(parent_id).unwrap();
+    assert_eq!(stopped.len(), 1);
+    assert!(stopped[0].handed_back, "a parked child is not warned about");
+    assert!(
+        !root.path().join("started").exists(),
+        "the parked child's worker was not started"
+    );
+}
+
+/// Closing a parked child ends it as closing an idle one does, so its
+/// parent's `wait` reads "stopped", without starting its worker first.
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
+    if !in_isolated_parked_test("closing_a_parked_sub_agent_stops_it_without_starting_its_worker") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parked close").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "55555555555555555555555555555555";
+    let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    crate::database::save_session(&parent).unwrap();
+    let child = parked_child(root.path(), child_id, parent_id, &workspace.id);
+    let worker_root = match &child.target {
+        Some(mj_core::state::TargetLocator::LocalBare { worker_root }) => worker_root.clone(),
+        _ => unreachable!(),
+    };
+
+    let state = test_runtime_state_loading_the_store();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        state.suspend_session(child_id.to_owned()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let stored = crate::database::load_state().unwrap();
+    let closed = &stored.sessions[child_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(
+        closed.target.is_none(),
+        "the child's private target state is gone"
+    );
+    assert!(
+        stored.subagents.contains_key(child_id),
+        "the relation stays"
+    );
+    assert!(
+        !worker_root.exists(),
+        "only the child's own worker root is removed"
+    );
+    assert!(
+        !root.path().join("started").exists(),
+        "the parked child's worker was not started"
+    );
+    assert_eq!(stored.sessions[parent_id].state, SessionState::Running);
 }

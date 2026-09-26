@@ -151,6 +151,10 @@ impl QuotaManager {
                 self.codex_clients
                     .insert(outcome.report.profile_id.clone(), client);
             }
+            log_quota_change(
+                self.reports.get(&outcome.report.profile_id),
+                &outcome.report,
+            );
             self.reports
                 .insert(outcome.report.profile_id.clone(), outcome.report.clone());
             on_report(outcome).await;
@@ -182,6 +186,32 @@ impl QuotaManager {
         for (_, client) in self.codex_clients.drain() {
             client.shutdown().await;
         }
+    }
+}
+
+/// Log why a profile's quota could not be read, and when it can be read
+/// again.
+///
+/// A failed probe becomes the report's `error`, and the panes show only a
+/// short label for it ("unavailable", "login expired", "rate limited"), so
+/// without this line the reason was recorded nowhere (R12-2). A profile that
+/// keeps failing the same way is logged once, not on every refresh.
+fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
+    let previous_error = previous.and_then(|previous| previous.error.as_deref());
+    match report.error.as_deref() {
+        Some(error) if previous_error != Some(error) => tracing::info!(
+            profile_id = %report.profile_id,
+            harness = report.harness.display_name(),
+            shown_as = report.error_label().unwrap_or_default(),
+            error,
+            "could not read the profile's quota"
+        ),
+        None if previous_error.is_some() => tracing::info!(
+            profile_id = %report.profile_id,
+            harness = report.harness.display_name(),
+            "the profile's quota can be read again"
+        ),
+        _ => {}
     }
 }
 

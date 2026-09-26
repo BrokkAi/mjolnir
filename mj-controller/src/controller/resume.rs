@@ -514,6 +514,24 @@ impl Controller {
         } = restore;
         let archive_manifest = &archive.manifest;
         let canonical_session = &archive.canonical_session;
+        // Sub-agents the suspend stopped: the model hears about them on its
+        // first prompt, and the person in a conversation line. The list is
+        // kept until the relay has the note, so a resume that fails tells
+        // the next one.
+        let stopped_subagents =
+            crate::database::load_stopped_subagents(session_id).unwrap_or_else(|error| {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "could not read the sub-agents this session's suspend stopped"
+                );
+                Vec::new()
+            });
+        let stopped_subagents_context =
+            mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
+        resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
+            &stopped_subagents,
+        ));
         let (backend, worker_root) = self.worker_placement(session_id)?;
         let harness_home = target_profile_home(&backend, session_id, profile);
         let workspace_root = if let Some(project_directory) = &resumed_project_directory {
@@ -690,6 +708,15 @@ impl Controller {
                 start_worker(executor, &backend, &worker_root)?;
                 connect_started_worker(&spec, session_id, executor, &backend, &worker_root).await?
             };
+            // Installed before the harness is ready, so a queued prompt the
+            // restored relay starts on its own cannot claim the hidden
+            // context first. The relay hands it to one prompt only.
+            if let Some(context) = &stopped_subagents_context {
+                relay
+                    .install_prompt_context(context.clone())
+                    .await
+                    .context("tell the resumed session which sub-agents its suspend stopped")?;
+            }
             let native_session_id =
                 wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
             Ok::<_, anyhow::Error>((relay, native_session_id))
@@ -782,7 +809,23 @@ impl Controller {
             }
         }
         self.mark_worker_connected(session_id, Some(native_session_id))?;
-        Ok(relay.sync().await?.materialized)
+        let materialized = relay.sync().await?.materialized;
+        if !stopped_subagents.is_empty() {
+            let delivered = stopped_subagents
+                .iter()
+                .map(|child| child.child_session_id.clone())
+                .collect::<Vec<_>>();
+            // The relay owns the note now. Failing to forget the list only
+            // means a later resume tells the model again.
+            if let Err(error) = crate::database::clear_stopped_subagents(session_id, &delivered) {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "could not clear the stopped sub-agents after telling the resumed session"
+                );
+            }
+        }
+        Ok(materialized)
     }
 }
 

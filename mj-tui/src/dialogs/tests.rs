@@ -131,6 +131,24 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
     assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
 }
 
+/// After a failed launch, the footer still said "Launching demo via codex…"
+/// 40 seconds later, under the Launch failed dialog (launch finding R13-8).
+/// A success replaces that notice with "Session … is ready"; a failure now
+/// replaces it too.
+#[test]
+fn launch_failure_replaces_the_launching_notice() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.set_notice("Launching demo via codex…");
+
+    dashboard.show_launch_failure("Codex is not installed on local host", None);
+
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("The session could not start.")
+    );
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+}
+
 #[test]
 fn launch_failure_scrolls_long_details_and_restores_interrupted_dialog() {
     let mut dashboard = dashboard_with_session(stopped_session());

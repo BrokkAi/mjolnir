@@ -20,6 +20,8 @@ pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
 mod resume;
 mod reviewer;
+mod subagent_park;
+pub use subagent_park::ParkOutcome;
 mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -85,14 +87,16 @@ pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
     checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
 };
-pub use lifecycle::{BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint};
+pub use lifecycle::{
+    BeforeClose, BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint,
+};
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,
 };
 pub use reviewer::reviewer_stager;
-pub use subagents::RegisterSubagentRequest;
+pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     worker_binary_prerequisite_for_arch,

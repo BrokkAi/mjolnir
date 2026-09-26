@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Longest time a sub-agent completion wait may remain pending.
 pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
-/// How long a `wait` call blocks when the caller gives no timeout.
-pub const DEFAULT_WAIT_SECONDS: u64 = 300;
+/// How long a `wait` call blocks when the caller gives no timeout: as long as
+/// the caller's harness allows, since every `wait` call costs the parent a
+/// request carrying its whole context. [`subagent_wait_timeout_for`] caps it at
+/// the harness's own ceiling.
+pub const DEFAULT_WAIT_SECONDS: u64 = MAX_WAIT_SECONDS;
 
 /// The `spawn` model value that means "the model the parent is running now".
 pub const CURRENT_MODEL: &str = "current";
@@ -110,7 +113,7 @@ pub fn still_running_payload(
         "status": WAIT_STATUS_STILL_RUNNING,
         "waited_seconds": waited_seconds,
         "agents": agents,
-        "next_action": next_action(false, child_session_ids.len(), child_session_ids.len()),
+        "next_action": next_action(child_session_ids, child_session_ids),
     });
     if let Some(note) = note
         && let Some(object) = payload.as_object_mut()
@@ -123,14 +126,30 @@ pub fn still_running_payload(
 /// The one sentence that tells the model what to do with this answer. It is
 /// part of the answer rather than of the tool description because a model
 /// reads the answer it just got far more reliably than a schema it read once.
-pub fn next_action(complete: bool, unfinished: usize, total: usize) -> String {
-    if complete {
+///
+/// `unfinished` names the children still running out of the `total` asked
+/// about. When some finished, the sentence names the ones left to wait for, so
+/// a parent does not collect the finished children's reports again.
+pub fn next_action(total: &[String], unfinished: &[String]) -> String {
+    if unfinished.is_empty() {
         return "All children finished. Their reports are in each agent's output field.".to_owned();
     }
+    if unfinished.len() == total.len() {
+        return format!(
+            "{} of {} child sessions are still running; this is not a failure. \
+             Call wait again with the same child_session_ids to keep waiting, \
+             or do other work first and call wait later.",
+            unfinished.len(),
+            total.len()
+        );
+    }
     format!(
-        "{unfinished} of {total} child sessions are still running; this is not a failure. \
-         Call wait again with the same child_session_ids to keep waiting, \
-         or do other work first and call wait later."
+        "{} of {} child sessions finished; their reports are in output. The others are still \
+         running, which is not a failure. Call wait with the remaining child_session_ids to \
+         keep waiting: {}.",
+        total.len() - unfinished.len(),
+        total.len(),
+        unfinished.join(", ")
     )
 }
 
@@ -199,6 +218,10 @@ pub enum SubagentToolAction {
         child_session_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
+        /// Left off the wire when it is the default, so a wait for every
+        /// child reads exactly as it did before the field existed.
+        #[serde(default, skip_serializing_if = "ReturnWhen::is_all")]
+        return_when: ReturnWhen,
     },
     InterruptAgent {
         child_session_id: String,
@@ -211,6 +234,33 @@ pub enum SubagentToolAction {
     Handback {
         message: String,
     },
+}
+
+/// When a `wait` answers before its timeout: once every named child finished,
+/// or once any one of them did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnWhen {
+    #[default]
+    All,
+    Any,
+}
+
+impl ReturnWhen {
+    #[must_use]
+    pub fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+
+    /// Whether a wait with this rule is answered, given which children
+    /// finished. A wait naming no children has nothing to wait for.
+    #[must_use]
+    pub fn satisfied(self, finished: &[bool]) -> bool {
+        match self {
+            Self::All => finished.iter().all(|done| *done),
+            Self::Any => finished.is_empty() || finished.iter().any(|done| *done),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +329,10 @@ impl SubagentRecord {
     }
 }
 
+/// The name a worker's sub-agent MCP server is registered under in every
+/// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
+pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
+
 /// Which tools a worker's `mj-agents` MCP server offers. A parent delegates;
 /// a child only hands its report back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +349,24 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => "parent",
             Self::Child => "child",
+        }
+    }
+
+    /// The tools this role's server lists, in the order it lists them. A
+    /// harness that asks before an MCP tool is allowed exactly these.
+    #[must_use]
+    pub fn tool_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Parent => &[
+                "list_profiles",
+                "spawn",
+                "list_agents",
+                "send_input",
+                "wait",
+                "interrupt",
+                "close",
+            ],
+            Self::Child => &["handback"],
         }
     }
 }
@@ -326,18 +398,60 @@ pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
 /// shows it.
 pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your report has not been delivered. Call the mj-agents handback tool now with your full report, then stop.";
 
+/// What a child's report must contain and what it must leave to files. Shared
+/// by the first-prompt note, the child's server instructions and the handback
+/// tool description, so the three cannot drift apart.
+pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Hand back a question and stop when the fix needs a design choice, touches a file you were not given, changes a persisted identity, a public contract or an epoch, or the failure also occurs on the base commit.";
+
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
-/// showed children skipping it.
-pub const HANDBACK_PROMPT_NOTE: &str = "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your full report: the session that started you reads only that report, not the rest of this conversation.";
+/// showed children skipping it. `report_dir` is the directory Mjolnir created
+/// for this child's files.
+#[must_use]
+pub fn handback_prompt_note(report_dir: &str) -> String {
+    format!(
+        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {HANDBACK_REPORT_RULES}"
+    )
+}
 
 /// How long a sent reminder may be neither queued, running nor finished before
 /// the child's report stops waiting for it. Someone removed it from the queue,
 /// or it never reached the child; either way it is not coming.
 pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 
-/// The longest report a child can hand back: the same limit as a prompt.
-pub const MAX_HANDBACK_CHARS: usize = 65_536;
+/// The longest report a child can hand back, and the longest output a `wait`
+/// shows for any child. Details belong in files in the child's report
+/// directory; the parent reads this on every later request it makes.
+pub const MAX_HANDBACK_CHARS: usize = 4_000;
+
+/// Directory under a parent's workspace root that holds its children's report
+/// directories, outside every repository.
+pub const REPORT_ROOT_DIR: &str = ".mj-agents";
+
+/// For a session whose workspace root is not Mjolnir's (a bare project), the
+/// report root sits inside the project, under a path its `info/exclude` lists.
+pub const PROJECT_REPORT_ROOT_DIR: &str = ".mj/agents";
+
+/// Archive prefix for the report files a checkpoint carries.
+pub const ARCHIVE_REPORT_DIR: &str = "mj-agent-reports";
+
+/// Cut `text` to [`MAX_HANDBACK_CHARS`] characters, saying how much was left
+/// out and how the parent can get it. Returns the text and whether it was cut.
+#[must_use]
+pub fn bounded_report(text: &str) -> (String, bool) {
+    let total = text.chars().count();
+    if total <= MAX_HANDBACK_CHARS {
+        return (text.to_owned(), false);
+    }
+    let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
+    (
+        format!(
+            "{kept}\n[truncated: {} more characters; use send_input to ask the child to write the details to files in its report directory and send you the paths]",
+            total - MAX_HANDBACK_CHARS
+        ),
+        true,
+    )
+}
 
 /// Whether a command id names a handback reminder.
 #[must_use]
@@ -377,6 +491,10 @@ pub struct SubagentReport {
     /// The child has not answered it until a finished turn reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaited_ordinal: Option<u64>,
+    /// The absolute directory on the parent's target where this child writes
+    /// the details its report points to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_dir: Option<String>,
 }
 
 /// Whether the parent's newest prompt has yet to be answered: no finished
@@ -430,6 +548,33 @@ pub fn failed_turn(
         })
         .unwrap_or(fallback);
     Some((state, reason))
+}
+
+/// Whether a child's last finished turn failed because the provider refused
+/// its profile's login: the turn's diagnostic says so (an error kind such as
+/// Codex's `unauthorized`, or an auth failure sentence), or the turn failed
+/// with such a sentence as its reason. A usage limit is never one.
+///
+/// Only the recorded failure is read, never the child's own messages: a child
+/// may well be writing about authentication errors.
+#[must_use]
+pub fn turn_failed_on_login(turn: &crate::state::MaterializedTurnOutcome) -> bool {
+    if turn
+        .diagnostic
+        .as_ref()
+        .is_some_and(crate::credentials::turn_diagnostic_reports_auth_failure)
+    {
+        return true;
+    }
+    failed_turn(turn, None).is_some_and(|(state, reason)| {
+        state == "failed" && crate::credentials::text_reports_auth_failure(&reason)
+    })
+}
+
+/// What a parent is told about a profile whose login the provider refused.
+#[must_use]
+pub fn login_invalid_reason(profile_id: &str) -> String {
+    format!("the login is no longer valid; run `mj login --profile {profile_id}` and spawn again")
 }
 
 /// Where a child's report stands after its last finished turn.
@@ -494,6 +639,241 @@ pub fn report_state(
             ReportState::Pending { remind: false }
         }
         Some(_) => ReportState::Fallback,
+    }
+}
+
+/// A sub-agent that Mjolnir stopped when its parent was suspended. The
+/// parent's record keeps one of these per child until the parent's model has
+/// been told, on the first prompt after the parent resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedSubagent {
+    pub child_session_id: String,
+    /// The child's listed title when it was stopped.
+    pub title: String,
+    /// One line of the task the parent gave it, when the spawn recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Whether the child had handed back its report for the parent's newest
+    /// task; see [`has_handed_back`].
+    pub handed_back: bool,
+}
+
+/// Longest task line a [`StoppedSubagent`] keeps, in characters.
+pub const STOPPED_TASK_CHARS: usize = 160;
+
+/// How [`handback_prompt_note`] begins, whatever directory it names.
+const HANDBACK_NOTE_OPENING: &str = "You are a Mjolnir sub-agent. ";
+
+/// One line of the task a parent gave a child, from the child's first prompt:
+/// the parent's instructions without the handback note Mjolnir puts before
+/// them, and without the context and file ranges the parent attached after
+/// them. `report_dir` is the directory that note names, when one was recorded.
+#[must_use]
+pub fn task_summary(initial_prompt: &str, report_dir: Option<&str>) -> Option<String> {
+    let mut task = initial_prompt;
+    if let Some(rest) = report_dir.and_then(|directory| {
+        task.strip_prefix(handback_prompt_note(directory).as_str())
+            .and_then(|rest| rest.strip_prefix("\n\n"))
+    }) {
+        task = rest;
+    } else if task.starts_with(HANDBACK_NOTE_OPENING)
+        && let Some((_, rest)) = task.split_once("\n\n")
+    {
+        task = rest;
+    }
+    for attachment in ["\n\n<parent_context>", "\n\n--- source "] {
+        if let Some((instructions, _)) = task.split_once(attachment) {
+            task = instructions;
+        }
+    }
+    let line = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= STOPPED_TASK_CHARS {
+        return Some(line);
+    }
+    let kept: String = line.chars().take(STOPPED_TASK_CHARS - 1).collect();
+    Some(format!("{}…", kept.trim_end()))
+}
+
+/// The tag of the hidden block that tells a resumed parent's model which
+/// sub-agents its suspend stopped. It is a reserved `mj-` block, so
+/// [`crate::relay::strip_hidden_prompt_context`] removes it wherever a harness
+/// copied the prompt into text a person sees.
+pub const STOPPED_SUBAGENTS_TAG: &str = "mj-stopped-subagents";
+
+/// The hidden context the first prompt after a parent resumes carries when
+/// its suspend stopped sub-agents: one line per child, then what the model
+/// should do about them. `None` when nothing was stopped.
+#[must_use]
+pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let total = stopped.len();
+    let not_handed_back = stopped.iter().filter(|child| !child.handed_back).count();
+    let mut lines = vec![
+        format!("<{STOPPED_SUBAGENTS_TAG}>"),
+        format!(
+            "Mjolnir stopped {} when this session was suspended:",
+            crate::text::counted(total, "sub-agent", "sub-agents")
+        ),
+    ];
+    for child in stopped {
+        let task = child
+            .task
+            .as_deref()
+            .map(|task| format!(", task: {task}"))
+            .unwrap_or_default();
+        let handed_back = if child.handed_back {
+            "had handed back"
+        } else {
+            "had not handed back"
+        };
+        lines.push(format!(
+            "- \"{}\" (child_session_id {}){task}; {handed_back}",
+            child.title, child.child_session_id
+        ));
+    }
+    lines.push(
+        match (total, not_handed_back) {
+            (1, 1) => "Its work was not handed back; spawn it again if you still need it.",
+            (1, _) => "It had handed back its report before it was stopped.",
+            (_, 0) => "Each had handed back its report before it was stopped.",
+            (total, count) if total == count => {
+                "Their work was not handed back; spawn them again if you still need it."
+            }
+            _ => {
+                "The work of those that had not handed back was lost; spawn them again if you still need it."
+            }
+        }
+        .to_owned(),
+    );
+    lines.push(
+        "A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it."
+            .to_owned(),
+    );
+    lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
+    Some(lines.join("\n"))
+}
+
+/// The conversation line a person sees when a parent whose suspend stopped
+/// sub-agents resumes. `None` when nothing was stopped.
+#[must_use]
+pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
+    if stopped.is_empty() {
+        return None;
+    }
+    let children = stopped
+        .iter()
+        .map(|child| {
+            format!(
+                "\"{}\" ({})",
+                child.title,
+                if child.handed_back {
+                    "had handed back"
+                } else {
+                    "had not handed back"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Suspend stopped {}: {children}.",
+        crate::text::counted(stopped.len(), "sub-agent", "sub-agents")
+    ))
+}
+
+/// What a person is told before a suspend stops sub-agents that have not
+/// handed back their reports. `None` when every child had handed back: those
+/// are stopped without a word, since their reports already reached the parent.
+#[must_use]
+pub fn suspend_warning(not_handed_back: usize) -> Option<String> {
+    match not_handed_back {
+        0 => None,
+        1 => Some("1 sub-agent has not handed back; suspending stops it".to_owned()),
+        count => Some(format!(
+            "{count} sub-agents have not handed back; suspending stops them"
+        )),
+    }
+}
+
+/// The same warning naming the children by their listed titles, for a
+/// person choosing whether to suspend: up to three by name, then how many
+/// more. The API keeps [`suspend_warning`]'s count.
+#[must_use]
+pub fn suspend_warning_naming(titles: &[String]) -> Option<String> {
+    match titles.len() {
+        0 => None,
+        1 => Some(format!(
+            "Sub-agent {} has not handed back; suspending stops it",
+            quoted_titles(titles)
+        )),
+        _ => Some(format!(
+            "Sub-agents {} have not handed back; suspending stops them",
+            quoted_titles(titles)
+        )),
+    }
+}
+
+/// Titles in quotes, in a sentence: `"a"`, `"a" and "b"`, `"a", "b" and
+/// "c"`. Past three, the rest are counted: `"a", "b", "c" and 2 more`.
+#[must_use]
+pub fn quoted_titles(titles: &[String]) -> String {
+    const NAMED: usize = 3;
+    let mut named = titles
+        .iter()
+        .take(NAMED)
+        .map(|title| format!("\"{title}\""))
+        .collect::<Vec<_>>();
+    let last = if titles.len() > NAMED {
+        format!("{} more", titles.len() - NAMED)
+    } else {
+        match named.pop() {
+            Some(last) => last,
+            None => return String::new(),
+        }
+    };
+    if named.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", named.join(", "))
+    }
+}
+
+/// Whether a child had handed back its report for the parent's newest task:
+/// it is not working, a finished turn answers the parent's newest prompt, and
+/// that answer is final. The answer is the report the child handed back, or,
+/// for a child without the tool or one that ignored its reminder, the last
+/// message of a turn that finished normally. A turn that failed, was
+/// interrupted or stopped to ask a question has not handed anything back.
+///
+/// `working` says the child has a turn running or its execution is not idle.
+#[must_use]
+pub fn has_handed_back(
+    handback_tool: bool,
+    report: &SubagentReport,
+    working: bool,
+    last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    now_ms: i64,
+) -> bool {
+    let Some(turn) = last_turn else {
+        return false;
+    };
+    if working || awaiting_prompt(report.awaited_ordinal, Some(turn)) {
+        return false;
+    }
+    match report_state(handback_tool, report, Some(turn), &[], now_ms) {
+        ReportState::Delivered(_) => true,
+        ReportState::Pending { .. } => false,
+        ReportState::Fallback => matches!(
+            &turn.outcome,
+            crate::state::TurnOutcomeKind::Completed { stop_reason }
+                if crate::state::classify_prompt_completion(stop_reason)
+                    == crate::state::PromptCompletion::Finished
+        ),
     }
 }
 
@@ -695,6 +1075,56 @@ mod tests {
         );
     }
 
+    /// #1160: a child whose profile could not sign in died on its first
+    /// request, and its parent read the error as the child's report. The
+    /// turns below are the shapes that failure takes.
+    #[test]
+    fn a_turn_the_provider_refused_for_its_login_is_a_login_failure() {
+        let diagnostic = |message: &str, code: Option<&str>| crate::diagnostic::TurnDiagnostic {
+            message: message.into(),
+            code: code.map(str::to_owned),
+            http_status: None,
+            reset_at: None,
+        };
+        let failed_with = |message: &str, code: Option<&str>| {
+            let mut turn = finished("t", "error");
+            turn.diagnostic = Some(diagnostic(message, code));
+            turn
+        };
+        // Codex could not refresh its ChatGPT login (R14-1).
+        assert!(turn_failed_on_login(&failed_with(
+            "Your access token could not be refreshed. Please log out and sign in again.",
+            Some("unauthorized"),
+        )));
+        // Codex sent an API key the backend rejected.
+        assert!(turn_failed_on_login(&failed_with(
+            "unexpected status 401 Unauthorized: Incorrect API key provided: sk-svca****fvMA.",
+            Some("-32603"),
+        )));
+        // The error kind alone is enough.
+        assert!(turn_failed_on_login(&failed_with(
+            "Your session ended.",
+            Some("unauthorized")
+        )));
+
+        // A usage limit, another failure, and a turn that finished are not.
+        assert!(!turn_failed_on_login(&failed_with(
+            "You've hit your usage limit.",
+            Some("usageLimitExceeded"),
+        )));
+        assert!(!turn_failed_on_login(&failed_with(
+            "stream disconnected before completion",
+            Some("responseStreamDisconnected"),
+        )));
+        assert!(!turn_failed_on_login(&finished("t", "end_turn")));
+        assert!(!turn_failed_on_login(&finished("t", "cancelled")));
+
+        assert_eq!(
+            login_invalid_reason("codex4"),
+            "the login is no longer valid; run `mj login --profile codex4` and spawn again"
+        );
+    }
+
     #[test]
     fn only_the_reminder_prefix_names_a_reminder() {
         assert!(is_handback_reminder("handback-reminder-0a1b"));
@@ -799,6 +1229,112 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_without_a_timeout_waits_as_long_as_the_harness_allows() {
+        use crate::config::HarnessKind;
+        use std::time::Duration;
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Claude), None),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+        assert_eq!(
+            subagent_wait_timeout_for(None, None),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Codex), None),
+            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn a_wait_for_every_child_is_unchanged_on_the_wire() {
+        let all = SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["c1".into()],
+            timeout_seconds: Some(5),
+            return_when: ReturnWhen::All,
+        };
+        let encoded = serde_json::to_value(&all).unwrap();
+        assert!(encoded["params"].get("return_when").is_none(), "{encoded}");
+        // A request written before the field existed reads as a wait for all.
+        let old: SubagentToolAction = serde_json::from_str(
+            r#"{"action":"wait_agents","params":{"child_session_ids":["c1"],"timeout_seconds":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(old, all);
+        let any = SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["c1".into()],
+            timeout_seconds: None,
+            return_when: ReturnWhen::Any,
+        };
+        let encoded = serde_json::to_value(&any).unwrap();
+        assert_eq!(encoded["params"]["return_when"], "any");
+        assert_eq!(
+            serde_json::from_value::<SubagentToolAction>(encoded).unwrap(),
+            any
+        );
+    }
+
+    #[test]
+    fn return_when_decides_whether_a_wait_is_answered() {
+        assert!(ReturnWhen::All.satisfied(&[true, true]));
+        assert!(!ReturnWhen::All.satisfied(&[true, false]));
+        assert!(ReturnWhen::Any.satisfied(&[false, true]));
+        assert!(!ReturnWhen::Any.satisfied(&[false, false]));
+    }
+
+    #[test]
+    fn next_action_names_only_the_children_left_to_wait_for() {
+        let ids = |names: &[&str]| names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
+        let total = ids(&["c1", "c2", "c3"]);
+        assert!(next_action(&total, &[]).starts_with("All children finished"));
+        let none = next_action(&total, &total);
+        assert!(none.contains("Call wait again with the same"), "{none}");
+        let some = next_action(&total, &ids(&["c3"]));
+        assert!(
+            some.contains("2 of 3") && some.contains("c3") && !some.contains("c1"),
+            "{some}"
+        );
+    }
+
+    #[test]
+    fn a_long_report_is_cut_on_a_character_boundary_and_says_how_to_get_the_rest() {
+        let short = "done".to_owned();
+        assert_eq!(bounded_report(&short), (short.clone(), false));
+        let exact = "é".repeat(MAX_HANDBACK_CHARS);
+        assert_eq!(bounded_report(&exact), (exact.clone(), false));
+        let long = "é".repeat(MAX_HANDBACK_CHARS + 25);
+        let (cut, truncated) = bounded_report(&long);
+        assert!(truncated);
+        assert!(cut.starts_with(&exact));
+        assert!(cut.contains("[truncated: 25 more characters"), "{cut}");
+        assert!(cut.contains("send_input"), "{cut}");
+    }
+
+    #[test]
+    fn the_report_rules_state_the_enforced_cap_and_the_test_failure_fields() {
+        let cap = format!(
+            "{},{:03}",
+            MAX_HANDBACK_CHARS / 1000,
+            MAX_HANDBACK_CHARS % 1000
+        );
+        assert!(
+            HANDBACK_REPORT_RULES.contains(&cap),
+            "{HANDBACK_REPORT_RULES}"
+        );
+        for needed in [
+            "name",
+            "one-line reason",
+            "path of its log",
+            "report directory",
+        ] {
+            assert!(HANDBACK_REPORT_RULES.contains(needed), "{needed}");
+        }
+        let note = handback_prompt_note("/workspace/p/.mj-agents/c1");
+        assert!(note.contains("/workspace/p/.mj-agents/c1"), "{note}");
+        assert!(note.contains(HANDBACK_REPORT_RULES));
+    }
+
+    #[test]
     fn the_still_running_answer_names_the_children_and_tells_the_model_to_ask_again() {
         let payload = still_running_payload(
             &["child-1".to_owned(), "child-2".to_owned()],
@@ -815,5 +1351,202 @@ mod tests {
             next.contains("Call wait again") && next.contains("not a failure"),
             "{next}"
         );
+    }
+
+    #[test]
+    fn a_task_summary_is_one_line_of_the_parents_own_instructions() {
+        let report_dir = "/workspace/p/.mj-agents/c1";
+        let prompt = format!(
+            "{}\n\nFix the parser.\nKeep the tests green.\n\n<parent_context>\nprivate\n</parent_context>\n\n--- source \"a.rs\", lines 1-2 (one-based, inclusive) ---\nfn a() {{}}",
+            handback_prompt_note(report_dir)
+        );
+        assert_eq!(
+            task_summary(&prompt, Some(report_dir)).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        // Without the recorded directory the note is still recognised.
+        assert_eq!(
+            task_summary(&prompt, None).as_deref(),
+            Some("Fix the parser. Keep the tests green.")
+        );
+        // A child without the tool has no note before its instructions.
+        assert_eq!(
+            task_summary("Review the docs.", None).as_deref(),
+            Some("Review the docs.")
+        );
+        assert_eq!(task_summary("  \n ", None), None);
+        let long = "word ".repeat(100);
+        let cut = task_summary(&long, None).unwrap();
+        assert_eq!(cut.chars().count(), STOPPED_TASK_CHARS);
+        assert!(cut.ends_with("word…"), "{cut}");
+    }
+
+    fn stopped(title: &str, task: Option<&str>, handed_back: bool) -> StoppedSubagent {
+        StoppedSubagent {
+            child_session_id: format!("id-{title}"),
+            title: title.into(),
+            task: task.map(str::to_owned),
+            handed_back,
+        }
+    }
+
+    #[test]
+    fn the_resume_note_names_each_stopped_child_and_what_to_do_about_it() {
+        assert_eq!(stopped_subagents_prompt_context(&[]), None);
+        assert_eq!(stopped_subagents_notice(&[]), None);
+
+        let lost = [
+            stopped("Fix the parser", Some("Fix the off-by-one."), false),
+            stopped("Review the docs", None, false),
+        ];
+        assert_eq!(
+            stopped_subagents_prompt_context(&lost).unwrap(),
+            "<mj-stopped-subagents>\n\
+             Mjolnir stopped 2 sub-agents when this session was suspended:\n\
+             - \"Fix the parser\" (child_session_id id-Fix the parser), task: Fix the off-by-one.; had not handed back\n\
+             - \"Review the docs\" (child_session_id id-Review the docs); had not handed back\n\
+             Their work was not handed back; spawn them again if you still need it.\n\
+             A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it.\n\
+             </mj-stopped-subagents>"
+        );
+        assert_eq!(
+            stopped_subagents_notice(&lost).unwrap(),
+            "Suspend stopped 2 sub-agents: \"Fix the parser\" (had not handed back), \
+             \"Review the docs\" (had not handed back)."
+        );
+
+        let one = stopped_subagents_prompt_context(&lost[..1]).unwrap();
+        assert!(
+            one.contains("Mjolnir stopped 1 sub-agent when")
+                && one.contains("Its work was not handed back; spawn it again"),
+            "{one}"
+        );
+        let mixed = [lost[0].clone(), stopped("Done", None, true)];
+        let note = stopped_subagents_prompt_context(&mixed).unwrap();
+        assert!(note.contains("\"Done\" (child_session_id id-Done); had handed back"));
+        assert!(note.contains("The work of those that had not handed back was lost"));
+        let finished = stopped_subagents_prompt_context(&mixed[1..]).unwrap();
+        assert!(
+            finished.contains("It had handed back its report"),
+            "{finished}"
+        );
+        // A reserved block, so it never shows in a harness's own copy of the prompt.
+        assert_eq!(
+            crate::relay::strip_hidden_prompt_context(&format!("{note}\nuser text")),
+            "user text"
+        );
+    }
+
+    #[test]
+    fn the_suspend_confirmation_names_up_to_three_children_and_counts_the_rest() {
+        let titles = |count: usize| {
+            ["Alpha", "Bravo", "Charlie", "Delta", "Echo"][..count]
+                .iter()
+                .map(|title| (*title).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(suspend_warning_naming(&titles(0)), None);
+        assert_eq!(
+            suspend_warning_naming(&titles(1)).as_deref(),
+            Some("Sub-agent \"Alpha\" has not handed back; suspending stops it")
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(2)).as_deref(),
+            Some("Sub-agents \"Alpha\" and \"Bravo\" have not handed back; suspending stops them")
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(3)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\" and \"Charlie\" have not handed back; \
+                 suspending stops them"
+            )
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(4)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 1 more have not handed \
+                 back; suspending stops them"
+            )
+        );
+        assert_eq!(
+            suspend_warning_naming(&titles(5)).as_deref(),
+            Some(
+                "Sub-agents \"Alpha\", \"Bravo\", \"Charlie\" and 2 more have not handed \
+                 back; suspending stops them"
+            )
+        );
+    }
+
+    #[test]
+    fn the_suspend_warning_counts_only_children_that_have_not_handed_back() {
+        assert_eq!(suspend_warning(0), None);
+        assert_eq!(
+            suspend_warning(1).as_deref(),
+            Some("1 sub-agent has not handed back; suspending stops it")
+        );
+        assert_eq!(
+            suspend_warning(3).as_deref(),
+            Some("3 sub-agents have not handed back; suspending stops them")
+        );
+    }
+
+    #[test]
+    fn a_child_has_handed_back_only_when_its_final_report_answers_the_newest_prompt() {
+        let task = finished("task", "end_turn");
+        let delivered = SubagentReport {
+            handback: handback("task"),
+            ..SubagentReport::default()
+        };
+        assert!(has_handed_back(true, &delivered, false, Some(&task), 0));
+        // Still working, never finished a turn, or given a newer prompt.
+        assert!(!has_handed_back(true, &delivered, true, Some(&task), 0));
+        assert!(!has_handed_back(true, &delivered, false, None, 0));
+        let newer = SubagentReport {
+            awaited_ordinal: Some(9),
+            ..delivered.clone()
+        };
+        assert!(!has_handed_back(true, &newer, false, Some(&task), 0));
+        // Owes a report and has not been reminded, or was reminded just now.
+        assert!(!has_handed_back(
+            true,
+            &SubagentReport::default(),
+            false,
+            Some(&task),
+            0
+        ));
+        let reminded = SubagentReport {
+            reminder: reminder("task"),
+            ..SubagentReport::default()
+        };
+        assert!(!has_handed_back(true, &reminded, false, Some(&task), 1_000));
+        // Its last message is the report once the reminder went unanswered,
+        // and always for a child without the tool.
+        assert!(has_handed_back(
+            true,
+            &reminded,
+            false,
+            Some(&task),
+            1_000 + HANDBACK_REMINDER_GRACE_MS
+        ));
+        assert!(has_handed_back(
+            false,
+            &SubagentReport::default(),
+            false,
+            Some(&task),
+            0
+        ));
+        // A turn that failed or asked a question handed nothing back.
+        for stop_reason in ["cancelled", "awaiting_input", "refusal"] {
+            assert!(
+                !has_handed_back(
+                    false,
+                    &SubagentReport::default(),
+                    false,
+                    Some(&finished("task", stop_reason)),
+                    0
+                ),
+                "{stop_reason}"
+            );
+        }
     }
 }

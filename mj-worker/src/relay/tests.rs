@@ -879,6 +879,85 @@ fn codex_wrapping_of_hidden_context_is_removed_from_harness_visible_text() {
     }
 }
 
+fn stopped_subagents_note() -> String {
+    mj_core::subagent::stopped_subagents_prompt_context(&[
+        mj_core::subagent::StoppedSubagent {
+            child_session_id: "11111111111111111111111111111111".into(),
+            title: "Fix the parser".into(),
+            task: Some("Fix the off-by-one in the parser.".into()),
+            handed_back: false,
+        },
+        mj_core::subagent::StoppedSubagent {
+            child_session_id: "22222222222222222222222222222222".into(),
+            title: "Review the docs".into(),
+            task: None,
+            handed_back: true,
+        },
+    ])
+    .expect("two stopped sub-agents make a note")
+}
+
+/// The note about the sub-agents a suspend stopped goes to the first prompt
+/// after the resume, and to no later one, even across a worker restart.
+#[test]
+fn a_stopped_sub_agents_note_reaches_only_the_first_prompt_after_a_resume() {
+    let temp = tempfile::tempdir().unwrap();
+    let note = stopped_subagents_note();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay.install_prompt_context(note.clone()).unwrap();
+
+    submit_relay(&mut relay, "first-prompt", prompt("carry on"));
+    let first = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        first[0].hidden_prompt_context.as_deref(),
+        Some(note.as_str())
+    );
+    assert_eq!(first[0].command, prompt("carry on"));
+    relay
+        .record_command_completed(
+            "first-prompt",
+            RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    submit_relay(&mut relay, "second-prompt", prompt("and again"));
+    let second = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(second[0].hidden_prompt_context, None);
+}
+
+/// A harness copies the hidden context into text a person sees: the start of
+/// the prompt in its own history, and the title it takes from that history.
+/// The note is removed there like project memory, whether it came as a text
+/// block or in codex-acp's wrapping of the `mj://prompt-context` resource.
+#[test]
+fn a_stopped_sub_agents_note_is_removed_from_harness_visible_text() {
+    use mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI as URI;
+
+    let note = stopped_subagents_note();
+    assert!(note.contains("Mjolnir stopped 2 sub-agents when this session was suspended:"));
+    let memory = "<mj-project-memory>\nprivate memory\n</mj-project-memory>";
+    for context in [note.clone(), format!("{memory}\n\n{note}")] {
+        let text_block = format!("{context}\nfirst prompt");
+        assert_eq!(strip_hidden_prompt_context(&text_block), "first prompt");
+        let codex_history =
+            format!("{URI}\n<context ref=\"{URI}\">\n{context}\n</context>\nfirst prompt");
+        assert_eq!(strip_hidden_prompt_context(&codex_history), "first prompt");
+        let title = codex_history
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(strip_hidden_prompt_context(&title), "first prompt");
+    }
+    // A note cut off part way is hidden, not shown.
+    assert_eq!(strip_hidden_prompt_context(&note[..note.len() / 2]), "");
+}
+
 #[test]
 fn acp_activity_clock_is_shared_with_operational_status_but_not_persisted() {
     let temp = tempfile::tempdir().unwrap();

@@ -413,6 +413,80 @@ fn auth_failure_phrases_match_and_near_misses_do_not() {
     ));
 }
 
+/// R14-1: when its refresh token is rejected, Codex fails the prompt with
+/// this error (reverify-14 cli/011, cli/013). Neither its sentence nor its
+/// `codexErrorInfo` counted as an auth failure, so no credential
+/// reconciliation ran and no `mj login` notice appeared.
+#[test]
+fn a_codex_refresh_failure_is_an_auth_failure() {
+    const SENTENCE: &str =
+        "Your access token could not be refreshed. Please log out and sign in again.";
+    let event = |observation| RelayEvent {
+        format: crate::relay::RELAY_EVENT_FORMAT_V1,
+        ordinal: 1,
+        previous_digest: crate::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        digest: "a".repeat(64),
+        recorded_at_ms: 1,
+        command_id: None,
+        observation,
+    };
+    let failed_turn = |data: serde_json::Value| {
+        let error = agent_client_protocol::Error::internal_error().data(data);
+        event(RelayObservation::CommandCompleted {
+            command_id: "prompt-1".into(),
+            outcome: crate::relay::RelayCommandOutcome::Prompt {
+                stop_reason: "error".into(),
+                diagnostic: Some(crate::diagnostic::TurnDiagnostic::from_acp(&error)),
+                usage: None,
+            },
+        })
+    };
+
+    assert!(auth_failure_signature(HarnessKind::Codex, SENTENCE));
+    // The turn that failed this way reports it, whether or not a warning
+    // repeats the sentence.
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": SENTENCE,
+            "codexErrorInfo": "unauthorized"
+        }))),
+        Some(CredentialSyncReason::AuthenticationFailure)
+    );
+    // The error kind alone is enough when Codex words the sentence
+    // differently.
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": "Your session ended.",
+            "codexErrorInfo": "unauthorized"
+        }))),
+        Some(CredentialSyncReason::AuthenticationFailure)
+    );
+
+    // Near misses: agent prose about an HTTP 401, another thing that could
+    // not be refreshed, and a turn that failed for another reason.
+    assert!(!auth_failure_signature(
+        HarnessKind::Codex,
+        "The endpoint returns 401 Unauthorized until the header is set."
+    ));
+    assert!(!auth_failure_signature(
+        HarnessKind::Codex,
+        "The page could not be refreshed."
+    ));
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "codexErrorInfo": "responseStreamDisconnected"
+        }))),
+        None
+    );
+    assert_eq!(
+        relay_event_credential_sync_reason(&failed_turn(serde_json::json!({
+            "message": "You’ve hit your usage limit.",
+            "codexErrorInfo": "usageLimitExceeded"
+        }))),
+        None
+    );
+}
+
 #[test]
 fn only_harness_observations_request_credential_sync() {
     use agent_client_protocol::schema::v1::{
@@ -707,4 +781,166 @@ fn github_token_install_and_remove_refuse_symlink_destinations() {
     assert!(write_github_token(&path, b"controller-token").is_err());
     assert!(remove_github_token(&path).is_err());
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
+}
+
+/// #1160: after the first child of a profile failed to sign in, ten more
+/// children were spawned on it and died the same way. A sync that answers an
+/// auth failure with nothing fresher to push shows the profile's own login is
+/// the one refused, and it stays refused until the login file changes.
+#[test]
+fn a_refused_login_is_known_until_the_login_file_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = harness_authentication_marker(HarnessKind::Codex, home.path());
+    std::fs::write(&marker, codex_credentials("2026-09-25T20:00:00.000Z")).unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {
+        CredentialSyncResult {
+            profile_id: "codex4".into(),
+            trigger: Some(CredentialSyncCause {
+                session_id: "child-1".into(),
+                reason,
+            }),
+            failure: failure.map(str::to_owned),
+            outcomes,
+        }
+    };
+    let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {
+        vec![CredentialSyncOutcome {
+            session_id: "child-1".into(),
+            outcome,
+        }]
+    };
+    let pushed = || reached(Ok(vec![CredentialSyncAction::Pushed]));
+    // The session was reconciled, and its copy already matched the profile's.
+    let nothing_pushed = || reached(Ok(vec![CredentialSyncAction::SkillsPushed]));
+
+    let mut rejected = RejectedLogins::default();
+    // A fresher login was pushed to the session: the profile's own is fine.
+    rejected.observe(
+        &result(CredentialSyncReason::AuthenticationFailure, pushed(), None),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+    // The sync failed, or never reached the session, so it compared nothing.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            Vec::new(),
+            Some("sync task stopped"),
+        ),
+        &profile,
+    );
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            reached(Err("worker unreachable".into())),
+            None,
+        ),
+        &profile,
+    );
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            Vec::new(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+    // An empty answer is not an auth failure.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::EmptyPromptResponse,
+            nothing_pushed(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+
+    // Nothing fresher to push: the profile's login is the one refused.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            nothing_pushed(),
+            None,
+        ),
+        &profile,
+    );
+    assert_eq!(
+        rejected.refusal("codex4").as_deref(),
+        Some("the login is no longer valid; run `mj login --profile codex4` and spawn again")
+    );
+    assert_eq!(rejected.refusal("codex3"), None);
+
+    // `mj login` rewrites the file.
+    std::fs::write(&marker, codex_credentials("2026-09-25T22:49:05.000Z")).unwrap();
+    assert_eq!(rejected.refusal("codex4"), None);
+
+    // A profile that signs in with an API key has no login to redo.
+    let provider = tempfile::tempdir().unwrap();
+    std::fs::write(
+        provider.path().join("config.toml"),
+        "model_provider = \"zai\"\n[model_providers.zai]\nbase_url = \"https://api.z.ai/api/v1\"\nenv_key = \"ZAI_API_KEY\"\nwire_api = \"responses\"\n",
+    )
+    .unwrap();
+    let api_key = HarnessProfile {
+        home: provider.path().to_path_buf(),
+        ..profile
+    };
+    let mut rejected = RejectedLogins::default();
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            nothing_pushed(),
+            None,
+        ),
+        &api_key,
+    );
+    assert_eq!(rejected.refusal("codex4"), None);
+}
+
+/// #1132: Kimi's refusal of its stored OAuth token, as its journal states it:
+/// the turn's error message, and the agent's error line with the error name.
+/// A sub-agent child whose turn failed this way failed on its login.
+#[test]
+fn a_kimi_token_refusal_is_an_auth_failure() {
+    const MESSAGE: &str = "Stored token for \"kimi-code\" was rejected; re-login required.";
+    assert!(auth_failure_signature(HarnessKind::Kimi, MESSAGE));
+    assert!(auth_failure_signature(
+        HarnessKind::Kimi,
+        &format!("OAuthUnauthorizedError: {MESSAGE}")
+    ));
+    let diagnostic = crate::diagnostic::TurnDiagnostic::from_provider(&serde_json::json!({
+        "code": "internal",
+        "message": MESSAGE,
+        "name": "OAuthUnauthorizedError",
+        "retryable": false,
+    }))
+    .unwrap();
+    assert!(turn_diagnostic_reports_auth_failure(&diagnostic));
+    let turn = crate::state::MaterializedTurnOutcome {
+        diagnostic: Some(diagnostic),
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 2,
+        completed_at_ms: 2,
+        outcome: crate::state::TurnOutcomeKind::Completed {
+            stop_reason: "error".into(),
+        },
+    };
+    assert!(crate::subagent::turn_failed_on_login(&turn));
+    assert!(!auth_failure_signature(
+        HarnessKind::Kimi,
+        "The token was rejected by the linter; see the log."
+    ));
 }

@@ -156,12 +156,16 @@ impl Controller {
         // sending one here could only point the reviewer somewhere it must not
         // read.
         environment.remove(profile.home_env());
+        // A reviewer on a ChatGPT Codex profile must not fall back to an API
+        // key any more than a session may.
+        let excluded_environment = profile.exclude_harness_environment(&mut environment);
         Ok(ReviewerLaunchConfig {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             bridge_command: bridge_command.into(),
             bridge_args,
             environment,
+            excluded_environment,
             execution_policy,
             model: None,
             effort: None,

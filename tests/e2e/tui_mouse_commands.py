@@ -212,21 +212,19 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     absent("Web viewer")
     record("composer-shortcut", "F4 web is clickable while the composer has focus")
 
-    # The active secondary workspace owns a live session, so its first Delete
-    # opens the manager's typed Force delete guard. Complete that guard through
-    # the current manager controls and verify the dashboard falls back to the
-    # surviving tab.
+    # Deleting the active workspace suspends its live session and preserves
+    # its history while the dashboard falls back to the surviving tab.
     workspace_manager()
-    click("Delete")
-    tmux.wait_for("Type the exact workspace name to confirm:")
-    workspace_name("Mouse secondary")
-    click("Force delete")
+    click("Delete…")
+    tmux.wait_for("Suspend 1 session(s)")
+    click("Delete workspace")
     lab.wait_snapshot(
         lambda value: all(
             row["name"] != "Mouse secondary" for row in value["workspaces"]
         )
-        and all(row["workspace_id"] != secondary_id for row in value["sessions"]),
-        "force delete workspace",
+        and any(row["workspace_id"] == secondary_id and row["state"] == "stopped"
+                for row in value["sessions"]),
+        "safe workspace deletion",
     )
     tmux.wait_for("Mouse renamed")
     tmux.wait_until(
@@ -234,7 +232,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         "workspace delete completes in manager",
     )
     close_workspace_manager()
-    record("workspace-force-delete", "☰; Delete; type exact name; Force delete; ×", "the active workspace and its session are removed and the remaining tab stays open")
+    record("workspace-delete", "☰; Delete; confirm suspension; ×", "the workspace is removed, its session is stopped, and the remaining tab stays open")
 
 
 

@@ -15,11 +15,15 @@ use mj_core::subagent::{
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the same child_session_ids. A child may take longer than any single wait. The user can see every child in the Sub-agents workspace.";
+const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for context-heavy work: exploration, census, suite runs and mechanical implementation slices. Give each child files excerpts and one question or one bounded slice. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. When a child's turn ends and you are told so, Mjolnir parks it: its processes stop, and it keeps its conversation and report. send_input starts a parked child again. Only children that hold processes count toward this session's limit on children; a parked child does not. The user can see every child in the Sub-agents workspace.";
 
 /// A child's server instructions: its report reaches the parent only through
 /// `handback`, which is the rule Claude Code's own subagents follow.
-const CHILD_INSTRUCTIONS: &str = "You are a Mjolnir sub-agent working for another session. Deliver your final report for each task by calling handback once, as your last action, with the full report. The session that started you reads that report, not the rest of this conversation. If you need a decision from it, hand back your question and stop; its answer arrives as your next prompt.";
+const CHILD_INSTRUCTIONS: &str = concat!(
+    "You are a Mjolnir sub-agent working for another session. Deliver your report for each task by calling handback once, as your last action. The session that started you reads that report, not the rest of this conversation. If you need a decision from it, hand back your question and stop; its answer arrives as your next prompt. Your report directory is named in your first prompt. ",
+    // Kept in step with `mj_core::subagent::HANDBACK_REPORT_RULES` by a test.
+    "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Hand back a question and stop when the fix needs a design choice, touches a file you were not given, changes a persisted identity, a public contract or an epoch, or the failure also occurs on the base commit."
+);
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -212,7 +216,7 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
         reader,
         writer,
         crate::mcp_stdio::McpServer {
-            name: "mj-agents",
+            name: mj_core::subagent::SUBAGENT_MCP_SERVER,
             instructions,
             tools,
             dispatch: crate::mcp_stdio::Dispatch::Concurrent,
@@ -270,6 +274,8 @@ struct WaitArgs {
     child_session_ids: Vec<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    return_when: mj_core::subagent::ReturnWhen,
 }
 
 fn call(
@@ -334,6 +340,7 @@ fn call_with_budget(
                     mj_core::subagent::subagent_wait_timeout_for(harness, args.timeout_seconds)
                         .as_secs(),
                 ),
+                return_when: args.return_when,
             }
         }
         "interrupt" => {
@@ -443,7 +450,7 @@ fn send(
 
 fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
     let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
-    let default_wait = mj_core::subagent::DEFAULT_WAIT_SECONDS.min(ceiling);
+    let default_wait = mj_core::subagent::subagent_wait_timeout_for(harness, None).as_secs();
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     let current = mj_core::subagent::CURRENT_MODEL;
     let model = format!(
@@ -457,7 +464,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once: that means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again.",
             json!({
                 "type":"object",
                 "properties":{
@@ -476,15 +483,16 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "send_input",
-            "Send follow-up input to one child session.",
+            "Send follow-up input to one child session and return the turn it starts; collect the result with wait. A child whose turn ended is parked (wait and list_agents show parked true) and holds no processes: send_input starts it again first, with its conversation intact, which can take tens of seconds. Starting a parked child is refused when this session already has the maximum number of live children; the refusal lists them. If the start fails, the child stays parked and you can retry.",
             json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
         ),
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. output is the report the child handed back, or its last message when it did not hand one back; report_source says which. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait} and is capped at {ceiling} in this session; a child may run far longer than that, so expect to call wait more than once."
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again on another profile, or after that login. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
-            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling}},"required":["child_session_ids"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
             "interrupt",
@@ -493,7 +501,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Stopping a child is not instant: it checkpoints the child, seals its transcript and tears its process tree down. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait with the closed child's id first and spawn its replacement only once that wait reports the child finished with state \"stopped\" - a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait with the closed child's id first and spawn its replacement only once that wait reports the child finished with state \"stopped\" - a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
     ]
@@ -504,10 +512,10 @@ fn child_tool_definitions() -> Vec<Value> {
     vec![tool(
         "handback",
         &format!(
-            "Deliver your final report to the session that started you. Call it once, as your last action for the task, with your full report: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If you need a decision from that session, hand back your question and stop; its answer arrives as your next prompt. At most {} characters.",
-            mj_core::subagent::MAX_HANDBACK_CHARS
+            "Deliver your report to the session that started you. Call it once, as your last action for the task: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If you need a decision from that session, hand back your question and stop; its answer arrives as your next prompt. {}",
+            mj_core::subagent::HANDBACK_REPORT_RULES
         ),
-        json!({"type":"object","properties":{"message":{"type":"string","description":"Your full report."}},"required":["message"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
     )]
 }
 
@@ -520,6 +528,50 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::sync::{Arc, Mutex};
+
+    /// #1160: a parent read a child's failed login as the child's report and
+    /// gave up on the profile. The tools say what a refused login looks like
+    /// and what to do about it.
+    #[test]
+    fn wait_and_spawn_say_what_a_refused_login_looks_like() {
+        let description = |name: &str| {
+            tool_definitions(None)
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["description"].as_str().map(str::to_owned))
+                .unwrap()
+        };
+        let wait = description("wait");
+        assert!(wait.contains("failure kind login_invalid"), "{wait}");
+        assert!(wait.contains("`mj login`"), "{wait}");
+        assert!(wait.contains("not about the task"), "{wait}");
+        let spawn = description("spawn");
+        assert!(spawn.contains("login the provider has refused"), "{spawn}");
+    }
+
+    /// #1161: a child that handed back is parked. The parent has to know
+    /// that such a child holds no processes, that `send_input` starts it
+    /// again and can take a while, and that the cap counts live children.
+    #[test]
+    fn the_tools_explain_parked_children_and_the_live_child_limit() {
+        let description = |name: &str| {
+            tool_definitions(None)
+                .into_iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["description"].as_str().map(str::to_owned))
+                .unwrap()
+        };
+        let send_input = description("send_input");
+        assert!(send_input.contains("parked true"), "{send_input}");
+        assert!(send_input.contains("starts it again"), "{send_input}");
+        assert!(send_input.contains("tens of seconds"), "{send_input}");
+        let wait = description("wait");
+        assert!(wait.contains("parked true"), "{wait}");
+        let spawn = description("spawn");
+        assert!(spawn.contains("live children"), "{spawn}");
+        assert!(spawn.contains("parks it"), "{spawn}");
+        assert!(SERVER_INSTRUCTIONS.contains("send_input starts a parked child again"));
+    }
 
     #[test]
     fn wait_advertises_the_shared_runtime_timeout_limit() {
@@ -539,6 +591,64 @@ mod tests {
         assert!(
             !SERVER_INSTRUCTIONS.contains("arrive in"),
             "instructions must not promise pushed results: {SERVER_INSTRUCTIONS}"
+        );
+        // Each wait call resends the parent's whole context, so the parent is
+        // told to wait long and once, and to read details from files.
+        for needed in [
+            "rather than polling",
+            "largest timeout",
+            "report_dir",
+            "do not redo",
+        ] {
+            assert!(
+                SERVER_INSTRUCTIONS.contains(needed),
+                "{needed}: {SERVER_INSTRUCTIONS}"
+            );
+        }
+        let wait = tool_definitions(None)
+            .into_iter()
+            .find(|tool| tool["name"] == "wait")
+            .expect("wait definition");
+        let description = wait["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("do not poll") && description.contains("return_when any"),
+            "{description}"
+        );
+        assert_eq!(
+            wait["inputSchema"]["properties"]["return_when"]["enum"],
+            json!(["all", "any"])
+        );
+    }
+
+    #[test]
+    fn a_wait_without_a_timeout_advertises_the_harness_ceiling_as_its_default() {
+        for harness in [None, Some(HarnessKind::Codex)] {
+            let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
+            let wait = tool_definitions(harness)
+                .into_iter()
+                .find(|tool| tool["name"] == "wait")
+                .expect("wait definition");
+            let description = wait["description"].as_str().unwrap_or_default();
+            assert!(
+                description.contains(&format!("defaults to {ceiling},")),
+                "{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_child_is_told_the_same_report_rules_everywhere() {
+        assert!(
+            CHILD_INSTRUCTIONS.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+            "{CHILD_INSTRUCTIONS}"
+        );
+        let handback = child_tool_definitions().remove(0);
+        assert!(
+            handback["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+            "{handback}"
         );
     }
 
@@ -563,6 +673,7 @@ mod tests {
         let wait = |timeout_seconds| SubagentToolAction::WaitAgents {
             child_session_ids: vec!["c1".into()],
             timeout_seconds,
+            return_when: Default::default(),
         };
         assert_eq!(
             reply_timeout(&wait(Some(7))),
@@ -724,6 +835,27 @@ mod tests {
         );
     }
 
+    /// A Claude profile is staged with an allow rule for each tool in
+    /// `tool_names`, so a tool listed here and missing there would make Claude
+    /// ask a person before running it (R11-1).
+    #[test]
+    fn each_role_lists_exactly_the_tools_its_harness_is_allowed() {
+        let names = |tools: Vec<Value>| {
+            tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(tool_definitions(None)),
+            SubagentMcpRole::Parent.tool_names()
+        );
+        assert_eq!(
+            names(child_tool_definitions()),
+            SubagentMcpRole::Child.tool_names()
+        );
+    }
+
     #[test]
     fn each_role_refuses_the_other_roles_tools() {
         let progress = crate::mcp_stdio::Progress::silent(Duration::from_millis(50));
@@ -800,6 +932,58 @@ mod tests {
         assert_eq!(
             request["action"],
             json!({"action": "handback", "params": {"message": "the report"}})
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_for_any_child_carries_return_when_and_the_harness_default() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (sent, received) = std::sync::mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            let request_id = request["request_id"].clone();
+            sent.send(request).unwrap();
+            let reply = json!({"accepted": true, "result": {
+                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
+                "message": "{\"status\":\"still_running\",\"agents\":[]}"
+            }});
+            let mut body = serde_json::to_vec(&reply).unwrap();
+            body.push(b'\n');
+            let mut stream = reader.into_inner();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+        let (value, is_error) = call_with_budget(
+            &socket,
+            Some(HarnessKind::Codex),
+            SubagentMcpRole::Parent,
+            Some(&json!({"name": "wait", "arguments": {
+                "child_session_ids": ["c1", "c2"], "return_when": "any"
+            }})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!is_error, "{value}");
+        let request = received.recv().unwrap();
+        assert_eq!(
+            request["action"],
+            json!({"action": "wait_agents", "params": {
+                "child_session_ids": ["c1", "c2"],
+                "timeout_seconds": mj_core::subagent::MAX_CODEX_WAIT_SECONDS,
+                "return_when": "any"
+            }})
         );
     }
 

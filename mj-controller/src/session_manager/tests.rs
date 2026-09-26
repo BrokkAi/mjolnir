@@ -254,6 +254,7 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
         bridge_command: "npx".into(),
         bridge_args: vec!["claude-code-acp".into()],
         environment: BTreeMap::from([("EXTRA".into(), "1".into())]),
+        excluded_environment: Vec::new(),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         model: Some("sonnet".into()),
         effort: Some("high".into()),
@@ -1673,6 +1674,9 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     for state in [
         SessionState::Destroying,
         SessionState::Stopped,
+        // A parked sub-agent's worker was stopped on purpose; recovery must
+        // not start it again.
+        SessionState::Parked,
         SessionState::Lost,
         SessionState::Error,
         SessionState::Provisioning,

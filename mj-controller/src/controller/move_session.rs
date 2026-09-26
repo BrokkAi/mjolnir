@@ -913,7 +913,8 @@ impl Controller {
                 return Ok(());
             }
         }
-        self.recover_interrupted_close_managed(&id, executor, manager)
+        // A move's source stop was admitted by the move itself.
+        self.recover_interrupted_close_managed(&id, executor, manager, true, None)
             .await?;
         Ok(())
     }

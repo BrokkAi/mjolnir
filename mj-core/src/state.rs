@@ -36,6 +36,13 @@ pub enum SessionState {
     /// was renamed, so the alias keeps those records loading.
     #[serde(alias = "archived")]
     Stopped,
+    /// A Mjolnir sub-agent whose turn ended and whose parent was told: its
+    /// worker process tree is stopped so it holds no processes in the
+    /// parent's container, while its record, relation, target locator and
+    /// worker root (relay journal, native session id) stay. Only a parent's
+    /// `send_input` starts it again. Nothing that connects to, reconnects,
+    /// recovers or upgrades live sessions acts on it.
+    Parked,
     Lost,
     Error,
     DestroyedWithDataLoss,
@@ -51,6 +58,8 @@ pub enum SessionTransitionKind {
     Moving,
     Suspending,
     Destroying,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stopping,
 }
 
 impl SessionTransitionKind {
@@ -61,6 +70,7 @@ impl SessionTransitionKind {
             Self::Moving => "Moving",
             Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
+            Self::Stopping => "Stopping",
         }
     }
 
@@ -190,6 +200,58 @@ pub enum TurnOutcomeKind {
     Rejected { message: String },
     /// The command was interrupted after being accepted.
     Interrupted { message: String },
+}
+
+/// How a turn ended, in words a person reads: "completed, end of turn",
+/// "interrupted", or "failed: <reason>".
+impl std::fmt::Display for TurnOutcomeKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed { stop_reason } => match classify_prompt_completion(stop_reason) {
+                PromptCompletion::Finished => formatter.write_str("completed, end of turn"),
+                PromptCompletion::InputRequired => {
+                    formatter.write_str("completed, waiting for input")
+                }
+                // A harness reports `cancelled` for a turn the client stopped.
+                PromptCompletion::Cancelled => formatter.write_str("interrupted"),
+                PromptCompletion::QuotaLimit => formatter.write_str("failed: quota limit reached"),
+                PromptCompletion::Error => {
+                    write!(formatter, "failed: {}", stop_reason_words(stop_reason))
+                }
+            },
+            Self::Rejected { message } => write!(
+                formatter,
+                "failed: {}",
+                message.lines().next().unwrap_or_default().trim()
+            ),
+            Self::Interrupted { .. } => formatter.write_str("interrupted"),
+        }
+    }
+}
+
+/// A stop reason as the harness spells it (`MaxTokens`, `max_turn_requests`)
+/// as lower-case words.
+fn stop_reason_words(stop_reason: &str) -> String {
+    let mut words = String::new();
+    let mut previous_lower = false;
+    for character in stop_reason.trim().chars() {
+        if character == '_' || character == '-' || character.is_whitespace() {
+            if !words.ends_with(' ') && !words.is_empty() {
+                words.push(' ');
+            }
+            previous_lower = false;
+            continue;
+        }
+        if character.is_uppercase() && previous_lower {
+            words.push(' ');
+        }
+        previous_lower = character.is_lowercase() || character.is_ascii_digit();
+        words.extend(character.to_lowercase());
+    }
+    match words.trim_end() {
+        "" => "no reason given".to_owned(),
+        words => words.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,6 +705,7 @@ impl SessionState {
             Self::Closing => "closing",
             Self::Destroying => "destroying",
             Self::Stopped => "stopped",
+            Self::Parked => "parked",
             Self::Lost => "lost",
             Self::Error => "error",
             Self::DestroyedWithDataLoss => "destroyed-with-data-loss",
@@ -660,6 +723,7 @@ impl SessionState {
             "closing" => Self::Closing,
             "destroying" => Self::Destroying,
             "stopped" | "archived" => Self::Stopped,
+            "parked" => Self::Parked,
             "lost" => Self::Lost,
             "error" => Self::Error,
             "destroyed-with-data-loss" => Self::DestroyedWithDataLoss,
@@ -680,7 +744,10 @@ impl SessionState {
 
     /// True while the session still belongs on the dashboard. `Closing` and
     /// `Checkpointing` stay active on purpose: a stop that has not produced a
-    /// verified checkpoint must not make its row disappear.
+    /// verified checkpoint must not make its row disappear. A `Parked`
+    /// sub-agent is active too: it is still its parent's child, still listed,
+    /// and its parent's suspend, destroy or workspace close must still end
+    /// it. Code that needs a live worker must ask [`Self::has_live_worker`].
     pub const fn is_active(self) -> bool {
         matches!(
             self,
@@ -690,7 +757,23 @@ impl SessionState {
                 | Self::Checkpointing
                 | Self::Closing
                 | Self::Destroying
+                | Self::Parked
                 | Self::Error
+        )
+    }
+
+    /// True while the session may have a worker process tree on its target,
+    /// including one still being started or torn down: the states in which a
+    /// sub-agent counts against its parent's cap.
+    pub const fn has_live_worker(self) -> bool {
+        matches!(
+            self,
+            Self::Provisioning
+                | Self::Running
+                | Self::Disconnected
+                | Self::Checkpointing
+                | Self::Closing
+                | Self::Destroying
         )
     }
 }
