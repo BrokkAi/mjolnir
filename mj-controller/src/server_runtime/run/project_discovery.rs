@@ -124,7 +124,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(gate.active_labels(), ["project discovery x2"]);
+            assert_eq!(gate.active_labels(), ["project discovery"]);
             assert!(!gate.try_close());
             match stop {
                 "disconnect" => drop(response),

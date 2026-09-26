@@ -155,22 +155,29 @@ A consequence for upgrades: replacing the daemon waits only for its own bounded
 control operations; replacing a worker waits for that worker to be idle, because
 the worker holds the turn.
 
-Automatic upgrades must never cancel accepted work or use a timeout as permission
-to stop a busy process. Daemon handoff waits only for daemon-owned work:
-lifecycle operations, startup and session recovery, admissions, automatic
-continuations, and in-flight request and response delivery, including after the
-originating client disconnects. It never waits for worker turns, pending
-questions, or reviews; those live in workers and survive the handoff. New
-daemon-owned background operations must participate in this ownership. Close
-admission and verify no outstanding work in one decision, and name the blocking
-work in the wait notice so the user can see what the upgrade is waiting for.
-Worker replacement is separate and still requires atomic idle admission: reserve
-workers only after that admission, and prepare downloads before taking their
-control connection. Retry only explicitly unaccepted requests, preserving command
-IDs and steering targets; a lost acknowledgement does not authorize replay of an
-arbitrary mutation. Test these races in isolated instances. Legacy daemons
-without atomic admission can only provide an observed idle check; never describe
-that bootstrap as having the new guarantee.
+Automatic upgrades must never cancel accepted work that cannot start again from
+durable state, or use a timeout as permission to stop a busy process. Daemon
+handoff waits only for daemon-owned work: lifecycle operations, startup and
+session recovery, admissions, automatic continuations, and in-flight request and
+response delivery, including after the originating client disconnects. It never
+waits for worker turns, pending questions, or reviews; those live in workers and
+survive the handoff. The wait must take seconds, not minutes. Work that can take
+minutes but is safe to stop and starts again under the next daemon does not hold
+admission: recovery copies, worker upgrade preparation, and sub-agent waits. The
+handoff cancels it. Only the worker swap itself, from the idle reservation to
+the reconnect, holds admission. While a handoff waits, the gate drains:
+deferrable work (`activity_unless_draining`) is refused so the wait can only
+shrink. Give each admission site its own label. New daemon-owned background
+operations must participate in this ownership. Close admission and verify no
+outstanding work in one decision, and name the blocking work in the wait notice
+so the user can see what the upgrade is waiting for. Worker replacement is
+separate and still requires atomic idle admission: reserve workers only after
+that admission, and prepare downloads before taking their control connection.
+Retry only explicitly unaccepted requests, preserving command IDs and steering
+targets; a lost acknowledgement does not authorize replay of an arbitrary
+mutation. Test these races in isolated instances. Legacy daemons without atomic
+admission can only provide an observed idle check; never describe that bootstrap
+as having the new guarantee.
 
 Keep file and path handling independent of the operating system. Use `Path` and
 `PathBuf`; normalize path text only at protocol or rendering boundaries.

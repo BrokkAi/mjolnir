@@ -192,6 +192,14 @@ impl Controller {
         if !lease.verify_for_upgrade().await? {
             return Ok(WorkerUpgradeOutcome::Deferred);
         }
+        // Everything before this point can be cancelled at any moment and
+        // leaves the old worker running. The swap cannot: a daemon that exits
+        // between stopping the old worker and connecting to the new one leaves
+        // the session with no worker. So a daemon upgrade waits for the swap,
+        // and a swap does not start while an upgrade is waiting.
+        let Ok(_swap) = crate::upgrade::activity_unless_draining("worker swap") else {
+            return Ok(WorkerUpgradeOutcome::Deferred);
+        };
         install_staged_worker_binary(executor, &backend, session_id)
             .context("install the prepared worker under its idle reservation")?;
         replace_installed_worker_launch_config(executor, &backend, session_id, &launch)

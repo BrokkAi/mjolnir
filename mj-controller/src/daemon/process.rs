@@ -461,6 +461,11 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    // Recovery copies and worker upgrades do not hold up a handoff, so some
+    // may still be running. Stop them first: the next daemon starts them again.
+    // The coordinators share one gate, and dropping either cancels both.
+    drop(worker_upgrades);
+    drop(recovery);
     match continuation_task.await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),
@@ -548,7 +553,6 @@ pub(super) async fn run_daemon_runtime(
             interrupted_close_task.await.map_err(anyhow::Error::new),
         );
     }
-    drop(recovery);
     record_daemon_cleanup(
         &mut outcome,
         "shut down controller daemon session manager",

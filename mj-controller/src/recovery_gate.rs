@@ -80,7 +80,6 @@ impl Default for RecoveryGate {
 
 #[derive(Default)]
 struct RecoveryGateState {
-    upgrade_work: BTreeMap<String, crate::upgrade::Work>,
     /// In-flight copies, each with the cancel flag its executor watches, so a
     /// foreground lifecycle operation can preempt one instead of waiting.
     busy: BTreeMap<String, Arc<AtomicBool>>,
@@ -110,15 +109,20 @@ impl RecoveryGate {
 
     /// Claims the session for background work and returns the cancel flag that
     /// work must watch, or `None` when other work or a reservation already
-    /// holds it.
+    /// holds it, or a daemon upgrade is waiting.
+    ///
+    /// The work does not hold up a daemon upgrade: it is cancelled when the
+    /// daemon exits, and the next daemon starts it again. Starting it while a
+    /// handoff waits would only waste it.
     pub fn try_start(&self, session_id: &str) -> Option<Arc<AtomicBool>> {
+        if crate::upgrade::is_draining() {
+            return None;
+        }
         let cancelled = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.busy.contains_key(session_id) || state.reservations.contains_key(session_id) {
                 return None;
             }
-            let work = crate::upgrade::activity("recovery or worker replacement").ok()?;
-            state.upgrade_work.insert(session_id.to_owned(), work);
             let cancelled = Arc::new(AtomicBool::new(false));
             state.busy.insert(session_id.to_owned(), cancelled.clone());
             cancelled
@@ -131,7 +135,6 @@ impl RecoveryGate {
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.busy.remove(session_id);
-            state.upgrade_work.remove(session_id);
         }
         self.publish_busy();
     }
