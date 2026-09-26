@@ -55,7 +55,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         harness: HarnessKind::Codex,
         harness_home: profile_home.into(),
         authentication_marker: None,
-        bridge_command: "codex-acp".into(),
+        bridge_command: "/usr/bin/false".into(),
         bridge_args: Vec::new(),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
         environment: BTreeMap::from([("CODEX_HOME".into(), profile_home.into())]),

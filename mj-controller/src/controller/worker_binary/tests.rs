@@ -2043,27 +2043,6 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
     );
 }
 #[test]
-fn default_bridges_pin_command_capable_adapter_versions() {
-    let (codex_command, codex_arguments) = bridge_launch(
-        mj_core::config::HarnessKind::Codex,
-        ExecutionPolicy::Unconstrained,
-    );
-    assert_eq!(codex_command, "sh");
-    assert_eq!(codex_arguments[0], "-c");
-    assert!(codex_arguments[1].contains(&format!("@brokkai/codex-acp@{CODEX_ACP_VERSION}")));
-    assert!(codex_arguments[1].contains("codex-acp --version"));
-    assert!(codex_arguments[1].contains(&format!("npx -y @brokkai/codex-acp@{CODEX_ACP_VERSION}")));
-
-    let (claude_command, claude_arguments) = bridge_launch(
-        mj_core::config::HarnessKind::Claude,
-        ExecutionPolicy::Unconstrained,
-    );
-    assert_eq!(claude_command, "sh");
-    assert_eq!(claude_arguments[0], "-c");
-    assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.81.0"));
-}
-
-#[test]
 fn readiness_stage_names_only_install_capable_default_harnesses() {
     let profile = |kind| mj_core::config::HarnessProfile {
         enabled: true,
@@ -2315,14 +2294,6 @@ fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
     assert!(script.contains("exec grok agent stdio"));
     assert!(!script.contains("--always-approve"));
     assert!(script.contains("Mjolnir needs compatible Grok Build"));
-    assert!(!script.contains("Hel"));
-}
-#[test]
-fn node_bootstrap_errors_name_mjolnir() {
-    let script = ensure_node_script();
-    assert!(script.contains("Mjolnir needs Node.js, npm, and npx"));
-    assert!(!script.contains("sudo"));
-    assert!(!script.contains("apt-get"));
     assert!(!script.contains("Hel"));
 }
 #[test]
@@ -5079,4 +5050,421 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         !allow.iter().any(|rule| rule.ends_with("__handback")),
         "a parent has no handback: {allow:?}"
     );
+}
+
+#[cfg(unix)]
+mod container_runtime {
+    use super::*;
+    use mj_core::harness_runtime::{CODEX_ACP_PACKAGE, RuntimeProvenance, npm_bridge};
+    use mj_worker::worker_runtime::{
+        AcpSupervisorSpec, PreparedHarnessLaunch, prepare_harness_launch,
+    };
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn executable(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn package(root: &Path, name: &str, version: &str) -> PathBuf {
+        let package = root.join("node_modules").join(name);
+        let command = package.join("bin/cli");
+        executable(
+            &command,
+            &format!("#!/bin/sh\nprintf '%s\\n' '{name} {version}'\n"),
+        );
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::json!({"name": name, "version": version}).to_string(),
+        )
+        .unwrap();
+        command
+    }
+
+    fn installed_bridge(root: &Path, harness: HarnessKind) -> PathBuf {
+        let bridge = npm_bridge(harness).unwrap();
+        let command = package(root, bridge.package, bridge.version);
+        if harness == HarnessKind::Codex {
+            let provider = package(
+                root,
+                "@openai/codex",
+                mj_core::harness_runtime::CODEX_CLI_VERSION,
+            );
+            std::fs::rename(&provider, provider.with_file_name("codex.js")).unwrap();
+        } else {
+            package(root, "@anthropic-ai/claude-agent-sdk", "test-sdk");
+        }
+        let bin = root.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        symlink(
+            format!("../{}/bin/cli", bridge.package),
+            bin.join(bridge.command),
+        )
+        .unwrap();
+        command
+    }
+
+    fn container_launch(root: &Path, harness: HarnessKind) -> WorkerLaunchConfig {
+        let profile_home = root.join("profile");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        let mut profile = codex_login_profile(&profile_home, "chatgpt");
+        profile.kind = harness;
+        let mut launch = launches_on_every_target(&profile)
+            .into_iter()
+            .find(|(target, _)| *target == "container")
+            .unwrap()
+            .1;
+        assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Ambient);
+        launch.cwd = root.to_path_buf();
+        launch.environment.insert(
+            "PATH".into(),
+            root.join("node_modules/.bin").display().to_string(),
+        );
+        launch.environment.insert(
+            "XDG_CACHE_HOME".into(),
+            root.join("cache").display().to_string(),
+        );
+        launch.environment.insert(
+            "CODEX_PATH".into(),
+            root.join("node_modules/@openai/codex/bin/codex.js")
+                .display()
+                .to_string(),
+        );
+        launch
+    }
+
+    async fn prepare(launch: &WorkerLaunchConfig) -> PreparedHarnessLaunch {
+        prepare_harness_launch(
+            launch.harness,
+            launch.harness_runtime,
+            launch.execution_policy,
+            AcpSupervisorSpec::from(launch),
+        )
+        .await
+        .unwrap()
+    }
+
+    // Frozen pre-2.23.1 descriptions, including an older pin, exercise upgrade compatibility.
+    fn legacy_launcher(harness: HarnessKind) -> String {
+        let node = "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi";
+        match harness {
+            HarnessKind::Codex => format!(
+                "if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"@brokkai/codex-acp 1.13.2\" ]; then exec codex-acp; fi; {node}; exec npx -y @brokkai/codex-acp@1.13.2"
+            ),
+            HarnessKind::Claude => format!(
+                "if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {node}; exec npx -y @agentclientprotocol/claude-agent-acp@0.81.0"
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn container_runtime_identifies_the_controller_selected_bridge_and_provider() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            let temp = tempfile::tempdir().unwrap();
+            let bridge = installed_bridge(temp.path(), harness);
+            let launch = container_launch(temp.path(), harness);
+            let prepared = prepare(&launch).await;
+            let identity = prepared.runtime_identity().await.unwrap();
+            assert!(identity.id.is_some(), "{harness:?}: {identity:?}");
+            assert_eq!(identity.provenance, RuntimeProvenance::TargetInstallation);
+            assert_eq!(prepared.spec.command, bridge.canonicalize().unwrap());
+            assert!(prepared.spec.args.is_empty());
+            assert!(identity.components.iter().any(|component| {
+                component.name == "acp_bridge"
+                    && component.version.as_deref() == Some(npm_bridge(harness).unwrap().version)
+            }));
+            assert!(
+                identity
+                    .components
+                    .iter()
+                    .any(|component| component.name == "provider_cli"
+                        || component.name == "provider_sdk")
+            );
+            identity.require(identity.id.as_deref().unwrap()).unwrap();
+            let provider = if harness == HarnessKind::Codex {
+                "@openai/codex"
+            } else {
+                "@anthropic-ai/claude-agent-sdk"
+            };
+            std::fs::write(
+                temp.path()
+                    .join("node_modules")
+                    .join(provider)
+                    .join("package.json"),
+                serde_json::json!({"name": provider, "version": "changed-provider"}).to_string(),
+            )
+            .unwrap();
+            let changed = prepare(&launch).await.runtime_identity().await.unwrap();
+            assert!(changed.id.is_some());
+            assert!(changed.require(identity.id.as_deref().unwrap()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn container_runtime_resolves_saved_shell_launches_to_the_same_current_installation() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            let temp = tempfile::tempdir().unwrap();
+            installed_bridge(temp.path(), harness);
+            let mut launch = container_launch(temp.path(), harness);
+            let current = prepare(&launch).await;
+            launch.bridge_command = "sh".into();
+            launch.bridge_args = vec!["-c".into(), legacy_launcher(harness)];
+            let legacy = prepare(&launch).await;
+            assert_eq!(legacy.spec.command, current.spec.command);
+            assert!(legacy.spec.args.is_empty());
+            assert_eq!(
+                legacy.runtime_identity().await.unwrap(),
+                current.runtime_identity().await.unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn container_runtime_custom_shell_is_not_replaced_by_an_installed_bridge() {
+        let temp = tempfile::tempdir().unwrap();
+        installed_bridge(temp.path(), HarnessKind::Codex);
+        let mut launch = container_launch(temp.path(), HarnessKind::Codex);
+        // An empty selector can be meaningful to a wrapper. It does not give
+        // Mjolnir enough provenance to accept an identity constraint.
+        launch
+            .environment
+            .insert("CODEX_PATH".into(), String::new());
+        launch.environment.insert(
+            "PATH".into(),
+            format!("{}:/bin", launch.environment["PATH"]),
+        );
+        launch.bridge_command = "sh".into();
+        launch.bridge_args = vec![
+            "-c".into(),
+            format!("{}; echo custom", legacy_launcher(HarnessKind::Codex)),
+        ];
+        let prepared = prepare(&launch).await;
+        assert_eq!(
+            prepared.spec.command,
+            Path::new("/bin/sh").canonicalize().unwrap()
+        );
+        assert_eq!(prepared.spec.args, launch.bridge_args);
+        let identity = prepared.runtime_identity().await.unwrap();
+        assert!(identity.id.is_none());
+        assert!(identity.unavailable_reason.is_some());
+        assert!(identity.require("mj-runtime-v1:expected").is_err());
+    }
+
+    #[tokio::test]
+    async fn container_runtime_freezes_relative_path_and_provider_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = installed_bridge(temp.path(), HarnessKind::Codex);
+        let mut launch = container_launch(temp.path(), HarnessKind::Codex);
+        launch
+            .environment
+            .insert("PATH".into(), "node_modules/.bin".into());
+        launch.environment.insert(
+            "CODEX_PATH".into(),
+            "node_modules/@openai/codex/bin/codex.js".into(),
+        );
+        let prepared = prepare(&launch).await;
+        let identity = prepared.runtime_identity().await.unwrap();
+        assert!(identity.id.is_some(), "{identity:?}");
+        assert_eq!(prepared.spec.command, bridge.canonicalize().unwrap());
+        assert!(Path::new(&prepared.spec.environment["CODEX_PATH"]).is_absolute());
+        let link = temp.path().join("node_modules/.bin/codex-acp");
+        std::fs::remove_file(&link).unwrap();
+        symlink("/bin/false", &link).unwrap();
+        // Execute the prepared spec: changing PATH's link cannot redirect it.
+        let mut command = tokio::process::Command::new(&prepared.spec.command);
+        command
+            .args(&prepared.spec.args)
+            .env_clear()
+            .envs(&prepared.spec.environment)
+            .current_dir(&prepared.spec.cwd);
+        let output =
+            mj_core::subprocess::run_bounded(&mut command, 1024, std::time::Duration::from_secs(5))
+                .await
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            format!("{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}")
+        );
+    }
+
+    #[tokio::test]
+    async fn container_runtime_installs_missing_or_incompatible_bridges_before_inspection() {
+        for (harness, incompatible) in [
+            (HarnessKind::Codex, false),
+            (HarnessKind::Codex, true),
+            (HarnessKind::Claude, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let packages = temp.path().join("packages");
+            installed_bridge(&packages, harness);
+            let mut launch = container_launch(temp.path(), harness);
+            let bin = temp.path().join("tools");
+            executable(&bin.join("node"), "#!/bin/sh\nexit 0\n");
+            executable(
+                &bin.join("npm"),
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\n[ \"$1\" = ci ] || exit 9\nprintf x >> \"$INSTALL_LOG\"\n/bin/cp -R \"$FIXTURE_PACKAGES/node_modules\" .\n",
+            );
+            if incompatible {
+                executable(
+                    &bin.join("codex-acp"),
+                    "#!/bin/sh\necho '@brokkai/codex-acp 0.0.0'\n",
+                );
+            }
+            launch
+                .environment
+                .insert("PATH".into(), bin.display().to_string());
+            launch
+                .environment
+                .insert("FIXTURE_PACKAGES".into(), packages.display().to_string());
+            let install_log = temp.path().join("installs");
+            launch
+                .environment
+                .insert("INSTALL_LOG".into(), install_log.display().to_string());
+            // The controller's preparation command must install before it
+            // starts or takes control of a worker, including ambient targets.
+            mj_worker::worker_runtime::prepare_managed_harness(launch.clone())
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&install_log).unwrap(), b"x");
+            let prepared = prepare(&launch).await;
+            let identity = prepared.runtime_identity().await.unwrap();
+            assert!(identity.id.is_some(), "{identity:?}");
+            assert_eq!(identity.provenance, RuntimeProvenance::ManagedInstallation);
+            assert!(
+                prepared
+                    .spec
+                    .command
+                    .starts_with(temp.path().join("cache").canonicalize().unwrap())
+            );
+            assert!(prepared.spec.args.is_empty());
+            let lease = std::fs::OpenOptions::new()
+                .write(true)
+                .open(prepared.spec.harness_lease.as_ref().unwrap())
+                .unwrap();
+            assert!(matches!(
+                lease.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            let again = prepare(&launch).await;
+            assert_eq!(again.runtime_identity().await.unwrap(), identity);
+            assert_eq!(std::fs::read(install_log).unwrap(), b"x");
+        }
+    }
+
+    #[test]
+    fn container_runtime_prepares_before_startup_and_preserves_the_live_worker_on_upgrade_failure()
+    {
+        use targets::TargetLocator;
+        struct PreparationExecutor {
+            commands: RefCell<Vec<CommandSpec>>,
+            fail_prepare: bool,
+        }
+        impl CommandExecutor for PreparationExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.borrow_mut().push(command.clone());
+                if self.fail_prepare
+                    && command.purpose == "prepare exact container harness before worker upgrade"
+                {
+                    bail!("test preparation connection failed");
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let session = mj_core::state::new_session_id().unwrap();
+        let container_id = targets::resource_name(&session).unwrap();
+        let ssh = SshTarget {
+            destination: "user@host.test".into(),
+            ssh_args: Vec::new(),
+        };
+        let locators = [
+            TargetLocator::LocalDocker {
+                container_id: container_id.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::LocalPodman {
+                container_id: container_id.clone(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+            TargetLocator::AppleContainer {
+                container_id: container_id.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::SshDocker {
+                container_id: container_id.clone(),
+                ssh: ssh.clone(),
+                borrowed_from: None,
+            },
+            TargetLocator::SshPodman {
+                container_id,
+                ssh,
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+        ];
+        let launch = container_launch(temp.path(), HarnessKind::Codex);
+        let worker = temp.path().join("worker");
+        std::fs::write(&worker, stamped_worker(b"new worker")).unwrap();
+        for locator in locators {
+            let root = targets::worker_root(&locator, &session).unwrap();
+            let executor = PreparationExecutor {
+                commands: RefCell::new(Vec::new()),
+                fail_prepare: false,
+            };
+            prepare_installed_managed_harness(&executor, &locator, &root, &launch).unwrap();
+            let commands = executor.commands.borrow();
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0].args.join(" ").contains("prepare-harness"));
+            drop(commands);
+            for fail_prepare in [false, true] {
+                let executor = PreparationExecutor {
+                    commands: RefCell::new(Vec::new()),
+                    fail_prepare,
+                };
+                let result = prepare_managed_harness_for_upgrade(
+                    &executor, &locator, &session, &worker, &launch,
+                );
+                assert_eq!(result.is_err(), fail_prepare);
+                let commands = executor.commands.borrow();
+                let prepare = commands
+                    .iter()
+                    .find(|command| {
+                        command.purpose == "prepare exact container harness before worker upgrade"
+                    })
+                    .unwrap();
+                assert!(prepare.args.join(" ").contains("harness-prepare-"));
+                let stage = commands
+                    .iter()
+                    .find(|command| {
+                        command.purpose == "stage container harness launch configuration"
+                    })
+                    .unwrap();
+                assert!(stage.args.join(" ").contains("harness-prepare-"));
+                for command in commands.iter() {
+                    let rendered = command.args.join(" ");
+                    assert!(!rendered.contains(&format!("'{root}/hel'")));
+                    assert!(!rendered.contains(&format!("'{root}/launch.json'")));
+                    assert!(!command.args.contains(&format!("{root}/hel")));
+                    assert!(!command.args.contains(&format!("{root}/launch.json")));
+                    assert!(!rendered.contains("control.sock"));
+                    assert!(!rendered.contains("kill"));
+                }
+                assert_eq!(
+                    commands
+                        .iter()
+                        .any(|command| command.purpose
+                            == "remove container harness preparation staging"),
+                    !fail_prepare
+                );
+            }
+        }
+    }
 }

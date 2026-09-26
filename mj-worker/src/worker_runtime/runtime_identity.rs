@@ -134,6 +134,14 @@ pub(super) fn resolve_command(
     command: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf> {
+    find_command(command, environment)?
+        .context("runtime command is not executable on the selected PATH")
+}
+
+pub(super) fn find_command(
+    command: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
     let selected = if command.is_absolute() {
         command.to_path_buf()
     } else {
@@ -141,21 +149,24 @@ pub(super) fn resolve_command(
             command.components().count() == 1,
             "relative runtime command is ambiguous"
         );
-        std::env::split_paths(
+        let selected = std::env::split_paths(
             environment
                 .get("PATH")
                 .context("runtime PATH is unavailable")?,
         )
         .map(|directory| directory.join(command))
-        .find(|path| super::harness::entrypoint_is_executable(path))
-        .context("runtime command is not on the selected PATH")?
+        .find(|path| super::harness::entrypoint_is_executable(path));
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        selected
     };
-    ensure!(
-        super::harness::entrypoint_is_executable(&selected),
-        "selected runtime command is not executable"
-    );
+    if !super::harness::entrypoint_is_executable(&selected) {
+        return Ok(None);
+    }
     selected
         .canonicalize()
+        .map(Some)
         .context("resolve selected runtime command")
 }
 

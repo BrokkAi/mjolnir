@@ -1,4 +1,4 @@
-//! Exact, target-local harness installations for bare workers.
+//! Exact, target-local harness installations, including container fallbacks.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};

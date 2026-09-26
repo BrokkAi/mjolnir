@@ -436,21 +436,18 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     super::record_startup_step(&root, "harness-resolve");
-    let managed_harness = super::harness::resolve(
-        config.harness_runtime,
+    let prepared_harness = super::prepare_harness_launch(
         config.harness,
+        config.harness_runtime,
         config.execution_policy,
-        &config.environment,
+        AcpSupervisorSpec::from(&config),
     )
-    .await
-    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
-    if let Some(managed) = &managed_harness {
-        config.bridge_command = managed.command.clone();
-        config.bridge_args = managed.args.clone();
-        config.environment.extend(managed.environment.clone());
+    .await?;
+    if let Some(managed) = &prepared_harness.managed {
         session_environment.extend(managed.environment.clone());
     }
-    let harness_gc = managed_harness
+    let harness_gc = prepared_harness
+        .managed
         .as_ref()
         .map(|managed| super::harness::spawn_gc(managed.cache_root.clone(), config.harness));
 
@@ -473,41 +470,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // The person's own `!` shells above keep the target's settings; the
     // harness, and the supervisor that starts it, do not get the variables
     // this profile excludes (#1160).
-    super::exclude_from_harness_environment(
-        config.harness,
-        &config.excluded_environment,
-        &session_environment,
-        &mut config.environment,
-    );
-    for name in &config.excluded_environment {
-        session_environment.remove(name);
-    }
-    let identity_environment = session_environment.clone();
-    let identity_command =
-        if config.bridge_command.is_relative() && config.bridge_command.components().count() > 1 {
-            config.cwd.join(&config.bridge_command)
-        } else {
-            config.bridge_command.clone()
-        };
-    let identity_root = managed_harness
-        .as_ref()
-        .and_then(|managed| managed.lease_path.parent())
-        .map(std::path::Path::to_path_buf);
-    let identity_harness = config.harness;
-    let (resolved_command, runtime_identity) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let command =
-            super::runtime_identity::resolve_command(&identity_command, &identity_environment)?;
-        let identity = super::runtime_identity::inspect(
-            identity_harness,
-            &command,
-            &identity_environment,
-            identity_root.as_deref(),
-        );
-        Ok((command, identity))
-    })
-    .await
-    .context("runtime identity inspection task failed")??;
-    config.bridge_command = resolved_command;
+    session_environment = prepared_harness.environment.clone();
+    let runtime_identity = prepared_harness.runtime_identity().await?;
     relay
         .lock()
         .expect("relay lock poisoned")
@@ -516,17 +480,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             config.expected_runtime_identity.clone(),
         );
     let supervisor_path = root.join("acp-supervisor.json");
-    AcpSupervisorSpec {
-        command: config.bridge_command,
-        args: config.bridge_args,
-        environment: config.environment,
-        excluded_environment: config.excluded_environment.clone(),
-        cwd: config.cwd.clone(),
-        harness_lease: managed_harness
-            .as_ref()
-            .map(|managed| managed.lease_path.clone()),
-    }
-    .write_spec(&supervisor_path)?;
+    prepared_harness.spec.write_spec(&supervisor_path)?;
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     // The reviewer shares this session's target and working directory and
     // nothing else. It stays idle until a controller asks for a second
@@ -762,18 +716,14 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
     let mut environment = config.target_environment.clone();
     environment.extend(config.environment);
     config.environment = environment;
-    let prepared = super::harness::resolve(
-        config.harness_runtime,
-        config.harness,
-        config.execution_policy,
-        &config.environment,
-    )
-    .await
-    .with_context(|| format!("prepare managed {}", config.harness.display_name()))?;
-    if config.harness_runtime == mj_core::worker_launch::HarnessRuntimePolicy::Managed
-        && prepared.is_none()
-    {
-        bail!("managed harness preparation produced no installation");
+    if config.requires_harness_preparation() {
+        super::prepare_harness_launch(
+            config.harness,
+            config.harness_runtime,
+            config.execution_policy,
+            AcpSupervisorSpec::from(&config),
+        )
+        .await?;
     }
     Ok(())
 }
