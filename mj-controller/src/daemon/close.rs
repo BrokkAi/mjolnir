@@ -178,9 +178,11 @@ impl RuntimeState {
         for child in stopped {
             let child_id = child.child_session_id;
             // A sub-agent borrows its parent's worker and owns no branch.
-            let Err(error) = Box::pin(
-                self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep),
-            )
+            let Err(error) = Box::pin(self.force_destroy_indexed_session(
+                child_id.clone(),
+                BranchDisposition::Keep,
+                LifecycleKind::StopSubagent,
+            ))
             .await
             else {
                 continue;

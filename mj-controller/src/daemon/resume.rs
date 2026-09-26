@@ -459,9 +459,13 @@ impl RuntimeState {
         for child_id in children {
             // A sub-agent borrows its parent's worker and never owns a managed
             // worktree, so it has no branch of its own to keep.
-            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
-                .await
-                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+            Box::pin(self.force_destroy_indexed_session(
+                child_id.clone(),
+                BranchDisposition::Keep,
+                LifecycleKind::ForceDestroy,
+            ))
+            .await
+            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
         self.wait_for_deferred_cleanup(&session_id).await?;
         let exists = blocking({
@@ -597,15 +601,19 @@ impl RuntimeState {
         branch: BranchDisposition,
     ) -> Result<()> {
         self.index_before_destroy(&session_id).await;
-        self.force_destroy_indexed_session(session_id, branch).await
+        self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
+            .await
     }
 
     /// [`Self::force_destroy_session`] once the session and its sub-agents
-    /// have been indexed.
+    /// have been indexed. `kind` is `ForceDestroy`, or `StopSubagent` for a
+    /// sub-agent its parent's suspend stops; its own sub-agents go the same
+    /// way.
     pub(super) async fn force_destroy_indexed_session(
         self: &Arc<Self>,
         session_id: String,
         branch: BranchDisposition,
+        kind: LifecycleKind,
     ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
@@ -619,9 +627,13 @@ impl RuntimeState {
         .await?;
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.force_destroy_indexed_session(child_id.clone(), BranchDisposition::Keep))
-                .await
-                .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
+            Box::pin(self.force_destroy_indexed_session(
+                child_id.clone(),
+                BranchDisposition::Keep,
+                kind,
+            ))
+            .await
+            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
         self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
@@ -634,7 +646,7 @@ impl RuntimeState {
         }
         self.run_lifecycle(
             session_id,
-            LifecycleKind::ForceDestroy,
+            kind,
             move |state, session_id, cancelled| async move {
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();

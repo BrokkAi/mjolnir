@@ -5484,3 +5484,28 @@ fn a_sub_agent_removed_while_its_parent_runs_is_not_reported_as_suspended() {
         StoppedBySuspend::default()
     );
 }
+
+/// R15-2: a sub-agent that its parent's suspend is stopping reads
+/// "Stopping" in its row and in its conversation's header, as the suspend
+/// dialog and the docs say. Before, both said "Destroying". A destroy a
+/// person asked for still says "Destroying".
+#[test]
+fn a_sub_agent_stopped_by_its_parents_suspend_reads_stopping() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent);
+    dashboard.set_current_session(Some("child-session"));
+
+    dashboard.begin_session_operation("child-session".into(), SessionOperationKind::Stopping, None);
+    let screen = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(screen.contains("Transition · Stopping"), "{screen}");
+    assert!(!screen.contains("Destroying"), "{screen}");
+
+    dashboard.finish_session_operation("child-session");
+    dashboard.begin_session_operation(
+        "child-session".into(),
+        SessionOperationKind::Destroying,
+        None,
+    );
+    let screen = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(screen.contains("Transition · Destroying"), "{screen}");
+}

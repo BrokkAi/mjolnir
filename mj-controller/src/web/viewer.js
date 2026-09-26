@@ -1065,6 +1065,7 @@ function operationLabel(operation, now) {
     move: 'Moving',
     suspend: 'Suspending',
     destroy: 'Destroying',
+    stop: 'Stopping',
     cleanup: 'Cleaning up',
     checkpoint: 'Checkpointing',
   }[operation.kind] || String(operation.kind || 'Operation').replace(/-/g, ' ');

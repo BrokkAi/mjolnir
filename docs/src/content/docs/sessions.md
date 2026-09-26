@@ -22,7 +22,7 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `↻` | Resuming |
 | `⇄` | Moving |
 | `▣` | Checkpointing |
-| `↓` | Suspending |
+| `↓` | Suspending, or a sub-agent stopping because its parent is suspending |
 | `■` | Suspended |
 | `⊗` | Destroying |
 
@@ -197,6 +197,7 @@ itself:
 - Each active sub-agent is stopped and removed, without a recovery copy of its
   own. Its conversation is put into SessionWiki first, so
   `mj sessions --session <child-id>` still finds it.
+- While a sub-agent stops, its row and its conversation say "Stopping".
 - A sub-agent that already handed back its report is stopped without a
   warning, since its report already reached the session.
 - When a sub-agent has not handed back yet, Mjolnir says so: "2 sub-agents

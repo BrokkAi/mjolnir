@@ -1768,6 +1768,7 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
         kind,
         SessionOperationKind::Suspending
             | SessionOperationKind::Destroying
+            | SessionOperationKind::Stopping
             | SessionOperationKind::Moving
     ) {
         actions::mark_active_chat_retiring(active_chat, session_id);

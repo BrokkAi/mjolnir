@@ -51,6 +51,8 @@ pub enum SessionTransitionKind {
     Moving,
     Suspending,
     Destroying,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stopping,
 }
 
 impl SessionTransitionKind {
@@ -61,6 +63,7 @@ impl SessionTransitionKind {
             Self::Moving => "Moving",
             Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
+            Self::Stopping => "Stopping",
         }
     }
 

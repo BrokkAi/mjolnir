@@ -214,6 +214,10 @@ enum LifecycleKind {
     /// contains every one of its commits. Surfaces see it as a destroy.
     ArchiveStopped,
     ForceDestroy,
+    /// A sub-agent stopped because its parent is being suspended: the
+    /// teardown of `ForceDestroy`, owned by the parent's suspend, so it is
+    /// shown as a stop and cannot be cancelled on its own.
+    StopSubagent,
     Cleanup,
 }
 
@@ -230,6 +234,7 @@ impl LifecycleKind {
             LifecycleKind::DestroyStopped => "destroy",
             LifecycleKind::ArchiveStopped => "archive",
             LifecycleKind::ForceDestroy => "force destroy",
+            LifecycleKind::StopSubagent => "stop",
             LifecycleKind::Cleanup => "cleanup",
         }
     }
@@ -258,10 +263,12 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// Whether a running lifecycle can still be cancelled. A graceful close has a
 /// point of no return: once the durable state says `Destroying`, the verified
 /// checkpoint is sealed and the record has already committed to losing its
-/// target, so stopping the teardown only strands the target. Every other
-/// lifecycle stays cancellable while it runs.
+/// target, so stopping the teardown only strands the target. A sub-agent's
+/// stop belongs to its parent's suspend, which is what a person cancels.
+/// Every other lifecycle stays cancellable while it runs.
 fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying))
+    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying)
+        || kind == LifecycleKind::StopSubagent)
 }
 
 /// How a stop request has to be carried out, given the durable record.
@@ -446,6 +453,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,
             LifecycleKind::ForceDestroy => Self::ForceDestroy,
+            LifecycleKind::StopSubagent => Self::StopSubagent,
             LifecycleKind::Cleanup => Self::Cleanup,
         }
     }

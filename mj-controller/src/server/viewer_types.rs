@@ -893,6 +893,8 @@ pub enum ViewerOperationKind {
     Move,
     Suspend,
     Destroy,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stop,
     Cleanup,
     Checkpoint,
 }
@@ -905,6 +907,7 @@ impl ViewerOperationKind {
             Self::Move => Some(SessionTransitionKind::Moving),
             Self::Suspend => Some(SessionTransitionKind::Suspending),
             Self::Destroy | Self::Cleanup => Some(SessionTransitionKind::Destroying),
+            Self::Stop => Some(SessionTransitionKind::Stopping),
             // Checkpointing is an ordinary live-session operation. It must
             // not replace a readable conversation with a placeholder.
             Self::Checkpoint => None,

@@ -65,8 +65,10 @@ impl RuntimeState {
     {
         let mut work = Some(work);
         ensure!(
-            matches!(kind, LifecycleKind::Move | LifecycleKind::ForceDestroy)
-                || !crate::controller::move_session::move_has_pending_queue(&session_id),
+            matches!(
+                kind,
+                LifecycleKind::Move | LifecycleKind::ForceDestroy | LifecycleKind::StopSubagent
+            ) || !crate::controller::move_session::move_has_pending_queue(&session_id),
             "Move queue admission is incomplete; retry Move on the same destination before another lifecycle operation"
         );
         let result = {

@@ -145,6 +145,7 @@ pub(super) fn viewer_operation(
             | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Suspend,
             crate::daemon::RuntimeLifecycleKind::DestroyStopped
             | crate::daemon::RuntimeLifecycleKind::ForceDestroy => ViewerOperationKind::Destroy,
+            crate::daemon::RuntimeLifecycleKind::StopSubagent => ViewerOperationKind::Stop,
             crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Cleanup,
         },
         started_at_epoch_seconds: view.started_at_epoch_seconds,
@@ -225,6 +226,7 @@ pub(super) fn session_capabilities(
             matches!(
                 op.kind,
                 crate::server::ViewerOperationKind::Destroy
+                    | crate::server::ViewerOperationKind::Stop
                     | crate::server::ViewerOperationKind::Cleanup
             )
         }),

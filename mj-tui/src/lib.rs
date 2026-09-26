@@ -573,6 +573,8 @@ pub enum SessionOperationKind {
     Moving,
     Suspending,
     Destroying,
+    /// A sub-agent stopped because its parent is being suspended.
+    Stopping,
     Connecting,
     Importing,
 }
@@ -585,6 +587,7 @@ impl SessionOperationKind {
             Self::Moving => "Moving",
             Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
+            Self::Stopping => "Stopping",
             Self::Connecting => "Connecting",
             Self::Importing => "Importing",
         }
@@ -600,6 +603,7 @@ impl SessionOperationKind {
             Self::Moving => Some(SessionTransitionKind::Moving),
             Self::Suspending => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
+            Self::Stopping => Some(SessionTransitionKind::Stopping),
             Self::Connecting | Self::Importing => None,
         }
     }

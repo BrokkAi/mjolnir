@@ -3941,3 +3941,90 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
     );
     parent.channels.shutdown.shutdown().await.unwrap();
 }
+
+/// R15-2: while a parent's suspend stopped a child, the child's row and
+/// header said "Destroying", and the dialog and the docs said "stopped".
+/// The child's own operation is a stop, which surfaces show as "Stopping",
+/// and it cannot be cancelled apart from the suspend that owns it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying() {
+    const NAME: &str = "a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying";
+    const CHILD: &str = "MJ_TEST_SUSPEND_SHOWS_STOPPING";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parent suspension").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    // A parent with nothing to checkpoint yet, so its suspend settles
+    // without a worker to talk to.
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(WORKING_CHILD),
+    });
+    crate::database::save_subagent_session(
+        &child,
+        &runtime_test_subagent(WORKING_CHILD, parent_id),
+    )
+    .unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    // A recovery copy in flight holds the child's stop at its start, where
+    // the operation is already visible.
+    state
+        .recovery_observer
+        .gate
+        .try_start(WORKING_CHILD)
+        .unwrap();
+    let suspend = tokio::spawn({
+        let state = state.clone();
+        async move { state.suspend_session(parent_id.to_owned()).await }
+    });
+    let stopping = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(view) = state
+                .active_lifecycles()
+                .into_iter()
+                .find(|view| view.session_id == WORKING_CHILD)
+            {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    state.recovery_observer.gate.finish(WORKING_CHILD);
+
+    assert_eq!(
+        serde_json::to_value(stopping.kind).unwrap(),
+        "stop_subagent",
+        "{stopping:?}"
+    );
+    assert!(!stopping.cancellable, "{stopping:?}");
+    tokio::time::timeout(Duration::from_secs(60), suspend)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(WORKING_CHILD)
+    );
+}

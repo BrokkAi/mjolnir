@@ -471,6 +471,7 @@ impl DashboardContext {
                     Some(
                         SessionOperationKind::Suspending
                             | SessionOperationKind::Destroying
+                            | SessionOperationKind::Stopping
                             | SessionOperationKind::Moving,
                     )
                 )
