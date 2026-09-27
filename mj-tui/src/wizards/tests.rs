@@ -4313,8 +4313,7 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
 }
 
 /// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
-/// show the choice. The box starts unchecked: native sub-agents are the
-/// default.
+/// show the choice. Native sub-agents are the default.
 #[test]
 fn new_session_wizard_shows_subagent_choices_only_for_claude_and_codex() {
     for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
@@ -4335,14 +4334,14 @@ fn new_session_wizard_shows_subagent_choices_only_for_claude_and_codex() {
             .unwrap();
         let text = buffer_lines(terminal.backend().buffer()).join("\n");
         assert_eq!(
-            text.contains("Mjolnir, all models"),
+            text.contains("Subagents"),
             visible,
             "profile {profile}:\n{text}"
         );
     }
 }
 
-/// The wizard sends the box's value for Claude and Codex, and `None` for a
+/// The wizard sends the selected value for Claude and Codex, and `None` for a
 /// harness that cannot receive the tools at all.
 #[test]
 fn new_session_wizard_sends_subagent_choice() {
@@ -4378,7 +4377,9 @@ fn new_session_wizard_sends_subagent_choice() {
                 panic!("new wizard")
             };
             wizard.form.get_mut().focus(WizardControl::Subagents);
+            ready_key(&mut dashboard, key(KeyCode::Enter));
             ready_key(&mut dashboard, key(KeyCode::Down));
+            ready_key(&mut dashboard, key(KeyCode::Enter));
         }
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new wizard")
@@ -5775,4 +5776,122 @@ fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
         panic!("wizard");
     };
     assert_eq!(*wizard.subagents, fixed, "canceling does not save edits");
+}
+
+#[test]
+fn subagent_combobox_previews_cancel_and_commit_without_leaving_review() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut dashboard =
+        DashboardState::new(subagent_wizard_config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.form.get_mut().focus(WizardControl::Subagents);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let collapsed = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(collapsed.contains("Subagents"), "{collapsed}");
+    assert!(!collapsed.contains("Mjolnir, all models"), "{collapsed}");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard")
+    };
+    assert_eq!(*wizard.subagents, SubagentPolicy::Native);
+    assert!(wizard.subagent_combo.is_open(WizardControl::Subagents));
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let expanded = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(expanded.contains("Mjolnir, all models"), "{expanded}");
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("Escape must only close the popup")
+    };
+    assert_eq!(wizard.step, WizardStep::Review);
+    assert_eq!(*wizard.subagents, SubagentPolicy::Native);
+    assert!(!wizard.subagent_combo.is_open(WizardControl::Subagents));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard")
+    };
+    assert_eq!(*wizard.subagents, SubagentPolicy::AllModels);
+    assert!(!wizard.subagent_combo.is_open(WizardControl::Subagents));
+}
+
+#[test]
+fn subagent_model_combobox_discovers_only_after_a_changed_model_is_committed() {
+    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    let mut dashboard = DashboardState::new(
+        subagent_wizard_config(),
+        State {
+            last_subagent_policy: fixed.clone(),
+            ..Default::default()
+        },
+        BTreeMap::new(),
+    );
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.form.get_mut().focus(WizardControl::SubagentModel);
+    let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
+        dashboard.take_subagent_discovery()
+    else {
+        panic!("discovery")
+    };
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    dashboard.apply_subagent_options(
+        id,
+        Ok(SubagentOptions {
+            models: vec![choice("chosen"), choice("next")],
+            efforts: vec![choice("high")],
+            unavailable: vec![],
+        }),
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    assert!(dashboard.take_subagent_discovery().is_none());
+    ready_key(&mut dashboard, key(KeyCode::Esc));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard")
+    };
+    assert_eq!(*wizard.subagents, fixed);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        dashboard.take_subagent_discovery().is_none(),
+        "accepting the same model retains its effort and capabilities"
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard")
+    };
+    assert_eq!(
+        *wizard.subagents,
+        SubagentPolicy::SingleModel {
+            model: "next".into(),
+            effort: None
+        }
+    );
+    assert!(
+        matches!(dashboard.take_subagent_discovery(), Some(DashboardAction::DiscoverSubagentOptions { model: Some(model), .. }) if model == "next")
+    );
 }

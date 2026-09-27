@@ -94,6 +94,10 @@ impl NewWizard {
             .and_then(|index| self.subagent_options()?.models.get(index))
             .map(|choice| choice.value.clone())
             .unwrap_or_default();
+        if matches!(&*self.subagents, SubagentPolicy::SingleModel { model: selected, .. } if selected == &model)
+        {
+            return;
+        }
         *self.subagents = SubagentPolicy::SingleModel {
             model,
             effort: None,

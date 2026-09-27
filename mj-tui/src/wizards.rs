@@ -149,6 +149,7 @@ pub(crate) struct NewWizard {
     /// harness's own. Only Claude and Codex can, so the review step hides the
     /// control for every other kind and the request then sends `None`.
     pub(crate) subagents: Box<mj_core::subagent::SubagentPolicy>,
+    pub(crate) subagent_combo: Box<ComboBoxState<WizardControl>>,
     pub(crate) subagent_discovery: Option<Box<subagents::SubagentDiscovery>>,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
@@ -190,6 +191,7 @@ impl PartialEq for NewWizard {
         self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
             && self.subagents == other.subagents
+            && self.subagent_combo == other.subagent_combo
             && self.subagent_discovery == other.subagent_discovery
             && self.workspace_id == other.workspace_id
             && self.step == other.step
