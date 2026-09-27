@@ -288,6 +288,7 @@ fn input() -> ArchiveInput {
             primary_repository: "hel".into(),
         },
         canonical_session: CanonicalSessionSnapshot {
+            assessment_state: None,
             event_frontier: 4,
             event_frontier_digest: "a".repeat(64),
             session: CanonicalSessionState {

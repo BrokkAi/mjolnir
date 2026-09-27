@@ -712,6 +712,16 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         tx.commit()?;
     }
 
+    // Breaking: relay assessment observations and seeded-context commands are
+    // persisted as JSON that older readers cannot decode or preserve.
+    if version < 58 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            UPDATE schema_compatibility SET minimum_compatible_version = 58 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (58, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 58;
+            COMMIT;")?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -936,7 +946,7 @@ mod reader_tests {
 
     /// The oldest executable revision that can still read and write a store at
     /// `SCHEMA_VERSION`. Migration 57 replaces stored API event bodies.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 57;
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 58;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

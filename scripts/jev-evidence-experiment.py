@@ -47,7 +47,7 @@ def project(snapshot, mode, selected=(), limit=48 * 1024):
 
 
 def questions():
-    return json.loads((ROOT / 'mj-core/src/activity/verdict_questions.json').read_text())
+    return json.loads((ROOT / 'mj-core/src/activity/verdict_questions_v4.json').read_text())
 
 
 def validate_case(case):

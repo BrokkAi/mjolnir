@@ -333,6 +333,7 @@ pub fn canonical_session_from_materialized(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(CanonicalSessionSnapshot {
+        assessment_state: None,
         event_frontier: materialized.applied_event_ordinal,
         event_frontier_digest: materialized.applied_event_digest.clone(),
         session: CanonicalSessionState {

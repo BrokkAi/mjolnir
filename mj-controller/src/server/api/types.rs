@@ -30,6 +30,8 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<mj_core::assessment::Summary>,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +85,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            assessment: None,
             subagents: session.subagents.clone(),
             background_work: None,
             checkout: session.checkout.clone(),

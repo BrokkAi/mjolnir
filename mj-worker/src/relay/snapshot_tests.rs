@@ -323,25 +323,6 @@ mod tests {
                 option_id: "allow".into(),
                 option_name: "Allow".into(),
             },
-            RelayObservation::ElicitationRequested {
-                request: mj_core::elicitation::ElicitationRequest {
-                    id: "elicitation-1".into(),
-                    message: "confirm".into(),
-                    title: None,
-                    description: None,
-                    fields: Vec::new(),
-                },
-            },
-            RelayObservation::ElicitationResolved {
-                elicitation_id: "elicitation-1".into(),
-                action: "accept".into(),
-            },
-            RelayObservation::ElicitationsCleared,
-            RelayObservation::SessionUpdate {
-                update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::from("streamed"),
-                ))),
-            },
         ];
         for observation in transcript {
             assert!(
@@ -374,6 +355,25 @@ mod tests {
         }
 
         for observation in [
+            RelayObservation::ElicitationRequested {
+                request: mj_core::elicitation::ElicitationRequest {
+                    id: "elicitation-1".into(),
+                    message: "confirm".into(),
+                    title: None,
+                    description: None,
+                    fields: Vec::new(),
+                },
+            },
+            RelayObservation::ElicitationResolved {
+                elicitation_id: "elicitation-1".into(),
+                action: "accept".into(),
+            },
+            RelayObservation::ElicitationsCleared,
+            RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::from("streamed"),
+                ))),
+            },
             RelayObservation::CommandQueued {
                 command_id: "queued-command".into(),
                 command: prompt("grow the snapshot"),
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn operational_state_is_payload_free_and_bounded() {
+    fn operational_state_retains_bounded_authorization_without_dispatch_payloads() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         submit_relay(
@@ -631,7 +631,12 @@ mod tests {
         assert!(encoded.len() <= RELAY_STATE_BYTE_BUDGET);
         let encoded = String::from_utf8(encoded).unwrap();
         assert!(encoded.contains("secret-prompt"));
-        assert!(!encoded.contains("payload-that-must-not-be-in-operational-state"));
+        let state: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(state.get("dispatches").is_none());
+        assert_eq!(
+            state["assessment_context"]["messages"][0]["text"],
+            "payload-that-must-not-be-in-operational-state"
+        );
 
         let half_budget = RELAY_STATE_BYTE_BUDGET / 2;
         relay

@@ -204,6 +204,21 @@ pub(crate) fn checkpoint_archive_input(
             primary_repository: "project".into(),
         },
         canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
+            assessment_state: Some(
+                serde_json::to_value(mj_core::assessment::Checkpoint {
+                    version: 1,
+                    context: Some(Default::default()),
+                    assessment: None,
+                    continuation: mj_core::continuation::ContinuationState {
+                        suppressed: true,
+                        quota_suppressed: true,
+                        ..Default::default()
+                    },
+                    capacity_retry: None,
+                    turn_completion: None,
+                })
+                .unwrap(),
+            ),
             event_frontier,
             event_frontier_digest: if event_frontier == 0 {
                 mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into()

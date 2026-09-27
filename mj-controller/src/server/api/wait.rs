@@ -190,6 +190,7 @@ pub(super) fn build_observation(
         && let Some(snapshot) = &view.snapshot
     {
         observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+        observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
         // Use activity and turn facts from the same actor snapshot. The viewer
@@ -250,6 +251,7 @@ pub(super) async fn finish_wait(
     decision: WaitDecision,
     relay: Option<RelayHealth>,
 ) -> Result<WaitResponse, ApiFailure> {
+    session.assessment.clone_from(&observation.assessment);
     session.activity_state = Some(observation.activity.clone());
     session.is_idle = observation.activity.is_idle()
         && session.lifecycle == ViewerLifecycleCategory::Live

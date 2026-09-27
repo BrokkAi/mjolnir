@@ -134,6 +134,9 @@ pub struct RepositoryManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalSessionSnapshot {
+    /// Versioned worker assessment state, validated by assessment::Checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_state: Option<serde_json::Value>,
     /// Highest relay event ordinal incorporated into this projection.
     pub event_frontier: u64,
     /// Relay-authored rolling digest of the exact event prefix at the frontier.
@@ -163,7 +166,8 @@ impl CanonicalSessionSnapshot {
     /// bookkeeping advances them without changing what the session contains.
     /// `last_activity_at_ms` is a watermark of the same kind.
     pub fn content_matches(&self, other: &Self) -> bool {
-        self.transcript == other.transcript
+        self.assessment_state == other.assessment_state
+            && self.transcript == other.transcript
             && self.queued_prompts == other.queued_prompts
             && self.session.without_activity_watermark()
                 == other.session.without_activity_watermark()
@@ -373,6 +377,9 @@ pub struct NativeArtifact {
 }
 
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {
+    if let Some(value) = &snapshot.assessment_state {
+        crate::assessment::Checkpoint::decode(value)?;
+    }
     ensure!(
         is_lower_hex_sha256(&snapshot.event_frontier_digest),
         "canonical event frontier digest must be 64 lowercase hexadecimal characters"

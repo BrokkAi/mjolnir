@@ -50,7 +50,8 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
         });
     }
     let mut operational = RelaySnapshot::new(id.into()).operational_state();
-    operational.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+    // These fixtures exercise the explicitly retained legacy classifier.
+    operational.relay_protocol_version = Some(24);
     operational.continuation = ContinuationState {
         user_command_id: Some("request".into()),
         completed_command_id: completed.then(|| "request".into()),
@@ -702,7 +703,7 @@ fn self_started(id: &str, reply: &str) -> ManagedSessionView {
 
 #[tokio::test]
 async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itself() {
-    for protocol in [mj_core::relay::RELAY_PROTOCOL_VERSION, 22] {
+    for protocol in [24, 22, mj_core::assessment::PROTOCOL] {
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
             session_id: "one".into(),
@@ -754,6 +755,38 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             .await
             .unwrap();
         receive(&mut updates).await;
+        if protocol >= mj_core::assessment::PROTOCOL {
+            use mj_core::assessment::{
+                Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
+            };
+            let state = &mut after.snapshot.as_mut().unwrap().operational;
+            let mut assessment = TurnAssessment::pending(
+                state.continuation.completed_command_id.clone().unwrap(),
+                99,
+                99,
+                mj_core::activity::verdict::CompletionEvidence::bounded(
+                    "harness_turn_settled",
+                    None,
+                ),
+            );
+            assessment.verdict = Some(Verdict {
+                failure: Judgment {
+                    choice: Failure::Quota,
+                    confidence: 0.99,
+                },
+                input: Judgment {
+                    choice: Input::Unclear,
+                    confidence: 0.5,
+                },
+                work: Judgment {
+                    choice: Work::Unclear,
+                    confidence: 0.5,
+                },
+            });
+            assessment.action = Some(Action::RecoverQuota);
+            assessment.status = Status::Deferred;
+            state.assessment = Some(Box::new(assessment));
+        }
         remote.publisher.publish("one".into(), after).await.unwrap();
         receive(&mut updates).await;
         if protocol < ENDED_TURN_PROTOCOL {
@@ -764,11 +797,18 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
                     .is_err()
             );
         } else {
-            let message = tokio::time::timeout(Duration::from_secs(3), checks.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(message.unwrap().contains("hit your session limit"));
+            if protocol < mj_core::assessment::PROTOCOL {
+                let message = tokio::time::timeout(Duration::from_secs(3), checks.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(message.unwrap().contains("hit your session limit"));
+            } else {
+                assert!(
+                    checks.try_recv().is_err(),
+                    "new workers must never be classified again by the daemon"
+                );
+            }
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
                 .unwrap()
@@ -790,8 +830,18 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             reply
                 .send(Err("end isolated scheduling probe".into()))
                 .unwrap();
-            let decision = technical(log_dir.path());
-            assert_eq!(decision.technical.unwrap()["turn"], "self-started");
+            if protocol < mj_core::assessment::PROTOCOL {
+                let decision = technical(log_dir.path());
+                assert_eq!(decision.technical.unwrap()["turn"], "self-started");
+            } else {
+                assert!(
+                    mj_core::jev::read(log_dir.path(), "one", None)
+                        .unwrap()
+                        .decisions
+                        .is_empty(),
+                    "only the worker owns a new assessment's diagnostic"
+                );
+            }
         }
         cancellation.cancel();
         task.await.unwrap().unwrap();

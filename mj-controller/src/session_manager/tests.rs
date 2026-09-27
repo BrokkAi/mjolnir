@@ -842,6 +842,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                assessment: None,
+                assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
                 relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),

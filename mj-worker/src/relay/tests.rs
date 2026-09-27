@@ -2533,6 +2533,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
         Some(RelayObservation::HarnessTurnSettled { origin, .. })
             if origin.as_deref() == Some("task-notification")
     ));
+    relay.prepare_pending_assessment().unwrap();
     let (_, evidence, _) = relay
         .pending_replied_verdict()
         .expect("settled harness turn is classified");
@@ -4796,6 +4797,7 @@ fn finished_turn_queues_only_one_replied_classification() {
             },
         )
         .unwrap();
+    relay.prepare_pending_assessment().unwrap();
     let (_, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert_eq!(
         evidence.phase,
@@ -5539,9 +5541,9 @@ fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inferen
             Some(completion.clone())
         );
         assert_eq!(relay.activity_facts().inferred_idle_since_ms, None);
-        assert_eq!(
-            relay.replied_verdict_pending,
-            decision == Decision::ExpectContinuation
+        assert!(
+            relay.pending_replied_verdict().is_none(),
+            "a recorded assessment is not polled again after restart"
         );
         submit_relay(&mut relay, "second-command", prompt("different work"));
         relay.claim_pending_commands(true).unwrap();

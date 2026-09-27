@@ -5,6 +5,7 @@ pub mod clock;
 pub mod acp;
 pub mod activity;
 pub mod archive;
+pub mod assessment;
 pub mod attachment;
 pub mod bounded_frame;
 pub mod codex_catalog;

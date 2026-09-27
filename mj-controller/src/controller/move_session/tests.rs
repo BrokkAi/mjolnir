@@ -505,6 +505,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
     let canonical = CanonicalSessionSnapshot {
+        assessment_state: None,
         event_frontier: 0,
         event_frontier_digest: mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into(),
         session: CanonicalSessionState {

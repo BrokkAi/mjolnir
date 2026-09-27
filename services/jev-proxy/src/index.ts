@@ -2,6 +2,7 @@ import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, 
 import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
 import questionsV3 from "../../../mj-core/src/activity/verdict_questions_v3.json" with { type: "json" };
+import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
@@ -34,6 +35,45 @@ type TurnEvidenceV4 = TurnEvidenceV2 & { completion?: {
   stop_reason: string;
   diagnostic: { message: string; code?: string; http_status?: number; reset_at?: string } | null;
 } };
+
+function evidenceV5(value: unknown): value is TurnEvidenceV4 {
+  if (!object(value)) return false;
+  const { authorization, ...ordinary } = value;
+  if (!evidenceV4(ordinary) || (ordinary.phase === "replied" && !ordinary.completion)) return false;
+  if (authorization === undefined) return true;
+  if (!object(authorization) || typeof authorization.authorization_complete !== "boolean"
+    || typeof authorization.assistant_history_omitted !== "boolean"
+    || typeof authorization.final_reply_omitted !== "boolean"
+    || Object.keys(authorization).some(k => !["messages", "authorization_complete", "assistant_history_omitted", "open_assistant_id", "final_reply_omitted"].includes(k))
+    || !(authorization.open_assistant_id === null || text(authorization.open_assistant_id, 256))
+    || !Array.isArray(authorization.messages) || authorization.messages.length > 256) return false;
+  let users = 0, assistants = 0;
+  for (const m of authorization.messages) {
+    if (!object(m) || !text(m.id, 256) || typeof m.text !== "string"
+      || Object.keys(m).some(k => !["id", "role", "text"].includes(k))) return false;
+    if (m.role === "user") users += encoder.encode(m.text).length;
+    else if (m.role === "assistant") assistants += encoder.encode(m.text).length;
+    else return false;
+  }
+  return users <= 32 * 1024 && assistants <= 16 * 1024;
+}
+
+function answersV5(value: unknown): Record<string, unknown> | null {
+  if (!object(value) || !object(value.answers)) return null;
+  const choices: Record<string, string[]> = {
+    failure: ["none", "transient_provider", "quota", "other", "unclear"],
+    input: ["none", "redundant_request", "required", "unclear"],
+    work: ["finished", "authorized_unfinished", "waiting", "unclear"],
+  };
+  const result: Record<string, unknown> = {};
+  for (const [key, allowed] of Object.entries(choices)) {
+    const answer = value.answers[key];
+    if (!object(answer) || answer.type !== "choice" || typeof answer.choice !== "string"
+      || !allowed.includes(answer.choice) || !probability(answer.confidence)) return null;
+    result[key] = { type: "choice", choice: answer.choice, confidence: answer.confidence };
+  }
+  return result;
+}
 
 class BodyTooLarge extends Error {}
 class UpstreamDeadline extends Error {}
@@ -178,7 +218,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 = 1, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 | 5 = 1, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -196,14 +236,14 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 4 ? questions : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 5 ? questions : version === 4 ? questionsV4 : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
+        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 5 ? answersV5(body) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -222,7 +262,7 @@ export default {
     const search = url.pathname === "/v1/help-search";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -247,6 +287,9 @@ export default {
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
+    }
+    if (url.pathname === "/v5/turn-verdict") {
+      return evidenceV5(state) ? classify(state, key, 5) : error("invalid_evidence", 400);
     }
     if (url.pathname === "/v4/turn-verdict") {
       return evidenceV4(state) ? classify(state, key, 4) : error("invalid_evidence", 400);

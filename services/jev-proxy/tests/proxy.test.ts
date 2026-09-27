@@ -235,7 +235,7 @@ test("v3 assesses input and work independently using the direct client's shared 
 });
 
 test("v4 supplies completion diagnostics and requires a typed server retry answer", async t => {
-  const { default: questionsV4 } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { default: questionsV4 } = await import("../../../mj-core/src/activity/verdict_questions_v4.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, phase: "replied", transcript_summary: "User: Continue the task.",
     assistant_text_tail: "Provider temporarily unavailable", completion: {
@@ -269,4 +269,32 @@ test("v4 supplies completion diagnostics and requires a typed server retry answe
   } }));
   await expectError(await proxy.fetch(v4(state), environment()), 502, "invalid_upstream_response");
   assert.equal(bad.callCount(), 1);
+});
+
+test("v5 independently assesses an autonomous capacity refusal", async (t) => {
+  const { default: unifiedQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { recent_tools: _recent, ...ordinary } = base;
+  const state = { ...ordinary, phase: "replied", transcript_summary: "",
+    assistant_text_tail: "Selected model is at capacity. Please try a different model.",
+    completion: { stop_reason: "harness_turn_settled", diagnostic: null } };
+  const result = { answers: {
+    failure: { type: "choice", choice: "transient_provider", confidence: 0.91 },
+    input: { type: "choice", choice: "unclear", confidence: 0.32 },
+    work: { type: "choice", choice: "unclear", confidence: 0.24 },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: unifiedQuestions });
+    return Response.json(result);
+  });
+  const v5 = (body: unknown) => new Request("https://proxy.example/v5/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body),
+  });
+  const response = await proxy.fetch(v5(state), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+  assert.equal(calls.callCount(), 1);
+  await expectError(await proxy.fetch(v5({ ...state, completion: undefined }), environment()), 400);
+  calls.restore();
+  upstream(t, async () => Response.json({ answers: { ...result.answers, failure: { type: "choice", choice: "invented", confidence: 1 } } }));
+  await expectError(await proxy.fetch(v5(state), environment()), 502);
 });

@@ -729,6 +729,7 @@ impl DurableRelay {
         }
         mj_core::test_hooks::reach_test_hook("journal_append_before_snapshot_publication")?;
 
+        let previous_assessment = self.snapshot.assessment.clone();
         match staged {
             Some(next_snapshot) => self.snapshot = next_snapshot,
             // Applying is still what moves the frontier, so a misclassified
@@ -736,6 +737,9 @@ impl DurableRelay {
             // fail here either: this event was digested from this exact
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
+        }
+        if self.snapshot.assessment != previous_assessment {
+            self.publish_assessment_diagnostic();
         }
         let mut summary_prompt = None;
         if let Some(command_id) =
@@ -754,7 +758,6 @@ impl DurableRelay {
                 .collect::<Vec<_>>()
                 .join("\n");
             summary_prompt = Some(prompt_text);
-            self.replied_verdict_pending = false;
         }
         self.turn_context
             .observe_relay(&event.observation, summary_prompt.as_deref());
@@ -769,7 +772,6 @@ impl DurableRelay {
                 | mj_core::relay::RelayExecutionState::Closed
         ) {
             self.turn_context.invalidate();
-            self.replied_verdict_pending = false;
         }
         let idle_changed = self.refresh_idle_clock(event.recorded_at_ms);
         self.record_journal_append(&path, &event);
@@ -780,7 +782,12 @@ impl DurableRelay {
         // streamed observation does not need its own snapshot write. Persisting
         // on every state move and once per bounded run of transcript bytes
         // keeps that replay short without paying two fsyncs per chunk.
-        if stage_snapshot
+        // Whole-message Jev evidence is reconstructed by journal replay. Its
+        // bounded growth is checked above, but streaming still checkpoints at
+        // the existing byte cadence rather than rewriting a snapshot per token.
+        let evidence_chunk = matches!(&self.hot_events.back().expect("just appended").observation,
+            RelayObservation::SessionUpdate { update } if matches!(update.as_ref(), agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)));
+        if (stage_snapshot && !evidence_chunk)
             || idle_changed
             || self.unpersisted_journal_bytes >= RELAY_SNAPSHOT_LAG_BYTE_LIMIT
         {

@@ -101,9 +101,9 @@ async fn completed_turn_response(
             return;
         }
         let body = serde_json::json!({"answers": {
-            "work_state": {"type":"choice", "choice":if choice == "user" { "background_work" } else { choice }, "confidence":confidence},
-            "needs_user_input": {"type":"noul", "noul":if choice == "user" { confidence } else { 0.01 }},
-            "retryable_server_error": {"type":"noul", "noul":0.01}
+            "work": {"type":"choice", "choice":if choice == "user" || choice == "background_work" { "waiting" } else { choice }, "confidence":confidence},
+            "input": {"type":"choice", "choice":if choice == "user" { "required" } else { "none" }, "confidence":if choice == "user" { confidence } else { 0.99 }},
+            "failure": {"type":"choice", "choice":"none", "confidence":0.99}
         }})
         .to_string();
         stream
@@ -288,9 +288,20 @@ async fn completed_turn_response(
         .unwrap();
     } else if matches!(action, WhileClassifying::KeepCurrent) {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !std::fs::read_to_string(&log_path)
+            while relay
+                .lock()
                 .unwrap()
-                .contains("Jev retry scheduled")
+                .operational_state()
+                .assessment
+                .as_ref()
+                .is_none_or(|a| {
+                    a.status
+                        != if status == 200 {
+                            mj_core::assessment::Status::Assessed
+                        } else {
+                            mj_core::assessment::Status::Failed
+                        }
+                })
             {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
@@ -361,7 +372,7 @@ async fn replied_idle_verdict_cannot_override_a_new_prompt() {
 }
 
 #[tokio::test]
-async fn uncertain_and_failed_replied_verdicts_preserve_activity_and_schedule_retry() {
+async fn uncertain_verdicts_are_cached_and_transport_failures_back_off() {
     completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.5, 200).await;
     completed_turn_response(WhileClassifying::KeepCurrent, "unclear", 4, 0.95, 200).await;
     completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.95, 503).await;
@@ -381,6 +392,7 @@ fn ask_once_without_a_classifier() {
         })
         .unwrap();
         let evidence = mj_core::activity::verdict::TurnEvidence {
+            authorization: None,
             completion: None,
             harness: mj_core::config::HarnessKind::Codex,
             phase: mj_core::activity::verdict::TurnPhase::Replied,

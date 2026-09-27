@@ -141,7 +141,7 @@ fn continuation_allowed(view: &ManagedSessionView) -> bool {
             .is_none_or(|r| r.submitted)
         && s.operational.continuation.eligible()
         && s.materialized.pending_elicitations.is_empty()
-        && ended_turn(s).is_some_and(|t| t.finished())
+        && ended_turn(s).is_some_and(|t| unified(s) || t.finished())
 }
 
 /// A background command, agent or goal will move the session on, so an
@@ -193,7 +193,7 @@ fn quota_allowed(view: &ManagedSessionView) -> bool {
         && !s.operational.goal.budget_limited()
         && s.materialized.pending_elicitations.is_empty()
         && ended_turn(s).is_some_and(|t| {
-            c.completed_command_id.as_deref() == Some(t.key) && t.quota_candidate()
+            c.completed_command_id.as_deref() == Some(t.key) && (unified(s) || t.quota_candidate())
         })
 }
 
@@ -219,10 +219,33 @@ fn quota_resumable(view: &ManagedSessionView) -> bool {
         })
 }
 
+fn unified(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
+    s.operational
+        .relay_protocol_version
+        .is_some_and(|v| v >= mj_core::assessment::PROTOCOL)
+}
+
 fn check_eligible(view: &ManagedSessionView) -> bool {
     let Some(s) = &view.snapshot else {
         return false;
     };
+    if unified(s) {
+        return s.operational.assessment.as_ref().is_some_and(|a| {
+            a.current()
+                && match a.action {
+                    Some(mj_core::assessment::Action::Continue) => continuation_allowed(view),
+                    Some(mj_core::assessment::Action::RecoverQuota) => {
+                        quota_schedulable(view)
+                            && s.operational
+                                .continuation
+                                .quota_recovery
+                                .as_ref()
+                                .is_none_or(|r| r.completed_command_id != a.turn_id)
+                    }
+                    _ => false,
+                }
+        });
+    }
     // Current workers are checked whatever else is running; the answer is
     // acted on only when it can be.
     let ordinary = if current_rules(s) {
@@ -379,6 +402,11 @@ fn spawn_in(
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
         let mut jobs = JoinSet::new();
+        let mut seed_jobs = JoinSet::new();
+        let mut seed_after = BTreeMap::<String, std::time::Instant>::new();
+        let mut assessed = BTreeMap::<String, u64>::new();
+        let (recheck_tx, mut recheck_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut action_recheck = BTreeMap::<String, std::time::Instant>::new();
 
         let mut generation = 0_u64;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -386,11 +414,45 @@ fn spawn_in(
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break,
-                update = input.recv() => {
+                update = async {
+                    loop {
+                        tokio::select! {
+                            update = input.recv() => return update,
+                            id = recheck_rx.recv() => {
+                                let id = id?;
+                                if let Some(view) = latest.get(&id) {
+                                    return Some(SessionManagerUpdate { session_id: id, view: view.clone() });
+                                }
+                            }
+                        }
+                    }
+                } => {
                     let Some(update) = update else { break };
                     let id = update.session_id;
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
+                    if let Some(snapshot) = view.snapshot.as_ref().filter(|s| unified(s) && s.operational.assessment_context.is_none())
+                        && view.connected && seed_after.get(&id).is_none_or(|at| *at <= std::time::Instant::now()) {
+                        seed_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(60));
+                        let snapshot = snapshot.clone();
+                        let control = environment.control.clone();
+                        let session = id.clone();
+                        seed_jobs.spawn(async move {
+                            let result = async {
+                                let _work = crate::upgrade::activity_unless_draining("seed Jev authorization")?;
+                                let expected = RelayCursor { ordinal: snapshot.operational.latest_ordinal, digest: snapshot.operational.latest_digest.clone() };
+                                let evidence = tokio::task::spawn_blocking(move || {
+                                    crate::database::load_continuation_evidence(&snapshot.materialized.session_id, snapshot.materialized.applied_event_ordinal, &snapshot.materialized.applied_event_digest)
+                                }).await.context("collect retained authorization")??;
+                                let context = mj_core::assessment::ContextHistory { messages: evidence.messages, authorization_complete: true, assistant_history_omitted: evidence.assistant_history_omitted, open_assistant_id: None, final_reply_omitted: false };
+                                let handle = control.wait_for_session(&session, Duration::from_secs(5)).await?;
+                                handle.submit(format!("assessment-seed-{}", expected.ordinal), RelayCommand::SeedAssessmentContext { expected, context: Box::new(context) }).await?;
+                                handle.sync_now().await?;
+                                Ok::<_, anyhow::Error>(())
+                            }.await;
+                            (session, result)
+                        });
+                    }
                     let completed = view
                         .snapshot
                         .as_ref()
@@ -430,7 +492,10 @@ fn spawn_in(
                         // to record the worker's actual acceptance or rejection.
                         // Its atomic frontier guard still lets new input win.
                     }
-                    let new_completion = previous.is_some_and(|old| old != completed) && completed.is_some();
+                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && a.verdict.is_some());
+                    let new_completion = if let Some(a) = worker_assessment {
+                        assessed.insert(id.clone(), a.revision) != Some(a.revision)
+                    } else { previous.is_some_and(|old| old != completed) && completed.is_some() };
                     // Whatever held a deferred continuation has stopped: ask
                     // again, since the conversation may have moved on.
                     let released = !new_completion && deferred.contains_key(&id) && eligible(&view);
@@ -444,7 +509,7 @@ fn spawn_in(
                         let epoch = generation;
                         let session = id.clone();
                         let snapshot = view.snapshot.as_ref().expect("eligible snapshot").clone();
-                        let diagnostic = environment.log.as_ref().map(|log| log.start(&id, "continuation",
+                        let diagnostic = environment.log.as_ref().filter(|_| !unified(&snapshot)).map(|log| log.start(&id, "continuation",
                             "Is the turn blocked by subscription quota, or does authorized unfinished work remain?",
                             "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
                         if let Some(diagnostic) = &diagnostic {
@@ -459,6 +524,14 @@ fn spawn_in(
                         let abort = jobs.spawn(async move {
                             let _task_work = task_work;
                             let result = async {
+                                if unified(&snapshot) {
+                                    let a = snapshot.operational.assessment.as_ref().context("missing worker assessment")?;
+                                    return Ok(mj_core::continuation::ContinuationVerdict {
+                                        quota_limit: f64::from(a.action == Some(mj_core::assessment::Action::RecoverQuota)),
+                                        unfinished: f64::from(a.action == Some(mj_core::assessment::Action::Continue)),
+                                        no_input_needed: f64::from(a.action == Some(mj_core::assessment::Action::Continue)),
+                                    });
+                                }
                                 let evidence_work = _task_work.clone();
                                 let evidence = tokio::task::spawn_blocking(move || {
                                     let _evidence_work = evidence_work;
@@ -515,6 +588,13 @@ fn spawn_in(
                         publish(&tx, &environment, id, view, true);
                     } else {
                         publish(&tx, &environment, id, view, false);
+                    }
+                }
+                result = seed_jobs.join_next(), if !seed_jobs.is_empty() => {
+                    match result {
+                        Some(Ok((session, Err(error)))) => tracing::warn!(%session, %error, "Jev authorization seed unavailable"),
+                        Some(Err(error)) if !error.is_cancelled() => tracing::error!(%error, "Jev authorization seed task failed"),
+                        _ => {}
                     }
                 }
                 result = jobs.join_next(), if !jobs.is_empty() => {
@@ -741,14 +821,28 @@ fn spawn_in(
                         pending.insert(id.clone(), Pending { _upgrade_work: upgrade_work, diagnostic: None, submitting: true, generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
+                    for (id, view) in &latest {
+                        let seed_due = view.snapshot.as_ref().is_some_and(|s| s.operational.assessment_context.is_none())
+                            && seed_after.get(id).is_none_or(|at| *at <= std::time::Instant::now());
+                        if view.snapshot.as_ref().is_some_and(unified) && (check_eligible(view) || seed_due) && !pending.contains_key(id)
+                            && action_recheck.get(id).is_none_or(|at| *at <= std::time::Instant::now()) {
+                            action_recheck.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
+                            assessed.remove(id);
+                            if recheck_tx.send(id.clone()).is_err() { break; }
+                        }
+                    }
                     let live = (environment.live)();
                     seen.retain(|id, _| live.contains(id));
                     deferred.retain(|id, _| live.contains(id));
                     latest.retain(|id, _| live.contains(id));
                     retry_after.retain(|id, _| live.contains(id));
+                    assessed.retain(|id, _| live.contains(id));
+                    action_recheck.retain(|id, _| live.contains(id));
+                    seed_after.retain(|id, _| live.contains(id));
                 }
             }
         }
+        seed_jobs.shutdown().await;
         jobs.shutdown().await;
 
         Ok(())

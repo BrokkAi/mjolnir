@@ -115,6 +115,7 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
         })
         .collect();
     CanonicalSessionSnapshot {
+        assessment_state: None,
         event_frontier: 0,
         event_frontier_digest: "0".repeat(64),
         session: CanonicalSessionState {
