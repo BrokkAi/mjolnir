@@ -206,6 +206,14 @@ pub(super) async fn serve_client(
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
             let reviewer = matches!(&request.action, DaemonAction::ReviewerAction { .. });
+            // Lifecycle actions contain large checkpoint/restore futures. Keep
+            // them off the connection task's stack, including in debug builds.
+            let mut action = Box::pin(handle_action(
+                request.action,
+                &metadata,
+                &state,
+                &cancellation,
+            ));
             if reviewer {
                 // A reviewer action is a long-lived sidecar operation. If its
                 // client goes away, drop the future so the session actor sees
@@ -213,12 +221,6 @@ pub(super) async fn serve_client(
                 // one-byte peek observes EOF without consuming a pipelined
                 // frame; buffered work therefore remains for the next loop.
                 let mut peer_probe = [0_u8; 1];
-                let mut action = Box::pin(handle_action(
-                    request.action,
-                    &metadata,
-                    &state,
-                    &cancellation,
-                ));
                 tokio::select! {
                     result = &mut action => result.map_err(|error| format!("{error:#}")),
                     peer = stream.peek(&mut peer_probe) => {
@@ -233,9 +235,7 @@ pub(super) async fn serve_client(
                     }
                 }
             } else {
-                handle_action(request.action, &metadata, &state, &cancellation)
-                    .await
-                    .map_err(|error| format!("{error:#}"))
+                action.await.map_err(|error| format!("{error:#}"))
             }
         };
         // Echo the caller's protocol version: replies must stay readable in the

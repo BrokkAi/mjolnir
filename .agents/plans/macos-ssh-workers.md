@@ -14,7 +14,9 @@ An existing Mac, including a manually provisioned EC2 Mac, can run a session for
 - [x] (2026-09-26) Added login-shell prerequisites, Darwin capacity sampling, and portable installed-worker digest checks. Actual Mac probe reports 16 GiB and eight logical cores.
 - [x] (2026-09-27) Full dev-profile Cargo suite passed with eight test threads; final Clippy and the login-shell regression passed.
 - [x] (2026-09-27) Real Mac launch, harness turn, concurrent workers, daemon restart during a turn, suspend/checkpoint and resume passed.
-- [ ] Commit the validated implementation, exercise the changed-build idle upgrade, and clean up isolated test resources.
+- [x] (2026-09-27) Committed Mac support as 221e1343; idle and busy-worker build-upgrade acceptance passed.
+- [x] (2026-09-27) Destroyed the isolated sessions and stopped the test daemon.
+- [x] (2026-09-27) All 98 focused daemon tests and final Clippy passed; checkpoint stack correction and final acceptance notes are ready for the required commit.
 - [x] (2026-09-27) Filed Apple-container-over-SSH follow-up #1169; user excluded Podman on macOS. Apple container requires a separate install.
 
 ## Surprises & Discoveries
@@ -29,7 +31,7 @@ The release already builds a universal Mac worker, but only distributes it with 
 
 ## Outcomes & Retrospective
 
-The supplied Mac built a matching dev worker in 38 seconds. The full dev-profile workspace suite passed with eight test threads after an initial default-parallel run hit two worker relay timeouts. Final Clippy passed. The Linux controller launched two Darwin workers, a harness returned MAC_WORKER_OK after a daemon restart during its turn, and suspend/checkpoint/resume preserved the first session while the second stayed live. The direct CLI checkpoint request exposed a separate Linux debug-daemon stack overflow; automatic and suspend checkpoints completed and verified their archives. Idle replacement across build revisions is the remaining acceptance check. Initial working tree contains unrelated untracked files; leave them untouched.
+The supplied Mac built a matching dev worker in 38 seconds. The full dev-profile workspace suite passed with eight test threads after an initial default-parallel run hit two worker relay timeouts. Final Clippy passed. The Linux controller launched two Darwin workers, a harness returned MAC_WORKER_OK after a daemon restart during its turn, and suspend/checkpoint/resume preserved the first session while the second stayed live. The direct CLI checkpoint request exposed a Linux debug-daemon stack overflow. Heap-allocating the ordinary request action, like the reviewer path already did, fixed it: direct checkpoints for both real Mac sessions now succeed. Automatic and suspend checkpoints also completed and verified their archives. Idle replacement across build revisions passed; a busy worker kept its PID and old executable until its accepted turn completed, then upgraded. Initial working tree contains unrelated untracked files; leave them untouched.
 
 ## Context and Orientation
 
@@ -81,3 +83,9 @@ Validation evidence (2026-09-27): `/mnt/optane/macos-ssh-cargo-test-complete.log
 Scope update (2026-09-27): User requested containers on SSH Macs if small, otherwise an issue. Existing Docker SSH backend can talk to a Linux Docker daemon on the Mac, but the supplied host has no running daemon. Apple container is explicitly local-only in config resolution and target lifecycle types, and Podman preflight requires local rootless `podman unshare`, which excludes the Mac remote client. Assess these separately rather than changing the bare-worker platform boundary.
 
 Follow-up (2026-09-27): https://github.com/BrokkAi/mjolnir/issues/1169 tracks Apple containers over SSH. Its public body describes requested behavior and installation prerequisites only.
+
+Final acceptance (2026-09-27): The old Darwin worker digest was `da32ef9de824a6363b9466b9bd4002184d9242491a04a565381ac29bc944051a`. Rebuilding identical worker sources with commit 221e1343 produced `504bb36cf1118c1bbf4b8faf4e068930c3ce0c2bef7bdf8aa652a8bfc5dc303b`. After controller replacement, idle session B changed PID 2463 to 3872, while busy A retained PID 3094 and the old digest. A returned `BUSY_UPGRADE_SURVIVED`, then changed to PID 4161 and the new digest. Direct checkpoints subsequently saved event 26 (B) and 157 (A). All three test records, including the initial failed launch, were destroyed; the isolated daemon stopped.
+
+Discovery and correction (2026-09-27): `daemon/serve.rs` boxed the reviewer action but embedded ordinary lifecycle actions into its connection future. Deep checkpoint polling overflowed the default debug-build Tokio thread stack. Share one boxed action for both paths, retaining reviewer disconnect cancellation and ordinary accepted-request completion semantics. Live before/after checkpoint behavior reproduces the crash and verifies the fix; run focused daemon behavior tests and Clippy before committing this separate correction.
+
+Completion (2026-09-27): Final focused daemon test run passed 98 tests; final `cargo clippy --all-targets -- -D warnings` and formatting passed. Removed the three task-owned remote fixture/build directories after verifying the worker roots and processes were gone. Removed copied test profile credentials locally. No default instance, existing project, or host configuration was changed. No release was needed for source-build acceptance and none was published; release packaging is ready for the next release. EC2 Mac hardware itself was not tested; it uses the same persistent SSH-host path.
