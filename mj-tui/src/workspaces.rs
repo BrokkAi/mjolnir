@@ -1069,7 +1069,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
 }
 
 /// One tab: the name, then the attention badge when there is one and the
-/// tab is wide enough to keep at least a few letters of the name beside it.
+/// tab has room for the name (or at least three cells of a longer name).
 /// The badge keeps its own colour on an unselected tab; a selected tab is
 /// already the highlight colour, and the counts stay legible in it.
 fn workspace_tab_line(
@@ -1078,12 +1078,15 @@ fn workspace_tab_line(
     width: u16,
     style: Style,
 ) -> Line<'static> {
-    let Some(badge) = badge.filter(|badge| usize::from(width) >= badge.width() + 5) else {
+    let minimum_name_width = Line::raw(name).width().min(3) + 2;
+    let Some(badge) =
+        badge.filter(|badge| usize::from(width) >= badge.width() + minimum_name_width)
+    else {
         return Line::styled(workspace_label(name, width), style);
     };
     let name_width = usize::from(width).saturating_sub(badge.width());
     let content = truncate_to_cells(name, name_width.saturating_sub(2), Truncate::PLAIN);
-    let pad = " ".repeat(name_width.saturating_sub(content.chars().count() + 2));
+    let pad = " ".repeat(name_width.saturating_sub(Line::raw(&content).width() + 2));
     Line::from(vec![
         Span::styled(format!(" {content}"), style),
         Span::styled(badge.content, badge.style.bg(style.bg.unwrap_or_default())),

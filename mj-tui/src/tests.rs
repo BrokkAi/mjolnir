@@ -3962,6 +3962,30 @@ fn workspace_tabs_and_folded_headings_carry_attention_badges() {
 }
 
 #[test]
+fn short_workspace_names_keep_their_attention_badges() {
+    for name in ["M", "MJ", "界", "e\u{301}"] {
+        let mut dashboard = dashboard_with_attention_mix();
+        dashboard.set_workspace_names(BTreeMap::from([
+            ("default".into(), name.into()),
+            ("other".into(), "Other".into()),
+        ]));
+        dashboard.set_active_workspace(Some("default".into()));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let (_, area) = dashboard
+            .workspace_tab_areas
+            .iter()
+            .find(|(id, _)| id == "default")
+            .expect("workspace tab");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.right() - 3, area.y)].symbol(), "!", "{name}");
+        assert_eq!(buffer[(area.right() - 2, area.y)].symbol(), "1", "{name}");
+    }
+}
+
+#[test]
 fn priority_order_lists_waiting_first_without_project_headings() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
