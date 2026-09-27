@@ -465,7 +465,7 @@ pub struct SessionLaunchOptions {
     pub launch_branch: Option<String>,
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     pub expected_runtime_identity: Option<String>,
-    pub mjolnir_subagents: Option<bool>,
+    pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -718,7 +718,7 @@ impl Controller {
             launch_branch,
             checkout,
             expected_runtime_identity,
-            mjolnir_subagents,
+            subagents,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -850,7 +850,13 @@ impl Controller {
             checkout,
             expected_runtime_identity,
             publication: None,
-            mjolnir_subagents,
+            subagents: Some(subagents.unwrap_or_else(|| {
+                if profile.kind.supports_delegation_tools() {
+                    self.state.last_subagent_policy.clone()
+                } else {
+                    Default::default()
+                }
+            })),
             archived: false,
             container_cpus: None,
             container_memory: None,
@@ -886,10 +892,9 @@ impl Controller {
         // Creation authors the whole record, so it writes the whole row. The
         // record reaches memory only once it is durable: a session this process
         // alone knows about is one the database can never resume or clean up.
-        if let Some((host, size)) = selected_container_size.as_ref() {
-            crate::database::save_session_with_container_size(&record, host, *size)?;
-        } else {
-            crate::database::save_session(&record)?;
+        crate::database::save_new_session(&record, selected_container_size.clone())?;
+        if record.harness_kind.supports_delegation_tools() {
+            self.state.last_subagent_policy = record.subagents.clone().unwrap_or_default();
         }
         self.state.sessions.insert(id.clone(), record);
         if let Some((host, size)) = selected_container_size {

@@ -23,10 +23,11 @@ pub(super) async fn spawn_subagent(
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
-    let selection = resolve_subagent_selection(
+    let selection = resolve_subagent_policy_selection(
         &backend,
         &parent_session_id,
         &parent.profile_id,
+        &parent.subagents,
         request.profile_id.as_deref(),
         request.model.as_deref(),
         request.effort.as_deref(),
@@ -89,6 +90,94 @@ pub(crate) struct SubagentSelection {
     pub model: String,
     pub effort: Option<String>,
     pub fast_mode: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_subagent_policy_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_session_id: &str,
+    parent_profile: &str,
+    policy: &mj_core::subagent::SubagentPolicy,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
+    use mj_core::subagent::SubagentPolicy;
+    match policy {
+        SubagentPolicy::AllModels => {
+            resolve_subagent_selection(
+                backend,
+                parent_session_id,
+                parent_profile,
+                profile_id,
+                model,
+                effort,
+            )
+            .await
+        }
+        SubagentPolicy::SingleModel {
+            model: fixed_model,
+            effort: fixed_effort,
+        } => {
+            if profile_id.is_some() || model.is_some() || effort.is_some() {
+                return Err(ApiFailure::bad_request(
+                    "single-model spawn does not accept profile_id, model, or effort",
+                ));
+            }
+            let mut candidates = backend
+                .subagent_candidates(parent_profile.to_owned())
+                .await?;
+            rank_candidates(&mut candidates.offered, parent_profile);
+            let mut errors = candidates
+                .unavailable
+                .into_iter()
+                .map(|(id, reason)| format!("{id}: {reason}"))
+                .collect::<Vec<_>>();
+            for candidate in candidates.offered {
+                if !offers_model(&candidate, fixed_model) {
+                    continue;
+                }
+                let choices = match backend
+                    .profile_config(
+                        candidate.profile_id.clone(),
+                        Some(fixed_model.clone()),
+                        false,
+                    )
+                    .await
+                {
+                    Ok(choices) => choices,
+                    Err(error) => {
+                        errors.push(format!("{}: {error:#}", candidate.profile_id));
+                        continue;
+                    }
+                };
+                let supported = match fixed_effort {
+                    Some(effort) => choices.efforts.iter().any(|choice| &choice.value == effort),
+                    None => choices.efforts.is_empty(),
+                };
+                if supported
+                    && choices
+                        .models
+                        .iter()
+                        .any(|choice| &choice.value == fixed_model)
+                {
+                    return Ok(SubagentSelection {
+                        profile_id: candidate.profile_id,
+                        model: fixed_model.clone(),
+                        effort: fixed_effort.clone(),
+                        fast_mode: mj_core::codex_catalog::is_luna_model(fixed_model),
+                    });
+                }
+            }
+            Err(ApiFailure::conflict(format!(
+                "No eligible profile offers the fixed subagent model {fixed_model:?} with effort {fixed_effort:?}. {}",
+                errors.join("; ")
+            )))
+        }
+        _ => Err(ApiFailure::conflict(
+            "this session does not allow Mjolnir sub-agents",
+        )),
+    }
 }
 
 /// Settle a spawn's profile, model and effort; both spawn paths use this.
@@ -563,6 +652,32 @@ mod tests {
     }
 
     impl SubagentBackend for FakeSelectionBackend {
+        fn profile_config(
+            &self,
+            profile: String,
+            model: Option<String>,
+            _refresh: bool,
+        ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
+            Box::pin(async move {
+                let mut choices = self
+                    .candidates
+                    .offered
+                    .iter()
+                    .find(|candidate| candidate.profile_id == profile)
+                    .unwrap()
+                    .choices
+                    .clone();
+                // Only the model-specific discovery exposes high effort.
+                if model.as_deref() == Some("fixed") && profile != "full-but-wrong-effort" {
+                    choices.efforts = vec![mj_core::acp::SessionConfigChoice {
+                        value: "high".into(),
+                        name: "High".into(),
+                        description: None,
+                    }];
+                }
+                Ok(choices)
+            })
+        }
         fn subagent_candidates(
             &self,
             _parent_profile: String,
@@ -635,6 +750,90 @@ mod tests {
         fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
         }
+    }
+
+    #[tokio::test]
+    async fn fixed_spawn_ranks_only_profiles_supporting_the_exact_model_and_effort() {
+        use mj_core::subagent::SubagentPolicy;
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![
+                    candidate("parent", Some(2), &["fixed"]),
+                    candidate("best", Some(70), &["fixed"]),
+                    candidate("full-but-wrong-effort", Some(100), &["fixed"]),
+                ],
+                unavailable: vec![],
+            },
+        });
+        let policy = SubagentPolicy::SingleModel {
+            model: "fixed".into(),
+            effort: Some("high".into()),
+        };
+        let selected =
+            resolve_subagent_policy_selection(&backend, "s", "parent", &policy, None, None, None)
+                .await
+                .unwrap();
+        assert_eq!(
+            (
+                selected.profile_id.as_str(),
+                selected.model.as_str(),
+                selected.effort.as_deref()
+            ),
+            ("best", "fixed", Some("high"))
+        );
+        for (profile, model, effort) in [
+            (Some("best"), None, None),
+            (None, Some("fixed"), None),
+            (None, None, Some("high")),
+        ] {
+            assert!(
+                resolve_subagent_policy_selection(
+                    &backend, "s", "parent", &policy, profile, model, effort
+                )
+                .await
+                .is_err()
+            );
+        }
+        for policy in [
+            SubagentPolicy::None,
+            SubagentPolicy::Native,
+            SubagentPolicy::SingleModel {
+                model: "missing".into(),
+                effort: Some("high".into()),
+            },
+            SubagentPolicy::SingleModel {
+                model: "fixed".into(),
+                effort: Some("ultra".into()),
+            },
+        ] {
+            assert!(
+                resolve_subagent_policy_selection(
+                    &backend, "s", "parent", &policy, None, None, None
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_model_without_effort_uses_harness_default() {
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![candidate("parent", Some(50), &["plain"])],
+                unavailable: vec![],
+            },
+        });
+        let policy = mj_core::subagent::SubagentPolicy::SingleModel {
+            model: "plain".into(),
+            effort: None,
+        };
+        let selected =
+            resolve_subagent_policy_selection(&backend, "s", "parent", &policy, None, None, None)
+                .await
+                .unwrap();
+        assert_eq!(selected.model, "plain");
+        assert_eq!(selected.effort, None);
     }
 
     #[tokio::test]

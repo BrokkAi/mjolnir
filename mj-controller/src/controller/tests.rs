@@ -539,7 +539,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         launch_branch: None,
         checkout: None,
         expected_runtime_identity: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         initial_prompt: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1271,7 +1271,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
         state: State::default(),
     };
     let mut options = launch_options(Vec::new());
-    options.mjolnir_subagents = Some(true);
+    options.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "delegating", options)
         .unwrap();
@@ -1285,7 +1285,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
         .current_worker_launch_config(&id, &backend)
         .unwrap();
 
-    assert!(relaunch.subagent_tools);
+    assert!(relaunch.subagents.uses_mjolnir());
 }
 
 /// R10-4: the Mjolnir sub-agents of an isolated session were given a project
@@ -1331,7 +1331,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
     });
-    parent.mjolnir_subagents = Some(true);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
     parent.target = Some(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
@@ -1599,7 +1599,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
                 // child registration below needs the parent's own choice.
-                mjolnir_subagents: Some(true),
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
                 ..launch_options(Vec::new())
             },
         )

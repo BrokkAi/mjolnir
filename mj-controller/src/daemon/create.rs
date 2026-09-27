@@ -75,7 +75,42 @@ impl RuntimeState {
         control: CreateSessionControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<RegisteredSession> {
+        let mut request = request;
+        let parent = request.profile_id.clone();
+        let supplied = request.subagents.clone();
+        let policy = blocking(move || {
+            let controller = Controller::load()?;
+            let kind = controller
+                .config
+                .enabled_profile(&parent)
+                .context("parent profile unavailable")?
+                .kind;
+            let policy = supplied.unwrap_or_else(|| {
+                if kind.supports_delegation_tools() {
+                    controller.state.last_subagent_policy.clone()
+                } else {
+                    Default::default()
+                }
+            });
+            anyhow::ensure!(
+                kind.supports_delegation_tools()
+                    || policy == mj_core::subagent::SubagentPolicy::Native,
+                "subagent policies are supported only by Claude and Codex"
+            );
+            Ok(policy)
+        })
+        .await?;
+        if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = &policy {
+            let options = crate::controller::profile_config::subagent_options(
+                request.profile_id.clone(),
+                Some(model.clone()),
+            )
+            .await?;
+            options.validate(&policy).map_err(anyhow::Error::msg)?;
+        }
+        // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
+        request.subagents = Some(policy);
         let path_cancelled = control.cancelled.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;
@@ -103,7 +138,7 @@ impl RuntimeState {
                     launch_branch: request.launch_branch,
                     checkout: request.checkout,
                     expected_runtime_identity: request.expected_runtime_identity,
-                    mjolnir_subagents: request.mjolnir_subagents,
+                    subagents: request.subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,

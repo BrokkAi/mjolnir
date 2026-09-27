@@ -24,9 +24,9 @@ pub enum ControllerAction {
         checkout: Option<mj_core::remote_git::ExactCheckout>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_runtime_identity: Option<String>,
-        /// None means native sub-agents.
+        /// Omitted reuses the last accepted top-level session choice.
         #[serde(default)]
-        mjolnir_subagents: Option<bool>,
+        subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty

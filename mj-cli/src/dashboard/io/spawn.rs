@@ -1272,7 +1272,7 @@ pub(crate) fn spawn_dashboard_create_session(
         let retry_launch = action.clone();
         let DashboardAction::CreateSession {
             create_managed_worktree,
-            mjolnir_subagents,
+            subagents,
             workspace_id,
             profile_id,
             bundle_id,
@@ -1333,7 +1333,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         launch_branch: None,
                         checkout: None,
                         expected_runtime_identity: None,
-                        mjolnir_subagents,
+                        subagents,
                         create_managed_worktree,
                         initial_prompt: None,
                         workspace_id,

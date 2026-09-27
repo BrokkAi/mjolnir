@@ -45,6 +45,10 @@ use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    SubagentOptions {
+        id: u64,
+        result: std::result::Result<mj_core::subagent::SubagentOptions, String>,
+    },
     HelpSearchFinished {
         generation: u64,
         result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
@@ -1276,6 +1280,9 @@ impl DashboardContext {
                 episode_id,
                 result,
             } => self.apply_worker_diagnosis(session_id, episode_id, result),
+            DashboardIoUpdate::SubagentOptions { id, result } => {
+                self.dashboard.apply_subagent_options(id, result)
+            }
             DashboardIoUpdate::ProjectDiscovery { context, result } => {
                 self.dashboard.apply_project_discovery(&context, result);
             }
@@ -2226,7 +2233,7 @@ mod tests {
             publication: None,
             build_cache: None,
             container_workspace: None,
-            mjolnir_subagents: None,
+            subagents: None,
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,

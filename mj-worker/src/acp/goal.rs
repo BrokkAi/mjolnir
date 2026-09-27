@@ -487,6 +487,7 @@ for line in sys.stdin:
             }));
             let spec = LaunchSpec {
                 bridge_spec_path: None,
+                subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 subagent_mcp_socket: None,
                 runtime_constraint: None,
                 clear_context_request: None,
@@ -659,6 +660,7 @@ for line in sys.stdin:
                 let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext::default()));
                 let spec = LaunchSpec {
                     bridge_spec_path: None,
+                    subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                     subagent_mcp_socket: None,
                     runtime_constraint: None,
                     clear_context_request: None,

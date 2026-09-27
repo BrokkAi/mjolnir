@@ -653,6 +653,7 @@ fn ctrl_n_and_ctrl_p_move_the_focused_list() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -698,6 +699,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
     DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -813,6 +815,7 @@ fn digits_toggle_projects_independently() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -1585,6 +1588,7 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: BTreeMap::from([(child.id.clone(), relation)]),
             version: STATE_VERSION,
             sessions: BTreeMap::from([
@@ -1680,6 +1684,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: BTreeMap::from([(child.id.clone(), relation)]),
             version: STATE_VERSION,
             sessions: BTreeMap::from([
@@ -1776,6 +1781,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: BTreeMap::from([(first_child.id.clone(), first_relation.clone())]),
             version: STATE_VERSION,
             sessions: BTreeMap::from([
@@ -1806,6 +1812,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         handback_tool: false,
     };
     dashboard.set_state(State {
+        last_subagent_policy: Default::default(),
         subagents: BTreeMap::from([
             (first_child.id.clone(), first_relation),
             (second_child.id.clone(), second_relation),
@@ -1976,6 +1983,7 @@ fn resolved_git_origin_groups_differently_named_raw_worktrees() {
     second.state = SessionState::Running;
     second.project_directory = Some("/home/dev/bifrost-fuzz".into());
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [first, second]
@@ -2025,6 +2033,7 @@ fn bundle_and_checkout_share_one_canonical_project_heading() {
     let single = DashboardState::new(
         dashboard_config.clone(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(bundle_session.id.clone(), bundle_session.clone())]
@@ -2051,6 +2060,7 @@ fn bundle_and_checkout_share_one_canonical_project_heading() {
     let mut dashboard = DashboardState::new(
         dashboard_config,
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [bundle_session, raw_source]
@@ -2205,6 +2215,7 @@ fn the_tab_ring_visits_every_pane_and_keeps_the_session_selection() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(active.id.clone(), active), (other.id.clone(), other)]),
@@ -2261,6 +2272,7 @@ fn keyboard_selection_stops_at_the_active_panes_ends_instead_of_wrapping() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -2318,6 +2330,7 @@ fn enter_opens_the_selected_session_even_inside_a_collapsed_project() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -2358,6 +2371,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -2532,6 +2546,7 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -2562,6 +2577,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(other.id.clone(), other)]),
@@ -3518,6 +3534,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,

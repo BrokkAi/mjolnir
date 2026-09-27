@@ -177,7 +177,8 @@ mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
        [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
-       [--model <name>] [--effort <name>] [--mj-subagents | --native-subagents]
+       [--model <name>] [--effort <name>] [--subagents native|all-models|single-model|none]
+       [--subagent-model <name>] [--subagent-effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -212,10 +213,14 @@ with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
-- `mj new` starts with native sub-agents by default; `--mj-subagents` gives it
-  Mjolnir's own delegation tools instead, and `--native-subagents` states the
-  default explicitly. This applies only to Claude and Codex sessions; other
-  harnesses always use their own. When both are given, the last one wins.
+- `mj new --subagents native|all-models|single-model|none` selects delegation
+  for Claude and Codex. Without this option, it reuses the last accepted
+  new-session choice for this instance; the initial choice is Native.
+  `single-model` requires `--subagent-model` and a corresponding
+  `--subagent-effort` when that model offers effort choices. Mjolnir fixes
+  every child's model and effort and selects an eligible profile by quota.
+  `none` disables delegation. The old `--mj-subagents` and
+  `--native-subagents` flags are no longer accepted.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.

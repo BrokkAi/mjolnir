@@ -396,6 +396,7 @@ impl RuntimeState {
         let records = runtime_records_for_workspace(&controller, &session_ids);
         let subagents = runtime_subagents_for_workspace(&controller, &records);
         Ok(RuntimeSnapshot {
+            last_subagent_policy: controller.state.last_subagent_policy.clone(),
             native_agents,
             workspace_names,
             moves: moves

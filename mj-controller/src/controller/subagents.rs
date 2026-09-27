@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use super::{Controller, now};
 use mj_core::config::HarnessKind;
@@ -186,6 +186,14 @@ impl Controller {
             "only Claude and Codex sessions can spawn sub-agents"
         );
         ensure_parent_may_delegate(&parent)?;
+        if let Some(mj_core::subagent::SubagentPolicy::SingleModel { model, effort }) =
+            &parent.subagents
+        {
+            ensure!(
+                request.model.as_ref() == Some(model) && &request.effort == effort,
+                "child selectors must match the parent's fixed model and effort"
+            );
+        }
         ensure!(parent.state.is_active(), "parent session is not active");
         ensure!(parent.target.is_some(), "parent session has no live target");
         ensure!(
@@ -240,7 +248,7 @@ impl Controller {
             build_cache: parent.build_cache.clone(),
             // A child never receives the Mjolnir sub-agent tools, so it can
             // never spawn a grandchild.
-            mjolnir_subagents: Some(false),
+            subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
             container_cpus: None,
@@ -534,14 +542,18 @@ fn child_gets_handback_tool(harness: HarnessKind) -> bool {
 }
 
 /// A parent may delegate to Mjolnir children only if its own stored choice
-/// says so; `None` means native sub-agents, same as `Some(false)`. A parent
+/// says so; historical records without a policy use native delegation. A parent
 /// using its harness's native delegation never received the Mjolnir tools, so
 /// a request from it is stale.
 fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
-    match parent.mjolnir_subagents {
-        Some(true) => Ok(()),
-        _ => bail!("this session uses native sub-agents"),
-    }
+    ensure!(
+        parent
+            .subagents
+            .as_ref()
+            .is_some_and(mj_core::subagent::SubagentPolicy::uses_mjolnir),
+        "this session does not allow Mjolnir sub-agents"
+    );
+    Ok(())
 }
 
 /// Where a parent's children keep their report directories, before the target
@@ -718,9 +730,15 @@ mod tests {
 
     #[test]
     fn a_parent_using_native_delegation_cannot_spawn_mjolnir_children() {
-        let parent = |choice| {
+        let parent = |choice: Option<bool>| {
             let mut session = crate::controller::test_support::checkpoint_test_session("parent");
-            session.mjolnir_subagents = choice;
+            session.subagents = choice.map(|enabled| {
+                if enabled {
+                    mj_core::subagent::SubagentPolicy::AllModels
+                } else {
+                    mj_core::subagent::SubagentPolicy::Native
+                }
+            });
             session
         };
 
@@ -728,13 +746,13 @@ mod tests {
             ensure_parent_may_delegate(&parent(Some(false)))
                 .unwrap_err()
                 .to_string(),
-            "this session uses native sub-agents"
+            "this session does not allow Mjolnir sub-agents"
         );
         assert_eq!(
             ensure_parent_may_delegate(&parent(None))
                 .unwrap_err()
                 .to_string(),
-            "this session uses native sub-agents"
+            "this session does not allow Mjolnir sub-agents"
         );
         assert!(ensure_parent_may_delegate(&parent(Some(true))).is_ok());
     }

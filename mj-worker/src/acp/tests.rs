@@ -16,6 +16,7 @@ use mj_core::subagent::SubagentMcpRole;
 fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -61,6 +62,7 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
         );
     }
 
+    spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
     spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
     let names = |request: &serde_json::Value| -> Vec<String> {
         request
@@ -382,13 +384,12 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
     ));
 }
 
-/// Native delegation is hidden only when Mjolnir's own delegation socket
-/// replaced it. Without the socket the session keeps `Agent` and
-/// `spawn_agent`, rather than ending up with neither.
+/// Suppression follows the stored policy, including None without an MCP socket.
 #[test]
-fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
+fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -420,6 +421,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         spec.harness = harness;
 
+        spec.subagent_policy = mj_core::subagent::SubagentPolicy::Native;
         spec.subagent_mcp_socket = None;
         let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
         assert!(
@@ -432,6 +434,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
             "{harness:?} without a socket must keep its native tools: {meta}"
         );
 
+        spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
         spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
         let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
         let hidden = match harness {
@@ -445,6 +448,24 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
             _ => serde_json::json!(["spawn_agent"]),
         };
         assert_eq!(hidden, Some(&expected), "{harness:?}: {meta}");
+        for policy in [
+            mj_core::subagent::SubagentPolicy::None,
+            mj_core::subagent::SubagentPolicy::SingleModel {
+                model: "chosen".into(),
+                effort: None,
+            },
+        ] {
+            spec.subagent_policy = policy;
+            spec.subagent_mcp_socket = None;
+            let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+            let path = if harness == HarnessKind::Claude {
+                "/claudeCode/options/disallowedTools"
+            } else {
+                "/codex/options/disallowedTools"
+            };
+            assert_eq!(meta.pointer(path), Some(&expected));
+            assert!(extra_mcp(&spec).is_empty());
+        }
     }
 }
 
@@ -452,6 +473,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
 fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -540,6 +562,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_all_policies() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -643,6 +666,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
         );
     }
     spec.execution_policy = ExecutionPolicy::Unconstrained;
+    spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
     spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
     let claude_meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
     assert_eq!(
@@ -694,13 +718,12 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
     }
 }
 
-/// A child's socket carries only `handback`. It must not take the child's
-/// native delegation tools away, and a Codex child reads the server over ACP
-/// in its child role.
+/// Children retain handback while native delegation is disabled.
 #[test]
-fn a_child_socket_serves_handback_without_hiding_native_tools() {
+fn a_child_socket_serves_handback_and_hides_native_tools() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::None,
         subagent_mcp_socket: Some(worker_socket(SubagentMcpRole::Child)),
         runtime_constraint: None,
         clear_context_request: None,
@@ -728,12 +751,17 @@ fn a_child_socket_serves_handback_without_hiding_native_tools() {
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         spec.harness = harness;
         let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap_or_default());
-        assert!(
-            meta.pointer("/claudeCode/options/disallowedTools")
-                .is_none()
-                && meta.pointer("/codex/options/disallowedTools").is_none(),
-            "{harness:?} child must keep its native tools: {meta}"
-        );
+        let (pointer, expected) = match harness {
+            HarnessKind::Claude => (
+                "/claudeCode/options/disallowedTools",
+                serde_json::json!(["Agent", "Task"]),
+            ),
+            _ => (
+                "/codex/options/disallowedTools",
+                serde_json::json!(["spawn_agent"]),
+            ),
+        };
+        assert_eq!(meta.pointer(pointer), Some(&expected));
     }
     spec.harness = HarnessKind::Codex;
     let servers = extra_mcp(&spec);
@@ -817,6 +845,7 @@ fn claude_async_task_stop_request_uses_the_air_wire_shape() {
 fn resumed_session_request_keeps_load_context() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -1005,6 +1034,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
                 endpoint: String::new(),
             }),
             stall_policy: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -1623,6 +1653,7 @@ async fn answer_to_ext_request(
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -1852,6 +1883,7 @@ async fn answer_architecture_form(
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -2258,6 +2290,7 @@ async fn config_change_request(
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -2441,6 +2474,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -2531,6 +2565,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -2725,6 +2760,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -3027,6 +3063,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -3387,6 +3424,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
 pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -3870,6 +3908,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -4102,6 +4141,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -4241,6 +4281,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -4333,6 +4374,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -4668,6 +4710,7 @@ mod terminals {
         });
         let spec = LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -5187,6 +5230,7 @@ for line in sys.stdin:
     let runtime = tokio::spawn(run(
         LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -5365,6 +5409,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
@@ -5522,6 +5567,7 @@ while True:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -5668,6 +5714,7 @@ while True:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -5776,6 +5823,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -5857,6 +5905,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -6159,6 +6208,7 @@ async fn session_reload_rejecting_bridge(
 fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -6241,6 +6291,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -6378,6 +6429,7 @@ fn missing_native_session_spec(
 ) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -6777,6 +6829,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                 endpoint: String::new(),
             }),
             stall_policy: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,
@@ -7205,6 +7258,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let (event_tx, mut events) = mpsc::channel(256);
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -7431,6 +7485,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let opened = Arc::new(Mutex::new(None));
     let spec = LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,

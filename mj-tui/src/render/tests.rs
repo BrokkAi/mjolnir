@@ -869,6 +869,7 @@ fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_card
     second.session_title_override = Some("Second session".into());
     second.created_at = "2026-08-10T00:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
@@ -1003,6 +1004,7 @@ fn project_groups_have_one_blank_row_between_them() {
     second.project_directory = Some("/projects/beta".into());
     second.created_at = "2026-08-10T00:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
@@ -1045,6 +1047,7 @@ fn project_hotkeys_collapse_and_expand_groups_independently() {
     second.project_directory = Some("/projects/beta".into());
     second.created_at = "2026-08-10T00:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
@@ -1127,6 +1130,7 @@ fn collapsed_duplicate_targets_are_numbered_within_their_project() {
     beta_second.id = "session-beta-second".into();
     beta_second.created_at = "2026-08-11T00:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [alpha, beta_first, beta_second]
@@ -2307,6 +2311,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: mj_core::state::STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
@@ -2385,6 +2390,7 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
@@ -3333,6 +3339,7 @@ fn dashboard_colors_named_host_permission_badges() {
     session.target_template_id = "precision-3260".into();
     session.project_directory = Some("/home/dev/hel".into());
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(session.id.clone(), session)]),
@@ -3517,6 +3524,7 @@ fn overflowing_session_pane_shows_a_scrollbar() {
         sessions.insert(session.id.clone(), session);
     }
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions,
@@ -3887,6 +3895,7 @@ fn only_focused_pane_draws_caret_without_shifting_table_columns() {
     let mut dashboard = DashboardState::new(
         config(),
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),

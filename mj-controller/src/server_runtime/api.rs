@@ -408,6 +408,10 @@ impl ApiBackend {
                     .exports
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
+                anyhow::ensure!(
+                    parent.subagents == Some(mj_core::subagent::SubagentPolicy::AllModels),
+                    "list_profiles is unavailable for this session's subagent policy"
+                );
                 // The catalogue discovers every enabled profile in the
                 // background, so this normally only ranks and merges what it
                 // holds; a discovery still running is waited for.
@@ -454,10 +458,11 @@ impl ApiBackend {
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
                 let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
-                let selection = crate::server::api::resolve_subagent_selection(
+                let selection = crate::server::api::resolve_subagent_policy_selection(
                     &backend,
                     parent_session_id,
                     &parent.last_profile,
+                    &parent.subagents.clone().unwrap_or_default(),
                     profile_id.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),

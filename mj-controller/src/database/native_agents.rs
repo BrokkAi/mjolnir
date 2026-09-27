@@ -690,6 +690,7 @@ mod tests {
             );
         }
         let snapshot = RuntimeSnapshot {
+            last_subagent_policy: Default::default(),
             native_agents: summaries,
             workspace_names: Default::default(),
             moves: Vec::new(),

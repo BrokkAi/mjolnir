@@ -1014,7 +1014,7 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         id: id.to_owned(),
         workspace_id: workspace_id.to_owned(),

@@ -10,6 +10,35 @@ pub fn save_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+pub fn save_new_session(
+    session: &SessionRecord,
+    container_size: Option<(String, HostContainerSize)>,
+) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save_new_session", move |_| {
+        save_new_session_to(&database_path(), &session, container_size)
+    })
+}
+
+pub(super) fn save_new_session_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(String, HostContainerSize)>,
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    validate_session_record(session)?;
+    insert_session(&tx, session)?;
+    if let Some((host, size)) = container_size {
+        write_host_container_size(&tx, &host, size)?;
+    }
+    if session.harness_kind.supports_delegation_tools() {
+        tx.execute("INSERT INTO subagent_preference(singleton, policy) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET policy = excluded.policy", [serde_json::to_string(&session.subagents.clone().unwrap_or_default())?])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Update publication evidence only while the exact stopped checkpoint is
 /// still current. An age scan may race a user's Resume or a new checkpoint.
 pub fn set_publication_assessment_if_current(

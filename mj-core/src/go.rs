@@ -16,7 +16,12 @@ pub struct GoRecipe {
     pub bundle_id: Option<String>,
     pub project_directory: Option<PathBuf>,
     pub create_managed_worktree: Option<bool>,
-    pub mjolnir_subagents: Option<bool>,
+    #[serde(
+        default,
+        alias = "mjolnir_subagents",
+        deserialize_with = "crate::subagent::deserialize_optional_policy"
+    )]
+    pub subagents: Option<crate::subagent::SubagentPolicy>,
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
 }
@@ -207,7 +212,7 @@ impl GoPreferences {
                 bundle_id: None,
                 project_directory: None,
                 create_managed_worktree: None,
-                mjolnir_subagents: None,
+                subagents: None,
                 additional_mounts: Vec::new(),
                 resource_allocation: None,
             });
@@ -245,7 +250,7 @@ mod tests {
             bundle_id: Some("repo-a".into()),
             project_directory: Some("/repo-a".into()),
             create_managed_worktree: Some(false),
-            mjolnir_subagents: None,
+            subagents: None,
             additional_mounts: Vec::new(),
             resource_allocation: None,
         }

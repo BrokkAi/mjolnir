@@ -361,6 +361,7 @@ mod tests {
         let mut dashboard = DashboardState::new(
             config(),
             State {
+                last_subagent_policy: Default::default(),
                 subagents: Default::default(),
                 version: STATE_VERSION,
                 sessions,

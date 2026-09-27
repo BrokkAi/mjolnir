@@ -139,7 +139,7 @@ pub fn import_native_session(
             expected_runtime_identity: None,
             publication: None,
             build_cache: None,
-            mjolnir_subagents: None,
+            subagents: None,
             // An imported history is a new session: when it is resumed into a
             // container it gets its own workspace, like any session created
             // now.

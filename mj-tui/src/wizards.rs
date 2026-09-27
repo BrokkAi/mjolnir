@@ -3,6 +3,7 @@ mod picker;
 mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod render;
+mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
 
@@ -91,7 +92,10 @@ pub(crate) enum WizardControl {
     MountAccess,
     ReviewAttachments,
     CreateManagedWorktree,
-    MjolnirSubagents,
+    Subagents,
+    SubagentModel,
+    SubagentEffort,
+    SubagentRetry,
     DiscardQueue,
     Cancel,
     Back,
@@ -144,7 +148,8 @@ pub(crate) struct NewWizard {
     /// Whether this session gets Mjolnir's delegation tools instead of its
     /// harness's own. Only Claude and Codex can, so the review step hides the
     /// control for every other kind and the request then sends `None`.
-    pub(crate) mjolnir_subagents: bool,
+    pub(crate) subagents: Box<mj_core::subagent::SubagentPolicy>,
+    pub(crate) subagent_discovery: Option<Box<subagents::SubagentDiscovery>>,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
@@ -184,7 +189,8 @@ impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
-            && self.mjolnir_subagents == other.mjolnir_subagents
+            && self.subagents == other.subagents
+            && self.subagent_discovery == other.subagent_discovery
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile

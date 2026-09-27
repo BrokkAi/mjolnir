@@ -216,6 +216,11 @@ pub enum DashboardAction {
     },
     /// Read the session checkout's branch and changed files on its target.
     /// The host runs it off the loop and answers with `set_git_status`.
+    DiscoverSubagentOptions {
+        id: u64,
+        profile: String,
+        model: Option<String>,
+    },
     ProbeGitStatus {
         session_id: String,
     },
@@ -228,7 +233,7 @@ pub enum DashboardAction {
     },
     CreateSession {
         create_managed_worktree: Option<bool>,
-        mjolnir_subagents: Option<bool>,
+        subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// Workspace selected when the creation request was submitted. The
         /// dashboard may switch tabs while validation or dirty-repository
         /// confirmation is still in flight, so the request keeps its origin.

@@ -11,6 +11,92 @@ use mj_core::config::{Config, HarnessProfile};
 use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
 use sha2::{Digest, Sha256};
 
+/// Pre-session choices use the same eligibility predicate as delegation.
+/// Discovery remains supervised and cached; independent profiles run concurrently.
+pub async fn subagent_options(
+    parent: String,
+    model: Option<String>,
+) -> Result<mj_core::subagent::SubagentOptions> {
+    let config = tokio::task::spawn_blocking(Config::load)
+        .await
+        .context("load subagent profiles")??;
+    subagent_options_with(&config, &parent, model, |id, model| {
+        discover(id, model, false)
+    })
+    .await
+}
+
+async fn subagent_options_with<F, Fut>(
+    config: &Config,
+    parent: &str,
+    model: Option<String>,
+    probe: F,
+) -> Result<mj_core::subagent::SubagentOptions>
+where
+    F: Fn(String, Option<String>) -> Fut + Copy,
+    Fut: std::future::Future<Output = Result<ProfileConfig>>,
+{
+    config
+        .enabled_profile(parent)
+        .context("parent profile is unavailable")?;
+    let candidates = config
+        .profiles
+        .iter()
+        .filter(|(id, profile)| profile.enabled && config.subagents.profile_is_eligible(parent, id))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let mut options = mj_core::subagent::SubagentOptions::default();
+    let results = futures::future::join_all(candidates.into_iter().map(|id| {
+        let model = model.clone();
+        async move {
+            let result = async {
+                let mut choices = probe(id.clone(), None).await?;
+                if let Some(model) = model
+                    .as_ref()
+                    .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
+                {
+                    choices = probe(id.clone(), Some(model.clone())).await?;
+                }
+                Ok::<_, anyhow::Error>(choices)
+            }
+            .await;
+            (id, result)
+        }
+    }))
+    .await;
+    for (id, result) in results {
+        match result {
+            Ok(choices) => {
+                if model
+                    .as_ref()
+                    .is_some_and(|model| choices.models.iter().any(|choice| &choice.value == model))
+                {
+                    for choice in choices.efforts {
+                        if !options
+                            .efforts
+                            .iter()
+                            .any(|existing| existing.value == choice.value)
+                        {
+                            options.efforts.push(choice);
+                        }
+                    }
+                }
+                for choice in choices.models {
+                    if !options
+                        .models
+                        .iter()
+                        .any(|existing| existing.value == choice.value)
+                    {
+                        options.models.push(choice);
+                    }
+                }
+            }
+            Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
+        }
+    }
+    Ok(options)
+}
+
 #[derive(Default)]
 struct ProbeLock {
     gate: tokio::sync::Mutex<()>,
@@ -344,6 +430,93 @@ fn store(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[tokio::test]
+    async fn subagent_options_use_eligible_profiles_and_model_specific_efforts() {
+        let mut config = Config::default();
+        for id in ["parent", "eligible", "disabled", "excluded", "broken"] {
+            config.profiles.insert(
+                id.into(),
+                HarnessProfile {
+                    enabled: id != "disabled",
+                    kind: mj_core::config::HarnessKind::Codex,
+                    home: std::path::PathBuf::from("/unused"),
+                    environment: BTreeMap::new(),
+                    context_window_bytes: None,
+                    guardian_review_model: None,
+                },
+            );
+        }
+        config.subagents.eligible_profiles = BTreeMap::from([
+            ("eligible".into(), true),
+            ("disabled".into(), true),
+            ("broken".into(), true),
+        ]);
+        let choices = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| mj_core::acp::SessionConfigChoice {
+                    value: (*value).into(),
+                    name: (*value).into(),
+                    description: None,
+                })
+                .collect()
+        };
+        let probe = |id: String, model: Option<String>| async move {
+            assert!(!matches!(id.as_str(), "disabled" | "excluded"));
+            anyhow::ensure!(id != "broken", "profile cannot sign in");
+            Ok(ProfileConfig {
+                model: model.clone(),
+                models: choices(if id == "parent" {
+                    &["parent-model"]
+                } else {
+                    &["child-model"]
+                }),
+                efforts: choices(if model.as_deref() == Some("child-model") {
+                    &["high"]
+                } else {
+                    &["low"]
+                }),
+                observed_at: 1,
+            })
+        };
+        let options = subagent_options_with(&config, "parent", Some("child-model".into()), probe)
+            .await
+            .unwrap();
+        assert_eq!(
+            options
+                .models
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["child-model", "parent-model"]
+        );
+        assert_eq!(
+            options
+                .efforts
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["high"]
+        );
+        assert_eq!(options.unavailable, ["broken: profile cannot sign in"]);
+        assert!(
+            options
+                .validate(&mj_core::subagent::SubagentPolicy::SingleModel {
+                    model: "child-model".into(),
+                    effort: Some("high".into())
+                })
+                .is_ok()
+        );
+        assert!(
+            options
+                .validate(&mj_core::subagent::SubagentPolicy::SingleModel {
+                    model: "child-model".into(),
+                    effort: Some("low".into())
+                })
+                .is_err()
+        );
+    }
 
     #[test]
     fn muse_discovery_publishes_the_model_selected_by_native_settings() {

@@ -82,14 +82,16 @@ impl Controller {
             &SharedCatalogCache,
         )?;
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+        append_subagent_policy(
+            profile.kind,
+            &profile_stage,
+            &launch.subagents,
+            self.config.subagents.max_concurrent,
+        )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if profile.kind == mj_core::config::HarnessKind::Claude {
-            if launch.subagent_tools {
-                configure_claude_subagent_mcp(
-                    &profile_stage,
-                    worker_root,
-                    mj_core::subagent::SubagentMcpRole::Parent,
-                )?;
+            if let Some(role) = launch.subagents.parent_role() {
+                configure_claude_subagent_mcp(&profile_stage, worker_root, role)?;
             } else if launch.handback_tool {
                 configure_claude_subagent_mcp(
                     &profile_stage,
@@ -287,7 +289,11 @@ impl Controller {
             &target,
         )?;
         apply_jev_switch(&mut launch, self.config.jev.enabled);
-        launch.subagent_tools = subagent_tools_enabled(session, subagent.is_some());
+        launch.subagents = session
+            .subagents
+            .clone()
+            .unwrap_or_default()
+            .for_launch(profile.kind, subagent.is_some());
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         // Capturing the working tree is only ever useful to a turn review, so
@@ -435,16 +441,17 @@ pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
 /// through `mj new` with neither flag given) gets its harness's own
 /// sub-agents. A child never gets them, and only Claude and Codex can receive
 /// them at all.
+#[cfg(test)]
 pub(super) fn subagent_tools_enabled(
     session: &mj_core::state::SessionRecord,
     is_child: bool,
 ) -> bool {
-    session.mjolnir_subagents.unwrap_or(false)
-        && !is_child
-        && matches!(
-            session.harness_kind,
-            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
-        )
+    session
+        .subagents
+        .clone()
+        .unwrap_or_default()
+        .for_launch(session.harness_kind, is_child)
+        .uses_mjolnir()
 }
 
 pub(super) fn worker_workspace_for_recovery(
@@ -598,7 +605,7 @@ pub(super) fn worker_launch_config(
             run_mode: Default::default(),
             expected_runtime_identity: session.expected_runtime_identity.clone(),
             session_id: session_id.to_string(),
-            subagent_tools: false,
+            subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             review_capture: false,
             harness: profile.kind,

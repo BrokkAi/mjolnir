@@ -50,7 +50,8 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
-            mjolnir_subagents: false,
+            subagents: Box::new(self.state.last_subagent_policy.clone()),
+            subagent_discovery: None,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 

@@ -13,6 +13,20 @@ pub(super) async fn profile_config(
     Ok(Json(choices))
 }
 
+pub(super) async fn subagent_options(
+    State(state): State<ServerState>,
+    Path(profile_id): Path<String>,
+    Query(query): Query<ProfileConfigQuery>,
+) -> Result<Json<mj_core::subagent::SubagentOptions>, ApiFailure> {
+    crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    let options = crate::controller::profile_config::subagent_options(profile_id, query.model)
+        .await
+        .map_err(|error| {
+            ApiFailure::unavailable(format!("subagent discovery failed: {error:#}"))
+        })?;
+    Ok(Json(options))
+}
+
 pub(crate) fn validate_selectors(
     choices: &mj_core::worker_launch::ProfileConfig,
     model: Option<&str>,

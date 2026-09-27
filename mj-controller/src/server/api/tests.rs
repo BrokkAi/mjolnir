@@ -1458,7 +1458,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             launch_branch: None,
             checkout: None,
             expected_runtime_identity: None,
-            mjolnir_subagents: None,
+            subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),
@@ -1839,7 +1839,7 @@ async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_b
             launch_branch: None,
             checkout: None,
             expected_runtime_identity: None,
-            mjolnir_subagents: None,
+            subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),
@@ -3666,6 +3666,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     let (app, _actions, snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
+            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
         });
     let parent = {
         let snapshot = snapshot_tx.borrow();
@@ -3716,6 +3717,7 @@ async fn a_spawn_without_a_model_is_refused() {
     let (app, _actions, snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
+            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
         });
     let parent = {
         let snapshot = snapshot_tx.borrow();
@@ -3746,6 +3748,7 @@ async fn a_spawn_naming_a_request_key_is_refused() {
     let (app, _actions, snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
+            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
         });
     let parent = {
         let snapshot = snapshot_tx.borrow();
@@ -4129,7 +4132,7 @@ async fn options_report_the_saved_default_and_publish_only_its_two_identifiers()
             bundle_id: Some("hel".into()),
             project_directory: Some(PathBuf::from("/private/project")),
             create_managed_worktree: None,
-            mjolnir_subagents: None,
+            subagents: None,
             additional_mounts: Vec::new(),
             resource_allocation: None,
         },
@@ -4167,7 +4170,7 @@ fn save_global_default(path: &std::path::Path, profile_id: &str, target_id: &str
             bundle_id: None,
             project_directory: None,
             create_managed_worktree: None,
-            mjolnir_subagents: None,
+            subagents: None,
             additional_mounts: Vec::new(),
             resource_allocation: None,
         },
@@ -4585,4 +4588,31 @@ fn both_wait_forms_use_recorded_jev_outcomes_and_targeted_wait_ignores_later_act
     observation.turn_completion.as_mut().unwrap().command_id = "different-command".into();
     observation.activity = ActivityState::Expecting { since_ms: 20 };
     assert!(resolve_wait(&observation, &targeted).is_none());
+}
+
+#[test]
+fn public_creation_rejects_legacy_subagent_parameters_and_boolean_policies() {
+    for value in [
+        serde_json::json!({"mjolnir_subagents": true}),
+        serde_json::json!({"subagents": true}),
+    ] {
+        assert!(serde_json::from_value::<StartSessionRequest>(value.clone()).is_err());
+        let mut action = value;
+        action["action"] = serde_json::json!("new");
+        action["profile_id"] = serde_json::json!("codex");
+        action["target_id"] = serde_json::json!("local");
+        action["bundle_id"] = serde_json::json!("project");
+        assert!(serde_json::from_value::<ControllerAction>(action).is_err());
+    }
+    let request: StartSessionRequest = serde_json::from_value(
+        serde_json::json!({"subagents":{"mode":"single_model", "model":"chosen", "effort":"high"}}),
+    )
+    .unwrap();
+    assert_eq!(
+        request.subagents,
+        Some(mj_core::subagent::SubagentPolicy::SingleModel {
+            model: "chosen".into(),
+            effort: Some("high".into())
+        })
+    );
 }

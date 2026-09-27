@@ -8,15 +8,6 @@ pub struct SubagentMcpSocket {
     pub role: mj_core::subagent::SubagentMcpRole,
 }
 
-impl SubagentMcpSocket {
-    /// Whether this socket replaces the harness's own delegation tools. Only
-    /// a parent's does; a child keeps its native tools.
-    #[must_use]
-    pub fn replaces_native_delegation(&self) -> bool {
-        self.role == mj_core::subagent::SubagentMcpRole::Parent
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     pub runtime_constraint: Option<(mj_core::harness_runtime::RuntimeIdentity, String)>,
@@ -34,8 +25,9 @@ pub struct LaunchSpec {
     /// turn review's reviewing agents get Bifrost this way; the primary
     /// session gets none.
     pub extra_mcp_servers: Vec<mj_core::worker_launch::ReviewMcpServer>,
-    /// Private Mjolnir sub-agent socket: delegation for a supported parent,
-    /// `handback` for a child that was given the tool.
+    /// Delegation policy independently controls native tool suppression.
+    pub subagent_policy: mj_core::subagent::SubagentPolicy,
+    /// Private Mjolnir socket: parent delegation or child handback.
     pub subagent_mcp_socket: Option<SubagentMcpSocket>,
     /// The supervisor spec the bridge command reads, when this launch has
     /// one. It is rewritten from `accepted_config` before every bridge start,
@@ -123,15 +115,9 @@ pub(super) fn session_request_meta(
             "goal".into(),
             serde_json::json!({"resumePolicy": if asking {"pause"} else {"preserve"}}),
         )]);
-        // Hide the harness's own delegation tool only when Mjolnir replaced
-        // it. A parent's socket exists exactly when the controller asked for
-        // Mjolnir sub-agents, so the two halves cannot disagree. A child's
-        // socket only carries `handback` and replaces nothing.
-        if spec
-            .subagent_mcp_socket
-            .as_ref()
-            .is_some_and(SubagentMcpSocket::replaces_native_delegation)
-        {
+        // The launch policy owns suppression independently of MCP exposure:
+        // None and children suppress native delegation without a parent socket.
+        if spec.subagent_policy.suppresses_native() {
             meta.insert(
                 "codex".into(),
                 serde_json::json!({"options":{"disallowedTools":["spawn_agent"]}}),
@@ -176,15 +162,8 @@ pub(super) fn session_request_meta(
             serde_json::json!({ "enabled": enabled }),
         );
     }
-    // Same rule as Codex above: without the Mjolnir delegation socket the
-    // session keeps Claude's own Agent tool. `Task` is Agent's older name.
-    // TaskStop and TaskOutput stay: they also stop and read the session's own
-    // background shell commands, which Mjolnir's tools do not replace.
-    if spec
-        .subagent_mcp_socket
-        .as_ref()
-        .is_some_and(SubagentMcpSocket::replaces_native_delegation)
-    {
+    // TaskStop and TaskOutput stay: they also manage background shell commands.
+    if spec.subagent_policy.suppresses_native() {
         options.insert(
             "disallowedTools".to_owned(),
             serde_json::json!(["Agent", "Task"]),

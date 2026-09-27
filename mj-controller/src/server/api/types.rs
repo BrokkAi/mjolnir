@@ -30,6 +30,8 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default)]
+    pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<mj_core::harness_runtime::RuntimeReceipt>,
     /// Immutable starting selection; session readiness verifies preparation.
@@ -81,6 +83,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            subagents: session.subagents.clone(),
             background_work: None,
             checkout: session.checkout.clone(),
             expected_runtime_identity: session.expected_runtime_identity.clone(),
@@ -160,9 +163,9 @@ pub struct StartSessionRequest {
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
-    /// None means native sub-agents, the same as `Some(false)`.
+    /// Omitted reuses the last accepted top-level session choice.
     #[serde(default)]
-    pub mjolnir_subagents: Option<bool>,
+    pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default. See the type's own documentation.

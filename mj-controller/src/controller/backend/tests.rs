@@ -172,7 +172,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -206,6 +206,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         checkpoint: None,
     };
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: mj_core::state::STATE_VERSION,
         sessions: BTreeMap::from([(session_id.into(), record)]),

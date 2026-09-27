@@ -517,7 +517,7 @@ fn adopted_session_record(
         expected_runtime_identity: None,
         publication: None,
         build_cache: None,
-        mjolnir_subagents: None,
+        subagents: None,
         // The adopting caller probes the running container for this.
         container_workspace: None,
         create_managed_worktree: None,

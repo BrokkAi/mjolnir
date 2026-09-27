@@ -30,7 +30,7 @@ fn session_record(id: &str) -> SessionRecord {
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         id: id.into(),
         workspace_id: "workspace-1".into(),
@@ -153,6 +153,7 @@ fn snapshot(
     records: Vec<SessionRecord>,
 ) -> daemon::RuntimeSnapshot {
     daemon::RuntimeSnapshot {
+        last_subagent_policy: Default::default(),
         native_agents: Vec::new(),
         workspace_names: Default::default(),
         revision,

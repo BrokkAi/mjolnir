@@ -425,6 +425,18 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::RestartDaemon => {
             spawn_daemon_restart(context);
         }
+        DashboardAction::DiscoverSubagentOptions { id, profile, model } => {
+            crate::dashboard::spawn_io(
+                "discovering subagent models",
+                context.dashboard_io_tx.clone(),
+                move || {
+                    mj_core::runtime::block_on(
+                        mj_controller::controller::profile_config::subagent_options(profile, model),
+                    )?
+                },
+                move |result| DashboardIoUpdate::SubagentOptions { id, result },
+            );
+        }
         DashboardAction::ProbeGitStatus { session_id } => {
             context.spawn_git_probe(session_id);
         }

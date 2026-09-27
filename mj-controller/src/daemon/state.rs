@@ -194,7 +194,7 @@ impl RuntimeState {
                 checkout: None,
                 expected_runtime_identity: None,
                 create_managed_worktree: None,
-                mjolnir_subagents: None,
+                subagents: None,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,

@@ -1323,10 +1323,13 @@ pub struct SessionRecord {
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<PublicationAssessment>,
-    /// None means native sub-agents at launch time; Some(true) and
-    /// Some(false) are explicit per-session choices.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mjolnir_subagents: Option<bool>,
+    /// Stored delegation policy. Historical records without a choice use native delegation.
+    #[serde(
+        default,
+        alias = "mjolnir_subagents",
+        deserialize_with = "crate::subagent::deserialize_optional_policy"
+    )]
+    pub subagents: Option<crate::subagent::SubagentPolicy>,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -1859,6 +1862,8 @@ fn created_at_seconds(timestamp: &str) -> Option<i64> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    #[serde(default)]
+    pub last_subagent_policy: crate::subagent::SubagentPolicy,
     pub version: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, SessionRecord>,
@@ -1878,6 +1883,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             version: STATE_VERSION,
+            last_subagent_policy: Default::default(),
             sessions: BTreeMap::new(),
             subagents: BTreeMap::new(),
             mount_history: BTreeMap::new(),

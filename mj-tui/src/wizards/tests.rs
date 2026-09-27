@@ -48,7 +48,7 @@ fn new_session_wizard_returns_all_three_choices() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(false),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -328,6 +328,7 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
@@ -358,6 +359,7 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
 
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(imported.id.clone(), imported)]),
@@ -1459,7 +1461,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "claude-1".into(),
@@ -1710,7 +1712,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::CreateSession {
-            mjolnir_subagents: None,
+            subagents: None,
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
@@ -1738,6 +1740,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
     recent.bundle_id = "zebra-recent".into();
     recent.created_at = "2026-08-11T12:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(older.id.clone(), older), (recent.id.clone(), recent)]),
@@ -1758,7 +1761,7 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         dashboard.take_prerequisite_check(),
         Some(DashboardAction::PreflightCreateSession {
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(false),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -1790,6 +1793,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
     recent.target_template_id = "recent-target".into();
     recent.created_at = "2026-08-12T12:00:00Z".into();
     let state = State {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(recent.id.clone(), recent)]),
@@ -2045,7 +2049,7 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                 access: MountAccess::Ro,
             }],
             launch: Box::new(DashboardAction::CreateSession {
-                mjolnir_subagents: Some(false),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
                 create_managed_worktree: Some(false),
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
                 profile_id: "codex-1".into(),
@@ -3600,6 +3604,7 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([(session.id.clone(), session)]),
@@ -3651,6 +3656,7 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
     let mut dashboard = DashboardState::new(
         config,
         State {
+            last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
@@ -4310,7 +4316,7 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
 /// show the choice. The box starts unchecked: native sub-agents are the
 /// default.
 #[test]
-fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
+fn new_session_wizard_shows_subagent_choices_only_for_claude_and_codex() {
     for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
         let configuration = subagent_wizard_config();
         let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
@@ -4321,10 +4327,7 @@ fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
         wizard.profile = profile;
         wizard.step = WizardStep::Review;
         wizard.project_directory = "/work/main".into();
-        assert!(
-            !wizard.mjolnir_subagents,
-            "native sub-agents are the default"
-        );
+        assert_eq!(*wizard.subagents, mj_core::subagent::SubagentPolicy::Native);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal
@@ -4332,7 +4335,7 @@ fn new_session_wizard_shows_subagent_checkbox_only_for_claude_and_codex() {
             .unwrap();
         let text = buffer_lines(terminal.backend().buffer()).join("\n");
         assert_eq!(
-            text.contains("Use Mjolnir sub-agents"),
+            text.contains("Mjolnir, all models"),
             visible,
             "profile {profile}:\n{text}"
         );
@@ -4374,8 +4377,8 @@ fn new_session_wizard_sends_subagent_choice() {
             let Mode::New(wizard) = &mut dashboard.mode else {
                 panic!("new wizard")
             };
-            wizard.form.get_mut().focus(WizardControl::MjolnirSubagents);
-            ready_key(&mut dashboard, key(KeyCode::Char(' ')));
+            wizard.form.get_mut().focus(WizardControl::Subagents);
+            ready_key(&mut dashboard, key(KeyCode::Down));
         }
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new wizard")
@@ -4387,21 +4390,21 @@ fn new_session_wizard_sends_subagent_choice() {
     assert!(matches!(
         submit(0, false),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(false),
+            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             ..
         }
     ));
     assert!(matches!(
         submit(0, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
             ..
         }
     ));
     assert!(matches!(
         submit(1, true),
         DashboardAction::CreateSession {
-            mjolnir_subagents: Some(true),
+            subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
             ..
         }
     ));
@@ -4409,7 +4412,7 @@ fn new_session_wizard_sends_subagent_choice() {
     assert!(matches!(
         submit(3, false),
         DashboardAction::CreateSession {
-            mjolnir_subagents: None,
+            subagents: None,
             ..
         }
     ));
@@ -5689,4 +5692,87 @@ fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
         checked += 1;
     }
     assert!(checked >= 2, "Tab reaches both recent directories");
+}
+
+#[test]
+fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
+    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    let state = State {
+        last_subagent_policy: fixed.clone(),
+        ..Default::default()
+    };
+    let mut dashboard = DashboardState::new(subagent_wizard_config(), state, BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard");
+    };
+    assert_eq!(*wizard.subagents, fixed);
+    wizard.step = WizardStep::Review;
+    let Some(DashboardAction::DiscoverSubagentOptions { id, model, .. }) =
+        dashboard.take_subagent_discovery()
+    else {
+        panic!("discovery");
+    };
+    assert_eq!(model.as_deref(), Some("chosen"));
+    assert!(
+        dashboard.take_subagent_discovery().is_none(),
+        "one request per selection"
+    );
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    let options = SubagentOptions {
+        models: vec![choice("chosen"), choice("next")],
+        efforts: vec![choice("high")],
+        unavailable: vec![],
+    };
+    dashboard.apply_subagent_options(id, Ok(options.clone()));
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard");
+    };
+    assert!(wizard.subagent_error().is_none());
+    wizard.select_subagent_model(2);
+    assert_eq!(
+        *wizard.subagents,
+        SubagentPolicy::SingleModel {
+            model: "next".into(),
+            effort: None
+        }
+    );
+    assert!(wizard.subagent_error().is_some());
+    let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
+        dashboard.take_subagent_discovery()
+    else {
+        panic!("next discovery");
+    };
+    dashboard.apply_subagent_options(id, Ok(options.clone()));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard");
+    };
+    assert!(
+        wizard.subagent_options().is_none(),
+        "old reply cannot finish the new request"
+    );
+    dashboard.apply_subagent_options(next, Ok(options));
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard");
+    };
+    assert!(
+        wizard.subagent_error().is_some(),
+        "new model requires a matching effort"
+    );
+    wizard.select_subagent_effort(1);
+    assert!(wizard.subagent_error().is_none());
+    dashboard.mode = Mode::Dashboard;
+    dashboard.begin_new();
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("wizard");
+    };
+    assert_eq!(*wizard.subagents, fixed, "canceling does not save edits");
 }

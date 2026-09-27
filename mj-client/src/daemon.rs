@@ -281,6 +281,8 @@ pub struct RuntimeNotice {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshot {
     #[serde(default)]
+    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
+    #[serde(default)]
     pub native_agents: Vec<mj_core::native_agent::NativeAgentSummary>,
     #[serde(default)]
     pub workspace_names: BTreeMap<String, String>,
@@ -361,9 +363,13 @@ pub struct CreateSessionRequest {
     pub checkout: Option<mj_core::remote_git::ExactCheckout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
-    /// None means native sub-agents, the same as `Some(false)`.
-    #[serde(default)]
-    pub mjolnir_subagents: Option<bool>,
+    /// Omitted reuses the last accepted top-level session choice.
+    #[serde(
+        default,
+        alias = "mjolnir_subagents",
+        deserialize_with = "mj_core::subagent::deserialize_optional_policy"
+    )]
+    pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -1984,7 +1990,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 38;
+// Delegation policies replace boolean creation fields and extend runtime snapshots.
+pub const PROTOCOL_VERSION: u32 = 39;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
