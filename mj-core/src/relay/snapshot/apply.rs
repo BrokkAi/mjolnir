@@ -84,6 +84,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     assessment.completed_ordinal,
                     event.recorded_at_ms,
                 ));
+            } else if assessment
+                .action
+                .is_some_and(|action| action != crate::assessment::Action::RetryProvider)
+            {
+                // Only consecutive provider refusals share a retry backoff.
+                snapshot.capacity_retry = None;
             }
             snapshot.retry_assessment = None;
             snapshot.assessment = Some((**assessment).clone());

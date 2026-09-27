@@ -86,6 +86,21 @@ fn server_retry_requires_a_jev_verdict_and_retries_with_backoff() {
     finish(&mut relay, &id, "Done", "EndTurn");
     assess(&mut relay, false);
     assert!(relay.capacity_retry_deadline().is_none());
+    assert!(relay.snapshot.capacity_retry.is_none());
+    // A later autonomous refusal starts a new backoff sequence.
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted {
+            started_at_ms: epoch_millis(),
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    assess(&mut relay, true);
+    assert_eq!(relay.operational_state().capacity_retry.unwrap().attempt, 1);
 }
 
 #[test]
