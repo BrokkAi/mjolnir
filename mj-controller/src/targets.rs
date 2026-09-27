@@ -36,6 +36,8 @@ const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 3);
 
 mod preflight;
 pub use preflight::*;
+mod platform;
+pub use platform::*;
 mod provision;
 pub use provision::*;
 mod recovery;

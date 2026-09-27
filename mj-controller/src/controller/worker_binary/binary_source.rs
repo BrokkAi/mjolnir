@@ -105,6 +105,12 @@ pub(super) fn select_sibling_worker(
         packaged_worker_binary_path(directory, triple),
         "beside the mj binary",
     ));
+    if triple.ends_with("-apple-darwin") {
+        candidates.push((
+            packaged_worker_binary_path(directory, "universal-apple-darwin"),
+            "universal Darwin worker beside mj",
+        ));
+    }
     // Development checkout: a controller at target/<profile>/<name> finds its
     // musl sibling at target/<triple>/<profile>/<name>. The static build is
     // preferred because the target's glibc may be older than the host's, so it
@@ -137,6 +143,7 @@ pub(super) fn select_sibling_worker(
     let controller_name = running_executable_file_name(controller);
     for name in names
         .iter()
+        .filter(|_| !triple.ends_with("-apple-darwin"))
         .filter(|name| Some(name.as_os_str()) != controller_name.as_deref())
     {
         candidates.push((directory.join(name), "beside the running executable"));
@@ -147,7 +154,25 @@ pub(super) fn select_sibling_worker(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum WorkerBinaryRequirement {
     PortableLinux,
+    Darwin,
     LocalHost,
+}
+
+impl WorkerBinaryRequirement {
+    pub(super) fn for_os(os: targets::TargetOs) -> Self {
+        match os {
+            targets::TargetOs::Linux => Self::PortableLinux,
+            targets::TargetOs::Darwin => Self::Darwin,
+        }
+    }
+
+    fn triple(self, arch: &str) -> String {
+        match self {
+            Self::Darwin => format!("{arch}-apple-darwin"),
+            Self::LocalHost if cfg!(target_os = "macos") => format!("{arch}-apple-darwin"),
+            _ => format!("{arch}-unknown-linux-musl"),
+        }
+    }
 }
 
 impl WorkerBinarySourceSnapshot {
@@ -161,6 +186,8 @@ impl WorkerBinarySourceSnapshot {
             (std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost),
             ("x86_64", WorkerBinaryRequirement::PortableLinux),
             ("aarch64", WorkerBinaryRequirement::PortableLinux),
+            ("x86_64", WorkerBinaryRequirement::Darwin),
+            ("aarch64", WorkerBinaryRequirement::Darwin),
         ];
 
         for (arch, requirement) in architectures {
@@ -443,7 +470,7 @@ pub(super) fn worker_binary_prerequisite_for_current(
     current: &Path,
     is_file: &dyn Fn(&Path) -> bool,
 ) -> Result<WorkerBinaryAvailability> {
-    let triple = format!("{arch}-unknown-linux-musl");
+    let triple = requirement.triple(arch);
     let rejected = std::cell::RefCell::new(Vec::new());
     let matches_build = |path: &Path| {
         if !is_file(path) {
@@ -483,6 +510,12 @@ pub(super) fn worker_binary_prerequisite_for_current(
             "MJ_WORKER_DIR",
         ));
         candidates.push((directory.join(&triple).join("hel"), "MJ_WORKER_DIR"));
+        if triple.ends_with("-apple-darwin") {
+            candidates.push((
+                packaged_worker_binary_path(&directory, "universal-apple-darwin"),
+                "MJ_WORKER_DIR",
+            ));
+        }
     }
     if let Some((path, source)) = candidates.into_iter().find(|(path, _)| matches_build(path)) {
         return Ok(WorkerBinaryAvailability::Local {
@@ -530,6 +563,6 @@ pub(super) fn worker_binary_prerequisite_for_current(
         display_path(current)
     );
     bail!(
-        "no Linux worker for {triple}; install mj-worker-{triple} beside mj, set MJ_WORKER_DIR/MJ_WORKER_BINARY, or configure MJ_WORKER_URL and MJ_WORKER_SHA256"
+        "no worker for {triple}; install mj-worker-{triple} beside mj, set MJ_WORKER_DIR/MJ_WORKER_BINARY, or configure MJ_WORKER_URL and MJ_WORKER_SHA256"
     )
 }

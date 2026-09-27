@@ -27,11 +27,9 @@ pub(super) fn template_architecture(
         Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
     };
     // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
-    platform.split('/').find_map(|part| match part.trim() {
-        "x86_64" | "amd64" => Some("x86_64"),
-        "aarch64" | "arm64" => Some("aarch64"),
-        _ => None,
-    })
+    platform
+        .split('/')
+        .find_map(|part| targets::normalize_architecture(part.trim()).ok())
 }
 
 /// Architectures a resume must be able to serve, knowing only the configured
@@ -61,8 +59,8 @@ pub(super) fn preflight_architectures(
     }
 }
 
-/// Whether this controller could produce a Linux worker binary for a target
-/// that does not exist yet.
+/// Resolve the worker before expensive provisioning or transcript compaction.
+/// Existing SSH bare hosts are probed; disposable targets use their template.
 ///
 /// A resume compacts a cross-harness transcript before it provisions anything,
 /// which costs minutes and paid model requests. Resolving the worker binary is
@@ -71,9 +69,20 @@ pub(super) fn preflight_architectures(
 /// verified here too, before provisioning can create a container.
 pub(in crate::controller) fn preflight_worker_binary(
     template: &mj_core::config::TargetTemplate,
+    executor: &impl CommandExecutor,
 ) -> Result<()> {
-    // Only a bare local target may run the controller's own host binary as
-    // its worker; every other target needs a portable Linux worker.
+    if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
+        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
+            .purpose("detect target platform");
+        let platform = probe_platform(executor, command)?;
+        return materialize_worker_source(worker_binary_for_arch(
+            platform.architecture,
+            WorkerBinaryRequirement::for_os(platform.os),
+        )?)
+        .map(|_| ());
+    }
+    // Existing SSH bare hosts were resolved above. Containers and the
+    // disposable EC2 backend require portable Linux workers.
     let requirement = if matches!(template, mj_core::config::TargetTemplate::LocalBare) {
         WorkerBinaryRequirement::LocalHost
     } else {
@@ -98,13 +107,13 @@ pub(in crate::controller) fn worker_binary_for(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<PathBuf> {
-    let arch = target_architecture(locator, executor)?;
+    let platform = probe_platform(executor, targets::platform_probe(locator))?;
     let requirement = if matches!(locator, targets::TargetLocator::LocalBare { .. }) {
         WorkerBinaryRequirement::LocalHost
     } else {
-        WorkerBinaryRequirement::PortableLinux
+        WorkerBinaryRequirement::for_os(platform.os)
     };
-    materialize_worker_source(worker_binary_for_arch(arch, requirement)?)
+    materialize_worker_source(worker_binary_for_arch(platform.architecture, requirement)?)
 }
 
 fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf> {
@@ -127,11 +136,15 @@ pub(in crate::controller) fn target_architecture(
     let command = targets::locator_command(locator, vec!["uname".into(), "-m".into()])
         .purpose("detect target architecture");
     let output = execute_checked(executor, command)?;
-    match String::from_utf8(output.stdout)?.trim() {
-        "x86_64" | "amd64" => Ok("x86_64"),
-        "aarch64" | "arm64" => Ok("aarch64"),
-        architecture => bail!("unsupported target architecture {architecture:?}"),
-    }
+    targets::normalize_architecture(String::from_utf8(output.stdout)?.trim())
+}
+
+fn probe_platform(
+    executor: &impl CommandExecutor,
+    command: CommandSpec,
+) -> Result<targets::TargetPlatform> {
+    let output = execute_checked(executor, command)?;
+    targets::TargetPlatform::parse(std::str::from_utf8(&output.stdout)?)
 }
 
 pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {

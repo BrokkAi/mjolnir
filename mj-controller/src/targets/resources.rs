@@ -261,9 +261,40 @@ pub(super) fn parse_disk_usage(output: &[u8]) -> Result<u64> {
 }
 
 pub fn ssh_host_capacity_command(ssh: &SshTarget) -> CommandSpec {
-    ssh_command(ssh, ["sh", "-c", HOST_RESOURCE_USAGE_SCRIPT])
-        .purpose("sample deployment host capacity")
+    let script = format!(
+        "set -eu\ncase $(uname -s) in\nDarwin)\n{DARWIN_HOST_RESOURCE_USAGE_SCRIPT}\n;;\nLinux)\n{HOST_RESOURCE_USAGE_SCRIPT}\n;;\n*) echo 'unsupported host operating system for capacity sampling' >&2; exit 1;;\nesac"
+    );
+    ssh_command(ssh, ["sh", "-c", &script]).purpose("sample deployment host capacity")
 }
+
+// vm_stat reports pages, whose size differs between Intel and Apple silicon.
+// Count active, wired and compressed pages as used; inactive/speculative pages
+// are reclaimable cache. top's second sample measures an interval, not uptime.
+pub(super) const DARWIN_HOST_RESOURCE_USAGE_SCRIPT: &str = r#"
+export LC_ALL=C
+memory_total=$(sysctl -n hw.memsize)
+cores=$(sysctl -n hw.logicalcpu)
+pages=$(vm_stat)
+cpu=$(top -l 2 -s 1 -n 0)
+printf '%s\n' "$pages" | awk -v total="$memory_total" '
+    /page size of/ { page_size = $8 }
+    /^Pages active:/ { active = $3 }
+    /^Pages wired down:/ { wired = $4 }
+    /^Pages occupied by compressor:/ { compressed = $5 }
+    END {
+        if (page_size <= 0 || total <= 0) exit 1
+        used = (active + wired + compressed) * page_size
+        if (used > total) used = total
+        printf "memory.current=%.0f\nmemory.max=%.0f\n", used, total
+    }'
+printf '%s\n' "$cpu" | awk '
+    /^CPU usage:/ { idle = $7; found = 1 }
+    END {
+        if (!found) exit 1
+        printf "cpu.percent=%.2f\n", 100 - idle
+    }'
+printf 'logical.cores=%s\n' "$cores"
+"#;
 
 pub fn aws_allocated_capacity_command(
     locator: &TargetLocator,
@@ -351,4 +382,48 @@ pub(super) fn parse_cgroup_counter(value: &str) -> Result<Option<u64>> {
     Ok(Some(value.parse().with_context(|| {
         format!("invalid memory counter {value:?}")
     })?))
+}
+
+#[cfg(all(test, unix))]
+mod darwin_tests {
+    use super::*;
+
+    #[test]
+    fn darwin_capacity_uses_reported_page_size_and_last_cpu_sample() {
+        for page_size in [4096, 16384] {
+            let directory = tempfile::tempdir().unwrap();
+            for (name, body) in [
+                ("sysctl", "case $2 in hw.memsize) echo 17179869184;; hw.logicalcpu) echo 8;; *) exit 1;; esac".to_owned()),
+                ("vm_stat", format!("printf '%s\\n' 'Mach Virtual Memory Statistics: (page size of {page_size} bytes)' 'Pages active: 100.' 'Pages inactive: 900.' 'Pages wired down: 200.' 'Pages occupied by compressor: 300.'")),
+                ("top", "printf '%s\\n' 'CPU usage: 10.00% user, 10.00% sys, 80.00% idle' 'CPU usage: 20.00% user, 10.00% sys, 70.00% idle'".to_owned()),
+            ] {
+                mj_core::test_hooks::install_fake_command(directory.path(), name, &format!("#!/bin/sh\n{body}\n"));
+            }
+            let script = format!("set -eu\n{DARWIN_HOST_RESOURCE_USAGE_SCRIPT}");
+            let mut command = CommandSpec::new("sh", ["-c", &script]);
+            command.env.insert(
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", directory.path().display()),
+            );
+            let output = ProcessExecutor.execute(&command).unwrap();
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let usage = parse_host_capacity(&output.stdout).unwrap();
+            assert_eq!(usage.memory_used_bytes, 600 * page_size);
+            assert_eq!(usage.memory_total_bytes, 17_179_869_184);
+            assert_eq!(usage.logical_cores, 8);
+            assert_eq!(usage.cpu_percent, Some(30));
+
+            mj_core::test_hooks::install_fake_command(
+                directory.path(),
+                "vm_stat",
+                "#!/bin/sh\nexit 7\n",
+            );
+            assert_ne!(ProcessExecutor.execute(&command).unwrap().status, 0);
+        }
+    }
 }

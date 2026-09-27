@@ -39,3 +39,9 @@ mj-desktop/*
 # Dictation: CoreAudio capture through cpal, and the client transport that runs it.
 voice-worker/*
 mj-chat/src/speech.rs
+
+# Remote Darwin deployment and resource probes.
+mj-controller/src/targets/platform.rs
+mj-controller/src/targets/bootstrap.rs
+mj-controller/src/targets/resources.rs
+mj-controller/src/controller/worker_binary/*

@@ -87,7 +87,7 @@ impl Controller {
         // Resolving the worker binary is local and costs microseconds. A swap
         // that could never install a worker fails before the old harness is
         // removed from the target.
-        crate::controller::worker_binary::preflight_worker_binary(&target_template)?;
+        crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
         // The directory the *source* profile owns inside the target. It is
         // read from the record's own profile, before the record names the
         // destination one.

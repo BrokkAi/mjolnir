@@ -90,10 +90,10 @@ pub(crate) struct NewArgs {
     /// saved default, as for `--profile`.
     #[arg(long)]
     target: Option<String>,
-    /// Existing bundle to run. Omit it to bundle `--project-directory`.
+    /// Existing bundle to run. Bare targets use `--project-directory` instead.
     #[arg(long)]
     bundle: Option<String>,
-    /// Directory to bundle and run the session against.
+    /// Existing directory on the selected bare target to run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
     /// Record this Git revision as the diff base, independently of the branch.

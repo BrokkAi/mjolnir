@@ -102,6 +102,12 @@ pub(in crate::controller) fn preflight_harness(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     use mj_core::config::TargetTemplate;
+    if let TargetTemplate::SshBare { ssh, .. } = template {
+        let ssh = SshTarget::from(ssh);
+        execute_checked(executor, crate::targets::ssh_login_script(&ssh,
+            "git --version >/dev/null || { echo 'Git is missing or unusable; install Git and, on macOS, the Xcode Command Line Tools on the target' >&2; exit 1; }",
+        ).purpose("preflight remote Git"))?;
+    }
     if !matches!(profile.kind, HarnessKind::Codex | HarnessKind::Claude) {
         return Ok(());
     }
@@ -128,14 +134,21 @@ pub(in crate::controller) fn preflight_harness(
             profile.environment["PATH"].clone(),
         ]
     } else {
-        vec!["-lc".to_owned(), script]
+        vec!["-lc".to_owned(), script.clone()]
     };
     let (command, destination) = match template {
         TargetTemplate::LocalBare => (CommandSpec::new("sh", args), "local host".to_owned()),
         TargetTemplate::SshBare { ssh, .. } => {
             let ssh = SshTarget::from(ssh);
-            args.insert(0, "sh".into());
-            (crate::targets::ssh_command(&ssh, args), ssh.destination)
+            if profile.environment.contains_key("PATH") {
+                args.insert(0, "sh".into());
+                (crate::targets::ssh_command(&ssh, args), ssh.destination)
+            } else {
+                (
+                    crate::targets::ssh_login_script(&ssh, &script),
+                    ssh.destination,
+                )
+            }
         }
         _ => unreachable!(),
     };

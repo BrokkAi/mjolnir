@@ -1943,21 +1943,18 @@ async fn a_bare_session_can_start_without_a_bundle() {
         r#"{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"","target_id":"raw","project_directory":"/work/project"}"#
             .to_owned(),
     ));
-    let bundle = tokio::time::timeout(Duration::from_secs(5), bundles.recv())
-        .await
-        .expect("the directory is registered through normal bundle creation")
-        .unwrap();
-    assert_eq!(bundle.source, "/work/project");
-    assert!(actions.try_recv().is_err(), "creation waits for the bundle");
-    bundle.reply.send(Ok("project".into())).unwrap();
     let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
         .await
         .expect("the directory-only request reached the controller")
         .unwrap();
+    assert!(
+        bundles.try_recv().is_err(),
+        "bare paths must not be registered as controller-local bundles"
+    );
     assert!(matches!(
         action.action,
         ControllerAction::New { ref bundle_id, ref project_directory, .. }
-            if bundle_id == "project" && project_directory.as_deref() == Some(Path::new("/work/project"))
+            if bundle_id == &mj_core::config::raw_project_context_id("/work/project") && project_directory.as_deref() == Some(Path::new("/work/project"))
     ));
     action.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);

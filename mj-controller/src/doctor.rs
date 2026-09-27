@@ -2209,11 +2209,9 @@ fn container_worker_architectures(config: ConfigStatus<'_>) -> Vec<String> {
 /// Container platforms name architectures the way Docker does; worker files
 /// are named the way Rust target triples do.
 fn normalized_worker_architecture(platform_arch: &str) -> String {
-    match platform_arch {
-        "amd64" => "x86_64".to_owned(),
-        "arm64" => "aarch64".to_owned(),
-        other => other.to_owned(),
-    }
+    crate::targets::normalize_architecture(platform_arch)
+        .unwrap_or(platform_arch)
+        .to_owned()
 }
 
 /// The digests the daemon's immutable worker cache holds.
@@ -2382,13 +2380,9 @@ fn container_architecture(platform: Option<&str>) -> std::result::Result<&'stati
         .rev()
         .find(|part| matches!(*part, "x86_64" | "amd64" | "aarch64" | "arm64"))
         .unwrap_or(candidate);
-    match candidate {
-        "x86_64" | "amd64" => Ok("x86_64"),
-        "aarch64" | "arm64" => Ok("aarch64"),
-        other => Err(format!(
-            "Container architecture {other:?} is unsupported; Mjolnir supports x86_64 and aarch64 Linux workers."
-        )),
-    }
+    crate::targets::normalize_architecture(candidate).map_err(|_| format!(
+        "Container architecture {candidate:?} is unsupported; Mjolnir supports x86_64 and aarch64 Linux workers."
+    ))
 }
 
 fn apple_container_image(config: ConfigStatus<'_>) -> String {

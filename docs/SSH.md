@@ -179,6 +179,50 @@ machine = "builder"
 permissions = "guardian"
 ```
 
+### macOS hosts, including EC2 Macs
+
+A bare SSH runtime can run directly on an Intel or Apple silicon Mac. The
+controller detects the remote operating system and architecture and uploads
+the worker from its own release. Linux controllers can manage Mac workers;
+release archives and npm packages include the universal macOS worker.
+
+Enable Remote Login on the Mac and configure noninteractive SSH key access.
+Install working Git (including the Xcode Command Line Tools if using Apple's
+Git) and the tools your project needs. Codex and Claude also require Node.js
+22 or newer and npm. Mjolnir checks these through the account's login shell,
+so Homebrew's PATH setup belongs in that shell's login configuration, such as
+`.zprofile` for zsh. The worker uses the target account's login environment
+and then applies any configured profile environment overrides.
+
+```toml
+[machines.mac]
+kind = "ssh"
+host = "my-mac"
+
+[targets.mac]
+kind = "bare"
+machine = "mac"
+permissions = "guardian"
+```
+
+Select an existing Git project on the Mac when starting a session. Workspaces
+and checkpoints follow the same SSH-bare lifecycle described below. Closing
+a session does not shut down the Mac or stop other sessions.
+
+For EC2, provision the Mac instance and Dedicated Host yourself, then use its
+SSH address in this configuration. Use the SSH machine kind for this persistent
+host: the `aws-ec2` machine kind owns disposable instances and terminates them
+on session teardown. This SSH configuration does not allocate or release AWS
+hosts, install Xcode, or manage signing identities.
+
+When developing from source, provide a worker built from the same source
+revision as the controller. `MJ_WORKER_DIR` accepts
+`mj-worker-aarch64-apple-darwin`, `mj-worker-x86_64-apple-darwin`, or the
+combined `mj-worker-universal-apple-darwin`. Build an architecture-specific
+worker on a Mac with `cargo build -p brokk-mj-worker --bin mj-worker`; copy it
+under the matching name in that directory. A release controller and a worker
+from another revision cannot be mixed.
+
 ### How a remote bare project is prepared
 
 The new-session wizard asks for an existing absolute Git directory on the SSH

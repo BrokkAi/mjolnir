@@ -1343,11 +1343,11 @@ impl Controller {
                 ),
             }
         }
-        // Resolving the worker binary is local and costs microseconds, while
-        // the compaction below costs minutes and paid model requests. A resume
+        // Resolve the worker before compaction costs minutes and paid model
+        // requests, including probing the platform of an existing SSH host. A resume
         // that could never install a worker fails here rather than after all
         // that work has been thrown away.
-        super::worker_binary::preflight_worker_binary(&target_template)?;
+        super::worker_binary::preflight_worker_binary(&target_template, executor)?;
         let same_harness = profile.kind == archive_manifest.session.harness_kind;
         let native_continuity =
             native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);

@@ -153,7 +153,7 @@ async function ensureBinary(filename, requireExecutableBit) {
   }
 }
 
-async function stagePlatform(platform, version, source, stagingRoot) {
+export async function stagePlatform(platform, version, source, stagingRoot) {
   const destination = path.join(stagingRoot, packageDirectory(platform.packageName));
   await mkdir(path.join(destination, "bin"), { recursive: true });
   for (const entry of ["README.md", "LICENSE", "licenses"]) {
@@ -172,11 +172,12 @@ async function stagePlatform(platform, version, source, stagingRoot) {
       await cp(path.join(source, nativeWorker), path.join(destination, "bin", nativeWorker));
       await ensureBinary(path.join(destination, "bin", nativeWorker), true);
     }
-    // Session workers are static Linux binaries uploaded into disposable
-    // targets; the controller looks for them beside its own executable.
+    // Session workers are uploaded to Linux targets and SSH Macs; the
+    // controller looks for them beside its own executable.
     for (const sessionWorker of [
       "mj-worker-x86_64-unknown-linux-musl",
       "mj-worker-aarch64-unknown-linux-musl",
+      "mj-worker-universal-apple-darwin",
     ]) {
       await cp(path.join(source, sessionWorker), path.join(destination, "bin", sessionWorker));
       await ensureBinary(path.join(destination, "bin", sessionWorker), platform.binary !== "mj.exe");

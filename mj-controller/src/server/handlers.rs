@@ -193,17 +193,7 @@ pub(super) async fn action(
     Json(mut action): Json<ControllerAction>,
 ) -> Result<StatusCode, ApiError> {
     validate_action_live(&state, &action).await?;
-    if let ControllerAction::New {
-        bundle_id,
-        project_directory: Some(directory),
-        ..
-    } = &mut action
-        && bundle_id.is_empty()
-    {
-        // Match documented API creation: directory callers need no saved
-        // bundle, but the durable session still records a valid bundle id.
-        *bundle_id = create_quick_bundle(&state, directory.display().to_string()).await?;
-    }
+    identify_raw_project(&mut action);
     let action = decode_prompt_images_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state
@@ -217,6 +207,20 @@ pub(super) async fn action(
     match outcome.rejection() {
         Some(rejection) => Err(rejection),
         None => Ok(StatusCode::ACCEPTED),
+    }
+}
+
+/// Called after request validation. Bare projects need a durable context id,
+/// not a saved bundle; the daemon resolves their paths on the selected host.
+pub(super) fn identify_raw_project(action: &mut ControllerAction) {
+    if let ControllerAction::New {
+        bundle_id,
+        project_directory: Some(directory),
+        ..
+    } = action
+        && bundle_id.is_empty()
+    {
+        *bundle_id = mj_core::config::raw_project_context_id(&directory.to_string_lossy());
     }
 }
 
@@ -267,9 +271,7 @@ pub(super) async fn create_bundle(
 
 /// Create or reuse the quick bundle for one repository source.
 ///
-/// Both the viewer's `/api/bundles` route and the documented API's session
-/// creation need this, and a caller that supplies a project directory instead
-/// of a bundle id must get exactly the bundle the viewer would have made.
+/// Used by the viewer's `/api/bundles` route for bundle-backed targets.
 pub(super) async fn create_quick_bundle(
     state: &ServerState,
     source: String,

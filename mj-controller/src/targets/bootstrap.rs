@@ -1,5 +1,21 @@
 use super::*;
 
+/// Load the account's login exports, then interpret our script as POSIX sh.
+/// User shells such as zsh have reserved variables and different syntax.
+pub fn ssh_login_script(ssh: &SshTarget, script: &str) -> CommandSpec {
+    let login_command = format!("exec /bin/sh -c {}", posix_quote(script));
+    ssh_command(
+        ssh,
+        [
+            "sh",
+            "-c",
+            "exec \"$SHELL\" -lc \"$1\"",
+            "mj-login",
+            &login_command,
+        ],
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionBoundary<'a> {
     Direct,

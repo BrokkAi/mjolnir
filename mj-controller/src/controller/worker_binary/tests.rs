@@ -494,6 +494,7 @@ fn pinned_snapshot_keeps_native_and_portable_sources_stable() {
             WorkerBinaryRequirement::LocalHost => &native,
             WorkerBinaryRequirement::PortableLinux if arch == "x86_64" => &x86,
             WorkerBinaryRequirement::PortableLinux => &arm,
+            WorkerBinaryRequirement::Darwin => &native,
         };
         Ok(WorkerBinaryAvailability::Local {
             path: path.clone(),
@@ -984,7 +985,7 @@ fn a_present_controller_still_looks_beside_itself() {
     );
     let detail = format!("{error:#}");
     assert!(
-        detail.contains("no Linux worker for riscv64-unknown-linux-musl"),
+        detail.contains("no worker for riscv64-unknown-linux-musl"),
         "{detail}"
     );
     assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
@@ -1001,7 +1002,7 @@ fn a_present_controller_still_looks_beside_itself() {
     .unwrap_err();
     let detail = format!("{error:#}");
     assert!(
-        detail.contains("no Linux worker for riscv64-unknown-linux-musl"),
+        detail.contains("no worker for riscv64-unknown-linux-musl"),
         "{detail}"
     );
     assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
@@ -4496,11 +4497,11 @@ fn local_container_recovery_selects_a_worker_for_the_container_architecture() {
     impl CommandExecutor for ForeignContainer {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program, "docker");
-            assert!(command.args.ends_with(&["uname".into(), "-m".into()]));
+            assert!(command.args.ends_with(&["uname".into(), "-sm".into()]));
             assert!(command.args.contains(&self.0));
             Ok(CommandOutput {
                 status: 0,
-                stdout: b"riscv64\n".to_vec(),
+                stdout: b"Linux riscv64\n".to_vec(),
                 stderr: Vec::new(),
             })
         }
@@ -5466,5 +5467,187 @@ mod container_runtime {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn darwin_worker_resolution_uses_target_specific_or_universal_artifacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let controller = directory.path().join("mj");
+    std::fs::write(&controller, b"controller").unwrap();
+    let universal = directory.path().join("mj-worker-universal-apple-darwin");
+    let linux = directory
+        .path()
+        .join("mj-worker-aarch64-unknown-linux-musl");
+    std::fs::write(&linux, stamped_worker(b"linux")).unwrap();
+    let resolve = |arch| {
+        worker_binary_prerequisite_for_current(
+            arch,
+            WorkerBinaryRequirement::Darwin,
+            &controller,
+            &|path| path.is_file(),
+        )
+    };
+    let error = format!("{:#}", resolve("aarch64").unwrap_err());
+    assert!(error.contains("aarch64-apple-darwin"), "{error}");
+    std::fs::write(&universal, stamped_worker(b"darwin universal")).unwrap();
+    for arch in ["x86_64", "aarch64"] {
+        assert!(
+            matches!(resolve(arch).unwrap(), WorkerBinaryAvailability::Local { path, .. } if path == universal)
+        );
+    }
+    let native = directory.path().join("mj-worker-aarch64-apple-darwin");
+    std::fs::write(&native, stamped_worker(b"darwin arm64")).unwrap();
+    assert!(
+        matches!(resolve("aarch64").unwrap(), WorkerBinaryAvailability::Local { path, .. } if path == native)
+    );
+    std::fs::write(&universal, b"unstamped old artifact").unwrap();
+    assert!(format!("{:#}", resolve("x86_64").unwrap_err()).contains("missing worker build stamp"));
+}
+
+#[test]
+fn ssh_preflight_resolves_the_actual_os_before_installing_any_worker() {
+    const CHILD: &str = "MJ_MACOS_PREFLIGHT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [
+            "mj-worker-universal-apple-darwin",
+            "mj-worker-x86_64-unknown-linux-musl",
+        ] {
+            std::fs::write(directory.path().join(name), stamped_worker(name.as_bytes())).unwrap();
+        }
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "ssh_preflight_resolves_the_actual_os_before_installing_any_worker",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "macos-preflight")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_DIR", directory.path())
+        .run();
+        return;
+    }
+    struct Platform(&'static str);
+    impl CommandExecutor for Platform {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh");
+            assert_eq!(command.purpose, "detect target platform");
+            Ok(CommandOutput {
+                status: 0,
+                stdout: self.0.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let template = mj_core::config::TargetTemplate::SshBare {
+        ssh: ssh_connection(),
+        permissions: mj_core::config::PermissionMode::Yolo,
+        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+    };
+    for response in ["Darwin arm64", "Darwin x86_64", "Linux x86_64"] {
+        preflight_worker_binary(&template, &Platform(response)).unwrap();
+    }
+    // An available worker for a different OS/architecture cannot satisfy preflight.
+    assert!(
+        format!(
+            "{:#}",
+            preflight_worker_binary(&template, &Platform("Linux aarch64")).unwrap_err()
+        )
+        .contains("aarch64-unknown-linux-musl")
+    );
+    assert!(preflight_worker_binary(&template, &Platform("FreeBSD arm64")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_harness_preflight_uses_the_accounts_login_shell() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["node", "npm", "git"] {
+        mj_core::test_hooks::install_fake_command(directory.path(), name, "#!/bin/sh\nexit 0\n");
+    }
+    mj_core::test_hooks::install_fake_command(
+        directory.path(),
+        "login-shell",
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = -lc ] || exit 99\nexport PATH={}\nreadonly status=0\neval \"$2\"\n",
+            targets::posix_quote(&directory.path().to_string_lossy()),
+        ),
+    );
+    let shell = directory.path().join("login-shell");
+    struct LocalSsh(PathBuf);
+    impl CommandExecutor for LocalSsh {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program, "ssh");
+            let mut local = CommandSpec::new("/bin/sh", ["-c", command.args.last().unwrap()]);
+            local
+                .env
+                .insert("SHELL".into(), self.0.to_string_lossy().into_owned());
+            ProcessExecutor.execute(&local)
+        }
+    }
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: directory.path().into(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let template = mj_core::config::TargetTemplate::SshBare {
+        ssh: ssh_connection(),
+        permissions: mj_core::config::PermissionMode::Yolo,
+        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+    };
+    preflight_harness(&template, &profile, &LocalSsh(shell.clone())).unwrap();
+    mj_core::test_hooks::install_fake_command(directory.path(), "git", "#!/bin/sh\nexit 1\n");
+    let error = preflight_harness(&template, &profile, &LocalSsh(shell)).unwrap_err();
+    assert!(format!("{error:#}").contains("Git is missing or unusable"));
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    // macOS ships shasum but not GNU sha256sum. Exercise the Linux command
+    // shape there through the native digest tool as well.
+    if cfg!(target_os = "macos") {
+        mj_core::test_hooks::install_fake_command(
+            directory.path(),
+            "sha256sum",
+            "#!/bin/sh\nexec /usr/bin/shasum -a 256 \"$@\"\n",
+        );
+    }
+    let file = directory.path().join("worker's bytes");
+    std::fs::write(&file, vec![0x5a; 128 * 1024]).unwrap();
+    let expected = mj_core::worker_launch::worker_executable_digest(&file).unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: directory.path().to_string_lossy().into_owned(),
+    };
+    for os in ["Linux", "Darwin"] {
+        mj_core::test_hooks::install_fake_command(
+            directory.path(),
+            "uname",
+            &format!("#!/bin/sh\necho {os}\n"),
+        );
+        let mut command =
+            installed_file_digest_command(&locator, &file.to_string_lossy(), "digest test");
+        command.env.insert(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", directory.path().display()),
+        );
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next(),
+            Some(expected.as_str())
+        );
     }
 }

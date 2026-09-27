@@ -102,18 +102,16 @@ pub(super) async fn start_session(
     }
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
-        // A caller that names a directory should not have to make a bundle
-        // first; this is the same quick bundle the viewer's own form creates.
-        (None, Some(directory)) => {
-            create_quick_bundle(&state, directory.display().to_string()).await?
-        }
+        // Bare directories belong to the selected target. The daemon validates
+        // them there; a controller-local bundle lookup cannot resolve SSH paths.
+        (None, Some(_)) => String::new(),
         (None, None) => {
             return Err(ApiFailure::bad_request(
                 "supply bundle_id, project_directory, or both",
             ));
         }
     };
-    let action = ControllerAction::New {
+    let mut action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
         launch_base: request.launch_base.clone(),
         launch_branch: request.launch_branch.clone(),
@@ -129,6 +127,7 @@ pub(super) async fn start_session(
         dirty_ack: Vec::new(),
     };
     validate_action(&action, &state.snapshot_rx.borrow())?;
+    super::super::identify_raw_project(&mut action);
 
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state

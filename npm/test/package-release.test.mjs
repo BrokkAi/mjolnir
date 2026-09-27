@@ -6,6 +6,7 @@ import {
   platformManifest,
   rootManifest,
   versionFromTag,
+  stagePlatform,
 } from "../scripts/package-release.mjs";
 
 test("declares every release target exactly once", () => {
@@ -44,4 +45,27 @@ test("generates platform constraints without committed manifests", () => {
   assert.deepEqual(manifest.os, ["linux"]);
   assert.deepEqual(manifest.cpu, ["x64"]);
   assert.deepEqual(manifest.libc, ["glibc"]);
+});
+
+
+test("stages Linux and Darwin workers in every platform package", async (t) => {
+  const { mkdtemp, mkdir, writeFile, readFile, stat, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const root = await mkdtemp(path.join(tmpdir(), "mj-npm-workers-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  await mkdir(path.join(source, "licenses"), { recursive: true });
+  const workers = ["mj-worker-x86_64-unknown-linux-musl", "mj-worker-aarch64-unknown-linux-musl", "mj-worker-universal-apple-darwin"];
+  for (const name of ["README.md", "LICENSE", "mj", "mj-worker", "mj-desktop", "mj-voice-worker", ...workers]) {
+    await writeFile(path.join(source, name), name, { mode: 0o755 });
+  }
+  for (const platform of PLATFORMS) {
+    const staged = await stagePlatform(platform, "1.2.3", source, path.join(root, "stage"));
+    for (const worker of workers) {
+      const filename = path.join(staged, "bin", worker);
+      assert.equal(await readFile(filename, "utf8"), worker);
+      assert.ok((await stat(filename)).mode & 0o111);
+    }
+  }
 });

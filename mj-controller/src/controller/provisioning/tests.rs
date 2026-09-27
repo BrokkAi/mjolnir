@@ -836,9 +836,10 @@ fn failed_node_preflight_retains_error_before_provisioning() {
     .unwrap_err();
     let reported = format!("{error:#}");
     assert!(reported.contains("Node.js 22+ and npm"), "{reported}");
-    assert_eq!(
-        executor.commands().len(),
-        1,
+    assert!(
+        !executor
+            .created_target
+            .load(std::sync::atomic::Ordering::Relaxed),
         "preflight must fail before provisioning"
     );
     let retained = &controller.state.sessions[&session_id];
@@ -1275,6 +1276,7 @@ const PROVISIONED_SESSION: &str = "0123456789abcdef0123456789abcdef";
 struct RecordingExecutor {
     failing_purpose: String,
     commands: Mutex<Vec<Vec<String>>>,
+    created_target: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingExecutor {
@@ -1282,6 +1284,7 @@ impl RecordingExecutor {
         Self {
             failing_purpose: purpose.into(),
             commands: Mutex::new(Vec::new()),
+            created_target: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1299,9 +1302,17 @@ impl CommandExecutor for RecordingExecutor {
         let mut argv = vec![command.program.clone()];
         argv.extend(command.args.clone());
         self.commands.lock().unwrap().push(argv);
+        if command.creates_target {
+            self.created_target
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(CommandOutput {
             status: i32::from(command.purpose == self.failing_purpose),
-            stdout: Vec::new(),
+            stdout: if command.purpose == "detect target platform" {
+                b"Linux x86_64\n".to_vec()
+            } else {
+                Vec::new()
+            },
             stderr: b"the step failed".to_vec(),
         })
     }

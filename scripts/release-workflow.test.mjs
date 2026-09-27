@@ -36,8 +36,8 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
     const native = join(dir, mac ? 'target/universal-apple-darwin/release' : 'native');
     mkdirSync(native, { recursive: true });
     for (const binary of binaries) writeFileSync(join(native, binary), binary);
-    for (const arch of ['x86_64', 'aarch64']) {
-      const worker = `mj-worker-${arch}-unknown-linux-musl`;
+    for (const triple of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'universal-apple-darwin']) {
+      const worker = `mj-worker-${triple}`;
       mkdirSync(join(dir, 'workers', worker), { recursive: true });
       writeFileSync(join(dir, 'workers', worker, 'mj-worker'), worker);
       binaries.push(worker);

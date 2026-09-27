@@ -441,7 +441,21 @@ pub(super) fn installed_file_digest_command(
     path: &str,
     purpose: &str,
 ) -> CommandSpec {
-    targets::locator_command(locator, vec!["sha256sum".into(), path.into()]).purpose(purpose)
+    // Resolve at execution time: this plan is also built on controller event
+    // loops, where probing the remote platform would block. Both tools print
+    // the digest first, which is the contract the refresh gate consumes.
+    let script = "case $(uname -s) in Darwin) exec shasum -a 256 -- \"$1\";; Linux) exec sha256sum -- \"$1\";; *) echo 'unsupported target operating system for worker digest' >&2; exit 1;; esac";
+    targets::locator_command(
+        locator,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            "mj-worker-digest".into(),
+            path.into(),
+        ],
+    )
+    .purpose(purpose)
 }
 
 pub(super) fn worker_launch_refresh_plan(

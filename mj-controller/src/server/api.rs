@@ -74,7 +74,7 @@ use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
     ActionOutcome, ApiError, ControllerAction, ControllerRequest, ServerState,
-    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, create_quick_bundle,
+    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq,
     require_session_record, validate_action, validate_prompt_text,
 };
 

@@ -1808,19 +1808,30 @@ async fn start_refuses_a_shell_command_as_a_first_prompt() {
 }
 
 #[tokio::test]
-async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
+async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_bundle() {
     let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, mut bundles) = api_app(backend, |_| {});
+    let (app, mut actions, _snapshot_tx, mut bundles) = api_app(backend, |snapshot| {
+        snapshot.bundles.clear();
+        snapshot
+            .targets
+            .iter_mut()
+            .find(|target| target.id == "raw")
+            .unwrap()
+            .kind = "ssh-bare".into();
+    });
 
     let response = tokio::spawn(app.oneshot(start_request(
         r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel"}"#.to_owned(),
     )));
 
-    let bundle = bundles.recv().await.unwrap();
-    assert_eq!(bundle.source, "/work/hel");
-    bundle.reply.send(Ok("hel".to_owned())).unwrap();
-
-    let request = actions.recv().await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        bundles.try_recv().is_err(),
+        "remote paths must not be resolved as local bundles"
+    );
     assert_eq!(
         request.action,
         ControllerAction::New {
@@ -1832,7 +1843,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),
-            bundle_id: "hel".into(),
+            bundle_id: mj_core::config::raw_project_context_id("/work/hel"),
             target_id: "raw".into(),
             title: None,
             project_directory: Some(PathBuf::from("/work/hel")),
