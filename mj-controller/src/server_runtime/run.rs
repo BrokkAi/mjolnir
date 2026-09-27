@@ -98,12 +98,11 @@ pub async fn run_server(
     let (background_task_stop_tx, mut background_task_stop_rx) =
         tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
     let SessionManagerChannels {
-        targets: worker_targets_tx,
+        targets: _,
         control: worker_commands_tx,
         updates: mut worker_updates_rx,
         shutdown: worker_shutdown,
     } = worker;
-    worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
     publish_capacity_targets(&controller, &capacity_targets_tx, &mut capacity_state);
     let mut credential_sync =
         CredentialSyncCoordinator::spawn_guarded(daemon_runtime.worker_background_gate());
@@ -1705,7 +1704,6 @@ pub async fn run_server(
                                 .lock()
                                 .expect("sub-agent quota reports lock poisoned")
                                 .retain(|id, _| controller.config.enabled_profile(id).is_some());
-                            worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
                             publish_capacity_targets(
                                 &controller,
                                 &capacity_targets_tx,

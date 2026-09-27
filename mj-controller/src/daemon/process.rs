@@ -316,12 +316,15 @@ pub(super) async fn run_daemon_runtime(
         })
     };
     let mut phone_publisher: Option<RemoteSessionPublisher> = None;
+    let mut phone_targets = None;
+    let mut prepared_targets = manager_targets.subscribe();
     let mut phone_task = None;
     let mut remote_request_bridge = None;
     if let Some(remote) = remote.take() {
         remote
             .targets
-            .send_replace(dashboard_worker_targets(&controller));
+            .send_replace(prepared_targets.borrow_and_update().clone());
+        phone_targets = Some(remote.targets.clone());
         phone_publisher = Some(remote.publisher.clone());
         remote_request_bridge = Some(spawn_remote_request_bridge(
             remote.requests,
@@ -355,6 +358,12 @@ pub(super) async fn run_daemon_runtime(
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
+                changed = prepared_targets.changed(), if phone_targets.is_some() => {
+                    changed.context("daemon worker target publication stopped")?;
+                    if let Some(targets) = &phone_targets {
+                        targets.send_replace(prepared_targets.borrow_and_update().clone());
+                    }
+                }
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {

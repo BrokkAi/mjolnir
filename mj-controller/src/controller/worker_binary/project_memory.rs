@@ -1,24 +1,31 @@
 use super::*;
 
+impl Controller {
+    pub(super) fn subagent_parent_worktree(
+        &self,
+        id: &str,
+    ) -> Option<&mj_core::state::ManagedWorktree> {
+        let relation = self.state.subagents.get(id)?;
+        self.state
+            .sessions
+            .get(&relation.parent_session_id)?
+            .managed_worktree
+            .as_ref()
+    }
+}
+
 pub(super) fn project_memory_launch(
     session: &mj_core::state::SessionRecord,
     bundle: Option<&ProjectBundle>,
     workspace: &(String, Vec<String>),
     target_profile_home: &str,
+    parent_worktree: Option<&mj_core::state::ManagedWorktree>,
 ) -> Result<ProjectMemoryLaunchConfig> {
     // A sub-agent records its parent's checkout as its project directory.
     // For an isolated parent that is the parent's own clone, not the project,
     // so the child takes the parent's checkout for its identity and shares
     // the parent's memory (R10-4).
-    let parent_worktree = match &session.managed_worktree {
-        Some(_) => None,
-        None => crate::database::load_subagent_parent_worktree(&session.id)?,
-    };
-    let identity = if let Some(worktree) = session
-        .managed_worktree
-        .as_ref()
-        .or(parent_worktree.as_ref())
-    {
+    let identity = if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
         ProjectMemoryIdentity::Repository {
             repository: RepositoryMemoryIdentity::Local {
                 canonical_root: std::fs::canonicalize(&worktree.source_repository)

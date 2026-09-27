@@ -41,9 +41,9 @@ use crate::daemon::{
 };
 use crate::pollers::{
     CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
-    QuotaUpdate, apply_worker_record_update, credential_sync_targets, dashboard_worker_targets,
-    projected_queued_prompts, queued_prompt_projection, quota_refresh_profiles,
-    schedule_due_credential_syncs, spawn_quota_refresher,
+    QuotaUpdate, apply_worker_record_update, credential_sync_targets, projected_queued_prompts,
+    queued_prompt_projection, quota_refresh_profiles, schedule_due_credential_syncs,
+    spawn_quota_refresher,
 };
 
 #[derive(Debug, Clone)]

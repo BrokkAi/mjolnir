@@ -31,6 +31,9 @@ pub(super) fn save_move_operation_with(
 }
 
 pub fn load_move_operation(session_id: &str) -> Result<Option<MoveOperation>> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.moves.get(session_id).cloned());
+    }
     let connection = open_reader(&database_path())?;
     load_move_operation_with(&connection, session_id)
 }
@@ -74,6 +77,9 @@ fn decode_move_operation(session_id: &str, json: &str) -> Option<MoveOperation> 
 }
 
 pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.moves.values().cloned().collect());
+    }
     let connection = open_reader(&database_path())?;
     load_move_operations_with(&connection)
 }
@@ -234,6 +240,40 @@ mod tests {
             updated_at: session.updated_at.clone(),
             error: None,
         }
+    }
+
+    #[test]
+    fn committed_moves_follow_phase_changes_and_cascading_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        let session = super::super::tests::session("moving", "project");
+        save_session_to(&path, &session).unwrap();
+        let intent = operation(&session);
+        save_move_operation_with(&open(&path).unwrap(), &intent).unwrap();
+        let writer = start_database_writer_at(&path, false).unwrap();
+        let held = writer.writer.committed_state().unwrap();
+        assert_eq!(held.moves["moving"], intent);
+        let mut failed = intent.clone();
+        failed.phase = MovePhase::Failed;
+        writer
+            .writer
+            .execute("fail move", move |connection| {
+                save_move_operation_with(connection, &failed)
+            })
+            .unwrap();
+        assert_eq!(
+            writer.writer.committed_state().unwrap().moves["moving"].phase,
+            MovePhase::Failed
+        );
+        assert_eq!(held.moves["moving"].phase, MovePhase::Preparing);
+        writer
+            .writer
+            .execute("delete moving session", |connection| {
+                connection.execute("DELETE FROM sessions WHERE session_id='moving'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(writer.writer.committed_state().unwrap().moves.is_empty());
     }
 
     #[test]

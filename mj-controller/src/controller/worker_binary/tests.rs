@@ -3144,8 +3144,11 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
         &profile,
         Some(&bundle),
         &locator,
-        session_id,
-        Some(&workspace),
+        LaunchWorkspace {
+            session_id,
+            container: Some(&workspace),
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap()
@@ -3204,8 +3207,11 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         &profile,
         Some(&bundle),
         &locator,
-        session_id,
-        Some(&workspace),
+        LaunchWorkspace {
+            session_id,
+            container: Some(&workspace),
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap()
@@ -3226,8 +3232,11 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         &profile,
         Some(&bundle),
         &locator,
-        session_id,
-        Some(&workspace),
+        LaunchWorkspace {
+            session_id,
+            container: Some(&workspace),
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap()
@@ -3285,8 +3294,11 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
             &profile,
             Some(&bundle),
             backend,
-            session_id,
-            Some(&workspace),
+            LaunchWorkspace {
+                session_id,
+                container: Some(&workspace),
+                parent_worktree: None,
+            },
             &mj_core::state::TargetRuntimeSettings::from(template),
         )
         .unwrap()
@@ -3410,8 +3422,11 @@ fn a_child_opens_its_parents_container_workspace() {
         &profile,
         Some(&bundle),
         &locator,
-        parent_id,
-        Some(&parent_workspace),
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&parent_workspace),
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap();
@@ -3496,8 +3511,11 @@ fn launches_on_every_target(
         &targets::TargetLocator::LocalBare {
             worker_root: local_root,
         },
-        parent_id,
-        None,
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: None,
+            parent_worktree: None,
+        },
         &with_target_keys(&mj_core::config::TargetTemplate::LocalBare),
     )
     .unwrap()
@@ -3515,8 +3533,11 @@ fn launches_on_every_target(
             container_id: targets::resource_name(parent_id).unwrap(),
             workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
         },
-        parent_id,
-        Some(&parent_workspace),
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&parent_workspace),
+            parent_worktree: None,
+        },
         &with_target_keys(&container),
     )
     .unwrap()
@@ -3534,8 +3555,11 @@ fn launches_on_every_target(
             container_id: targets::resource_name(parent_id).unwrap(),
             workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
         },
-        parent_id,
-        Some(&parent_workspace),
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&parent_workspace),
+            parent_worktree: None,
+        },
         &with_target_keys(&container),
     )
     .unwrap()
@@ -3649,8 +3673,11 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
             container_id: "c".repeat(64),
             workspace_storage: Default::default(),
         },
-        parent_id,
-        Some(&parent_workspace),
+        LaunchWorkspace {
+            session_id: parent_id,
+            container: Some(&parent_workspace),
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&template),
     )
     .unwrap();
@@ -3691,8 +3718,11 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         &targets::TargetLocator::LocalBare {
             worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
         },
-        &session.id,
-        None,
+        LaunchWorkspace {
+            session_id: &session.id,
+            container: None,
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
     )
     .unwrap();
@@ -3746,8 +3776,11 @@ fn raw_local_muse_launches_unconstrained() {
         &targets::TargetLocator::LocalBare {
             worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
         },
-        &session.id,
-        None,
+        LaunchWorkspace {
+            session_id: &session.id,
+            container: None,
+            parent_worktree: None,
+        },
         &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
     )
     .unwrap();
@@ -4797,8 +4830,11 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             &profile,
             None,
             &locator,
-            &session_id,
-            None,
+            LaunchWorkspace {
+                session_id: &session_id,
+                container: None,
+                parent_worktree: None,
+            },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),
@@ -4912,8 +4948,11 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             &profile,
             None,
             &locator,
-            &session_id,
-            None,
+            LaunchWorkspace {
+                session_id: &session_id,
+                container: None,
+                parent_worktree: None,
+            },
             &mj_core::state::TargetRuntimeSettings::from(
                 &mj_core::config::TargetTemplate::LocalBare,
             ),

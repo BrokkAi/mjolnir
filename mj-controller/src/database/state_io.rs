@@ -12,6 +12,10 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     // Sessions and their relationships must come from the same WAL snapshot.
     // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
     let connection = reader.transaction()?;
+    load_state_with(&connection)
+}
+
+pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
     let mut state = State::default();
     let remembered: Option<String> = connection
         .query_row(
@@ -72,10 +76,10 @@ pub fn load_state_from(path: &Path) -> Result<State> {
         }
         state.subagents.insert(child_id, record);
     }
-    load_targets(&connection, &mut state)?;
-    load_mounts(&connection, &mut state)?;
-    load_checkpoints(&connection, &mut state)?;
-    state.mount_history = read_mount_history(&connection)?;
+    load_targets(connection, &mut state)?;
+    load_mounts(connection, &mut state)?;
+    load_checkpoints(connection, &mut state)?;
+    state.mount_history = read_mount_history(connection)?;
     let mut statement = connection
         .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
     let rows = statement.query_map([], |row| {

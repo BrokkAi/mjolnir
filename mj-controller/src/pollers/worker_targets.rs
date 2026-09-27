@@ -6,13 +6,20 @@ pub fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget
         .sessions
         .values()
         .filter(|session| session_target_is_pollable(session))
-        .filter_map(|session| worker_poll_target(controller, session))
+        .filter_map(|session| {
+            worker_poll_target(
+                controller,
+                session,
+                crate::database::load_move_operation(&session.id),
+            )
+        })
         .collect()
 }
 
 pub(crate) fn worker_poll_target(
     controller: &Controller,
     session: &SessionRecord,
+    operation: Result<Option<mj_core::state::MoveOperation>>,
 ) -> Option<WorkerPollTarget> {
     let spec = match controller.reconnect_command(&session.id) {
         Ok(spec) => spec,
@@ -24,7 +31,9 @@ pub(crate) fn worker_poll_target(
     Some(WorkerPollTarget {
         session_id: session.id.clone(),
         spec,
-        worker_recovery: match controller.worker_recovery_plan(&session.id) {
+        worker_recovery: match operation
+            .and_then(|operation| controller.worker_recovery_plan(&session.id, operation.as_ref()))
+        {
             Ok(plan) => Some(plan),
             Err(error) => {
                 tracing::debug!(session_id = %session.id, "worker recovery target unavailable: {error:#}");

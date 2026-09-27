@@ -215,9 +215,13 @@ impl Controller {
     /// A non-destructive liveness probe plus commands that replace a confirmed
     /// dead session worker without touching its durable relay files. The
     /// session manager runs both off its async actor.
-    pub fn worker_recovery_plan(&self, session_id: &str) -> Result<WorkerRecoveryPlan> {
+    pub fn worker_recovery_plan(
+        &self,
+        session_id: &str,
+        operation: Option<&mj_core::state::MoveOperation>,
+    ) -> Result<WorkerRecoveryPlan> {
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        let launch = self.worker_launch_config_for_move(session_id, &backend, operation)?;
         let workspace = worker_workspace_for_recovery(&backend, &launch.cwd);
         Ok(WorkerRecoveryPlan {
             source_target: self.state.sessions[session_id]
@@ -284,8 +288,11 @@ impl Controller {
             profile,
             bundle,
             backend,
-            &workspace_session_id,
-            workspace_container.as_deref(),
+            LaunchWorkspace {
+                session_id: &workspace_session_id,
+                container: workspace_container.as_deref(),
+                parent_worktree: self.subagent_parent_worktree(session_id),
+            },
             &target,
         )?;
         apply_jev_switch(&mut launch, self.config.jev.enabled);
@@ -330,8 +337,11 @@ impl Controller {
                 parent_profile,
                 parent_bundle,
                 &parent_backend,
-                &parent.id,
-                parent.container_workspace.as_deref(),
+                LaunchWorkspace {
+                    session_id: &parent.id,
+                    container: parent.container_workspace.as_deref(),
+                    parent_worktree: None,
+                },
                 &parent_target,
             )?;
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
@@ -349,13 +359,23 @@ impl Controller {
         session_id: &str,
         backend: &targets::TargetLocator,
     ) -> Result<WorkerLaunchConfig> {
+        let operation = crate::database::load_move_operation(session_id)?;
+        self.worker_launch_config_for_move(session_id, backend, operation.as_ref())
+    }
+
+    fn worker_launch_config_for_move(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        operation: Option<&mj_core::state::MoveOperation>,
+    ) -> Result<WorkerLaunchConfig> {
         let session = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
         let (mut launch, _, _) = self.session_launch_config(session_id, backend)?;
-        if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
+        if operation.is_some_and(|operation| {
             operation.source_checkpoint_only
                 && operation.destination_target.is_none()
                 && matches!(
@@ -412,7 +432,13 @@ impl Controller {
             )?
         };
         let target_home = target_profile_home(&backend, session_id, profile);
-        let launch = project_memory_launch(session, bundle, &workspace, &target_home)?;
+        let launch = project_memory_launch(
+            session,
+            bundle,
+            &workspace,
+            &target_home,
+            self.subagent_parent_worktree(session_id),
+        )?;
         Ok(ProjectMemorySyncTarget {
             canonical_root: canonical_memory_root(&launch.project_key),
         })
@@ -477,13 +503,18 @@ pub(super) fn worker_workspace_for_recovery(
     })
 }
 
+pub(super) struct LaunchWorkspace<'a> {
+    pub session_id: &'a str,
+    pub container: Option<&'a Path>,
+    pub parent_worktree: Option<&'a mj_core::state::ManagedWorktree>,
+}
+
 pub(super) fn worker_launch_config(
     session: &mj_core::state::SessionRecord,
     profile: &mj_core::config::HarnessProfile,
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
-    workspace_session_id: &str,
-    workspace_container: Option<&Path>,
+    worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
     let session_id = session.id.as_str();
@@ -497,8 +528,8 @@ pub(super) fn worker_launch_config(
         workspace_paths(
             backend,
             bundle.context("session bundle is missing")?,
-            workspace_session_id,
-            workspace_container,
+            worker_workspace.session_id,
+            worker_workspace.container,
         )?
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -579,8 +610,13 @@ pub(super) fn worker_launch_config(
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
-    let mut project_memory =
-        project_memory_launch(session, bundle, &workspace, &target_profile_home)?;
+    let mut project_memory = project_memory_launch(
+        session,
+        bundle,
+        &workspace,
+        &target_profile_home,
+        worker_workspace.parent_worktree,
+    )?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
     project_memory.history_socket =
         Some(Path::new(&targets::worker_root(backend, &session.id)?).join("control.sock"));

@@ -6,6 +6,7 @@ pub(super) struct PollableWorkerInputs {
     ids: Vec<String>,
     config: Config,
     records: mj_core::state::State,
+    moves: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::MoveOperation>,
 }
 
 impl PollableWorkerInputs {
@@ -17,7 +18,11 @@ impl PollableWorkerInputs {
         self.ids
             .iter()
             .filter_map(|id| {
-                crate::pollers::worker_poll_target(&controller, &controller.state.sessions[id])
+                crate::pollers::worker_poll_target(
+                    &controller,
+                    &controller.state.sessions[id],
+                    Ok(self.moves.get(id).cloned()),
+                )
             })
             .collect()
     }
@@ -30,11 +35,22 @@ pub(super) struct RuntimeStateOwner {
     pub(super) lifecycle: BTreeMap<String, ActiveLifecycle>,
     pub(super) close_requested: BTreeSet<String>,
     pub(super) indexes: RecordIndexes,
-    committed_sequence: Option<u64>,
-    pub(super) store_failure: Option<Arc<str>>,
+    store: StoreState,
+}
+
+enum StoreState {
+    Bootstrap,
+    Current(crate::database::CommittedState),
+    Unavailable(Arc<str>),
 }
 
 impl RuntimeStateOwner {
+    pub(super) fn committed(&self) -> Option<&crate::database::CommittedState> {
+        match &self.store {
+            StoreState::Current(committed) => Some(committed),
+            StoreState::Bootstrap | StoreState::Unavailable(_) => None,
+        }
+    }
     pub(super) fn controller(&self) -> &Controller {
         &self.controller
     }
@@ -60,13 +76,12 @@ impl RuntimeStateOwner {
             lifecycle: BTreeMap::new(),
             close_requested: BTreeSet::new(),
             indexes,
-            committed_sequence: None,
-            store_failure: None,
+            store: StoreState::Bootstrap,
         }
     }
 
     pub(super) fn install_controller(&mut self, controller: Controller) {
-        if self.committed_sequence.is_some() {
+        if !matches!(self.store, StoreState::Bootstrap) {
             self.controller.config = controller.config;
             return;
         }
@@ -76,16 +91,19 @@ impl RuntimeStateOwner {
     }
 
     fn observe_committed(&mut self, committed: &crate::database::CommittedState) {
-        if self.committed_sequence == Some(committed.sequence) {
+        if self
+            .committed()
+            .is_some_and(|current| current.sequence == committed.sequence)
+        {
             return;
         }
         self.indexes.apply(&self.controller.state, &committed.state);
         self.controller.state = committed.state.clone();
-        self.committed_sequence = Some(committed.sequence);
+        self.store = StoreState::Current(committed.clone());
     }
 
     pub(super) fn ensure_available(&self) -> Result<()> {
-        if let Some(error) = &self.store_failure {
+        if let StoreState::Unavailable(error) = &self.store {
             bail!("{error}");
         }
         Ok(())
@@ -118,7 +136,14 @@ impl RuntimeStateOwner {
     pub(super) fn pollable_worker_inputs(&self) -> PollableWorkerInputs {
         let ids = self.pollable_worker_ids();
         let mut records = mj_core::state::State::default();
+        let mut moves = mj_core::snapshot_map::SnapshotMap::new();
         for id in &ids {
+            if let Some(operation) = self
+                .committed()
+                .and_then(|committed| committed.moves.get(id))
+            {
+                moves.insert(id.clone(), operation.clone());
+            }
             let mut current = id.as_str();
             while !records.sessions.contains_key(current) {
                 let Some(record) = self.controller.state.sessions.get(current) else {
@@ -138,6 +163,7 @@ impl RuntimeStateOwner {
             ids,
             config: self.controller.config.clone(),
             records,
+            moves,
         }
     }
 }
@@ -151,7 +177,7 @@ impl RuntimeState {
         if let Some(committed) = &self.committed {
             match &*committed.borrow() {
                 Ok(committed) => owner.observe_committed(committed),
-                Err(error) => owner.store_failure = Some(error.clone()),
+                Err(error) => owner.store = StoreState::Unavailable(error.clone()),
             }
         }
         owner

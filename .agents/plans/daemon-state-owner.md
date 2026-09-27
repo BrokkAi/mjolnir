@@ -266,3 +266,27 @@ suite passes 1,875 tests (8 ignored). All five publication regressions and the
 previously failing launch tests pass. Clippy passes. Remaining workspace suites
 are still running; the current checkpoint covers ownership, publication, and
 the primary daemon pollable-worker index, not the later consumer/feed work.
+
+Checkpoint update (2026-09-27): 08984a09 commits the operational owner and primary
+poller refactor. Its full isolated workspace test run passed, including 1,875
+controller tests, 635 worker library tests, 235 CLI unit tests, all 11 terminal
+PTY tests, and store-divergence integration tests. No live daemon was upgraded.
+
+The next uncommitted checkpoint forwards the primary manager's prepared targets
+to the web manager, eliminating web-side target reconstruction. CommittedState
+now bootstraps sessions, moves, and native summaries in one WAL snapshot and
+updates move/native keys incrementally. Native replay staging remains private;
+ReplayBegin legitimately publishes loss of availability, and ReplayCommit adds
+or replaces replayed children while retaining older disconnected children.
+Worker preparation captures move records with the session inputs. Project-memory
+identity receives the parent's checkout from the controller snapshot instead of
+querying the database from a low-level launch helper. New tests cover metadata
+bootstrap, staged replay, phase changes, cascading deletion, and held snapshots.
+This checkpoint's focused validation is in progress.
+
+Validation checkpoint (2026-09-27): The metadata and prepared-target consumer
+changes pass the controller suite (1,877 passed, 8 ignored) and Clippy across
+all default workspace targets. The existing isolated-parent project-memory
+regression still passes after removing its implicit database lookup. The full
+workspace suite passed for the preceding owner checkpoint; final whole-workspace
+validation remains due after the client-feed and remaining state-machine work.

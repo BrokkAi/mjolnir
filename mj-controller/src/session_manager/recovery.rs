@@ -129,10 +129,11 @@ pub(crate) fn recover_worker_controlled(
     // A failed Move can leave this actor with a plan from before recovery.
     // Never overwrite the durable checkpoint-only launch with that old plan.
     if let Some(id) = session_id
-        && crate::database::load_move_operation(id)?
-            .is_some_and(|op| op.source_checkpoint_only && op.destination_target.is_none())
+        && let Some(operation) = crate::database::load_move_operation(id)?
+        && operation.source_checkpoint_only
+        && operation.destination_target.is_none()
     {
-        plan = crate::controller::Controller::load()?.worker_recovery_plan(id)?;
+        plan = crate::controller::Controller::load()?.worker_recovery_plan(id, Some(&operation))?;
     }
     if ensure_recovery_target_running(executor, plan.target.as_ref())
         .context("restore relay worker target")?

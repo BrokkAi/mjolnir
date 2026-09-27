@@ -7,6 +7,8 @@
 //! cannot publish a change. Nothing is added to the durable schema.
 
 use super::*;
+use mj_core::native_agent::{NativeAgentSummary, NativeAgentView};
+use mj_core::snapshot_map::SnapshotMap;
 use rusqlite::functions::FunctionFlags;
 use std::cell::RefCell;
 
@@ -52,6 +54,8 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("subagent_preference", "preference", "singleton"),
         ("mount_history", "mount_history", "host"),
         ("host_container_sizes", "container_size", "host"),
+        ("session_moves", "move", "session_id"),
+        ("native_agents", "native_agent", "owner"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
         // an unrelated optional table. Its own read/write still reports damage.
@@ -71,7 +75,12 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
             let calls = references
                 .iter()
                 .map(|reference| {
-                    format!("SELECT mj_changed_record('{kind}', CAST({reference}.{key} AS TEXT));")
+                    let key = if kind == "native_agent" {
+                        format!("json_array({reference}.owner, {reference}.child)")
+                    } else {
+                        format!("CAST({reference}.{key} AS TEXT)")
+                    };
+                    format!("SELECT mj_changed_record('{kind}', {key});")
                 })
                 .collect::<String>();
             connection.execute_batch(&format!(
@@ -100,6 +109,45 @@ pub(super) fn begin_operation(path: &Path) {
 pub struct CommittedState {
     pub sequence: u64,
     pub state: State,
+    pub moves: SnapshotMap<String, mj_core::state::MoveOperation>,
+    pub native_agents: SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>,
+}
+
+impl CommittedState {
+    pub(super) fn bootstrap(connection: &mut Connection) -> Result<Self> {
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        let state = state_io::load_state_with(&transaction)?;
+        let moves = session_move::load_move_operations_with(&transaction)?
+            .into_iter()
+            .map(|operation| (operation.selection.session_id.clone(), operation))
+            .collect();
+        let mut native_agents =
+            SnapshotMap::<String, SnapshotMap<String, NativeAgentSummary>>::new();
+        let mut statement =
+            transaction.prepare("SELECT owner, child, body FROM native_agents WHERE staging=0")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (owner, child, body) = row?;
+            let view: NativeAgentView = serde_json::from_str(&body)?;
+            native_agents
+                .entry(owner)
+                .or_insert_with(SnapshotMap::new)
+                .insert(child, NativeAgentSummary::of(&view));
+        }
+        Ok(Self {
+            sequence: 0,
+            state,
+            moves,
+            native_agents,
+        })
+    }
 }
 
 /// Reads all changed records from one committed WAL snapshot. The caller owns
@@ -121,10 +169,60 @@ pub(super) fn finish_operation(
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
     let mut state = previous.state.clone();
+    let mut moves = previous.moves.clone();
+    let mut native_agents = previous.native_agents.clone();
+    let mut changed_history = State::default();
     let mut changed = false;
     let mut relations = BTreeSet::new();
     for (kind, key) in &changes.keys {
         match kind.as_str() {
+            "move" => {
+                let operation = session_move::load_move_operation_with(&transaction, key)?;
+                if moves.get(key) != operation.as_ref() {
+                    match operation {
+                        Some(operation) => {
+                            moves.insert(key.clone(), operation);
+                        }
+                        None => {
+                            moves.remove(key);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            "native_agent" => {
+                let (owner, child): (String, String) = serde_json::from_str(key)?;
+                let body: Option<String> = transaction
+                    .query_row(
+                        "SELECT body FROM native_agents WHERE owner=?1 AND child=?2 AND staging=0",
+                        params![owner, child],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let summary = body
+                    .map(|body| {
+                        serde_json::from_str::<NativeAgentView>(&body)
+                            .map(|view| NativeAgentSummary::of(&view))
+                    })
+                    .transpose()?;
+                let old = native_agents
+                    .get(&owner)
+                    .and_then(|children| children.get(&child));
+                if old != summary.as_ref() {
+                    if let Some(summary) = summary {
+                        native_agents
+                            .entry(owner)
+                            .or_insert_with(SnapshotMap::new)
+                            .insert(child, summary);
+                    } else if let Some(children) = native_agents.get_mut(&owner) {
+                        children.remove(&child);
+                        if children.is_empty() {
+                            native_agents.remove(&owner);
+                        }
+                    }
+                    changed = true;
+                }
+            }
             "session" => {
                 let record = state_io::load_session_with(&transaction, key)?;
                 let membership_changed = state.sessions.contains_key(key) != record.is_some();
@@ -191,6 +289,9 @@ pub(super) fn finish_operation(
                 if state.mount_history.get(key) != paths.as_ref() {
                     match paths {
                         Some(paths) => {
+                            changed_history
+                                .mount_history
+                                .insert(key.clone(), paths.clone());
                             state.mount_history.insert(key.clone(), paths);
                         }
                         None => {
@@ -216,6 +317,7 @@ pub(super) fn finish_operation(
                 if state.container_sizes.get(key) != size.as_ref() {
                     match size {
                         Some(size) => {
+                            changed_history.container_sizes.insert(key.clone(), size);
                             state.container_sizes.insert(key.clone(), size);
                         }
                         None => {
@@ -257,10 +359,13 @@ pub(super) fn finish_operation(
     for key in &relations {
         state.validate_subagent(key)?;
     }
+    changed_history.validate()?;
     transaction.commit()?;
     Ok(changed.then(|| CommittedState {
         sequence: previous.sequence + 1,
         state,
+        moves,
+        native_agents,
     }))
 }
 

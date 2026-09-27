@@ -234,12 +234,9 @@ pub(super) fn start_database_writer_at(
 ) -> Result<DatabaseWriterOwner> {
     static NEXT_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 
-    let connection = schema::open_writer(path)?;
+    let mut connection = schema::open_writer(path)?;
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
-    let initial = CommittedState {
-        sequence: 0,
-        state: load_state_from(path)?,
-    };
+    let initial = CommittedState::bootstrap(&mut connection)?;
     let (committed, _) = tokio::sync::watch::channel(Ok(initial));
     let path = path.to_owned();
     let (sender, receiver) = sync_channel(DATABASE_WRITE_QUEUE_CAPACITY);

@@ -7,6 +7,13 @@ use mj_core::relay::{RelayEvent, RelayObservation};
 pub fn load_native_agent_summaries(
     owner: &str,
 ) -> Result<Vec<mj_core::native_agent::NativeAgentSummary>> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed
+            .native_agents
+            .get(owner)
+            .map(|children| children.values().cloned().collect())
+            .unwrap_or_default());
+    }
     let connection = open_reader(&database_path())?;
     load_native_agent_summaries_from(&connection, owner)
 }
@@ -400,6 +407,81 @@ mod tests {
 
     fn text(child: &str, message: &str) -> NativeAgentEvent {
         NativeAgentEvent::Update { session_id: child.into(), update: Box::new(serde_json::from_value(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":message}})).unwrap()) }
+    }
+
+    #[test]
+    fn committed_native_agents_keep_replay_private_and_publish_cascading_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        save_session_to(&path, &super::super::tests::session("owner", "project")).unwrap();
+        let writer = start_database_writer_at(&path, false).unwrap();
+        writer
+            .writer
+            .execute("spawn native child", |connection| {
+                apply_native_agent_event(connection, "owner", &event(1, spawn("child", None)))
+            })
+            .unwrap();
+        let held = writer.writer.committed_state().unwrap();
+        assert!(held.native_agents["owner"].contains_key("child"));
+        writer.shutdown().unwrap();
+        let writer = start_database_writer_at(&path, false).unwrap();
+        assert_eq!(
+            writer.writer.committed_state().unwrap().native_agents,
+            held.native_agents
+        );
+        writer
+            .writer
+            .execute("begin native replay", |connection| {
+                apply_native_agent_event(
+                    connection,
+                    "owner",
+                    &event(2, NativeAgentEvent::ReplayBegin),
+                )
+            })
+            .unwrap();
+        let before = writer.writer.committed_state().unwrap();
+        assert_eq!(
+            before.native_agents["owner"]["child"].agent.state,
+            NativeAgentState::Disconnected
+        );
+        writer
+            .writer
+            .execute("stage native child", |connection| {
+                apply_native_agent_event(connection, "owner", &event(3, spawn("replacement", None)))
+            })
+            .unwrap();
+        let staged = writer.writer.committed_state().unwrap();
+        assert_eq!(staged.sequence, before.sequence);
+        assert_eq!(staged.native_agents, before.native_agents);
+        writer
+            .writer
+            .execute("publish native replay", |connection| {
+                apply_native_agent_event(
+                    connection,
+                    "owner",
+                    &event(4, NativeAgentEvent::ReplayCommit),
+                )
+            })
+            .unwrap();
+        let published = writer.writer.committed_state().unwrap();
+        assert!(published.native_agents["owner"].contains_key("child"));
+        assert!(published.native_agents["owner"].contains_key("replacement"));
+        writer
+            .writer
+            .execute("delete native owner", |connection| {
+                connection.execute("DELETE FROM sessions WHERE session_id='owner'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            writer
+                .writer
+                .committed_state()
+                .unwrap()
+                .native_agents
+                .is_empty()
+        );
+        assert!(held.native_agents["owner"].contains_key("child"));
     }
 
     #[test]
