@@ -1032,7 +1032,7 @@ pub(super) fn role_strip(review: &TurnReview) -> Option<Line<'static>> {
                     .fg(theme::palette().accent)
                     .add_modifier(Modifier::REVERSED)
             } else {
-                Style::default().fg(theme::palette().accent)
+                theme::actionable_chip()
             },
         ));
     }

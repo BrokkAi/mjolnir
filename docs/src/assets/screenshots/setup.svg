@@ -137,18 +137,18 @@
     <text x="86" y="46" fill="#9de5ca" font-weight="700">r</text>
     <text x="104" y="46" fill="#f0cd91" font-weight="700">✓</text>
     <text x="113" y="46" fill="#f0cd91" font-weight="700">1</text>
-    <text x="140" y="46" fill="#9de5ca">M</text>
-    <text x="149" y="46" fill="#9de5ca">a</text>
-    <text x="158" y="46" fill="#9de5ca">i</text>
-    <text x="167" y="46" fill="#9de5ca">n</text>
-    <text x="176" y="46" fill="#9de5ca">t</text>
-    <text x="185" y="46" fill="#9de5ca">e</text>
-    <text x="194" y="46" fill="#9de5ca">n</text>
-    <text x="203" y="46" fill="#9de5ca">a</text>
-    <text x="212" y="46" fill="#9de5ca">n</text>
-    <text x="221" y="46" fill="#9de5ca">c</text>
-    <text x="230" y="46" fill="#9de5ca">e</text>
-    <text x="401" y="46" fill="#9de5ca">☰</text>
+    <text x="140" y="46" fill="#efede8">M</text>
+    <text x="149" y="46" fill="#efede8">a</text>
+    <text x="158" y="46" fill="#efede8">i</text>
+    <text x="167" y="46" fill="#efede8">n</text>
+    <text x="176" y="46" fill="#efede8">t</text>
+    <text x="185" y="46" fill="#efede8">e</text>
+    <text x="194" y="46" fill="#efede8">n</text>
+    <text x="203" y="46" fill="#efede8">a</text>
+    <text x="212" y="46" fill="#efede8">n</text>
+    <text x="221" y="46" fill="#efede8">c</text>
+    <text x="230" y="46" fill="#efede8">e</text>
+    <text x="401" y="46" fill="#efede8">☰</text>
     <text x="419" y="46" fill="#3e4a4e">│</text>
     <text x="428" y="46" fill="#3e4a4e">│</text>
     <text x="446" y="46" fill="#9ec2ee" font-weight="700">❯</text>
@@ -156,8 +156,8 @@
     <text x="473" y="46" fill="#9ec2ee" font-weight="700">o</text>
     <text x="482" y="46" fill="#9ec2ee" font-weight="700">u</text>
     <text x="500" y="46" fill="#97a3a3">·</text>
-    <text x="518" y="46" fill="#97a3a3">0</text>
-    <text x="527" y="46" fill="#97a3a3">1</text>
+    <text x="518" y="46" fill="#97a3a3">1</text>
+    <text x="527" y="46" fill="#97a3a3">8</text>
     <text x="536" y="46" fill="#97a3a3">:</text>
     <text x="545" y="46" fill="#97a3a3">0</text>
     <text x="554" y="46" fill="#97a3a3">0</text>
@@ -308,10 +308,10 @@
     <text x="59" y="100" fill="#9de5ca" font-weight="700">a</text>
     <text x="68" y="100" fill="#9de5ca" font-weight="700">t</text>
     <text x="77" y="100" fill="#9de5ca" font-weight="700">e</text>
-    <text x="113" y="100" fill="#9de5ca">O</text>
-    <text x="122" y="100" fill="#9de5ca">p</text>
-    <text x="131" y="100" fill="#9de5ca">e</text>
-    <text x="140" y="100" fill="#9de5ca">n</text>
+    <text x="113" y="100" fill="#efede8">O</text>
+    <text x="122" y="100" fill="#efede8">p</text>
+    <text x="131" y="100" fill="#efede8">e</text>
+    <text x="140" y="100" fill="#efede8">n</text>
     <text x="1256" y="100" fill="#97a3a3">▐</text>
     <text x="1265" y="100" fill="#3e4a4e">│</text>
     <rect x="14" y="104" width="198" height="18" fill="#161b1e"/>
@@ -321,13 +321,13 @@
     <rect x="266" y="104" width="783" height="18" fill="#20272b"/>
     <rect x="1049" y="104" width="225" height="18" fill="#0f1214"/>
     <text x="14" y="118" fill="#3e4a4e">│</text>
-    <text x="23" y="118" fill="#9de5ca" font-weight="700">m</text>
-    <text x="32" y="118" fill="#9de5ca" font-weight="700">j</text>
-    <text x="41" y="118" fill="#9de5ca" font-weight="700">o</text>
-    <text x="50" y="118" fill="#9de5ca" font-weight="700">l</text>
-    <text x="59" y="118" fill="#9de5ca" font-weight="700">n</text>
-    <text x="68" y="118" fill="#9de5ca" font-weight="700">i</text>
-    <text x="77" y="118" fill="#9de5ca" font-weight="700">r</text>
+    <text x="23" y="118" fill="#efede8" font-weight="700">m</text>
+    <text x="32" y="118" fill="#efede8" font-weight="700">j</text>
+    <text x="41" y="118" fill="#efede8" font-weight="700">o</text>
+    <text x="50" y="118" fill="#efede8" font-weight="700">l</text>
+    <text x="59" y="118" fill="#efede8" font-weight="700">n</text>
+    <text x="68" y="118" fill="#efede8" font-weight="700">i</text>
+    <text x="77" y="118" fill="#efede8" font-weight="700">r</text>
     <text x="95" y="118" fill="#3e4a4e">─</text>
     <text x="104" y="118" fill="#3e4a4e">─</text>
     <text x="113" y="118" fill="#3e4a4e">─</text>
@@ -342,7 +342,7 @@
     <text x="194" y="118" fill="#3e4a4e">─</text>
     <text x="203" y="118" fill="#3e4a4e">─</text>
     <text x="230" y="118" fill="#97a3a3">╭</text>
-    <text x="248" y="118" fill="#9de5ca" font-weight="700">×</text>
+    <text x="248" y="118" fill="#efede8" font-weight="700">×</text>
     <text x="266" y="118" fill="#9de5ca" font-weight="700">S</text>
     <text x="275" y="118" fill="#9de5ca" font-weight="700">e</text>
     <text x="284" y="118" fill="#9de5ca" font-weight="700">t</text>
@@ -1293,7 +1293,7 @@
     <text x="1175" y="568" fill="#3e4a4e">─</text>
     <text x="1184" y="568" fill="#3e4a4e">─</text>
     <text x="1193" y="568" fill="#3e4a4e">─</text>
-    <text x="1211" y="568" fill="#9de5ca" font-weight="700">▁</text>
+    <text x="1211" y="568" fill="#efede8" font-weight="700">▁</text>
     <text x="1247" y="568" fill="#9de5ca" font-weight="700">▪</text>
     <text x="1265" y="568" fill="#3e4a4e">╮</text>
     <rect x="14" y="572" width="198" height="18" fill="#161b1e"/>
@@ -1371,7 +1371,7 @@
     <text x="1175" y="640" fill="#3e4a4e">─</text>
     <text x="1184" y="640" fill="#3e4a4e">─</text>
     <text x="1193" y="640" fill="#3e4a4e">─</text>
-    <text x="1211" y="640" fill="#9de5ca" font-weight="700">▁</text>
+    <text x="1211" y="640" fill="#efede8" font-weight="700">▁</text>
     <text x="1247" y="640" fill="#9de5ca" font-weight="700">▪</text>
     <text x="1265" y="640" fill="#3e4a4e">╮</text>
     <rect x="14" y="644" width="198" height="18" fill="#161b1e"/>

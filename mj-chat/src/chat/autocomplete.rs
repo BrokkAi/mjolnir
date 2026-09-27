@@ -493,14 +493,16 @@ fn autocomplete_row(chat: &ChatState, kind: AutocompleteKind, index: usize) -> O
     }
 }
 
+pub(super) fn config_choice_name(choice: &SessionConfigChoice) -> &str {
+    if choice.name.trim().is_empty() {
+        &choice.value
+    } else {
+        &choice.name
+    }
+}
+
 pub(super) fn config_value_row(choice: &SessionConfigChoice) -> Option<String> {
-    let description = choice
-        .description
-        .as_deref()
-        .filter(|description| !description.trim().is_empty())
-        .map(|description| format!(" — {description}"))
-        .unwrap_or_default();
-    Some(format!("{} ({}){description}", choice.name, choice.value))
+    Some(config_choice_name(choice).to_owned())
 }
 
 #[cfg(test)]
@@ -511,6 +513,18 @@ mod tests {
         advertise, fast_mode_option, grok_chat, key, mode_config_option, snapshot,
     };
     use crossterm::event::KeyCode;
+
+    #[test]
+    fn config_rows_show_only_names_and_fall_back_for_blank_names() {
+        let mut choice = SessionConfigChoice {
+            value: "model-id".into(),
+            name: "Model name".into(),
+            description: Some("An explanation that should not appear".into()),
+        };
+        assert_eq!(config_value_row(&choice).as_deref(), Some("Model name"));
+        choice.name = "  ".into();
+        assert_eq!(config_value_row(&choice).as_deref(), Some("model-id"));
+    }
 
     #[test]
     fn local_command_parser_requires_an_exact_command_boundary() {

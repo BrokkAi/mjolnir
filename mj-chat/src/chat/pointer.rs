@@ -137,7 +137,8 @@ impl ChatState {
         {
             return true;
         }
-        if self.config_picker_handles_mouse(mouse.column, mouse.row) {
+        // An open dropdown captures outside presses to dismiss without click-through.
+        if self.config_picker_active() {
             return true;
         }
         self.second_opinion_handles_mouse(mouse.column, mouse.row)
@@ -319,6 +320,9 @@ impl ChatState {
             }
             return ChatAction::None;
         }
+        if self.config_picker_active() {
+            return self.handle_config_picker_mouse(mouse).1;
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self
                 .task_control_area
@@ -333,9 +337,6 @@ impl ChatState {
                 .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
         {
             return ChatAction::OpenSubagents;
-        }
-        if self.config_picker_active() {
-            return self.handle_config_picker_mouse(mouse).1;
         }
         if self.second_opinion_active() && !self.second_opinion_split() {
             let (handled, action) = self.handle_second_opinion_mouse(mouse);

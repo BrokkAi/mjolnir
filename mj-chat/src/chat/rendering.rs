@@ -417,7 +417,7 @@ pub(super) fn markdown_lines(
                     style_stack.push(writer.style);
                     writer.style = writer
                         .style
-                        .fg(theme::palette().accent)
+                        .fg(theme::palette().text)
                         .add_modifier(Modifier::UNDERLINED);
                 }
                 Tag::Table(alignments) => {

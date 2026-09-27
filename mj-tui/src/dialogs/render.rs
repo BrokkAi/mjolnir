@@ -934,7 +934,10 @@ pub(crate) fn render_web_dialog(
             // so it wraps within the box instead of widening it.
             lines.push(Line::from(vec![
                 Span::styled("Web: ", Style::default().fg(theme::palette().muted)),
-                Span::styled(url.clone(), Style::default().fg(theme::palette().accent)),
+                Span::styled(
+                    url.clone(),
+                    theme::actionable().add_modifier(Modifier::UNDERLINED),
+                ),
             ]));
         }
         if let Some(code) = &dialog.viewer_code {

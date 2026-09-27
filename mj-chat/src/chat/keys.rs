@@ -116,6 +116,12 @@ impl ChatState {
             return ChatAction::None;
         }
 
+        // The value selector owns the keyboard while it is up; it is checked
+        // after the elicitation dialog because the dialog draws on top of it.
+        if self.config_picker_active() {
+            return self.handle_config_picker_event(key);
+        }
+
         if self.task_control_focused {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
@@ -158,12 +164,6 @@ impl ChatState {
             if code == KeyCode::Esc || code == KeyCode::Up {
                 return ChatAction::None;
             }
-        }
-
-        // The value selector owns the keyboard while it is up; it is checked
-        // after the elicitation dialog because the dialog draws on top of it.
-        if self.config_picker_active() {
-            return self.handle_config_picker_event(key);
         }
 
         if code == KeyCode::Char('r')

@@ -595,7 +595,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
                 assert!(cell.modifier.contains(Modifier::BOLD));
             } else {
                 assert_eq!(cell.bg, theme::palette().surface);
-                assert_eq!(cell.fg, theme::palette().accent);
+                assert_eq!(cell.fg, theme::palette().text);
             }
         }
     }

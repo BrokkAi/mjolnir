@@ -2152,14 +2152,14 @@ pub(crate) fn render_resume_dialog(
             ] {
                 let area = Rect::new(preview_band.right() - from_right, preview_band.y, 3, 1);
                 form.register(id, ControlKind::Button, area, enabled);
-                frame.render_widget(
-                    Paragraph::new(format!("[{label}]")).style(Style::default().fg(if enabled {
-                        theme::palette().accent
-                    } else {
-                        theme::palette().muted
-                    })),
-                    area,
-                );
+                let style = if !enabled {
+                    theme::muted()
+                } else if form.is_focused(id) || form.is_armed(id) {
+                    theme::focus_control()
+                } else {
+                    theme::actionable()
+                };
+                frame.render_widget(Paragraph::new(format!("[{label}]")).style(style), area);
             }
         }
         // Wrapped here rather than by the paragraph, so the scroll offset, the

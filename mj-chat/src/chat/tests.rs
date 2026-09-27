@@ -587,7 +587,7 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
     });
 
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("View tasks (1)"), "{screen}");
+    assert!(screen.contains("Tasks (1)"), "{screen}");
     assert!(!screen.contains("oldest"), "{screen}");
     assert!(!screen.contains("Background:"), "{screen}");
 
@@ -601,7 +601,7 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
     assert!(shifted_task_area.x > task_area.x);
     let border = &rows[usize::from(shifted_task_area.y)];
     assert!(border.contains("1 queued · Esc steers next"), "{border}");
-    let task_offset = border.find("View tasks (1)").expect("task label");
+    let task_offset = border.find("Tasks (1)").expect("task label");
     assert_eq!(
         rendering::display_width(&border[..task_offset]),
         usize::from(shifted_task_area.x + 1)
@@ -612,10 +612,10 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
         assert!(border.contains("1 queued · Esc steers next"), "{border}");
         if width == 32 {
             assert!(chat.task_control_area.is_none());
-            assert!(!border.contains("View tasks"), "{border}");
+            assert!(!border.contains("Tasks"), "{border}");
         } else {
             assert!(chat.task_control_area.is_some());
-            assert!(border.contains("View tasks (1)"), "{border}");
+            assert!(border.contains("Tasks (1)"), "{border}");
         }
     }
     drawn_transcript(&mut chat, 100, 24);

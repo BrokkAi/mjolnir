@@ -1828,7 +1828,7 @@ fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert_eq!(rendered.matches("gpt-5.6-sol · high").count(), 1);
+    assert_eq!(rendered.matches("Sol ▾ · High ▾").count(), 1);
     assert!(rendered.contains("Esc interrupts"));
     assert!(!rendered.contains("Running"));
     // No outer frame wraps the whole session: the transcript's own titled
@@ -2071,7 +2071,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
         active_user_shells: Vec::new(),
     });
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("View tasks (2)"), "{screen}");
+    assert!(screen.contains("Tasks (2)"), "{screen}");
 
     // The spinner represents a running turn, whatever it left behind.
     chat.phase = WorkerPhase::Running;
@@ -2108,7 +2108,7 @@ fn effort_separator_between_prompt_chips_is_not_clickable() {
             assert_eq!(title.spans[separator].style, theme::muted());
             assert_eq!(
                 title.spans[separator + 1].content,
-                format!("{} ", chat.current_effort().unwrap())
+                format!("{} ▾ ", chat.current_effort().unwrap())
             );
             assert_eq!(title.spans[separator + 1].style, theme::actionable_chip());
 
@@ -2142,7 +2142,7 @@ fn effort_separator_between_prompt_chips_is_not_clickable() {
                 .unwrap();
             for (_, area) in &chat.config_chip_areas {
                 let cell = &terminal.backend().buffer()[(area.x, area.y)];
-                assert_eq!(cell.fg, theme::palette().accent);
+                assert_eq!(cell.fg, theme::palette().text);
                 assert_eq!(cell.bg, theme::palette().selection);
             }
         });
@@ -2166,7 +2166,7 @@ fn select_config(key: &str, current: &str, values: &[&'static str]) -> SessionCo
 }
 
 #[test]
-fn subagents_are_accented_as_clickable_on_prompt_border() {
+fn subagents_use_navigation_glyph_and_neutral_surface_until_focused() {
     for palette in theme::UiTheme::ALL {
         theme::with_theme(palette, || {
             let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2183,10 +2183,10 @@ fn subagents_are_accented_as_clickable_on_prompt_border() {
             let label = (area.x..area.right())
                 .map(|x| buffer[(x, area.y)].symbol())
                 .collect::<String>();
-            assert_eq!(label, " Subagents · 0 working ");
+            assert_eq!(label, " Subagents · 0 working › ");
             assert!((area.x..area.right()).all(|x| {
                 let cell = &buffer[(x, area.y)];
-                cell.bg == theme::palette().selection && cell.fg == theme::palette().accent
+                cell.bg == theme::palette().selection && cell.fg == theme::palette().text
             }));
             chat.subagent_control_focused = true;
             terminal
@@ -2204,7 +2204,7 @@ fn subagents_are_accented_as_clickable_on_prompt_border() {
 }
 
 #[test]
-fn running_tasks_are_accented_as_clickable_on_prompt_border() {
+fn running_tasks_use_navigation_glyph_and_neutral_surface_until_focused() {
     for palette in theme::UiTheme::ALL {
         theme::with_theme(palette, || {
             let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2240,10 +2240,10 @@ fn running_tasks_are_accented_as_clickable_on_prompt_border() {
             let label = (area.x..area.right())
                 .map(|x| buffer[(x, area.y)].symbol())
                 .collect::<String>();
-            assert_eq!(label, " View tasks (1) ");
+            assert_eq!(label, " Tasks (1) › ");
             assert!((area.x..area.right()).all(|x| {
                 let cell = &buffer[(x, area.y)];
-                cell.bg == theme::palette().selection && cell.fg == theme::palette().accent
+                cell.bg == theme::palette().selection && cell.fg == theme::palette().text
             }));
             chat.task_control_focused = true;
             terminal

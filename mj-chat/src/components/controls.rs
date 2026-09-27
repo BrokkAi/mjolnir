@@ -17,7 +17,7 @@ fn focus_style() -> Style {
     theme::focus_control()
 }
 fn normal_style() -> Style {
-    theme::actionable().bg(theme::palette().selection)
+    theme::actionable_chip()
 }
 fn disabled_style() -> Style {
     Style::new()
@@ -31,9 +31,15 @@ fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
     } else if form.is_focused(id) || form.is_armed(id) {
         focus_style()
     } else if form.is_default_action(id) {
-        normal_style()
+        let style = normal_style()
             .fg(theme::palette().accent)
-            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::BOLD);
+        // Bold reverse video is reserved for actual focus in monochrome.
+        if theme::is_mono() {
+            style.remove_modifier(Modifier::REVERSED)
+        } else {
+            style
+        }
     } else {
         normal_style()
     }

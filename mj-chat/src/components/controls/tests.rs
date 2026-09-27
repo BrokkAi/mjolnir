@@ -595,3 +595,43 @@ fn path_field_popup_shows_candidates_a_wait_or_nothing() {
     assert!(text.contains("~/provision/"), "{text}");
     assert!(!text.contains("Completing"), "{text}");
 }
+
+#[test]
+fn idle_buttons_are_neutral_but_focus_and_primary_actions_stay_distinct() {
+    for palette in theme::UiTheme::ALL {
+        theme::with_theme(palette, || {
+            let mut form = Form::new();
+            for id in 0..3 {
+                form.declare(id, ControlKind::Button);
+            }
+            form.set_default_action(1);
+            form.end_frame(0);
+            let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    form.begin_frame();
+                    for (id, label) in [(0, "Focused"), (1, "Primary"), (2, "Ordinary")] {
+                        Button::render(frame, Rect::new(0, id, 20, 1), label, true, &mut form, id);
+                    }
+                    form.end_frame(0);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let idle = &buffer[(8, 2)];
+            let primary = &buffer[(8, 1)];
+            let focus = &buffer[(8, 0)];
+            assert_eq!(idle.fg, theme::palette().text);
+            assert!(!idle.modifier.contains(Modifier::BOLD));
+            assert!(focus.modifier.contains(Modifier::BOLD));
+            assert!(primary.modifier.contains(Modifier::BOLD));
+            if theme::is_mono() {
+                assert!(idle.modifier.contains(Modifier::REVERSED));
+                assert!(!primary.modifier.contains(Modifier::REVERSED));
+            } else {
+                assert_eq!(idle.bg, theme::palette().selection);
+                assert_eq!(primary.fg, theme::palette().accent);
+                assert_eq!(focus.bg, theme::palette().accent);
+            }
+        });
+    }
+}

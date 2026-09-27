@@ -222,6 +222,8 @@ pub struct Glyphs {
     pub running: &'static str,
     pub pending: &'static str,
     pub dropdown: &'static str,
+    /// Opens another view rather than a choice menu.
+    pub navigate: &'static str,
     pub scroll_track: &'static str,
     pub scroll_thumb: &'static str,
     pub bar_full: &'static str,
@@ -277,6 +279,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     running: "●",
     pending: "○",
     dropdown: "▾",
+    navigate: "›",
     scroll_track: "│",
     scroll_thumb: "▐",
     bar_full: "█",
@@ -330,6 +333,7 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     running: "*",
     pending: "o",
     dropdown: "v",
+    navigate: ">",
     scroll_track: "|",
     scroll_thumb: "#",
     bar_full: "#",
@@ -441,9 +445,9 @@ pub fn base() -> Style {
     Style::default().fg(palette().text).bg(palette().background)
 }
 
-/// An enabled clickable label, visible before it receives focus.
+/// Neutral enabled-control text; shape and surface convey clickability.
 pub fn actionable() -> Style {
-    Style::default().fg(palette().accent)
+    Style::default().fg(palette().text)
 }
 
 /// A clickable chip that retains its surface and monochrome affordance.

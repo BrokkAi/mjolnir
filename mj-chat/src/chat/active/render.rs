@@ -537,17 +537,23 @@ pub(crate) fn render_composer_band(
     chat.subagent_control_area = None;
     let bottom_width = prompt_area.width.saturating_sub(2);
     let queue_control = prompt_bottom_queue_control(chat);
-    let task_label = (chat.background_task_count() > 0)
-        .then(|| format!(" View tasks ({}) ", chat.background_task_count()));
+    let task_label = (chat.background_task_count() > 0).then(|| {
+        format!(
+            " Tasks ({}) {} ",
+            chat.background_task_count(),
+            theme::glyphs().navigate
+        )
+    });
     // A session created with sub-agents shows the entry, dimmed and not
     // clickable, before its first child exists, so the user can find where
     // they will appear. The Sub-agents chord is greyed on the same condition.
     let subagents_ready = chat.subagent_count() > 0;
     let subagent_label = if subagents_ready {
         Some(format!(
-            " Subagents{}{} working ",
+            " Subagents{}{} working {} ",
             theme::footer_separator(),
-            chat.subagent_working_count
+            chat.subagent_working_count,
+            theme::glyphs().navigate
         ))
     } else {
         chat.subagents_enabled
@@ -622,7 +628,7 @@ pub(crate) fn render_composer_band(
             if chat.task_control_focused() {
                 theme::focus_control()
             } else {
-                // Advertise the action before keyboard focus reaches it.
+                // The surface and navigation glyph advertise the action.
                 theme::actionable_chip()
             },
         ));
@@ -654,7 +660,7 @@ pub(crate) fn render_composer_band(
             } else if chat.subagent_control_focused() {
                 theme::focus_control()
             } else {
-                // Advertise the action before keyboard focus reaches it.
+                // The surface and navigation glyph advertise the action.
                 theme::actionable_chip()
             },
         ));
@@ -841,59 +847,52 @@ pub(crate) fn prompt_title_line(
     // The title begins just inside the border corner; each chip keeps the exact
     // cells of its span, and only a chip that fits inside the border is kept.
     let mut chip_x = usize::from(prompt_area.x.saturating_add(1)) + spans[0].width();
-    let chip_limit = usize::from(prompt_area.right().saturating_sub(1));
+    let activity_reserve = if chat.needs_animation() { 4 } else { 0 };
+    let chip_limit = usize::from(prompt_area.right().saturating_sub(1 + activity_reserve));
     let mut chips = Vec::new();
-    if let Some(model) = model {
-        let text = format!(" {model} ");
-        let width = display_width(&text);
-        if chip_x.saturating_add(width) <= chip_limit {
-            chips.push((
-                "model",
-                Rect::new(
-                    u16::try_from(chip_x).unwrap_or(u16::MAX),
-                    prompt_area.y,
-                    u16::try_from(width).unwrap_or(u16::MAX),
-                    1,
-                ),
-            ));
-        }
-        spans.push(Span::styled(text, theme::actionable_chip()));
-        chip_x = chip_x.saturating_add(width);
-    }
-    if let Some(effort) = effort {
-        let separator_width = usize::from(model.is_some()) * display_width("· ");
-        let text = if model.is_some() {
-            format!("· {effort} ")
-        } else {
-            format!(" {effort} ")
+    for (key, value) in [("model", model), ("effort", effort)] {
+        let Some(value) = value else {
+            continue;
         };
-        let width = display_width(&text);
-        let value_width = width.saturating_sub(separator_width);
-        let value_x = chip_x.saturating_add(separator_width);
-        // The dot is visual punctuation between independent controls, so
-        // neither its color nor its hitbox advertises it as clickable.
-        if model.is_some() {
-            spans.push(Span::styled("· ", theme::muted()));
+        let enabled = !chat.advertised_config_values(key).is_empty()
+            && !matches!(chat.phase, WorkerPhase::Closing | WorkerPhase::Closed);
+        let label = chat
+            .advertised_config_values(key)
+            .iter()
+            .find(|choice| choice.value == value)
+            .map_or(value, super::super::autocomplete::config_choice_name);
+        let separator = if key == "effort" && model.is_some() {
+            "· "
+        } else {
+            " "
+        };
+        let text = if enabled {
+            format!("{label} {} ", theme::glyphs().dropdown)
+        } else {
+            format!("{label} ")
+        };
+        let width = display_width(separator) + display_width(&text);
+        // Draw and register complete controls together, never a clipped active fragment.
+        if chip_x.saturating_add(width) > chip_limit {
+            break;
         }
-        if chip_x.saturating_add(width) <= chip_limit {
+        spans.push(Span::styled(separator, theme::muted()));
+        chip_x += display_width(separator);
+        if enabled {
             chips.push((
-                "effort",
-                Rect::new(
-                    u16::try_from(value_x).unwrap_or(u16::MAX),
-                    prompt_area.y,
-                    u16::try_from(value_width).unwrap_or(u16::MAX),
-                    1,
-                ),
+                key,
+                Rect::new(chip_x as u16, prompt_area.y, display_width(&text) as u16, 1),
             ));
         }
         spans.push(Span::styled(
-            if model.is_some() {
-                format!("{effort} ")
+            text,
+            if enabled {
+                theme::actionable_chip()
             } else {
-                text
+                theme::muted()
             },
-            theme::actionable_chip(),
         ));
+        chip_x += width - display_width(separator);
     }
     if !suffix.is_empty() {
         spans.push(Span::raw(format!(" {suffix} ")));
