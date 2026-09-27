@@ -13,8 +13,8 @@ Claude and Codex new-session wizards offer Native, Mjolnir all models, Mjolnir s
 - [x] (2026-09-27) Implement shared discovery, enforcement, worker behavior, and staged guidance.
 - [x] (2026-09-27) Implement TUI, web, and CLI controls.
 - [x] (2026-09-27) Review changes; formatting, Clippy, browser checks, and final runtime/CLI tests pass.
-- [ ] Finish the slower full-workspace tests.
-- [ ] Commit, merge to master, and push as explicitly requested while the slow tests run.
+- [x] (2026-09-27) Finish full-workspace verification: all unit suites passed; one late integration startup timeout passed in an isolated rerun. The final runtime/CLI run also passed that complete integration suite.
+- [x] (2026-09-27) Commit as `4c03a8d5`, merge to master as `389a1666`, and push as explicitly requested while the slow tests run.
 
 ## Surprises & Discoveries
 
@@ -30,7 +30,7 @@ The old native suppression predicate depends on the MCP socket, so None requires
 
 ## Outcomes & Retrospective
 
-Implementation and diff review are complete. Clippy and formatting pass. Browser unit tests passed; the full browser run passed 112 cases with one obsolete checkbox assertion, then all 41 session-creation tests passed after correcting that assertion. Initial Rust failures exposed old implicit-native fixtures and migration equality expectations; corrected these without changing native behavior. A later full run hit an unrelated relay-fixture timing assertion (broken pipe instead of disconnect). The final runtime/CLI run passes, including all 1,852 controller tests and isolated daemon startup/upgrade tests. Full-workspace verification is still running. The user explicitly authorized merging and pushing optimistically while these slower tests run.
+Implementation and diff review are complete. Clippy and formatting pass. Browser unit tests passed; the full browser run passed 112 cases with one obsolete checkbox assertion, then all 41 session-creation tests passed after correcting that assertion. Initial Rust failures exposed old implicit-native fixtures and migration equality expectations; corrected these without changing native behavior. A later full run hit an unrelated relay-fixture timing assertion (broken pipe instead of disconnect). The final runtime/CLI run passes, including all 1,852 controller tests and isolated daemon startup/upgrade tests. The full-workspace run subsequently passed all unit suites but hit a late timeout in `concurrent_starts_wait_for_controller_ownership_before_launching`; that exact test passed alone in 1.98 seconds. Its complete integration suite had also passed in the final runtime/CLI run. The user explicitly authorized the optimistic merge and push. The pushed merge also passes formatting and `cargo clippy --all-targets -- -D warnings`. Browser coverage is 51 unit tests plus 112 tests in the initial full run and all 41 session-creation cases on the corrected test.
 
 ## Context and Orientation
 
@@ -80,3 +80,5 @@ Revision: user requested removal of legacy CLI and public API parameters. The pr
 Revision (2026-09-27): completed runtime preference propagation, advanced the daemon protocol for the new wire fields, and added explicit migration coverage for all legacy boolean states and rejection of older writers.
 
 Revision (2026-09-27): user authorized merging and pushing before the remaining slow tests finish. Preserve the active test run and report any late failure.
+
+Final verification (2026-09-27): merge conflict was limited to independent tests appended to `mj-controller/src/controller/worker_binary/tests.rs`; both additions were preserved. No live instance was migrated. Existing untracked files in the master worktree were left untouched. No implementation work remains.
