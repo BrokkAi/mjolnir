@@ -114,7 +114,8 @@ pub(super) async fn run_daemon_runtime(
 
     // Start the primary manager last: every remaining fallible operation is
     // inside `outcome`, so its owner always reaches the awaited epilogue.
-    let manager = spawn_session_manager()?;
+    let (delegation_tx, delegation_updates) = crate::session_manager::delegation_channel();
+    let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
     let manager_targets = manager.targets;
     manager_targets.send_replace(dashboard_worker_targets(&controller));
     let manager_updates = manager.updates;
@@ -165,6 +166,13 @@ pub(super) async fn run_daemon_runtime(
     };
     let (mut manager_updates, continuation_task) =
         continuation::spawn(state.clone(), manager_updates, cancellation.clone());
+
+    let (delegation_services, mut delegation_task) = super::delegation::spawn(
+        state.clone(),
+        manager_control.clone(),
+        delegation_updates,
+        cancellation.clone(),
+    );
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -331,6 +339,7 @@ pub(super) async fn run_daemon_runtime(
                 updates: remote.updates,
                 shutdown: remote.shutdown,
             },
+            delegation_services,
         ));
     } else {
         state.set_phone_status(WebViewerStatus::Disabled);
@@ -338,6 +347,7 @@ pub(super) async fn run_daemon_runtime(
     }
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
+    let mut delegation_outcome = None;
 
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
@@ -349,6 +359,10 @@ pub(super) async fn run_daemon_runtime(
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
+                result = &mut delegation_task => {
+                    delegation_outcome = Some(result.map_err(anyhow::Error::from).and_then(|result| result));
+                    anyhow::bail!("delegation coordinator stopped unexpectedly");
+                }
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
@@ -488,6 +502,17 @@ pub(super) async fn run_daemon_runtime(
         Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),
         Err(error) => tracing::error!(%error, "continuation service task failed"),
     }
+    record_daemon_cleanup(
+        &mut outcome,
+        "join delegation coordinator",
+        match delegation_outcome {
+            Some(result) => result,
+            None => delegation_task
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result),
+        },
+    );
     drop(interrupted_close_tx);
     record_daemon_cleanup(
         &mut outcome,

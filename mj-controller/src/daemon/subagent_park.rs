@@ -16,36 +16,45 @@ impl RuntimeState {
     /// Park a sub-agent whose turn ended and whose parent was told. A child
     /// that has work in flight or queued, or that is no longer running, is
     /// left as it is. Any failure leaves the child running; the caller logs it.
-    pub async fn park_subagent(self: &Arc<Self>, child_session_id: String) -> Result<()> {
-        self.run_lifecycle(
-            child_session_id,
-            LifecycleKind::Park,
-            |state, session_id, _cancelled| async move {
-                // A park is short and not cancellable: a close that asks for
-                // the child waits for it instead, so it never finds a worker
-                // stopped under a record that still says running.
-                let never = AtomicBool::new(false);
-                let _recovery_reservation = blocking({
-                    let observer = state.recovery_observer.clone();
-                    let session_id = session_id.clone();
-                    move || reserve_recovery_or_cancel(&observer, &session_id, &never)
-                })
-                .await?;
-                if state.close_is_requested(&session_id) {
-                    return Ok(DaemonLifecycleResult::Done);
-                }
-                let controller = blocking(Controller::load).await?;
-                let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-                let outcome = controller
-                    .park_subagent_worker(&session_id, &executor, &state.session_manager)
+    pub async fn park_subagent(
+        self: &Arc<Self>,
+        child_session_id: String,
+    ) -> Result<crate::controller::ParkOutcome> {
+        let result = self
+            .run_lifecycle(
+                child_session_id,
+                LifecycleKind::Park,
+                |state, session_id, _cancelled| async move {
+                    // A park is short and not cancellable: a close that asks for
+                    // the child waits for it instead, so it never finds a worker
+                    // stopped under a record that still says running.
+                    let never = AtomicBool::new(false);
+                    let _recovery_reservation = blocking({
+                        let observer = state.recovery_observer.clone();
+                        let session_id = session_id.clone();
+                        move || reserve_recovery_or_cancel(&observer, &session_id, &never)
+                    })
                     .await?;
-                tracing::info!(%session_id, ?outcome, "sub-agent park finished");
-                Ok(DaemonLifecycleResult::Done)
-            },
-        )
-        .await?;
+                    if state.close_is_requested(&session_id) {
+                        return Ok(DaemonLifecycleResult::Park(
+                            crate::controller::ParkOutcome::NotRunning,
+                        ));
+                    }
+                    let controller = blocking(Controller::load).await?;
+                    let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
+                    let outcome = controller
+                        .park_subagent_worker(&session_id, &executor, &state.session_manager)
+                        .await?;
+                    tracing::info!(%session_id, ?outcome, "sub-agent park finished");
+                    Ok(DaemonLifecycleResult::Park(outcome))
+                },
+            )
+            .await?;
         self.publish_revision();
-        Ok(())
+        match result {
+            DaemonLifecycleResult::Park(outcome) => Ok(outcome),
+            _ => unreachable!("a park returns its worker's reservation outcome"),
+        }
     }
 
     /// Start a parked sub-agent's worker again so it can take its parent's

@@ -1,9 +1,16 @@
 use super::*;
 
 pub fn spawn_session_manager() -> Result<SessionManagerChannels> {
+    spawn_session_manager_observed(None)
+}
+
+pub(crate) fn spawn_session_manager_observed(
+    delegation: Option<DelegationSender>,
+) -> Result<SessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
-    let (updates_tx, updates_rx) = coalesced_update_channel();
+    let (mut updates_tx, updates_rx) = coalesced_update_channel();
+    updates_tx.delegation = delegation;
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         let mut actors = BTreeMap::<String, ActorRegistration>::new();

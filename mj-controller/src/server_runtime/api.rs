@@ -94,7 +94,10 @@ pub trait ExportRuntime: Send + Sync {
 
     /// Stop an idle child's worker and keep everything else, once its parent
     /// has been told its turn ended (#1161).
-    fn park_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
+    fn park_subagent(
+        self: Arc<Self>,
+        _session_id: String,
+    ) -> BoxFuture<'static, Result<crate::controller::ParkOutcome>> {
         Box::pin(async { anyhow::bail!("parking a sub-agent is unavailable") })
     }
 
@@ -189,7 +192,10 @@ impl ExportRuntime for RuntimeState {
         RuntimeState::subagent_park_running(self, session_id)
     }
 
-    fn park_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+    fn park_subagent(
+        self: Arc<Self>,
+        session_id: String,
+    ) -> BoxFuture<'static, Result<crate::controller::ParkOutcome>> {
         Box::pin(async move { RuntimeState::park_subagent(&self, session_id).await })
     }
 
@@ -1078,22 +1084,15 @@ impl ApiBackend {
         }
     }
 
-    /// Park a child whose turn ended once its parent has been told: stop its
-    /// worker so it holds no processes in the parent's container, keeping its
-    /// record, conversation and report (#1161). A park never fails the parent
-    /// or the notice: a failure is logged and the child stays live, counting
-    /// toward its parent's cap.
-    pub async fn park_subagent(&self, child_session_id: &str) {
-        if let Err(error) = Arc::clone(&self.exports)
+    /// Return the worker's atomic idle reservation outcome. The coordinator
+    /// retains a busy park separately from the already delivered notice.
+    pub async fn park_subagent(
+        &self,
+        child_session_id: &str,
+    ) -> Result<crate::controller::ParkOutcome> {
+        Arc::clone(&self.exports)
             .park_subagent(child_session_id.to_owned())
             .await
-        {
-            tracing::warn!(
-                child_session_id,
-                error = format!("{error:#}"),
-                "could not park a sub-agent whose turn ended; it stays live"
-            );
-        }
     }
 
     /// Forget sessions the daemon no longer holds a record for, so a

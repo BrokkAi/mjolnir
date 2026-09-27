@@ -197,6 +197,8 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(super) delegation: Option<DelegationSender>,
+    pub(super) observer: Option<Arc<DelegationPublisher>>,
     pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
     pub(super) wake: mpsc::Sender<()>,
 }
@@ -218,6 +220,9 @@ pub(super) struct PendingUpdate {
 
 impl CoalescedUpdateSender {
     pub(crate) fn send(&self, update: SessionManagerUpdate) {
+        if let Some(observer) = &self.observer {
+            observer.publish(&update.view);
+        }
         if self.wake.is_closed() {
             return;
         }
@@ -273,6 +278,8 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            delegation: None,
+            observer: None,
             pending: pending.clone(),
             wake: wake_tx,
         },

@@ -5,7 +5,7 @@ impl RuntimeState {
         self.recovery_observer.gate.clone()
     }
 
-    pub(super) fn new(
+    pub(crate) fn new(
         session_manager: SessionManagerControl,
         controller: Controller,
         recovery_observer: RecoveryObserver,
