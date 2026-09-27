@@ -216,12 +216,11 @@ impl RuntimeState {
                     }
                     {
                         let mut owner = state.owner();
-                        if let Some(active) = owner.lifecycle.get_mut(&operation_session_id)
-                            && active.operation_id == operation_reference
-                        {
-                            active.phase = LifecyclePhase::Completed(result.clone());
-                            active._move_guard.take();
-                        }
+                        owner.complete_lifecycle(
+                            &operation_session_id,
+                            &operation_reference,
+                            result.clone(),
+                        );
                         // Waiters and state readers cross the same completion
                         // boundary; the channel is notification, not ownership.
                         result_tx.send_replace(Some(result));

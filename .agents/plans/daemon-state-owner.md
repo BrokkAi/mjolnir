@@ -23,7 +23,7 @@ interface; do not implement a second delegation scheduler.
 - [x] User approved incremental TUI and web feeds as part of this refactor.
 - [x] Claimed #1172 and added `agent-in-progress`.
 - [x] Introduce structurally shared session/relation maps and point-read support.
-- [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; additional concurrency/scaling coverage remains).
+- [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; pollability work-count coverage passes at 100, 10,000, and 100,000 historical sessions; remaining consumer scaling coverage is pending).
 - [ ] Integrate ordered persistence receipts and lifecycle ownership (committed publication integrated; lifecycle phases explicit; remaining late-effect and worker-incarnation audit pending).
 - [ ] Replace daemon reloads and poller scans with maintained projections (pollable workers maintained in memory; historical runtime snapshot projections remain).
 - [ ] Implement cursor-based incremental TUI and web feeds.
@@ -290,3 +290,27 @@ all default workspace targets. The existing isolated-parent project-memory
 regression still passes after removing its implicit database lookup. The full
 workspace suite passed for the preceding owner checkpoint; final whole-workspace
 validation remains due after the client-feed and remaining state-machine work.
+
+Checkpoint note (2026-09-27): 272d95e8 commits prepared-target sharing and the
+committed move/native metadata projection. The next checkpoint puts worker views
+and background policy observations inside RuntimeStateOwner alongside records and
+lifecycles. Record deletion removes those observations under the same lock; late
+views for missing records are rejected. Stage and notice callbacks carry their
+lifecycle operation ID, so callbacks from an old operation cannot mutate its
+replacement. Hidden completed lifecycle outcomes retain at most 256 entries;
+visible deferred cleanup continues to hold its existing handoff semantics.
+
+Validation note (2026-09-27): All 103 focused daemon tests pass, including the
+new late-callback, deletion, bounded-retention, and historical scaling regressions.
+Polling performs zero eligibility predicate evaluations after bootstrap at every
+tested history size. A single changed record evaluates only its before and after
+eligibility. Formatting and whitespace checks pass. Full isolated workspace tests
+and Clippy are in progress. Incremental client feeds are still outstanding; this
+checkpoint is not completion of the whole plan.
+
+Validation checkpoint (2026-09-27): Full `cargo test` with the dedicated
+state-owner-1172 environment passed, including 1,881 controller tests, 635 worker
+library tests, 235 CLI unit tests, 11 daemon-startup tests, all 11 terminal PTY
+tests, and all 4 store-divergence tests. `cargo clippy --all-targets -- -D warnings`
+and formatting checks pass. No live instance was started or upgraded. The
+remaining work is incremental client feeds and the remaining ownership audit.

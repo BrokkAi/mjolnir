@@ -2449,7 +2449,7 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
     });
     state.refresh_background_policies();
     assert!(observed.try_recv().is_err());
-    assert!(state.background_policies.lock().unwrap().is_empty());
+    assert!(state.owner().background_policies.is_empty());
 }
 
 /// Put `session-1` into the daemon's in-memory controller as a session that
@@ -4506,4 +4506,94 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         "the parked child's worker was not started"
     );
     assert_eq!(stored.sessions[parent_id].state, SessionState::Running);
+}
+
+#[tokio::test]
+async fn late_stage_callbacks_cannot_change_a_replacement_lifecycle() {
+    let state = test_runtime_state();
+    let first_release = Arc::new(tokio::sync::Notify::new());
+    let first = state
+        .start_or_join_lifecycle("same-session".into(), LifecycleKind::Create, {
+            let release = first_release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let old = DaemonStageReportingExecutor::new(
+        RefusingExecutor("stage-only test"),
+        state.clone(),
+        "same-session".into(),
+    );
+    first_release.notify_one();
+    RuntimeState::wait_lifecycle_result(first).await.unwrap();
+    let second_release = Arc::new(tokio::sync::Notify::new());
+    let second = state
+        .start_or_join_lifecycle("same-session".into(), LifecycleKind::Resume, {
+            let release = second_release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let current = DaemonStageReportingExecutor::new(
+        RefusingExecutor("stage-only test"),
+        state.clone(),
+        "same-session".into(),
+    );
+    old.stage_started(ProvisionStage::Cloning);
+    old.notify_notice("obsolete operation");
+    assert!(state.active_lifecycles()[0].active_stages.is_empty());
+    assert!(state.active_lifecycles()[0].notice.is_none());
+    current.stage_started(ProvisionStage::Cloning);
+    old.stage_finished(ProvisionStage::Cloning);
+    assert_eq!(state.active_lifecycles()[0].active_stages.len(), 1);
+    second_release.notify_one();
+    RuntimeState::wait_lifecycle_result(second).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(
+            "session-1".into(),
+            runtime_test_session("session-1", "workspace", SessionState::Running),
+        );
+    });
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(state.owner().sessions.contains_key("session-1"));
+    state.owner().edit_sessions(|sessions| {
+        sessions.remove("session-1");
+    });
+    assert!(!state.owner().sessions.contains_key("session-1"));
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(!state.owner().sessions.contains_key("session-1"));
+}
+
+#[tokio::test]
+async fn completed_lifecycle_retention_does_not_grow_with_history() {
+    let state = test_runtime_state();
+    for index in 0..300 {
+        let result = state
+            .start_or_join_lifecycle(
+                format!("session-{index}"),
+                LifecycleKind::Create,
+                |_, _, _| async { Ok(DaemonLifecycleResult::Done) },
+            )
+            .unwrap();
+        RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    }
+    assert_eq!(state.owner().lifecycle.len(), 256);
+    assert!(state.active_lifecycles().is_empty());
+    assert!(state.owner().lifecycle.contains_key("session-299"));
+    assert!(!state.owner().lifecycle.contains_key("session-0"));
 }

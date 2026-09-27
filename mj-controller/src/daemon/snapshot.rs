@@ -36,23 +36,19 @@ impl RuntimeState {
     /// Quiet workers need no new view to retry a skipped or delayed operation.
     /// This only queues observations; coordinators perform the actual I/O.
     pub(super) fn refresh_background_policies(&self) {
-        let controller_owner = self.owner();
-        let controller = controller_owner.controller();
-        self.background_policies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|session_id, policy| {
-                let Some(session) = controller
-                    .state
-                    .sessions
-                    .get(session_id)
-                    .filter(|session| session.state.has_live_worker())
-                else {
-                    return false;
-                };
-                self.observe_background_policy(session, &controller.config, policy);
-                true
-            });
+        let mut owner = self.owner();
+        let records = owner.controller().state.sessions.clone();
+        let config = owner.controller().config.clone();
+        owner.background_policies.retain(|session_id, policy| {
+            let Some(session) = records
+                .get(session_id)
+                .filter(|session| session.state.has_live_worker())
+            else {
+                return false;
+            };
+            self.observe_background_policy(session, &config, policy);
+            true
+        });
     }
 
     pub async fn reload_controller(&self) -> Result<()> {
@@ -147,7 +143,8 @@ impl RuntimeState {
     /// this belongs on the daemon's background tick. The write it leads to
     /// does not; see [`Self::fail_unready_session`].
     pub(super) fn sessions_without_a_usable_harness(&self) -> Vec<UnreadySession> {
-        let live = {
+        let now = chrono::Utc::now();
+        let observations = {
             let owner = self.owner();
             owner
                 .indexes
@@ -161,27 +158,20 @@ impl RuntimeState {
                 })
                 .filter(|id| !owner.close_requested.contains(*id))
                 .filter_map(|id| owner.controller().state.sessions.get(id))
-                .map(|record| (record.id.clone(), record.updated_at.clone()))
-                .collect::<Vec<_>>()
-        };
-        let now = chrono::Utc::now();
-        let observations = {
-            let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            live.into_iter()
-                .map(|(session_id, updated_at)| {
-                    let view = sessions.get(&session_id);
+                .map(|record| {
+                    let view = owner.sessions.get(&record.id);
                     ReadinessObservation {
                         harness_ready: view.is_some_and(|view| {
                             view.operational.as_ref().is_some_and(
                                 mj_core::relay::RelayOperationalState::native_session_is_ready,
                             )
                         }),
-                        record_age: record_age(&updated_at, now),
-                        updated_at,
+                        record_age: record_age(&record.updated_at, now),
+                        updated_at: record.updated_at.clone(),
                         detail: view
                             .and_then(|view| view.error.as_ref())
                             .map(|error| error.detail().to_owned()),
-                        session_id,
+                        session_id: record.id.clone(),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -238,12 +228,11 @@ impl RuntimeState {
             "daemon received a session view"
         );
         {
-            let controller_owner = self.owner();
-            let controller = controller_owner.controller();
-            let mut policies = self
-                .background_policies
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut owner = self.owner();
+            let controller = owner.controller();
+            if !controller.state.sessions.contains_key(&session_id) {
+                return Ok(());
+            }
             if view.connected
                 && let Some(snapshot) = view.snapshot.as_ref()
                 && let Some(session) = controller.state.sessions.get(&session_id)
@@ -258,18 +247,15 @@ impl RuntimeState {
                     worker_build: snapshot.worker_build.clone(),
                 };
                 self.observe_background_policy(session, &controller.config, &policy);
-                policies.insert(session_id.clone(), policy);
+                owner.background_policies.insert(session_id.clone(), policy);
             } else {
-                policies.remove(&session_id);
+                owner.background_policies.remove(&session_id);
             }
-        }
-        self.sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
+            owner.sessions.insert(
                 session_id.clone(),
                 RuntimeSessionView::from_managed(session_id, view),
             );
+        }
         reach_test_hook("relay_projection_before_revision_publication").await?;
         self.publish_revision();
         Ok(())
@@ -318,18 +304,14 @@ impl RuntimeState {
             Ok(agents)
         })
         .await?;
-        let sessions = self
+        let controller_owner = self.owner();
+        let sessions = controller_owner
             .sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter(|(session_id, _)| session_ids.contains(*session_id))
             .map(|(_, view)| view.clone())
             .collect();
-        // Match the controller -> lifecycle lock order used by worker polling.
-        // Completion reloads records before publishing its result, so holding
-        // this guard prevents an absent operation paired with older records.
-        let controller_owner = self.owner();
+        // Worker observations, records and lifecycle ownership share one boundary.
         let controller = controller_owner.controller();
         let lifecycles = controller_owner
             .lifecycle

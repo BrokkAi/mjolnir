@@ -47,22 +47,23 @@ impl RuntimeState {
                         .unwrap_or_else(|| "container cleanup".to_owned());
                     (
                         session_id.clone(),
+                        active.operation_id.clone(),
                         active.kind,
                         stage,
-                        active.cancelled.clone(),
                         active.result.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
         let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-        for (session_id, kind, stage, cancelled, result) in &mut pending {
+        for (session_id, operation_id, kind, stage, result) in &mut pending {
             if *kind != LifecycleKind::Cleanup || result.borrow().is_some() {
                 continue;
             }
             tracing::info!(%session_id, %stage, "daemon shutdown is waiting for deferred cleanup");
             self.set_lifecycle_notice(
                 session_id,
+                operation_id,
                 &format!("Daemon shutdown is waiting for {stage}"),
             );
             let finished = tokio::time::timeout_at(cleanup_deadline, async {
@@ -78,13 +79,13 @@ impl RuntimeState {
                 Ok(result) => result?,
                 Err(_) => {
                     tracing::warn!(%session_id, %stage, "deferred cleanup exceeded the daemon shutdown drain deadline");
-                    cancelled.store(true, Ordering::Release);
+                    self.cancel_operation(session_id, operation_id);
                 }
             }
         }
         let join_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        for (session_id, _, stage, cancelled, mut result) in pending {
-            cancelled.store(true, Ordering::Release);
+        for (session_id, operation_id, _, stage, mut result) in pending {
+            self.cancel_operation(&session_id, &operation_id);
             let joined = tokio::time::timeout_at(join_deadline, async {
                 while result.borrow_and_update().is_none() {
                     result.changed().await.with_context(|| {
@@ -276,6 +277,7 @@ impl RuntimeState {
     pub(super) fn change_lifecycle_stage(
         &self,
         session_id: &str,
+        operation_id: &str,
         stage: ProvisionStage,
         active: bool,
     ) {
@@ -285,6 +287,9 @@ impl RuntimeState {
             let Some(operation) = lifecycle.get_mut(session_id) else {
                 return;
             };
+            if operation.operation_id != operation_id || !operation.is_running() {
+                return;
+            }
             if active {
                 let entry = operation
                     .active_stages
@@ -330,12 +335,24 @@ impl RuntimeState {
         self.publish_revision();
     }
 
-    pub(super) fn set_lifecycle_notice(&self, session_id: &str, notice: &str) {
-        if let Some(active) = self.owner().lifecycle.get_mut(session_id) {
+    pub(super) fn set_lifecycle_notice(&self, session_id: &str, operation_id: &str, notice: &str) {
+        if let Some(active) = self.owner().lifecycle.get_mut(session_id)
+            && active.operation_id == operation_id
+            && active.is_running()
+        {
             if active.kind == LifecycleKind::Move && notice == "Preparing destination" {
                 active.move_source_closed = true;
             }
             active.notice = Some(notice.to_owned());
+            self.publish_revision();
+        }
+    }
+
+    fn cancel_operation(&self, session_id: &str, operation_id: &str) {
+        if let Some(active) = self.owner().lifecycle.get_mut(session_id)
+            && active.operation_id == operation_id
+            && active.request_cancel()
+        {
             self.publish_revision();
         }
     }

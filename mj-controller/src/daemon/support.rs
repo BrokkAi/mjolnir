@@ -99,14 +99,21 @@ pub(super) struct DaemonStageReportingExecutor<E> {
     pub(super) inner: E,
     pub(super) state: Arc<RuntimeState>,
     pub(super) session_id: String,
+    operation_id: Option<String>,
 }
 
 impl<E> DaemonStageReportingExecutor<E> {
     pub(super) fn new(inner: E, state: Arc<RuntimeState>, session_id: String) -> Self {
+        let operation_id = state
+            .owner()
+            .lifecycle
+            .get(&session_id)
+            .map(|active| active.operation_id.clone());
         Self {
             inner,
             state,
             session_id,
+            operation_id,
         }
     }
 }
@@ -161,17 +168,24 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
-        self.state
-            .change_lifecycle_stage(&self.session_id, stage, true);
+        if let Some(id) = &self.operation_id {
+            self.state
+                .change_lifecycle_stage(&self.session_id, id, stage, true);
+        }
     }
 
     fn stage_finished(&self, stage: ProvisionStage) {
-        self.state
-            .change_lifecycle_stage(&self.session_id, stage, false);
+        if let Some(id) = &self.operation_id {
+            self.state
+                .change_lifecycle_stage(&self.session_id, id, stage, false);
+        }
     }
 
     fn notify_notice(&self, notice: &str) {
-        self.state.set_lifecycle_notice(&self.session_id, notice);
+        if let Some(id) = &self.operation_id {
+            self.state
+                .set_lifecycle_notice(&self.session_id, id, notice);
+        }
     }
 }
 

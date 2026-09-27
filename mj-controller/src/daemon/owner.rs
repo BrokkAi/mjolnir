@@ -35,6 +35,9 @@ pub(super) struct RuntimeStateOwner {
     pub(super) lifecycle: BTreeMap<String, ActiveLifecycle>,
     pub(super) close_requested: BTreeSet<String>,
     pub(super) indexes: RecordIndexes,
+    pub(super) sessions: mj_core::snapshot_map::SnapshotMap<String, RuntimeSessionView>,
+    pub(super) background_policies: BTreeMap<String, snapshot::BackgroundPolicyState>,
+    completed: VecDeque<(String, String)>,
     store: StoreState,
 }
 
@@ -65,7 +68,7 @@ impl RuntimeStateOwner {
     ) -> R {
         let before = self.controller.state.clone();
         let result = edit(&mut self.controller.state.sessions);
-        self.indexes.apply(&before, &self.controller.state);
+        self.records_changed(&before);
         result
     }
 
@@ -76,6 +79,9 @@ impl RuntimeStateOwner {
             lifecycle: BTreeMap::new(),
             close_requested: BTreeSet::new(),
             indexes,
+            sessions: Default::default(),
+            background_policies: BTreeMap::new(),
+            completed: VecDeque::new(),
             store: StoreState::Bootstrap,
         }
     }
@@ -85,9 +91,9 @@ impl RuntimeStateOwner {
             self.controller.config = controller.config;
             return;
         }
-        self.indexes
-            .apply(&self.controller.state, &controller.state);
+        let before = self.controller.state.clone();
         self.controller = controller;
+        self.records_changed(&before);
     }
 
     fn observe_committed(&mut self, committed: &crate::database::CommittedState) {
@@ -97,9 +103,20 @@ impl RuntimeStateOwner {
         {
             return;
         }
-        self.indexes.apply(&self.controller.state, &committed.state);
+        let before = self.controller.state.clone();
         self.controller.state = committed.state.clone();
+        self.records_changed(&before);
         self.store = StoreState::Current(committed.clone());
+    }
+
+    fn records_changed(&mut self, before: &mj_core::state::State) {
+        self.indexes.apply(before, &self.controller.state);
+        for (id, record) in before.sessions.changes(&self.controller.state.sessions) {
+            if record.is_none() {
+                self.sessions.remove(id);
+                self.background_policies.remove(id);
+            }
+        }
     }
 
     pub(super) fn ensure_available(&self) -> Result<()> {
@@ -107,6 +124,37 @@ impl RuntimeStateOwner {
             bail!("{error}");
         }
         Ok(())
+    }
+
+    pub(super) fn complete_lifecycle(
+        &mut self,
+        session_id: &str,
+        operation_id: &str,
+        result: LifecycleResult,
+    ) {
+        const RETAINED_OUTCOMES: usize = 256;
+        let Some(active) = self.lifecycle.get_mut(session_id) else {
+            return;
+        };
+        if active.operation_id != operation_id || !active.is_running() {
+            return;
+        }
+        active.phase = LifecyclePhase::Completed(result);
+        active._move_guard.take();
+        if !active.is_visible() {
+            self.completed
+                .push_back((session_id.to_owned(), operation_id.to_owned()));
+        }
+        while self.completed.len() > RETAINED_OUTCOMES {
+            let (id, operation) = self.completed.pop_front().expect("retained outcome");
+            if self
+                .lifecycle
+                .get(&id)
+                .is_some_and(|active| active.operation_id == operation && !active.is_visible())
+            {
+                self.lifecycle.remove(&id);
+            }
+        }
     }
 
     pub(super) fn worker_is_owned(&self, session_id: &str) -> bool {
@@ -181,5 +229,63 @@ impl RuntimeState {
             }
         }
         owner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::runtime_test_session;
+    use super::*;
+
+    #[test]
+    fn polling_visits_no_historical_records_at_any_history_size() {
+        for historical in [100, 10_000, 100_000] {
+            let mut state = mj_core::state::State::default();
+            for index in 0..historical {
+                let id = format!("history-{index:06}");
+                state.sessions.insert(
+                    id.clone(),
+                    runtime_test_session(&id, "workspace", SessionState::Stopped),
+                );
+            }
+            let mut active = runtime_test_session("active", "workspace", SessionState::Running);
+            active.target = Some(mj_core::state::TargetLocator::LocalBare {
+                worker_root: "/worker".into(),
+            });
+            state.sessions.insert(active.id.clone(), active.clone());
+            let mut owner = RuntimeStateOwner::new(Controller {
+                config: Config::default(),
+                state,
+            });
+            crate::pollers::take_pollability_visits();
+            let held = owner.pollable_worker_inputs();
+            assert_eq!(held.ids, ["active"]);
+            assert_eq!(held.records.sessions.len(), 1);
+            assert_eq!(
+                crate::pollers::take_pollability_visits(),
+                0,
+                "polling re-evaluated session history"
+            );
+            owner.edit_sessions(|sessions| {
+                let record = sessions.get_mut("history-000000").unwrap();
+                record.state = SessionState::Running;
+                record.target = active.target.clone();
+            });
+            assert_eq!(
+                crate::pollers::take_pollability_visits(),
+                2,
+                "only the changed record's before and after eligibility may be evaluated"
+            );
+            assert_eq!(
+                owner.pollable_worker_inputs().ids,
+                ["active", "history-000000"]
+            );
+            assert_eq!(
+                held.records.sessions.len(),
+                1,
+                "a retained query snapshot changed"
+            );
+            assert_eq!(crate::pollers::take_pollability_visits(), 0);
+        }
     }
 }

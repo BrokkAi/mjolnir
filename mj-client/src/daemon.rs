@@ -228,7 +228,7 @@ pub struct WorkspaceSnapshot {
     pub drafts: Vec<DraftPreview>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
     pub session_id: String,
@@ -323,7 +323,7 @@ pub enum RuntimeLifecycleKind {
     Cleanup,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLifecycleView {
     pub operation_id: String,
