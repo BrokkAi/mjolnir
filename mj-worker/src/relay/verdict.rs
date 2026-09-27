@@ -67,7 +67,7 @@ impl RepliedVerdictState {
             *inference = None;
         }
         match *inference {
-            Some((_, Decision::InferIdle, since)) => (None, Some(since)),
+            Some((_, Decision::InferIdle | Decision::AwaitingInput, since)) => (None, Some(since)),
             Some((_, Decision::ExpectContinuation, since)) => (Some(since), None),
             _ => (None, None),
         }
@@ -207,6 +207,17 @@ impl DurableRelay {
         }
         if decision == Decision::KeepCurrent {
             return Ok("keep_current");
+        }
+        // Commit the turn's decision before publishing activity. The worker owns
+        // both under the relay lock; readers cannot see a half-applied verdict.
+        if let Some(completion) = self.snapshot.turn_completion.as_ref() {
+            let mut next = self.snapshot.clone();
+            next.turn_completion = Some(mj_core::activity::verdict::TurnCompletion {
+                command_id: completion.command_id.clone(),
+                completed_ordinal: self.snapshot.latest_ordinal,
+                decision,
+            });
+            self.commit_snapshot(next)?;
         }
         *self
             .replied_verdict

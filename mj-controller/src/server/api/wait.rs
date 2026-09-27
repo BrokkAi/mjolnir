@@ -145,10 +145,10 @@ pub(super) fn build_observation(
     start_status: Option<StartStatus>,
 ) -> WaitObservation {
     let mut observation = WaitObservation {
-        checking_continuation: matches!(
-            session.activity_state,
-            Some(mj_core::activity::ActivityState::CheckingContinuation)
-        ),
+        activity: session
+            .activity_state
+            .clone()
+            .unwrap_or(mj_core::activity::ActivityState::Unrecognized),
         pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
         resuming: session
@@ -192,6 +192,16 @@ pub(super) fn build_observation(
         observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {
+        // Use activity and turn facts from the same actor snapshot. The viewer
+        // can lag a Jev verdict; a disconnected actor cannot confirm idle.
+        observation.activity = if live.is_some_and(|view| view.connected) {
+            snapshot.operational.activity_state()
+        } else {
+            mj_core::activity::while_disconnected(
+                snapshot.materialized.execution,
+                snapshot.materialized.last_activity_at_ms(),
+            )
+        };
         observation
             .pending_elicitations
             .clone_from(&snapshot.materialized.pending_elicitations);
@@ -205,6 +215,9 @@ pub(super) fn build_observation(
             .capacity_retry
             .clone_from(&snapshot.operational.capacity_retry);
         observation.retry_assessment_pending = snapshot.operational.retry_assessment_pending;
+        observation
+            .turn_completion
+            .clone_from(&snapshot.operational.turn_completion);
         observation.quota_recovery = snapshot
             .operational
             .continuation
@@ -237,6 +250,11 @@ pub(super) async fn finish_wait(
     decision: WaitDecision,
     relay: Option<RelayHealth>,
 ) -> Result<WaitResponse, ApiFailure> {
+    session.activity_state = Some(observation.activity.clone());
+    session.is_idle = observation.activity.is_idle()
+        && session.lifecycle == ViewerLifecycleCategory::Live
+        && !observation.resuming
+        && !observation.closing;
     session
         .background_work
         .clone_from(&observation.background_work);

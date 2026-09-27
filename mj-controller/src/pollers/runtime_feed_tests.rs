@@ -63,6 +63,7 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        turn_completion: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
         native_agents: Vec::new(),

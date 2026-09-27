@@ -119,7 +119,8 @@ fn probability(value: &Value) -> Result<f32> {
     Ok(number as f32)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     AwaitingInput,
     ExpectContinuation,
@@ -127,15 +128,22 @@ pub enum Decision {
     KeepCurrent,
 }
 
+/// A worker-owned completion decision for one physical prompt boundary.
+/// KeepCurrent preserves the harness outcome; other decisions are Jev verdicts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct TurnCompletion {
+    pub command_id: String,
+    /// Transcript frontier the completion decision covers, including autonomous work.
+    pub completed_ordinal: u64,
+    pub decision: Decision,
+}
+
 pub fn decide(phase: TurnPhase, verdict: &TurnVerdict) -> Decision {
     if !(0.0..=1.0).contains(&verdict.needs_user_input) {
         return Decision::KeepCurrent;
     }
     if verdict.needs_user_input >= ACT_CONFIDENCE {
-        return match phase {
-            TurnPhase::Running => Decision::AwaitingInput,
-            TurnPhase::Replied => Decision::InferIdle,
-        };
+        return Decision::AwaitingInput;
     }
     if phase == TurnPhase::Running
         || verdict.needs_user_input > NO_INPUT_CONFIDENCE
@@ -195,11 +203,7 @@ mod tests {
                         let expected = if !(0.0..=1.0).contains(&needs_user_input) {
                             Decision::KeepCurrent
                         } else if needs_user_input >= 0.85 {
-                            if phase == TurnPhase::Running {
-                                Decision::AwaitingInput
-                            } else {
-                                Decision::InferIdle
-                            }
+                            Decision::AwaitingInput
                         } else if phase == TurnPhase::Replied
                             && needs_user_input <= 0.15
                             && (0.85..=1.0).contains(&work_state_confidence)

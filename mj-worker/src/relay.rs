@@ -491,7 +491,14 @@ impl DurableRelay {
         relay.adopt_unqueued_queue_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.promote_next_queued_command()?;
-        relay.replied_verdict_pending = relay.snapshot.retry_assessment.is_some();
+        relay.replied_verdict_pending = relay.snapshot.retry_assessment.is_some()
+            || relay
+                .snapshot
+                .turn_completion
+                .as_ref()
+                .is_some_and(|completion| {
+                    completion.decision == mj_core::activity::verdict::Decision::ExpectContinuation
+                });
         Ok(relay)
     }
 

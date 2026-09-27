@@ -22,7 +22,9 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
-    pub checking_continuation: bool,
+    /// The shared activity classification, including the worker's Jev inference.
+    pub activity: mj_core::activity::ActivityState,
+    pub turn_completion: Option<mj_core::activity::verdict::TurnCompletion>,
     pub background_work: Option<ApiBackgroundWork>,
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
@@ -68,6 +70,46 @@ pub struct WaitObservation {
 }
 
 impl WaitObservation {
+    fn completed_decision(&self, outcome: &MaterializedTurnOutcome) -> Option<WaitDecision> {
+        use mj_core::activity::verdict::Decision;
+        let mut result = WaitDecision::from_outcome(outcome);
+        // Failure, cancellation, and a native input handoff already have a
+        // terminal meaning; background activity cannot turn them into success.
+        if result.outcome != WaitOutcome::Finished {
+            return Some(result);
+        }
+        let completion = self
+            .turn_completion
+            .as_ref()
+            .filter(|completion| completion.command_id == outcome.command_id);
+        if let Some(completion) = completion
+            && matches!(
+                completion.decision,
+                Decision::InferIdle | Decision::AwaitingInput
+            )
+            && let Some(span) = result.turn.as_mut()
+        {
+            span.completed_position = span.completed_position.max(completion.completed_ordinal);
+        }
+        match completion.map(|completion| completion.decision) {
+            Some(Decision::ExpectContinuation) => None,
+            Some(Decision::InferIdle) => Some(result),
+            Some(Decision::AwaitingInput) => {
+                result.outcome = WaitOutcome::InputRequired;
+                result.stop_reason = Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into());
+                Some(result)
+            }
+            Some(Decision::KeepCurrent) | None => {
+                let later_turn = self.active_turn.as_ref().is_some_and(|active| {
+                    active
+                        .accepted_ordinal
+                        .is_some_and(|ordinal| ordinal > outcome.completed_ordinal)
+                });
+                (self.activity.is_idle() || later_turn).then_some(result)
+            }
+        }
+    }
+
     /// Fold a child's recorded report into this observation, judged against
     /// the turn this observation saw finish.
     pub fn apply_subagent_report(
@@ -198,7 +240,11 @@ impl WaitDecision {
 ///    prompt handed over at creation that has not become a turn yet is
 ///    queued work too: until it is submitted there is no turn to target,
 ///    and an idle session would otherwise read as finished before it.
-/// 4. A completed turn under server assessment or with a retry armed is not an
+/// 4. A session-level wait also requires the shared activity classification to
+///    be idle, including Jev's assessment of background work and continuation.
+///    Both forms use the command-bound Jev completion decision. A recorded
+///    final verdict remains usable while later unrelated work is active.
+/// 5. A completed turn under server assessment or with a retry armed is not an
 ///    ending: the worker may submit the retry itself, so the wait keeps waiting.
 ///
 /// A turn that really did fail still reports `error`: a rejected or interrupted
@@ -312,6 +358,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
                     .accepted_ordinal
                     .is_some_and(|ordinal| ordinal >= target)
                     && !retry_pending(outcome)
+                    && observation.completed_decision(outcome).is_some()
             })
     });
     if request.return_on_input && !target_finished && !observation.pending_elicitations.is_empty() {
@@ -326,6 +373,12 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             turn: None,
         });
     }
+    // Session waits follow the same activity decision as the worker and UI.
+    // Targeted waits use the command-bound completion below; current session
+    // activity may belong to later unrelated work.
+    if request.turn_id.is_none() && !observation.activity.is_idle() {
+        return None;
+    }
     match target {
         Some(target) => {
             let outcome = observation.last_turn_outcome.as_ref()?;
@@ -338,11 +391,10 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             if retry_pending(outcome) {
                 return None;
             }
-            Some(WaitDecision::from_outcome(outcome))
+            observation.completed_decision(outcome)
         }
         None => {
-            if observation.checking_continuation
-                || observation.cannot_take_prompt
+            if observation.cannot_take_prompt
                 || matches!(observation.start_status, Some(StartStatus::Pending))
                 || observation.execution != MaterializedExecutionState::Idle
                 || observation.active_turn.is_some()
@@ -352,7 +404,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             }
             match observation.last_turn_outcome.as_ref() {
                 Some(outcome) if retry_pending(outcome) => None,
-                Some(outcome) => Some(WaitDecision::from_outcome(outcome)),
+                Some(outcome) => observation.completed_decision(outcome),
                 // Idle with nothing queued and nothing ever finished: there is
                 // no turn to wait for, so say so immediately rather than block
                 // for the full timeout.

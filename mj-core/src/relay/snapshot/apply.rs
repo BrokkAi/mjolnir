@@ -379,6 +379,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
+                snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
+                    command_id: command_id.clone(),
+                    completed_ordinal: event.ordinal,
+                    decision: crate::activity::verdict::Decision::KeepCurrent,
+                });
                 snapshot.continuation.completed_command_id =
                     (snapshot.continuation.user_command_id.as_ref() == Some(command_id)
                         || matches!(

@@ -165,8 +165,9 @@ pub(crate) struct WaitArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// The turn to wait for, as `mj prompt` printed it. Omit it to wait until
-    /// the session is idle with nothing queued.
+    /// The turn to wait for, as `mj prompt` printed it. Both forms honor the
+    /// worker's completion assessment, including expected continuation.
+    /// Omit it to wait until the session is idle with nothing queued.
     #[arg(long)]
     turn: Option<u64>,
     /// Seconds to wait before answering `timeout`.

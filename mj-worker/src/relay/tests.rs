@@ -5453,3 +5453,61 @@ fn runtime_identity_unknown_is_allowed_only_without_a_constraint() {
     submit_relay(&mut relay, "unconstrained", prompt("work"));
     assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 }
+
+#[test]
+fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inference() {
+    use mj_core::activity::verdict::Decision;
+    for decision in [
+        Decision::ExpectContinuation,
+        Decision::InferIdle,
+        Decision::AwaitingInput,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+        submit_relay(&mut relay, "first-command", prompt("work"));
+        relay.claim_pending_commands(true).unwrap();
+        relay
+            .record_command_completed(
+                "first-command",
+                RelayCommandOutcome::Prompt {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                    diagnostic: None,
+                },
+            )
+            .unwrap();
+        let generation = relay.turn_context.generation();
+        assert_eq!(
+            relay
+                .apply_replied_decision(generation, decision, 200)
+                .unwrap(),
+            "applied"
+        );
+        let completion = relay.operational_state().turn_completion.unwrap();
+        assert_eq!(completion.command_id, "first-command");
+        assert_eq!(completion.decision, decision);
+        let identity = relay.retry_assessment_identity();
+        relay.resolve_retry_assessment(identity, false).unwrap();
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        assert_eq!(
+            relay.operational_state().turn_completion,
+            Some(completion.clone())
+        );
+        assert_eq!(relay.activity_facts().inferred_idle_since_ms, None);
+        assert_eq!(
+            relay.replied_verdict_pending,
+            decision == Decision::ExpectContinuation
+        );
+        submit_relay(&mut relay, "second-command", prompt("different work"));
+        relay.claim_pending_commands(true).unwrap();
+        assert_ne!(
+            relay
+                .apply_replied_decision(generation, Decision::InferIdle, 300)
+                .unwrap(),
+            "applied"
+        );
+        assert_eq!(relay.operational_state().turn_completion, Some(completion));
+    }
+}

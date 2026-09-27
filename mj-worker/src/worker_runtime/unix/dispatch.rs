@@ -245,7 +245,7 @@ async fn run_relay_coordinator_with_verdict(
                         }
                         match answer {
                             Ok(answer) => {
-                                if relay.resolve_retry_assessment(assessment, answer.should_retry_server_error())? {
+                                if answer.should_retry_server_error() && relay.resolve_retry_assessment(assessment.clone(), true)? {
                                     attempt.finish("applied", "server_retry_armed");
                                     continue;
                                 }
@@ -257,6 +257,7 @@ async fn run_relay_coordinator_with_verdict(
                                         return Err(error);
                                     }
                                 };
+                                relay.resolve_retry_assessment(assessment, false)?;
                                 attempt.finish(if reason == "applied" { "applied" } else { "unchanged" }, reason);
                                 if decision == Decision::KeepCurrent {
                                     relay.retry_replied_verdict(generation);

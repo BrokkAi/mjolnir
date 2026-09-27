@@ -958,6 +958,8 @@ fn api_app_with_engines(
     // session-scoped error must not answer a wait about one turn, so every
     // wait test below runs against a session that is carrying one.
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    // The fake viewer represents an attached idle worker unless overridden.
+    snapshot.sessions[0].activity_state = Some(mj_core::activity::ActivityState::default());
     adjust(&mut snapshot);
     let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
     let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
@@ -2431,8 +2433,8 @@ fn idle(outcome: Option<MaterializedTurnOutcome>) -> WaitObservation {
 
 /// A wait must never conclude that a turn finished from a state that only
 /// says nobody can see the session. `mj wait` and the sub-agent wait share
-/// this one decision, and it reads the durable turn record: the activity
-/// state, which can be `Unknown` or `Unrecognized`, has no way in.
+/// this one decision. Durable turn ownership remains a guard even when the
+/// published activity state says idle.
 #[test]
 fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
     let request = WaitRequest::default();
@@ -3791,9 +3793,9 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
 }
 
 #[test]
-fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary() {
+fn both_wait_forms_follow_continuation() {
     let observation = WaitObservation {
-        checking_continuation: true,
+        activity: mj_core::activity::ActivityState::CheckingContinuation,
         execution: MaterializedExecutionState::Idle,
         last_turn_outcome: Some(completed(7, "end_turn")),
         ..Default::default()
@@ -3803,10 +3805,102 @@ fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary()
         turn_id: Some(7),
         ..Default::default()
     };
+    assert!(resolve_wait(&observation, &request).is_none());
+}
+
+#[test]
+fn session_wait_uses_the_workers_published_jev_activity() {
+    use mj_core::activity::ActivityState;
+    let root = tempfile::tempdir().unwrap();
+    let relay = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "test").unwrap();
+    let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
+    materialized.last_turn_outcome = Some(completed(7, "end_turn"));
+    let mut live = ManagedSessionView {
+        connected: true,
+        error: None,
+        snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+            window: mj_core::state::ProjectionWindow::of(&materialized),
+            materialized,
+            operational: relay.operational_state(),
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
+            latest_credential_sync_signal: None,
+            worker_build: None,
+        }),
+    };
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.capabilities.prompt = true;
+    session.activity_state = Some(ActivityState::Idle { since_ms: None });
+    let explicit = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    for activity in [
+        ActivityState::Expecting { since_ms: 10 },
+        ActivityState::Background {
+            started_at_ms: Some(10),
+        },
+        ActivityState::CheckingContinuation,
+        ActivityState::Goal,
+        ActivityState::Unrecognized,
+    ] {
+        live.snapshot.as_mut().unwrap().operational.activity = Some(activity.clone());
+        let observation = build_observation(&snapshot, &session, Some(&live), None, None);
+        assert_eq!(observation.activity, activity);
+        assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+        assert!(resolve_wait(&observation, &explicit).is_none());
+        let observation = WaitObservation {
+            start_status: Some(StartStatus::Submitted { turn_id: 7 }),
+            ..observation
+        };
+        assert!(
+            resolve_wait(&observation, &WaitRequest::default()).is_none(),
+            "an implicit initial turn target must still follow session activity"
+        );
+    }
+    // Jev can judge a reply finished even with an abandoned background task.
+    // Consume that published decision rather than recounting the processes.
+    let operational = &mut live.snapshot.as_mut().unwrap().operational;
+    operational
+        .background_commands
+        .push(mj_core::relay::BackgroundCommand {
+            id: "leftover".into(),
+            started_at_ms: 1,
+            command: "sleep infinity".into(),
+            can_stop: false,
+        });
+    operational.activity = Some(ActivityState::Idle { since_ms: Some(20) });
+    operational.turn_completion = Some(mj_core::activity::verdict::TurnCompletion {
+        command_id: "prompt-7".into(),
+        completed_ordinal: 20,
+        decision: mj_core::activity::verdict::Decision::InferIdle,
+    });
+    session.activity_state = Some(ActivityState::Expecting { since_ms: 10 });
+    let observation = build_observation(&snapshot, &session, Some(&live), None, None);
     assert_eq!(
-        resolve_wait(&observation, &request).unwrap().outcome,
+        resolve_wait(&observation, &WaitRequest::default())
+            .unwrap()
+            .outcome,
         WaitOutcome::Finished
     );
+
+    live.connected = false;
+    session.activity_state = Some(ActivityState::Idle { since_ms: None });
+    let disconnected = build_observation(&snapshot, &session, Some(&live), None, None);
+    assert!(matches!(
+        disconnected.activity,
+        ActivityState::Unknown { .. }
+    ));
+    assert!(resolve_wait(&disconnected, &WaitRequest::default()).is_none());
+    assert!(
+        resolve_wait(&disconnected, &explicit).is_some(),
+        "recorded turn outcomes survive a disconnect"
+    );
+    session.activity_state = None;
+    let unknown = build_observation(&snapshot, &session, None, None, None);
+    assert!(resolve_wait(&unknown, &WaitRequest::default()).is_none());
 }
 
 #[test]
@@ -4427,4 +4521,57 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
     .await;
     assert_eq!(response.final_message.as_deref(), Some("Report delivered."));
     assert_eq!(response.report_source.as_deref(), Some("last_message"));
+}
+
+#[test]
+fn both_wait_forms_use_recorded_jev_outcomes_and_targeted_wait_ignores_later_activity() {
+    use mj_core::activity::{
+        ActivityState,
+        verdict::{Decision, TurnCompletion},
+    };
+    let mut observation = idle(Some(completed(7, "end_turn")));
+    let targeted = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    for (decision, expected) in [
+        (Decision::ExpectContinuation, None),
+        (Decision::InferIdle, Some(WaitOutcome::Finished)),
+        (Decision::AwaitingInput, Some(WaitOutcome::InputRequired)),
+    ] {
+        observation.turn_completion = Some(TurnCompletion {
+            command_id: "prompt-7".into(),
+            completed_ordinal: 20,
+            decision,
+        });
+        for request in [&WaitRequest::default(), &targeted] {
+            assert_eq!(
+                resolve_wait(&observation, request).map(|d| d.outcome),
+                expected
+            );
+        }
+        if expected.is_some() {
+            assert_eq!(
+                resolve_wait(&observation, &targeted)
+                    .unwrap()
+                    .turn
+                    .unwrap()
+                    .completed_position,
+                20,
+                "the returned summary includes the continuation Jev judged"
+            );
+        }
+        // The completion record belongs to this command, not the current
+        // activity. Later work must not reinterpret a settled target.
+        observation.activity = ActivityState::Goal;
+        assert_eq!(
+            resolve_wait(&observation, &targeted).map(|d| d.outcome),
+            expected
+        );
+        assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+        observation.activity = ActivityState::default();
+    }
+    observation.turn_completion.as_mut().unwrap().command_id = "different-command".into();
+    observation.activity = ActivityState::Expecting { since_ms: 20 };
+    assert!(resolve_wait(&observation, &targeted).is_none());
 }

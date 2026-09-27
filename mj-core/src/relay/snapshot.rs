@@ -495,6 +495,9 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    /// Recorded completion, independent of process-local activity inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
     #[serde(default)]
     pub continuation: crate::continuation::ContinuationState,
     /// Negotiated connection protocol, supplied by the controller after hello.
@@ -1102,6 +1105,9 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    /// Recorded completion, independent of process-local activity inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
     #[serde(default)]
     pub continuation: crate::continuation::ContinuationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1205,6 +1211,7 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            turn_completion: None,
             continuation: Default::default(),
             steering: None,
             cancelling_prompt_id: None,
@@ -1256,6 +1263,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),
             relay_protocol_version: None,
             native_agents: self.native_agents.values().cloned().collect(),

@@ -192,6 +192,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            turn_completion: None,
             continuation: Default::default(),
             relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
             native_agents: Vec::new(),
