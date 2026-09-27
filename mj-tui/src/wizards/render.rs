@@ -687,23 +687,18 @@ pub(crate) fn render_review_wizard(
     let mut subagent_effort_row = None;
     let mut subagent_retry_row = None;
     let subagent_row = subagents.map(|wizard| {
-        lines.push(Line::styled("Subagents", theme::muted()));
         let row = lines.len() as u16;
-        for _ in 0..4 {
-            lines.push(Line::raw(""));
-        }
+        lines.push(Line::raw(""));
         if matches!(
             *wizard.subagents,
             mj_core::subagent::SubagentPolicy::SingleModel { .. }
         ) {
-            lines.push(Line::styled("Model", theme::muted()));
-            let height = wizard.subagent_models().len().min(3) as u16;
+            let height = 1;
             subagent_model_row = Some((lines.len() as u16, height));
             for _ in 0..height {
                 lines.push(Line::raw(""));
             }
-            lines.push(Line::styled("Effort", theme::muted()));
-            let height = wizard.subagent_efforts().len().min(3) as u16;
+            let height = 1;
             subagent_effort_row = Some((lines.len() as u16, height));
             for _ in 0..height {
                 lines.push(Line::raw(""));
@@ -836,48 +831,72 @@ pub(crate) fn render_review_wizard(
             WizardControl::CreateManagedWorktree,
         );
     }
+    let mut expanded_subagent_combo = None;
     if let Some((wizard, row)) = subagents.zip(subagent_row) {
-        let modes = mj_core::subagent::SubagentPolicy::LABELS
-            .iter()
-            .map(|label| Line::raw(*label))
-            .collect::<Vec<_>>();
-        ChoiceList::render(
-            frame,
-            viewport.row(row, 4),
-            &modes,
-            wizard.subagents.index(),
-            form,
+        let mut selectors = vec![(
             WizardControl::Subagents,
-        );
-        if let Some((row, height)) = subagent_model_row {
-            let choices = wizard
-                .subagent_models()
-                .into_iter()
-                .map(Line::raw)
-                .collect::<Vec<_>>();
-            ChoiceList::render(
-                frame,
-                viewport.row(row, height),
-                &choices,
-                wizard.subagent_model_index(),
-                form,
+            "Subagents",
+            row,
+            mj_core::subagent::SubagentPolicy::LABELS
+                .iter()
+                .map(|label| (*label).to_owned())
+                .collect::<Vec<_>>(),
+            wizard.subagents.index(),
+            true,
+        )];
+        if let Some((row, _)) = subagent_model_row {
+            selectors.push((
                 WizardControl::SubagentModel,
-            );
+                "Model",
+                row,
+                wizard.subagent_models(),
+                wizard.subagent_model_index(),
+                wizard.subagent_options().is_some(),
+            ));
         }
-        if let Some((row, height)) = subagent_effort_row {
-            let choices = wizard
-                .subagent_efforts()
-                .into_iter()
-                .map(Line::raw)
-                .collect::<Vec<_>>();
-            ChoiceList::render(
-                frame,
-                viewport.row(row, height),
-                &choices,
-                wizard.subagent_effort_index(),
-                form,
+        if let Some((row, _)) = subagent_effort_row {
+            selectors.push((
                 WizardControl::SubagentEffort,
+                "Effort",
+                row,
+                wizard.subagent_efforts(),
+                wizard.subagent_effort_index(),
+                wizard.subagent_options().is_some(),
+            ));
+        }
+        for (id, label, row, values, committed, enabled) in selectors {
+            let area = viewport.row(row, 1);
+            let label_width = 11.min(area.width);
+            frame.render_widget(
+                Line::raw(label),
+                Rect::new(area.x, area.y, label_width, area.height),
             );
+            let field = Rect::new(
+                area.x + label_width,
+                area.y,
+                area.width - label_width,
+                area.height,
+            );
+            let selected = wizard.subagent_combo.selection(id, committed);
+            let value = values.get(selected).cloned().unwrap_or_default();
+            let options = values.into_iter().map(Line::raw).collect::<Vec<_>>();
+            ComboBox::render(
+                frame,
+                inner,
+                field,
+                &value,
+                &options,
+                selected,
+                false,
+                enabled,
+                " values · ↑/↓ select · Tab/Enter accept ",
+                PopupSide::Below,
+                form,
+                id,
+            );
+            if wizard.subagent_combo.is_open(id) {
+                expanded_subagent_combo = Some((id, field, value, options, selected, enabled));
+            }
         }
         if let Some(row) = subagent_retry_row {
             mj_chat::components::Button::render(
@@ -1019,6 +1038,23 @@ pub(crate) fn render_review_wizard(
         &buttons,
         form,
     );
+    // Paint the active popup last so it overlays the remaining review fields.
+    if let Some((id, field, value, options, selected, enabled)) = expanded_subagent_combo {
+        ComboBox::render(
+            frame,
+            inner,
+            field,
+            &value,
+            &options,
+            selected,
+            true,
+            enabled,
+            " values · ↑/↓ select · Tab/Enter accept ",
+            PopupSide::Below,
+            form,
+            id,
+        );
+    }
 }
 
 /// Suffix that shows an attached directory's access mode in a list row.

@@ -103,6 +103,12 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     /// Whether selecting a target should recompute the size at once. Creation
     /// always does; a resume only does for a target the session can use.
     fn prepares_target_on_select(&self, dashboard: &DashboardState) -> bool;
+    fn route_extra_interaction(
+        &mut self,
+        interaction: Option<Interaction<WizardControl>>,
+    ) -> Option<Interaction<WizardControl>> {
+        interaction
+    }
     /// Handles an interaction with a control that only one wizard has.
     fn apply_extra_interaction(
         &mut self,
@@ -295,6 +301,16 @@ impl WizardDraft for NewWizard {
             self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
+        let selected = match id {
+            WizardControl::Subagents => Some(self.subagents.index()),
+            WizardControl::SubagentModel => Some(self.subagent_model_index()),
+            WizardControl::SubagentEffort => Some(self.subagent_effort_index()),
+            _ => None,
+        };
+        if let Some(selected) = selected {
+            self.subagent_combo.open(id, selected);
+            return Ok(dashboard.keep(self));
+        }
         if id == WizardControl::SubagentRetry {
             self.subagent_discovery = None;
             return Ok(dashboard.keep(self));
@@ -382,6 +398,13 @@ impl WizardDraft for NewWizard {
         }
     }
 
+    fn route_extra_interaction(
+        &mut self,
+        interaction: Option<Interaction<WizardControl>>,
+    ) -> Option<Interaction<WizardControl>> {
+        self.subagent_combo.route(interaction)
+    }
+
     /// Every target is offered, and the size is prepared for whichever one is
     /// picked; an unusable target is refused later, on Next.
     fn prepares_target_on_select(&self, _dashboard: &DashboardState) -> bool {
@@ -438,7 +461,7 @@ impl WizardDraft for NewWizard {
                 self.create_managed_worktree = !self.create_managed_worktree;
                 dashboard.record_event_handled();
             }
-            Interaction::Select(WizardControl::Subagents, selected)
+            Interaction::ComboBoxCommit(WizardControl::Subagents, selected)
                 if self.subagent_choice_applies(&dashboard.config) =>
             {
                 if self.subagents.index() != *selected {
@@ -447,11 +470,11 @@ impl WizardDraft for NewWizard {
                 }
                 dashboard.record_event_handled();
             }
-            Interaction::Select(WizardControl::SubagentModel, selected) => {
+            Interaction::ComboBoxCommit(WizardControl::SubagentModel, selected) => {
                 self.select_subagent_model(*selected);
                 dashboard.record_event_handled();
             }
-            Interaction::Select(WizardControl::SubagentEffort, selected) => {
+            Interaction::ComboBoxCommit(WizardControl::SubagentEffort, selected) => {
                 self.select_subagent_effort(*selected);
                 dashboard.record_event_handled();
             }
@@ -590,9 +613,12 @@ impl WizardDraft for NewWizard {
         if self.subagent_choice_applies(&dashboard.config) {
             form.declare_with_enabled(
                 WizardControl::Subagents,
-                ControlKind::ChoiceList {
+                ControlKind::ComboBox {
                     len: 4,
-                    selected: self.subagents.index(),
+                    selected: self
+                        .subagent_combo
+                        .selection(WizardControl::Subagents, self.subagents.index()),
+                    expanded: self.subagent_combo.is_open(WizardControl::Subagents),
                 },
                 true,
             );
@@ -602,17 +628,23 @@ impl WizardDraft for NewWizard {
             ) {
                 form.declare_with_enabled(
                     WizardControl::SubagentModel,
-                    ControlKind::ChoiceList {
+                    ControlKind::ComboBox {
                         len: self.subagent_models().len(),
-                        selected: self.subagent_model_index(),
+                        selected: self
+                            .subagent_combo
+                            .selection(WizardControl::SubagentModel, self.subagent_model_index()),
+                        expanded: self.subagent_combo.is_open(WizardControl::SubagentModel),
                     },
                     self.subagent_options().is_some(),
                 );
                 form.declare_with_enabled(
                     WizardControl::SubagentEffort,
-                    ControlKind::ChoiceList {
+                    ControlKind::ComboBox {
                         len: self.subagent_efforts().len(),
-                        selected: self.subagent_effort_index(),
+                        selected: self
+                            .subagent_combo
+                            .selection(WizardControl::SubagentEffort, self.subagent_effort_index()),
+                        expanded: self.subagent_combo.is_open(WizardControl::SubagentEffort),
                     },
                     self.subagent_options().is_some(),
                 );

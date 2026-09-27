@@ -51,6 +51,7 @@ impl DashboardState {
             worktree_options: None,
             create_managed_worktree: false,
             subagents: Box::new(self.state.last_subagent_policy.clone()),
+            subagent_combo: Box::default(),
             subagent_discovery: None,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,

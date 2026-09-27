@@ -196,6 +196,7 @@ impl DashboardState {
             }
             Err(interaction) => interaction,
         };
+        let action = wizard.route_extra_interaction(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
@@ -533,7 +534,12 @@ impl DashboardState {
             WizardControl::Add => {}
             WizardControl::Submit => return wizard.submit_review(self),
 
-            _ => {}
+            _ => {
+                return match wizard.activate_extra(self, id) {
+                    Ok(action) => action,
+                    Err(wizard) => self.keep(wizard),
+                };
+            }
         }
         self.keep(wizard)
     }
