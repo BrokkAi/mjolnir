@@ -206,6 +206,7 @@ pub(super) fn project_observation(
         RelayObservation::CommandCompleted {
             command_id,
             outcome,
+            ..
         } => {
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
@@ -375,11 +376,13 @@ pub(super) fn project_observation(
             command_id,
             command,
             message,
+            reason,
         }
         | RelayObservation::CommandInterrupted {
             command_id,
             command,
             message,
+            reason,
         } => {
             if *command == RelayCommandKind::ClearContext {
                 mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -431,10 +434,12 @@ pub(super) fn project_observation(
                         RelayObservation::CommandRejected { .. }
                     ) {
                         TurnOutcomeKind::Rejected {
+                            reason: *reason,
                             message: outcome_text,
                         }
                     } else {
                         TurnOutcomeKind::Interrupted {
+                            reason: *reason,
                             message: outcome_text,
                         }
                     },
@@ -477,16 +482,16 @@ pub(super) fn project_observation(
                     ),
                     format!("Work interrupted: {message}"),
                 );
-            } else if !controller_coordination(*command) {
+            } else if !controller_coordination(*command)
+                || reason.is_some_and(|reason| !reason.expected_cancellation())
+            {
                 // The command id is internal. The relay event keeps it for
                 // diagnosis, and the log line below ties it to the notice.
                 tracing::info!(%command_id, ?command, %message, "relay command did not complete");
                 push_system(mutation, event, message.clone());
             }
-            // Checkpoint barriers and recovery floors are coordination between
-            // the daemon and the worker. Their failure has nothing for the
-            // person to act on; the relay journal keeps the command id and the
-            // diagnostic.
+            // Expected coordination cleanup stays in the journal and API.
+            // Typed control failures remain visible to the person.
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
             let mut configuration = current.configuration.clone();
@@ -614,7 +619,7 @@ pub(super) fn project_observation(
                 }
             }
         }
-        RelayObservation::Warning { message } => {
+        RelayObservation::Warning { message } | RelayObservation::SessionFault { message, .. } => {
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {

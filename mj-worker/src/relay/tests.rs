@@ -250,10 +250,18 @@ fn uncertain_steering_survives_restart_and_requires_explicit_retry() {
         "prompt-queued"
     );
     relay
-        .record_command_interrupted("steer-first", "connection lost")
+        .record_command_interrupted(
+            "steer-first",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "connection lost",
+        )
         .unwrap();
     relay
-        .record_command_interrupted("prompt-first", "harness restarted")
+        .record_command_interrupted(
+            "prompt-first",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "harness restarted",
+        )
         .unwrap();
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     assert!(
@@ -576,7 +584,11 @@ fn steering_rejects_changed_queue_and_consumes_late_confirmed_input_once() {
         mj_core::relay::SteeringStatus::Applied
     );
     relay
-        .record_command_interrupted("prompt-first", "stopped")
+        .record_command_interrupted(
+            "prompt-first",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "stopped",
+        )
         .unwrap();
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     assert!(
@@ -1304,7 +1316,11 @@ fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
     );
     assert_eq!(first[0].command, prompt("do it"));
     relay
-        .record_command_interrupted("first-prompt", "restart")
+        .record_command_interrupted(
+            "first-prompt",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "restart",
+        )
         .unwrap();
 
     submit_relay(&mut relay, "second-prompt", prompt("continue"));
@@ -1768,6 +1784,7 @@ fn a_shell_cancelled_before_launch_still_reaches_the_next_prompt() {
     relay
         .record_command_interrupted(
             "shell-command-01",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
             "shell command was cancelled before it started",
         )
         .unwrap();
@@ -1847,6 +1864,8 @@ fn controller_disconnect_cannot_leave_checkpoint_barrier_paused() {
     let cancelled = relay
         .cancel_checkpoint_barrier_on_disconnect("barrier-disconnect")
         .unwrap();
+    assert!(crate::relay::test_support::retained_events(&relay).iter().any(|event| matches!(&event.observation,
+        RelayObservation::CommandInterrupted { reason: Some(mj_core::event_outcome::OutcomeReason::ControllerDisconnected), command_id, .. } if command_id == "barrier-disconnect")));
     assert!(cancelled.is_some());
     assert!(relay.operational_state().checkpoint_barrier.is_none());
     let next = relay.claim_pending_commands(true).unwrap();
@@ -3391,8 +3410,16 @@ fn claude_background_tasks_survive_prompt_boundaries_until_the_level_is_empty() 
                     usage: None,
                 },
             ),
-            "rejected" => relay.record_command_rejected("review-prompt", "adapter failed"),
-            _ => relay.record_command_interrupted("review-prompt", "cancelled"),
+            "rejected" => relay.record_command_rejected(
+                "review-prompt",
+                mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                "adapter failed",
+            ),
+            _ => relay.record_command_interrupted(
+                "review-prompt",
+                mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                "cancelled",
+            ),
         }
         .unwrap();
 
@@ -3892,8 +3919,16 @@ fn prompt_boundaries_clear_stale_tools_but_preserve_detached_commands() {
                     usage: None,
                 },
             ),
-            "rejected" => relay.record_command_rejected("boundary-prompt", "adapter failed"),
-            _ => relay.record_command_interrupted("boundary-prompt", "cancelled"),
+            "rejected" => relay.record_command_rejected(
+                "boundary-prompt",
+                mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                "adapter failed",
+            ),
+            _ => relay.record_command_interrupted(
+                "boundary-prompt",
+                mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+                "cancelled",
+            ),
         }
         .unwrap();
 
@@ -4059,7 +4094,11 @@ fn an_in_flight_prompt_blocks_checkpoint_barrier_admission() {
     );
 
     relay
-        .record_command_interrupted("stuck-prompt", "worker restarted")
+        .record_command_interrupted(
+            "stuck-prompt",
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            "worker restarted",
+        )
         .unwrap();
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
@@ -5141,7 +5180,11 @@ fn a_rejected_clear_does_not_block_later_prompts() {
     );
     relay.claim_pending_commands(true).unwrap();
     relay
-        .record_command_rejected("clear-request", "restore model after clear failed")
+        .record_command_rejected(
+            "clear-request",
+            mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+            "restore model after clear failed",
+        )
         .unwrap();
     assert!(relay.snapshot.dispatches.contains_key("clear-request"));
     assert_eq!(relay.clear_context_started_at_ms(), None);

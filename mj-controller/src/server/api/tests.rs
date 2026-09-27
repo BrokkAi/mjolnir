@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::state::TurnOutcomeKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
@@ -22,7 +23,8 @@ fn error_event(seq: u64) -> crate::database::ApiEvent {
         seq,
         session_id: "session-1".into(),
         recorded_at_ms: 10,
-        event: crate::database::ApiEventData::Error {
+        event: crate::database::ApiEventData::SessionFault {
+            reason: mj_core::event_outcome::OutcomeReason::StartupFailed,
             message: "test failure".into(),
             command_id: None,
         },
@@ -207,7 +209,7 @@ async fn event_stream_replays_then_follows_live_events_with_version_and_ids() {
         .unwrap();
     let text = std::str::from_utf8(frame.data_ref().unwrap()).unwrap();
     assert!(text.contains("id: 2"), "{text}");
-    assert!(text.contains("event: error"), "{text}");
+    assert!(text.contains("event: session_fault"), "{text}");
     backend.events.lock().unwrap().push(error_event(3));
     let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
@@ -248,7 +250,8 @@ async fn event_stream_slow_readers_do_not_block_requests_or_shutdown() {
     let backend = Arc::new(FakeBackend::default());
     backend.events.lock().unwrap().extend((1..=200).map(|seq| {
         let mut event = error_event(seq);
-        event.event = crate::database::ApiEventData::Error {
+        event.event = crate::database::ApiEventData::SessionFault {
+            reason: mj_core::event_outcome::OutcomeReason::StartupFailed,
             message: "x".repeat(8192),
             command_id: None,
         };
@@ -2668,6 +2671,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
         completed_ordinal: 5,
         completed_at_ms: 10,
         outcome: TurnOutcomeKind::Rejected {
+            reason: None,
             message: "transport failed".into(),
         },
     });

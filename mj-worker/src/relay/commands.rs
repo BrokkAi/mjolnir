@@ -732,6 +732,14 @@ impl DurableRelay {
         self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
+                barrier_command_id: match &self.snapshot.dispatches[command_id].command {
+                    RelayCommand::CompleteCheckpoint { barrier_command_id }
+                    | RelayCommand::ReleaseCheckpoint { barrier_command_id } => {
+                        Some(barrier_command_id.clone())
+                    }
+                    _ => None,
+                },
+                command: Some(self.snapshot.dispatches[command_id].command.kind()),
                 command_id: command_id.to_owned(),
                 outcome,
             },
@@ -792,7 +800,11 @@ impl DurableRelay {
             })
             .collect();
         for id in stale {
-            self.record_command_rejected(&id, "The requested turn is no longer running")?;
+            self.record_command_rejected(
+                &id,
+                mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+                "The requested turn is no longer running",
+            )?;
         }
         self.submit_automatic_steer()?;
         self.promote_next_queued_command()?;
@@ -803,7 +815,7 @@ impl DurableRelay {
             .is_some_and(|s| s.holds_queue())
         {
             while let Some((barrier_id, _)) = self.next_queued_checkpoint() {
-                self.record_command_rejected(&barrier_id, "Resolve uncertain steering delivery before checkpointing or moving this session")?;
+                self.record_command_rejected(&barrier_id, mj_core::event_outcome::OutcomeReason::AdmissionRejected, "Resolve uncertain steering delivery before checkpointing or moving this session")?;
             }
         }
         if self.snapshot.checkpoint_barrier.is_none() {
@@ -1397,6 +1409,14 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
+                barrier_command_id: match &self.snapshot.dispatches[command_id].command {
+                    RelayCommand::CompleteCheckpoint { barrier_command_id }
+                    | RelayCommand::ReleaseCheckpoint { barrier_command_id } => {
+                        Some(barrier_command_id.clone())
+                    }
+                    _ => None,
+                },
+                command: Some(self.snapshot.dispatches[command_id].command.kind()),
                 command_id: command_id.to_owned(),
                 outcome,
             },
@@ -1425,6 +1445,7 @@ impl DurableRelay {
     pub fn record_command_rejected(
         &mut self,
         command_id: &str,
+        reason: mj_core::event_outcome::OutcomeReason,
         message: impl Into<String>,
     ) -> Result<u64> {
         self.require_dispatch(command_id)?;
@@ -1432,6 +1453,7 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandRejected {
+                reason: Some(reason),
                 command_id: command_id.to_owned(),
                 command,
                 message: message.into(),
@@ -1447,6 +1469,7 @@ impl DurableRelay {
     pub fn record_command_interrupted(
         &mut self,
         command_id: &str,
+        reason: mj_core::event_outcome::OutcomeReason,
         message: impl Into<String>,
     ) -> Result<u64> {
         self.require_dispatch(command_id)?;
@@ -1454,6 +1477,7 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandInterrupted {
+                reason: Some(reason),
                 command_id: command_id.to_owned(),
                 command,
                 message: message.into(),
@@ -1517,6 +1541,7 @@ impl DurableRelay {
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandInterrupted {
+                reason: Some(mj_core::event_outcome::OutcomeReason::ControllerDisconnected),
                 command_id: command_id.to_owned(),
                 command: RelayCommandKind::BeginCheckpoint,
                 message: "checkpoint barrier cancelled because its controller disconnected"

@@ -313,7 +313,7 @@ pub async fn run_with_shutdown(
     if let Err(error) = &result {
         emit_runtime_event(
             &events,
-            RuntimeEvent::Warning {
+            RuntimeEvent::SessionFault {
                 message: format!("ACP runtime failed: {error:#}"),
             },
         )
@@ -397,7 +397,7 @@ async fn run_inner(
                 spec.context_restore = Some(reset);
                 emit_runtime_event(&events, RuntimeEvent::CommandRejected {
                     request_id, message: format!("Could not clear context; restoring the previous conversation: {error:#}"),
-                }).await?;
+                 reason: mj_core::event_outcome::OutcomeReason::CommandFailed }).await?;
                 let (previous, used, goal) = rollback.take().expect("clear rollback identity");
                 spec.resume_session = Some(previous);
                 spec.native_session_may_have_history = used;
@@ -723,6 +723,7 @@ async fn emit_close_outcome<T>(
             emit_runtime_event(
                 events,
                 RuntimeEvent::CommandRejected {
+                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                     request_id,
                     message: format!("close ACP session: {error}"),
                 },

@@ -97,6 +97,7 @@ impl NativeHistoryEvidence {
             RelayObservation::CommandCompleted {
                 command_id,
                 outcome,
+                ..
             } => {
                 self.commands.remove(&command_id);
                 match outcome {
@@ -142,6 +143,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::ConfigurationUpdated { .. }
             | RelayObservation::CheckpointReady { .. }
             | RelayObservation::SessionRestarted
+            | RelayObservation::SessionFault { .. }
             | RelayObservation::Warning { .. }
             | RelayObservation::Notice { .. }
             | RelayObservation::ElicitationResolved { .. }

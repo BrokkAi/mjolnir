@@ -34,6 +34,7 @@ impl PendingControls {
             match response {
                 Ok(_) => RuntimeEvent::GoalControlApplied { request_id },
                 Err(error) => RuntimeEvent::CommandRejected {
+                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                     request_id,
                     message: format!("/goal {} failed: {error}", action.as_str()),
                 },
@@ -172,6 +173,7 @@ pub(super) async fn prepare_control(
         emit_runtime_event(
             events,
             RuntimeEvent::CommandRejected {
+                reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                 request_id: request_id.into(),
                 message,
             },
@@ -188,6 +190,7 @@ pub(super) async fn prepare_control(
             emit_runtime_event(
                 events,
                 RuntimeEvent::CommandRejected {
+                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                     request_id: request_id.into(),
                     message: format!("Could not save goal control intent: {error:#}"),
                 },
@@ -770,6 +773,7 @@ for line in sys.stdin:
                         RuntimeEvent::CommandRejected {
                             request_id,
                             message,
+                            ..
                         } => {
                             assert_eq!(harness, HarnessKind::Claude);
                             assert_eq!(request_id, "unsupported");
@@ -830,6 +834,7 @@ for line in sys.stdin:
                     if let RuntimeEvent::CommandRejected {
                         request_id,
                         message,
+                        ..
                     } = next(&mut receive).await
                     {
                         assert_eq!(request_id, "denied");

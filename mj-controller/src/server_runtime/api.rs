@@ -2276,7 +2276,7 @@ impl SubagentBackend for ApiBackend {
                     let failed_id = id.clone();
                     let message = message.clone();
                     match tokio::task::spawn_blocking(move || {
-                        crate::database::record_api_error(failed_id, message)
+                        crate::database::record_startup_fault(failed_id, message)
                     })
                     .await
                     {

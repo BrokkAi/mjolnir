@@ -368,7 +368,7 @@ impl HostState {
             events.iter().any(|event| {
                 matches!(
                     &event.observation,
-                    RelayObservation::CommandCompleted { command_id, outcome }
+                    RelayObservation::CommandCompleted { command_id, outcome , ..}
                         if command_id == awaited
                             && matches!(
                                 outcome,

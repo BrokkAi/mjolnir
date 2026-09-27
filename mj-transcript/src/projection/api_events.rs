@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::event_outcome::{CommandResult, CommandResultKind, OutcomeReason, TurnResultKind};
 use mj_core::storage::ApiEventData;
 
 /// Retain transitions before the database page coalesces its final projection.
@@ -29,40 +30,82 @@ pub(super) fn derive(
 
         RelayObservation::CommandRejected {
             command_id,
+            command,
             message,
-            ..
+            reason,
         }
         | RelayObservation::CommandInterrupted {
             command_id,
+            command,
             message,
+            reason,
+        } if *command != RelayCommandKind::Prompt => {
+            if let Some(reason) = reason
+                && *reason != OutcomeReason::LegacyUnclassified
+            {
+                let outcome = if reason.expected_cancellation() {
+                    CommandResultKind::Cancelled
+                } else if *reason == OutcomeReason::AdmissionRejected {
+                    CommandResultKind::Rejected
+                } else {
+                    CommandResultKind::Failed
+                };
+                events.push(ApiEventData::CommandEnded {
+                    result: CommandResult::worker(
+                        command_id,
+                        *command,
+                        outcome,
+                        Some(*reason),
+                        Some(message.clone()),
+                    ),
+                });
+            } else {
+                events.push(ApiEventData::LegacyNotice {
+                    original_type: "error".into(),
+                    message: message.clone(),
+                    command_id: Some(command_id.clone()),
+                });
+            }
+        }
+        RelayObservation::CommandCompleted {
+            command_id,
+            barrier_command_id,
+            command: Some(command),
+            outcome,
             ..
-        } => {
-            events.push(ApiEventData::Error {
+        } if *command != RelayCommandKind::Prompt => {
+            if let Some(barrier) = barrier_command_id {
+                events.push(ApiEventData::CommandEnded {
+                    result: CommandResult::worker(
+                        barrier,
+                        RelayCommandKind::BeginCheckpoint,
+                        CommandResultKind::Succeeded,
+                        None,
+                        None,
+                    ),
+                });
+            }
+            events.push(ApiEventData::CommandEnded {
+                result: CommandResult::completed(command_id, *command, outcome),
+            });
+        }
+        RelayObservation::SessionFault { reason, message } => {
+            events.push(ApiEventData::SessionFault {
+                reason: *reason,
                 message: message.clone(),
-                command_id: Some(command_id.clone()),
+                command_id: event.command_id.clone(),
             });
         }
         _ => {}
     }
     if let Some(turn) = &mutation.last_turn_outcome {
-        if let mj_core::state::TurnOutcomeKind::Completed { stop_reason } = &turn.outcome {
-            match mj_core::state::classify_prompt_completion(stop_reason) {
-                mj_core::state::PromptCompletion::InputRequired => {
-                    events.push(ApiEventData::InputRequired {
-                        request: None,
-                        turn_id: turn.accepted_ordinal,
-                    });
-                }
-                mj_core::state::PromptCompletion::Error => {
-                    events.push(ApiEventData::Error {
-                        message: stop_reason.clone(),
-                        command_id: Some(turn.command_id.clone()),
-                    });
-                }
-                _ => {}
-            }
+        if turn.result().kind == TurnResultKind::InputRequired {
+            events.push(ApiEventData::InputRequired {
+                request: None,
+                turn_id: turn.accepted_ordinal,
+            });
         }
-        events.push(ApiEventData::TurnEnded { turn: turn.clone() });
+        events.push(ApiEventData::TurnEnded { turn: turn.into() });
     }
     let turn_id = current
         .active_turn

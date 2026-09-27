@@ -1639,6 +1639,7 @@ pub(super) async fn apply_cancel(
             emit_runtime_event(
                 events,
                 RuntimeEvent::CommandRejected {
+                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                     request_id: cancel_id,
                     message: format!("cancel ACP prompt: {error}"),
                 },
@@ -1779,6 +1780,7 @@ pub(super) async fn settle_steer(
             emit_runtime_event(
                 events,
                 RuntimeEvent::CommandInterrupted {
+                    reason: mj_core::event_outcome::OutcomeReason::RuntimeFailure,
                     request_id: pending.request_id,
                     message: format!(
                         "Unexpected steering response; delivery is unconfirmed: {outcome:?}"
@@ -1798,6 +1800,7 @@ pub(super) async fn settle_steer(
             emit_runtime_event(
                 events,
                 RuntimeEvent::CommandRejected {
+                    reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                     request_id: pending.request_id,
                     message,
                 },
@@ -1823,7 +1826,7 @@ pub(super) async fn settle_steer_at_turn_end(
         Err(_) => {
             emit_runtime_event(
                 events,
-                RuntimeEvent::CommandInterrupted {
+                RuntimeEvent::CommandInterrupted { reason: mj_core::event_outcome::OutcomeReason::RuntimeFailure,
                     request_id: pending.request_id,
                     message: "Steering delivery unconfirmed after the turn ended; queued input is held for review".into(),
                 },

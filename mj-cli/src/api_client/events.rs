@@ -74,13 +74,14 @@ mod tests {
             seq: 3,
             session_id: "session-1".into(),
             recorded_at_ms: 1,
-            event: mj_controller::database::ApiEventData::Error {
+            event: mj_controller::database::ApiEventData::SessionFault {
+                reason: mj_core::event_outcome::OutcomeReason::StartupFailed,
                 message: "é".repeat(70000),
                 command_id: None,
             },
         };
         let frame = format!(
-            ": heartbeat\r\n\r\nid: 3\r\nevent: error\r\ndata: {}\r\n\r\n",
+            ": heartbeat\r\n\r\nid: 3\r\nevent: session_fault\r\ndata: {}\r\n\r\n",
             serde_json::to_string(&event).unwrap()
         );
         let mut decoder = EventDecoder::default();
@@ -93,10 +94,10 @@ mod tests {
 
     #[test]
     fn event_decoder_rejects_conflicting_identity_and_stream_errors() {
-        let body = r#"{"seq":2,"session_id":"s","recorded_at_ms":1,"type":"error","data":{"message":"failed","command_id":null}}"#;
+        let body = r#"{"seq":2,"session_id":"s","recorded_at_ms":1,"type":"session_fault","data":{"reason":"startup_failed","message":"failed","command_id":null}}"#;
         assert!(
             EventDecoder::default()
-                .push(format!("id: 1\nevent: error\ndata: {body}\n\n").as_bytes())
+                .push(format!("id: 1\nevent: session_fault\ndata: {body}\n\n").as_bytes())
                 .is_err()
         );
         let error = EventDecoder::default()

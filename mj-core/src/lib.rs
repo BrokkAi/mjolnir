@@ -14,6 +14,7 @@ pub mod credentials;
 pub mod diagnostic;
 pub mod diff;
 pub mod elicitation;
+pub mod event_outcome;
 pub mod go;
 pub mod goal;
 pub mod harness_runtime;

@@ -694,6 +694,24 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: typed event bodies cannot be decoded by older readers, and
+    // pending checkpoint identities must survive every writer's transitions.
+    if version < 57 {
+        let tx = connection.unchecked_transaction()?;
+        tx.execute_batch("DROP TRIGGER IF EXISTS api_session_error_updated;
+            DROP TRIGGER IF EXISTS api_session_error_inserted;
+            CREATE TABLE IF NOT EXISTS checkpoint_operations (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                command_id TEXT NOT NULL UNIQUE,
+                related_command_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(related_command_ids))
+            ) STRICT;")?;
+        super::events::migrate_event_outcomes(&tx)?;
+        tx.execute_batch("UPDATE schema_compatibility SET minimum_compatible_version = 57 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (57, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 57;")?;
+        tx.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -917,8 +935,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 56 adds delegation policies older builds cannot honor.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 56;
+    /// `SCHEMA_VERSION`. Migration 57 replaces stored API event bodies.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 57;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -1118,11 +1136,11 @@ mod reader_tests {
         // A repair would recreate this deliberately removed trigger. A future
         // schema is authoritative even when it differs from our own repairs.
         let raw = Connection::open(&path).unwrap();
-        raw.execute_batch("DROP TRIGGER api_session_error_updated;")
+        raw.execute_batch("DROP TRIGGER session_contexts_workspace_update;")
             .unwrap();
         drop(raw);
         let writer = open_writer(&path).unwrap();
-        assert!(!writer.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'api_session_error_updated')", [], |row| row.get::<_, bool>(0)).unwrap());
+        assert!(!writer.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'session_contexts_workspace_update')", [], |row| row.get::<_, bool>(0)).unwrap());
         assert_eq!(
             writer
                 .query_row("SELECT value FROM future_feature", [], |row| row

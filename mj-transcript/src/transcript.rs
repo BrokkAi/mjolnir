@@ -1221,7 +1221,7 @@ pub fn apply_runtime_event_to_entries(
             apply_session_update_to_entries(entries, seq, recorded_at_ms, parsed)
                 .map(|_| RuntimeEvent::SessionUpdate { update })
         }
-        RuntimeEvent::Warning { message } => {
+        RuntimeEvent::Warning { message } | RuntimeEvent::SessionFault { message } => {
             entries.push(ChatEntry::plain(
                 seq,
                 ChatRole::System,

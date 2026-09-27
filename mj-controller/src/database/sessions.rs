@@ -668,6 +668,7 @@ pub(super) fn mark_session_target_missing_if_current_to(
 ) -> Result<Option<SessionState>> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let previous_error = super::events::previous_session_error(&tx, session_id)?;
     let changed = tx.execute(
         "UPDATE sessions
          SET state = CASE
@@ -695,6 +696,18 @@ pub(super) fn mark_session_target_missing_if_current_to(
     } else {
         None
     };
+    if changed == 1 && previous_error.as_deref() != Some(detail) {
+        super::events::insert_api_event(
+            &tx,
+            session_id,
+            Utc::now().timestamp_millis(),
+            &ApiEventData::SessionFault {
+                reason: mj_core::event_outcome::OutcomeReason::RuntimeUnavailable,
+                message: detail.into(),
+                command_id: None,
+            },
+        )?;
+    }
     tx.commit()?;
     Ok(state)
 }
@@ -969,21 +982,31 @@ pub(super) fn recover_interrupted_checkpointing_sessions_to(
     path: &Path,
     updated_at: &str,
 ) -> Result<usize> {
-    if updated_at.trim().is_empty() {
-        bail!("checkpoint recovery timestamp is empty");
+    ensure!(
+        !updated_at.trim().is_empty(),
+        "checkpoint recovery timestamp is empty"
+    );
+    let mut connection = open(path)?;
+    let tx = connection.transaction()?;
+    let ids = {
+        let mut query = tx.prepare("SELECT session_id FROM checkpoint_operations")?;
+        query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in ids {
+        super::events::finish_checkpoint_operation(
+            &tx,
+            &id,
+            mj_core::event_outcome::CommandResultKind::Failed,
+            Some(mj_core::event_outcome::OutcomeReason::ControllerRestarted),
+            Some("Checkpoint operation interrupted by controller restart".into()),
+        )?;
     }
-    let connection = open(path)?;
-    connection
-        .execute(
-            "UPDATE sessions
-             SET state = 'running', updated_at = ?1, last_checkpoint_error = ?2
-             WHERE state = 'checkpointing'",
-            params![
-                updated_at,
-                "checkpointing was interrupted by a controller restart; the target was left running"
-            ],
-        )
-        .context("recover interrupted checkpointing sessions")
+    let changed = tx.execute("UPDATE sessions SET state = 'running', updated_at = ?1, last_checkpoint_error = ?2 WHERE state = 'checkpointing'",
+        params![updated_at, "checkpointing was interrupted by a controller restart; the target was left running"])?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 pub(super) fn save_session_to(path: &Path, session: &SessionRecord) -> Result<()> {

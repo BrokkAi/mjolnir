@@ -115,6 +115,8 @@ fn a_completed_prompt_records_its_stop_reason_and_clears_the_running_turn() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -180,6 +182,8 @@ fn steer_prompt_2(session: &mut MaterializedSession) {
     apply_observation(
         session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "steer-1".into(),
             outcome: RelayCommandOutcome::Steered {
                 queued_command_id: "prompt-2".into(),
@@ -200,6 +204,8 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -227,6 +233,7 @@ fn an_interrupted_steered_turn_clears_the_running_turn() {
     apply_observation(
         &mut session,
         RelayObservation::CommandInterrupted {
+            reason: None,
             command_id: "prompt-1".into(),
             command: RelayCommandKind::Prompt,
             message: "stopped".into(),
@@ -238,6 +245,7 @@ fn an_interrupted_steered_turn_clears_the_running_turn() {
     assert_eq!(
         outcome.outcome,
         TurnOutcomeKind::Interrupted {
+            reason: None,
             message: "stopped".into()
         }
     );
@@ -250,6 +258,8 @@ fn a_returned_steer_leaves_the_prompt_queued_and_the_turn_running() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "steer-1".into(),
             outcome: RelayCommandOutcome::SteeringReturned {
                 queued_command_id: "prompt-2".into(),
@@ -285,6 +295,7 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
     apply_observation(
         &mut session,
         RelayObservation::CommandRejected {
+            reason: None,
             command_id: "prompt-1".into(),
             command: RelayCommandKind::Prompt,
             message: "transport failed".into(),
@@ -302,6 +313,7 @@ fn a_rejected_queued_prompt_records_its_acceptance_ordinal_without_a_turn_start(
     assert_eq!(
         outcome.outcome,
         TurnOutcomeKind::Rejected {
+            reason: None,
             message: "transport failed".into()
         }
     );
@@ -339,6 +351,8 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
         apply_observation(
             &mut session,
             RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: None,
                 command_id: command_id.into(),
                 outcome: RelayCommandOutcome::Prompt {
                     diagnostic: None,
@@ -479,6 +493,8 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -510,6 +526,8 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "initial-prompt".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -603,6 +621,8 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -654,6 +674,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     apply_observation(
         &mut session,
         RelayObservation::CommandInterrupted {
+            reason: None,
             command_id: "prompt".into(),
             command: mj_core::relay::RelayCommandKind::Prompt,
             message: "worker restarted".into(),
@@ -694,6 +715,8 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
         apply_observation(
             &mut session,
             RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: None,
                 command_id: "prompt".into(),
                 outcome: RelayCommandOutcome::Prompt {
                     stop_reason: stop_reason.into(),
@@ -787,6 +810,8 @@ fn shell_output_updates_one_durable_transcript_item() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: Some(mj_core::relay::RelayCommandKind::RunUserShell),
             command_id: "shell-1".into(),
             outcome: RelayCommandOutcome::UserShell {
                 result: UserShellResult {
@@ -973,6 +998,8 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -1223,6 +1250,8 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
     let mut completion = event(
         &session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -1885,6 +1914,8 @@ fn queued_prompt_becomes_user_message_only_when_started() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,
@@ -2086,6 +2117,8 @@ fn queued_config_change_starts_without_becoming_a_turn() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "config-1".into(),
             outcome: RelayCommandOutcome::Configured,
         },
@@ -2120,6 +2153,8 @@ fn queue_changes_project_only_from_their_completion_events() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "remove-1".into(),
             outcome: RelayCommandOutcome::QueueChanged {
                 removed_command_ids: vec!["queued-1".into()],
@@ -2157,6 +2192,8 @@ fn queue_changes_project_only_from_their_completion_events() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "clear-1".into(),
             outcome: RelayCommandOutcome::QueueChanged {
                 removed_command_ids: vec!["queued-2".into(), "queued-3".into()],
@@ -2188,6 +2225,7 @@ fn rejected_close_rolls_closing_projection_back_to_idle() {
     apply_observation(
         &mut session,
         RelayObservation::CommandRejected {
+            reason: None,
             command_id: "close-1".into(),
             command: RelayCommandKind::Close,
             message: "ACP close failed".into(),
@@ -2202,6 +2240,7 @@ fn a_rejected_command_notice_does_not_show_the_command_id() {
     apply_observation(
         &mut session,
         RelayObservation::CommandRejected {
+            reason: None,
             command_id: "set-config-0123abcd".into(),
             command: RelayCommandKind::SetConfig,
             message: "\"gpt-9\" is not an available model value".into(),
@@ -2241,6 +2280,8 @@ fn control_command_outcomes_do_not_end_an_active_prompt() {
     apply_observation(
         &mut session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "config-1".into(),
             outcome: RelayCommandOutcome::Configured,
         },
@@ -2260,6 +2301,7 @@ fn control_command_outcomes_do_not_end_an_active_prompt() {
     apply_observation(
         &mut session,
         RelayObservation::CommandRejected {
+            reason: None,
             command_id: "cancel-1".into(),
             command: RelayCommandKind::Cancel,
             message: "not cancellable".into(),
@@ -2481,6 +2523,8 @@ fn agent_chunk(text: &str, message_id: &str) -> RelayObservation {
 
 fn end_turn() -> RelayObservation {
     RelayObservation::CommandCompleted {
+        barrier_command_id: None,
+        command: None,
         command_id: "prompt-1".into(),
         outcome: RelayCommandOutcome::Prompt {
             diagnostic: None,
@@ -2631,6 +2675,8 @@ fn clear_preserves_history_and_adds_one_durable_context_boundary() {
     let complete = event(
         &session,
         RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "clear-request".into(),
             outcome: RelayCommandOutcome::ContextCleared {
                 native_session_id: "new".into(),
@@ -2780,6 +2826,7 @@ fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
         apply_observation(
             &mut session,
             RelayObservation::CommandInterrupted {
+                reason: None,
                 command_id: "worker-upgrade-0123abcd".into(),
                 command,
                 message: "relay restarted without the controller that owned the checkpoint barrier"
@@ -2793,6 +2840,7 @@ fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
     apply_observation(
         &mut session,
         RelayObservation::CommandRejected {
+            reason: None,
             command_id: "clear".into(),
             command: mj_core::relay::RelayCommandKind::ClearContext,
             message: "busy".into(),
