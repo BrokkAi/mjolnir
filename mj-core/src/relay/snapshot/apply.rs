@@ -7,14 +7,14 @@ use super::*;
 /// Whether applying this observation moves durable relay state beyond the
 /// event frontier.
 ///
-/// Transcript observations do not: replaying them from the journal reaches the
-/// same snapshot, so appending one need not stage a snapshot copy, re-check the
-/// snapshot budgets, or rewrite `relay-state.json`. Every arm here mirrors an
+/// Assistant text also updates bounded authorization evidence. Other transcript
+/// observations only advance the frontier. Every arm here mirrors an
 /// arm of [`apply_relay_event`]; `transcript_observations_move_nothing_but_the_frontier`
 /// fails if the two ever disagree.
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
-        RelayObservation::SteeringUnconfirmed { .. }
+        RelayObservation::TurnAssessmentUpdated { .. }
+        | RelayObservation::SteeringUnconfirmed { .. }
         | RelayObservation::AgentInitialized { .. }
         | RelayObservation::SessionOpened { .. }
         | RelayObservation::SessionConfigured { .. }
@@ -33,6 +33,9 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::SessionRestarted
         | RelayObservation::HarnessTurnStarted { .. }
         | RelayObservation::HarnessTurnSettled { .. }
+        | RelayObservation::ElicitationRequested { .. }
+        | RelayObservation::ElicitationResolved { .. }
+        | RelayObservation::ElicitationsCleared
         | RelayObservation::Closing
         | RelayObservation::Closed => true,
         RelayObservation::SessionUpdate { update } => matches!(
@@ -41,12 +44,11 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
                 | SessionUpdate::ConfigOptionUpdate(_)
                 | SessionUpdate::CurrentModeUpdate(_)
                 | SessionUpdate::SessionInfoUpdate(_)
+                | SessionUpdate::AgentMessageChunk(_)
         ),
         RelayObservation::NativeAgent { event } => !matches!(event, crate::native_agent::NativeAgentEvent::Update { .. }),
         RelayObservation::PermissionAutoApproved { .. }
-        | RelayObservation::ElicitationRequested { .. }
-        | RelayObservation::ElicitationResolved { .. }
-        | RelayObservation::ElicitationsCleared
+
         | RelayObservation::SessionFault { .. }
         | RelayObservation::Warning { .. }
         | RelayObservation::UserShellOutput { .. }
@@ -58,6 +60,40 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
+        RelayObservation::TurnAssessmentUpdated { assessment } => {
+            let current = snapshot
+                .assessment
+                .as_ref()
+                .ok_or_else(|| anyhow!("assessment has no completed turn"))?;
+            if current.turn_id != assessment.turn_id
+                || current.completed_ordinal != assessment.completed_ordinal
+                || !current.current()
+            {
+                bail!("assessment completion changed");
+            }
+            if assessment.action == Some(crate::assessment::Action::RetryProvider)
+                && assessment.status == crate::assessment::Status::Scheduled
+            {
+                let attempt = snapshot
+                    .capacity_retry
+                    .as_ref()
+                    .filter(|r| r.submitted)
+                    .map_or(1, |r| r.attempt.saturating_add(1));
+                snapshot.capacity_retry = Some(CapacityRetry::new(
+                    attempt,
+                    assessment.completed_ordinal,
+                    event.recorded_at_ms,
+                ));
+            } else if assessment
+                .action
+                .is_some_and(|action| action != crate::assessment::Action::RetryProvider)
+            {
+                // Only consecutive provider refusals share a retry backoff.
+                snapshot.capacity_retry = None;
+            }
+            snapshot.retry_assessment = None;
+            snapshot.assessment = Some((**assessment).clone());
+        }
         RelayObservation::SteeringUnconfirmed {
             command_id,
             message,
@@ -174,6 +210,28 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.attempts = *attempt;
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
+                }
+                RelayCommand::SeedAssessmentContext { context, .. } => {
+                    snapshot.assessment_context = Some((**context).clone());
+                    if let Some(a) = snapshot.assessment.as_mut().filter(|a| {
+                        a.current()
+                            && !matches!(
+                                a.action,
+                                Some(
+                                    crate::assessment::Action::RetryProvider
+                                        | crate::assessment::Action::RecoverQuota
+                                )
+                            )
+                    }) {
+                        a.revision = event.ordinal;
+                        a.status = crate::assessment::Status::Pending;
+                        a.evidence = None;
+                        a.verdict = None;
+                        a.action = None;
+                        a.failures = 0;
+                        a.retry_at_ms = None;
+                        a.reason = "authorization_evidence_changed".into();
+                    }
                 }
                 RelayCommand::SetQuotaRecovery { recovery, .. } => {
                     snapshot.continuation.quota_recovery = recovery.as_deref().cloned();
@@ -398,14 +456,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     completed_ordinal: event.ordinal,
                     decision: crate::activity::verdict::Decision::KeepCurrent,
                 });
-                snapshot.continuation.completed_command_id =
-                    (snapshot.continuation.user_command_id.as_ref() == Some(command_id)
-                        || matches!(
-                            command,
-                            RelayCommand::ContinueAuthorizedWork { .. }
-                                | RelayCommand::ResumeAfterQuota { .. }
-                        ))
-                    .then(|| command_id.clone());
+                snapshot.continuation.completed_command_id = snapshot
+                    .continuation
+                    .user_command_id
+                    .as_ref()
+                    .map(|_| command_id.clone());
                 snapshot.continuation.harness_turn = None;
                 if crate::state::classify_prompt_completion(stop_reason)
                     != crate::state::PromptCompletion::Finished
@@ -416,6 +471,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     .retry_assessment
                     .as_ref()
                     .is_none_or(|assessment| assessment.command_id != *command_id)
+                    && snapshot
+                        .capacity_retry
+                        .as_ref()
+                        .is_none_or(|r| r.command_id != *command_id)
                 {
                     snapshot.capacity_retry = None;
                 }
@@ -521,6 +580,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     snapshot.config.insert("mode".to_owned(), mode_id);
                 }
+                (
+                    RelayCommand::SeedAssessmentContext { .. },
+                    RelayCommandOutcome::NoticeRecorded,
+                ) => {}
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
                 | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
@@ -964,6 +1027,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if let Some(turn) = &snapshot.harness_turn
                 && !*prompt_in_flight
                 && started == Some(turn.first_ordinal)
+            {
+                // Physical completion does not depend on a retained user command.
+                // Missing authorization gates nudges, never provider assessment.
+                snapshot.assessment = Some(crate::assessment::TurnAssessment::pending(
+                    crate::continuation::harness_turn_id(turn.first_ordinal),
+                    event.ordinal,
+                    event.recorded_at_ms,
+                    crate::activity::verdict::CompletionEvidence::bounded(
+                        "harness_turn_settled",
+                        None,
+                    ),
+                ));
+            }
+            if let Some(turn) = &snapshot.harness_turn
+                && !*prompt_in_flight
+                && started == Some(turn.first_ordinal)
                 && snapshot.continuation.user_command_id.is_some()
             {
                 let id = crate::continuation::harness_turn_id(turn.first_ordinal);
@@ -1120,6 +1199,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     {
         snapshot.cancelling_prompt_id = None;
     }
+    apply_assessment_context(snapshot, event);
     snapshot.latest_ordinal = event.ordinal;
     snapshot.latest_digest = event.digest.clone();
     Ok(())
@@ -1207,4 +1287,150 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
             | RelayCommand::SetSessionMode { .. }
             | RelayCommand::Close { .. }
     )
+}
+
+/// Classification boundaries and action invalidation share the journal owner.
+fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
+    use crate::activity::verdict::CompletionEvidence;
+    use crate::assessment::{Status, TurnAssessment};
+    let mut delivered = None;
+    match &event.observation {
+        RelayObservation::CommandStarted { command_id, .. } => delivered = Some(command_id),
+        RelayObservation::CommandCompleted {
+            outcome: RelayCommandOutcome::Steered { queued_command_id },
+            ..
+        } => delivered = Some(queued_command_id),
+        _ => {}
+    }
+    if let Some(id) = delivered
+        && let Some(prompt) = snapshot
+            .dispatches
+            .get(id)
+            .and_then(|d| d.command.prompt_blocks())
+        && let Some(context) = &mut snapshot.assessment_context
+    {
+        context.user(id, &prompt);
+    }
+    match &event.observation {
+        RelayObservation::ElicitationRequested { request } => {
+            snapshot.assessment_questions.insert(request.id.clone());
+        }
+        RelayObservation::ElicitationResolved { elicitation_id, .. } => {
+            snapshot.assessment_questions.remove(elicitation_id);
+        }
+        RelayObservation::ElicitationsCleared => {
+            snapshot.assessment_questions.clear();
+        }
+        RelayObservation::SessionUpdate { update } => {
+            if let SessionUpdate::AgentMessageChunk(chunk) = update.as_ref()
+                && let ContentBlock::Text(text) = &chunk.content
+                && let Some(context) = &mut snapshot.assessment_context
+            {
+                context.assistant(
+                    chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                    event.ordinal,
+                    &text.text,
+                );
+            }
+        }
+        RelayObservation::CommandCompleted {
+            command_id,
+            outcome:
+                RelayCommandOutcome::Prompt {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                },
+            ..
+        } => {
+            let mut a = TurnAssessment::pending(
+                command_id.clone(),
+                event.ordinal,
+                event.recorded_at_ms,
+                CompletionEvidence::bounded(stop_reason, diagnostic.as_ref()),
+            );
+            if matches!(
+                crate::state::classify_prompt_completion(stop_reason),
+                crate::state::PromptCompletion::Cancelled
+                    | crate::state::PromptCompletion::InputRequired
+            ) {
+                a.status = Status::Superseded;
+                a.reason = "explicit_handoff_or_cancellation".into();
+            }
+            snapshot.assessment = Some(a);
+            if let Some(context) = &mut snapshot.assessment_context {
+                context.open_assistant_id = None;
+            }
+        }
+        RelayObservation::HarnessTurnSettled {
+            prompt_in_flight: false,
+            ..
+        } => {
+            if let Some(context) = &mut snapshot.assessment_context {
+                context.open_assistant_id = None;
+            }
+        }
+        RelayObservation::CommandCompleted {
+            outcome: RelayCommandOutcome::ContextCleared { .. },
+            ..
+        } => {
+            snapshot.assessment_context = Some(Default::default());
+            snapshot.assessment = None;
+        }
+        RelayObservation::CommandQueued {
+            command_id,
+            command,
+            ..
+        } => {
+            let automatic = crate::continuation::is_generated_prompt(command_id)
+                || crate::continuation::is_quota_goal_resume(command_id);
+            if let Some(a) = &mut snapshot.assessment {
+                if let RelayCommand::SetQuotaRecovery { recovery, .. } = command {
+                    if a.current() && a.action == Some(crate::assessment::Action::RecoverQuota) {
+                        a.status = if recovery.as_ref().is_some_and(|r| r.retry_at_ms.is_some()) {
+                            Status::Scheduled
+                        } else {
+                            Status::Assessed
+                        };
+                        a.reason = match recovery {
+                            Some(r) if r.retry_at_ms.is_some() => "quota_retry_scheduled",
+                            Some(_) => "quota_deadline_unavailable",
+                            None => "quota_recovery_cleared",
+                        }
+                        .into();
+                    }
+                } else if automatic
+                    && (command.prompt_blocks().is_some()
+                        || crate::continuation::is_quota_goal_resume(command_id))
+                {
+                    a.status = Status::Consumed;
+                    a.reason = "automatic_action_admitted".into();
+                } else if cancels_capacity_retry(command)
+                    || matches!(
+                        command,
+                        RelayCommand::ClearContext | RelayCommand::CancelTurnFor { .. }
+                    )
+                {
+                    a.status = Status::Superseded;
+                    a.reason = "user_or_lifecycle_action".into();
+                }
+            }
+        }
+        RelayObservation::HarnessTurnStarted { .. }
+        | RelayObservation::Closing
+        | RelayObservation::Closed => {
+            if let Some(a) = &mut snapshot.assessment {
+                a.status = Status::Superseded;
+                a.reason = "turn_or_lifecycle_changed".into();
+            }
+            if snapshot
+                .capacity_retry
+                .as_ref()
+                .is_none_or(|r| !r.submitted)
+            {
+                snapshot.capacity_retry = None;
+            }
+        }
+        _ => {}
+    }
 }

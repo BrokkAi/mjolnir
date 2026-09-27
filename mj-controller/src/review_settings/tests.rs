@@ -125,6 +125,8 @@ fn advertised(models: &[&str], efforts: &[&str]) -> Vec<SessionConfigOption> {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        assessment: None,
+        assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),

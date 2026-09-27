@@ -52,6 +52,11 @@ pub fn restore_checkpoint_with_native_state(
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
     let mut seed = mj_core::relay::RestoredRelaySeed {
+        assessment_state: if spec.restore_native {
+            canonical_session.assessment_state.clone()
+        } else {
+            None
+        },
         event_frontier: canonical_session.event_frontier,
         event_frontier_digest: canonical_session.event_frontier_digest,
         queued_prompts: canonical_session.queued_prompts,

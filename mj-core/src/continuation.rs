@@ -108,7 +108,7 @@ pub struct EvidenceMessage {
     pub role: String,
     pub text: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuationEvidence {
     pub assistant_history_omitted: bool,

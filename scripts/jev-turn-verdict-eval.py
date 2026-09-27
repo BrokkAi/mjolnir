@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--run', action='store_true', help='Send only the built-in synthetic scenarios to Jev')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    questions = json.loads((ROOT / 'mj-core/src/activity/verdict_questions.json').read_text())
+    questions = json.loads((ROOT / 'mj-core/src/activity/verdict_questions_v4.json').read_text())
     if not args.run:
         print(f'Validated {len(scenarios())} built-in synthetic scenarios; no requests sent.')
         return

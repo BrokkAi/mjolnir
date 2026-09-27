@@ -5,3 +5,5 @@ pub mod transcript;
 
 pub mod summary;
 pub mod turn_context;
+
+pub mod authorization;

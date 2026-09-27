@@ -22,6 +22,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
+    pub assessment: Option<mj_core::assessment::Summary>,
     /// The shared activity classification, including the worker's Jev inference.
     pub activity: mj_core::activity::ActivityState,
     pub turn_completion: Option<mj_core::activity::verdict::TurnCompletion>,
@@ -316,6 +317,10 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
         observation.report_pending_for.as_deref() == Some(outcome.command_id.as_str())
             || observation.retry_assessment_pending
+            || observation
+                .assessment
+                .as_ref()
+                .is_some_and(|a| a.status == mj_core::assessment::Status::Deferred)
             || observation.capacity_retry.is_some()
             || observation.quota_recovery.as_ref().is_some_and(|r| {
                 r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id

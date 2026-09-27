@@ -723,6 +723,7 @@ pub(super) fn project_observation(
             mutation.execution = Some(MaterializedExecutionState::Closed);
         }
         RelayObservation::RetryAssessmentStarted { .. }
+        | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
     Ok(())

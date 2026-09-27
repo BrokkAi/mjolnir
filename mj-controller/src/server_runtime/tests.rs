@@ -411,6 +411,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
+        assessment: None,
+        assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),

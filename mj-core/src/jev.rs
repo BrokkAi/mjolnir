@@ -136,10 +136,47 @@ impl DecisionLog {
     pub fn start(&self, session: &str, kind: &str, checked: &str, scope: &str) -> Attempt {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
+        self.start_with_id(
+            session,
+            kind,
+            checked,
+            scope,
+            format!("{}-{:020}", owner(), NEXT.fetch_add(1, Ordering::Relaxed)),
+        )
+    }
+
+    /// Publish the owner's durable state, including later admission or supersession.
+    /// Request tasks must not overwrite this record with their process-local outcome.
+    pub fn record_assessment(&self, session: &str, assessment: &crate::assessment::TurnAssessment) {
+        self.append(&Decision {
+            version: 1,
+            id: format!("assessment-{session}-{}", assessment.revision),
+            session_id: session.into(),
+            kind: "assessment".into(),
+            started_at_ms: assessment.completed_at_ms,
+            updated_at_ms: crate::clock::epoch_millis(),
+            status: serde_json::to_value(assessment.status).expect("assessment status").as_str().unwrap().into(),
+            checked: "What failed, is input required, and what authorized work remains?".into(),
+            answer: assessment.verdict.map_or_else(|| "No usable Jev answer yet.".into(), |v| format!("Failure: {:?}; input: {:?}; work: {:?}.", v.failure.choice, v.input.choice, v.work.choice)),
+            action: assessment.reason.replace('_', " "),
+            scope: "Whole retained authorization messages and current completion evidence; omitted context is explicit.".into(),
+            owner: owner().into(),
+            technical: Some(serde_json::json!({"contract":"turn-verdict-v5", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE})),
+        });
+    }
+
+    fn start_with_id(
+        &self,
+        session: &str,
+        kind: &str,
+        checked: &str,
+        scope: &str,
+        id: String,
+    ) -> Attempt {
         let now = crate::clock::epoch_millis();
         let record = Decision {
             version: 1,
-            id: format!("{}-{:020}", owner(), NEXT.fetch_add(1, Ordering::Relaxed)),
+            id,
             session_id: session.into(),
             kind: kind.into(),
             started_at_ms: now,

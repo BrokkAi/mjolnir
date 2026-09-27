@@ -41,7 +41,6 @@ use crate::review_host::TurnReviewHost;
 use crate::session_manager::{
     ManagedSessionView, RemoteSessionPublisher, RemoteSessionRequest, SessionManagerChannels,
     SessionManagerControl, ViewError, new_command_id, spawn_remote_session_manager,
-    spawn_session_manager,
 };
 #[cfg(test)]
 use crate::session_manager::{RelaySessionTarget, RemoteSessionRequests, SessionManagerShutdown};
@@ -436,6 +435,7 @@ enum DaemonLifecycleResult {
     Done,
     DeferredCleanup,
     Move(MoveOutcome),
+    Park(crate::controller::ParkOutcome),
 }
 
 /// How one lifecycle operation ended when it failed.
@@ -519,6 +519,7 @@ mod subagent_park;
 mod support;
 mod views;
 use support::*;
+pub(crate) mod delegation;
 mod process;
 pub use process::*;
 mod serve;

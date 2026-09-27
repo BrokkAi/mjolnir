@@ -1,30 +1,15 @@
-//! Process-local completed-turn inference and bounded retry scheduling.
+//! Durable completed-turn assessment and process-local activity inference.
 use super::*;
 use mj_core::activity::ActivityFacts;
 use mj_core::activity::verdict::{Decision, TurnEvidence, TurnPhase};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 type PendingRepliedVerdict = (u64, TurnEvidence, Option<(String, u64)>);
 
+#[derive(Default)]
 pub(super) struct RepliedVerdictState {
     last_generation: Option<u64>,
-    retry_at: Option<Instant>,
-    retry_delay: Duration,
-    skip_reason: Option<&'static str>,
     inference: Mutex<Option<(u64, Decision, i64)>>,
-}
-
-impl Default for RepliedVerdictState {
-    fn default() -> Self {
-        Self {
-            last_generation: None,
-            retry_at: None,
-            retry_delay: Duration::from_secs(60),
-            skip_reason: None,
-            inference: Mutex::new(None),
-        }
-    }
 }
 
 fn blocked(facts: &ActivityFacts) -> Option<&'static str> {
@@ -75,121 +60,256 @@ impl RepliedVerdictState {
 }
 
 impl DurableRelay {
-    pub fn pending_replied_verdict(&mut self) -> Option<PendingRepliedVerdict> {
-        self.pending_replied_verdict_at(Instant::now())
+    pub(super) fn publish_assessment_diagnostic(&self) {
+        if let Some(a) = &self.snapshot.assessment
+            && let Some(log) = self.turn_context.decision_log()
+        {
+            log.record_assessment(&self.snapshot.session_id, a);
+        }
     }
 
-    fn pending_replied_verdict_at(&mut self, now: Instant) -> Option<PendingRepliedVerdict> {
-        if !self.replied_verdict_pending {
-            return None;
-        }
-        let facts = self.activity_facts();
-        let generation = self.turn_context.generation();
-        let reason = blocked(&facts).or(self.verdict_harness.is_none().then_some("no_harness"));
-        if let Some(reason) = reason {
-            if self.replied_verdict.skip_reason != Some(reason) {
-                tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
-                    phase = "replied", generation, reason, outcome = "skipped", "Jev classification skipped");
-            }
-            self.replied_verdict.skip_reason = Some(reason);
-            return None;
-        }
-        self.replied_verdict.skip_reason = None;
-        if self.replied_verdict.last_generation == Some(generation) {
-            if self
-                .replied_verdict
-                .retry_at
-                .is_none_or(|deadline| now < deadline)
-            {
-                return None;
-            }
-        } else {
-            self.replied_verdict.retry_delay = Duration::from_secs(60);
-        }
-        self.replied_verdict.last_generation = Some(generation);
-        self.replied_verdict.retry_at = None;
-        let assessment = self
-            .snapshot
-            .retry_assessment
-            .as_ref()
-            .map(|pending| (pending.command_id.clone(), pending.ordinal));
-        let evidence = self.snapshot.retry_assessment.as_ref().map_or_else(
-            || {
-                self.turn_context.evidence(
-                    self.verdict_harness.expect("checked harness"),
-                    TurnPhase::Replied,
-                    &facts,
-                    epoch_millis(),
+    /// Capture immutable semantic evidence before issuing a request. Completion
+    /// itself already installed the pending record, so restart can finish this.
+    pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+            a.current()
+                && matches!(
+                    a.action,
+                    Some(
+                        mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain
+                    )
                 )
-            },
-            |pending| pending.evidence.clone(),
+        }) {
+            let facts = self.activity_facts();
+            if a.evidence.as_ref().is_some_and(|e| {
+                e.background_commands != facts.background_commands
+                    || e.queued_commands != facts.queued_commands
+            }) {
+                a.revision = self.snapshot.latest_ordinal + 1;
+                a.status = mj_core::assessment::Status::Pending;
+                a.evidence = None;
+                a.action = None;
+                a.verdict = None;
+                self.store_assessment(a)?;
+            }
+        }
+        let Some(mut a) = self
+            .snapshot
+            .assessment
+            .clone()
+            .filter(|a| a.needs_classification(epoch_millis()) && a.evidence.is_none())
+        else {
+            return Ok(());
+        };
+        let Some(harness) = self.verdict_harness else {
+            return Ok(());
+        };
+        let mut evidence = self.turn_context.evidence(
+            harness,
+            TurnPhase::Replied,
+            &self.activity_facts(),
+            epoch_millis(),
         );
-        Some((generation, evidence, assessment))
+        evidence.completion = Some(a.completion.clone());
+        evidence.authorization = self.snapshot.assessment_context.clone();
+        if let Some(context) = &evidence.authorization
+            && !context.final_reply_omitted
+            && let Some(last) = context
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+        {
+            evidence.assistant_text_tail = last.text.clone();
+            evidence
+                .assistant_text_tail
+                .truncate(evidence.assistant_text_tail.floor_char_boundary(2048));
+        }
+        // Authorization already contains whole messages; don't send a second,
+        // differently clipped interpretation of that same conversation.
+        if evidence.authorization.is_some() {
+            evidence.transcript_summary.clear();
+        }
+        if serde_json::to_vec(&evidence)?.len() > 60 * 1024 {
+            evidence.authorization = None;
+            evidence.transcript_summary.clear();
+        }
+        a.evidence = Some(evidence);
+        self.store_assessment(a)
     }
 
-    #[cfg(any(unix, test))]
+    fn store_assessment(&mut self, assessment: mj_core::assessment::TurnAssessment) -> Result<()> {
+        self.append_relay_event(
+            None,
+            RelayObservation::TurnAssessmentUpdated {
+                assessment: Box::new(assessment),
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn apply_turn_assessment(
+        &mut self,
+        ordinal: u64,
+        verdict: mj_core::assessment::Verdict,
+    ) -> Result<&'static str> {
+        use mj_core::assessment::{Action, Status};
+        let Some(mut a) = self
+            .snapshot
+            .assessment
+            .clone()
+            .filter(|a| a.revision == ordinal && a.current())
+        else {
+            return Ok("stale_turn");
+        };
+        let complete = a
+            .evidence
+            .as_ref()
+            .and_then(|e| e.authorization.as_ref())
+            .is_some_and(|c| {
+                c.authorization_complete
+                    && !c.final_reply_omitted
+                    && c.evidence().validate().is_ok()
+            });
+        let action = verdict.action(complete);
+        a.verdict = Some(verdict);
+        a.action = Some(action);
+        a.status = Status::Assessed;
+        a.retry_at_ms = None;
+        let suppressed = !self.snapshot.assessment_questions.is_empty()
+            || self.snapshot.goal.budget_limited()
+            || self
+                .snapshot
+                .goal
+                .snapshot
+                .as_ref()
+                .is_some_and(|g| g.status == "paused")
+            || !self.snapshot.queued_prompts.is_empty();
+        let reason = if suppressed {
+            a.status = Status::Superseded;
+            "automatic_action_suppressed"
+        } else {
+            match action {
+                Action::RetryProvider => {
+                    a.status = Status::Scheduled;
+                    "server_retry_armed"
+                }
+                Action::RecoverQuota => {
+                    a.status = Status::Deferred;
+                    "quota_resolution_required"
+                }
+                Action::Continue if self.snapshot.continuation.eligible() => {
+                    a.status = Status::Deferred;
+                    "authorized_continuation_ready"
+                }
+                Action::Continue => "continuation_allowance_unavailable",
+                Action::AwaitInput => "user_input_required",
+                Action::Finished => "work_finished",
+                Action::Wait => "background_work_pending",
+                Action::Uncertain => "assessment_uncertain",
+            }
+        };
+        a.reason = reason.into();
+        self.store_assessment(a)?;
+        if !suppressed {
+            let decision = match action {
+                Action::AwaitInput => Decision::AwaitingInput,
+                Action::Finished => Decision::InferIdle,
+                Action::Wait => Decision::ExpectContinuation,
+                _ => Decision::KeepCurrent,
+            };
+            // Semantic completion survives; runtime inference only applies to
+            // current quiet facts, and never grants resource-replacement safety.
+            self.apply_replied_decision(self.turn_context.generation(), decision, epoch_millis())?;
+        }
+        Ok(reason)
+    }
+
+    pub(crate) fn fail_turn_assessment(&mut self, ordinal: u64, reason: &str) -> Result<()> {
+        let Some(mut a) = self
+            .snapshot
+            .assessment
+            .clone()
+            .filter(|a| a.revision == ordinal && a.current())
+        else {
+            return Ok(());
+        };
+        a.status = if reason == "classifier_unavailable" {
+            mj_core::assessment::Status::Assessed
+        } else {
+            mj_core::assessment::Status::Failed
+        };
+        a.failures = a.failures.saturating_add(1);
+        a.retry_at_ms = Some(epoch_millis().saturating_add(
+            (60_000_i64 * (1_i64 << a.failures.saturating_sub(1).min(3))).min(300_000),
+        ));
+        a.reason = reason.into();
+        self.replied_verdict.last_generation = None;
+        self.store_assessment(a)
+    }
+
+    pub fn pending_replied_verdict(&mut self) -> Option<PendingRepliedVerdict> {
+        let a = self.snapshot.assessment.as_ref()?;
+        if !a.needs_classification(epoch_millis())
+            || self.replied_verdict.last_generation == Some(a.revision)
+        {
+            return None;
+        }
+        let evidence = a.evidence.clone()?;
+        self.replied_verdict.last_generation = Some(a.revision);
+        Some((
+            a.revision,
+            evidence,
+            Some((a.turn_id.clone(), a.completed_ordinal)),
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn resolve_retry_assessment(
         &mut self,
         identity: Option<(String, u64)>,
         retryable: bool,
     ) -> Result<bool> {
-        let Some((command_id, assessment_ordinal)) = identity else {
+        let Some((id, ordinal)) = identity else {
             return Ok(false);
         };
-        if !self
+        let Some(mut a) = self
             .snapshot
-            .retry_assessment
-            .as_ref()
-            .is_some_and(|pending| {
-                pending.command_id == command_id && pending.ordinal == assessment_ordinal
-            })
-        {
+            .assessment
+            .clone()
+            .filter(|a| a.turn_id == id && a.completed_ordinal == ordinal && a.current())
+        else {
             return Ok(false);
-        }
-        self.append_relay_event(
-            Some(&command_id),
-            RelayObservation::RetryAssessmentResolved {
-                command_id: command_id.clone(),
-                assessment_ordinal,
-                retryable,
-            },
-        )?;
-        if retryable {
-            self.replied_verdict_pending = false;
-        }
+        };
+        a.status = if retryable {
+            mj_core::assessment::Status::Scheduled
+        } else {
+            mj_core::assessment::Status::Assessed
+        };
+        a.action = Some(if retryable {
+            mj_core::assessment::Action::RetryProvider
+        } else {
+            mj_core::assessment::Action::Uncertain
+        });
+        self.store_assessment(a)?;
         Ok(retryable)
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     pub(crate) fn retry_assessment_identity(&self) -> Option<(String, u64)> {
         self.snapshot
-            .retry_assessment
+            .assessment
             .as_ref()
-            .map(|pending| (pending.command_id.clone(), pending.ordinal))
+            .filter(|a| a.current())
+            .map(|a| (a.turn_id.clone(), a.completed_ordinal))
     }
 
     #[cfg(any(unix, test))]
     pub(crate) fn replied_verdict_is_current(&self, generation: u64) -> bool {
-        let facts = self.activity_facts();
-        self.replied_verdict_pending
-            && generation == self.turn_context.generation()
-            && blocked(&facts).is_none()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn retry_replied_verdict(&mut self, generation: u64) {
-        self.retry_replied_verdict_at(generation, Instant::now());
-    }
-
-    #[cfg(any(unix, test))]
-    fn retry_replied_verdict_at(&mut self, generation: u64, now: Instant) {
-        if self.replied_verdict_is_current(generation) {
-            let delay = self.replied_verdict.retry_delay;
-            self.replied_verdict.retry_at = Some(now + delay);
-            self.replied_verdict.retry_delay = (delay * 2).min(Duration::from_secs(300));
-            tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
-                phase = "replied", generation, retry_after_s = delay.as_secs(), "Jev retry scheduled");
-        }
+        self.snapshot
+            .assessment
+            .as_ref()
+            .is_some_and(|a| a.current() && a.revision == generation)
     }
 
     pub(crate) fn apply_replied_decision(
@@ -264,7 +384,7 @@ mod tests {
         for task in relay.claude_background_tasks.values_mut() {
             task.started_at_ms = 100;
         }
-        relay.replied_verdict_pending = true;
+        relay.activity_facts();
         relay
     }
 
@@ -290,7 +410,13 @@ mod tests {
                 .iter()
                 .any(|task| task.id == "claude:0" && task.can_stop)
         );
-        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
+        let generation = relay.turn_context.generation();
+        let evidence = relay.turn_context.evidence(
+            HarnessKind::Claude,
+            TurnPhase::Replied,
+            &relay.activity_facts(),
+            200,
+        );
         assert_eq!(evidence.background_commands, 4);
         assert_eq!(evidence.assistant_text_tail, "One ticket so far: #3486.");
         assert_eq!(
@@ -326,7 +452,7 @@ mod tests {
     fn identical_inventory_preserves_verdict_but_same_count_replacement_invalidates_it() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
-        let (generation, _, _) = relay.pending_replied_verdict().unwrap();
+        let generation = relay.turn_context.generation();
         relay
             .apply_replied_decision(generation, Decision::InferIdle, 200)
             .unwrap();
@@ -353,7 +479,7 @@ mod tests {
             relay.operational_state().activity_state(),
             ActivityState::Background { .. }
         ));
-        let (new_generation, _, _) = relay.pending_replied_verdict().unwrap();
+        let new_generation = relay.turn_context.generation();
         assert_ne!(generation, new_generation);
         assert_eq!(
             relay
@@ -371,35 +497,10 @@ mod tests {
     }
 
     #[test]
-    fn inconclusive_replies_retry_with_bounded_backoff_and_stop_after_acceptance() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut relay = completed(temp.path());
-        let mut now = Instant::now();
-        let (generation, _, _) = relay.pending_replied_verdict_at(now).unwrap();
-        for seconds in [60, 120, 240, 300, 300] {
-            relay.retry_replied_verdict_at(generation, now);
-            now += Duration::from_secs(seconds);
-            assert!(
-                relay
-                    .pending_replied_verdict_at(now - Duration::from_millis(1))
-                    .is_none()
-            );
-            assert!(relay.pending_replied_verdict_at(now).is_some());
-        }
-        relay
-            .apply_replied_decision(generation, Decision::InferIdle, 200)
-            .unwrap();
-        assert!(
-            relay
-                .pending_replied_verdict_at(now + Duration::from_secs(1_000))
-                .is_none()
-        );
-    }
-    #[test]
     fn harness_restart_invalidates_the_completed_turn_inference_and_request() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
-        let (generation, _, _) = relay.pending_replied_verdict().unwrap();
+        let generation = relay.turn_context.generation();
         relay
             .apply_replied_decision(generation, Decision::InferIdle, 200)
             .unwrap();

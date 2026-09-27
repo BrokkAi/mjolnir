@@ -43,6 +43,7 @@ pub(super) async fn get_session(
                 && let Some(snapshot) = view.snapshot
             {
                 session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+                session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
                 if let Some(runtime) = &snapshot.operational.runtime
                     && session
                         .runtime

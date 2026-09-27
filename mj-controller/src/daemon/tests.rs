@@ -2243,6 +2243,8 @@ fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
 fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
+        assessment: None,
+        assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
@@ -2465,6 +2467,7 @@ fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {
 /// The smallest archived snapshot a hand-off step can carry.
 fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
     mj_core::archive::CanonicalSessionSnapshot {
+        assessment_state: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
         session: mj_core::archive::CanonicalSessionState {

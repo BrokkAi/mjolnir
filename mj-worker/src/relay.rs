@@ -151,7 +151,6 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
-    replied_verdict_pending: bool,
     replied_verdict: verdict::RepliedVerdictState,
     /// Codex tool calls explicitly introduced as execute cards, with the
     /// command needed if a later partial update says the process is detached.
@@ -278,6 +277,15 @@ impl DurableRelay {
         } else {
             let mut snapshot = RelaySnapshot::new(session_id);
             if let Some(restored) = read_restored_relay_seed(&root)? {
+                snapshot.assessment_context = None;
+                if let Some(value) = &restored.assessment_state {
+                    let state = mj_core::assessment::Checkpoint::decode(value)?;
+                    snapshot.assessment_context = state.context;
+                    snapshot.assessment = state.assessment;
+                    snapshot.continuation = state.continuation;
+                    snapshot.capacity_retry = state.capacity_retry;
+                    snapshot.turn_completion = state.turn_completion;
+                }
                 snapshot.latest_ordinal = restored.event_frontier;
                 snapshot.latest_digest = restored.event_frontier_digest.clone();
                 snapshot.acknowledged_through = restored.event_frontier;
@@ -374,6 +382,26 @@ impl DurableRelay {
             snapshot_ordinal,
             &mut snapshot,
         )?;
+        // Shipped retry records were command-bound. Read them forward once;
+        // all new transitions use the turn-owned assessment state machine.
+        let migrated_assessment =
+            snapshot.assessment.is_none() && snapshot.retry_assessment.is_some();
+        if migrated_assessment && let Some(old) = snapshot.retry_assessment.take() {
+            let completion = old.evidence.completion.clone().unwrap_or_else(|| {
+                mj_core::activity::verdict::CompletionEvidence::bounded(
+                    "legacy_completed_turn",
+                    None,
+                )
+            });
+            let mut a = mj_core::assessment::TurnAssessment::pending(
+                old.command_id,
+                old.ordinal,
+                epoch_millis(),
+                completion,
+            );
+            a.evidence = Some(old.evidence);
+            snapshot.assessment = Some(a);
+        }
         ensure_serialized_budget(
             &snapshot.operational_state(),
             RELAY_STATE_BYTE_BUDGET,
@@ -404,7 +432,6 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
-            replied_verdict_pending: false,
             replied_verdict: Default::default(),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
@@ -485,20 +512,17 @@ impl DurableRelay {
         if idle {
             relay.snapshot.activity_turn_started_at_ms = None;
         }
-        if !state_path.exists() || replayed || assigned_store_id || recovered_native_history {
+        if !state_path.exists()
+            || replayed
+            || assigned_store_id
+            || recovered_native_history
+            || migrated_assessment
+        {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
         relay.recover_nonterminal_commands()?;
         relay.promote_next_queued_command()?;
-        relay.replied_verdict_pending = relay.snapshot.retry_assessment.is_some()
-            || relay
-                .snapshot
-                .turn_completion
-                .as_ref()
-                .is_some_and(|completion| {
-                    completion.decision == mj_core::activity::verdict::Decision::ExpectContinuation
-                });
         Ok(relay)
     }
 
@@ -775,6 +799,7 @@ impl DurableRelay {
             }
         }
         self.turn_context.set_session_id(&self.snapshot.session_id);
+        self.publish_assessment_diagnostic();
     }
 
     pub fn turn_context(&self) -> mj_transcript::turn_context::TurnContext {
@@ -1084,7 +1109,6 @@ impl DurableRelay {
             },
         )?;
         self.finish_turn_activity()?;
-        self.replied_verdict_pending = true;
         Ok(())
     }
 

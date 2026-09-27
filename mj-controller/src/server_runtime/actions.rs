@@ -14,7 +14,7 @@ pub(super) fn phone_action_capacity_available(active_actions: usize) -> bool {
 /// Sending a batch restarts every profile's refresh, which spawns a harness
 /// process per profile, so the batch travels only when the profiles changed.
 /// Reports whether it did.
-pub(super) fn republish_quota_profiles(
+pub(crate) fn republish_quota_profiles(
     controller: &Controller,
     published: &mut std::collections::BTreeMap<String, HarnessProfile>,
     batch: &mut QuotaRefreshBatch,

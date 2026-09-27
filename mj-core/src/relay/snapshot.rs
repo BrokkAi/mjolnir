@@ -45,6 +45,11 @@ pub use digest::*;
     deny_unknown_fields
 )]
 pub enum RelayCommand {
+    /// Seed exact retained authorization history at the controller's verified frontier.
+    SeedAssessmentContext {
+        expected: RelayCursor,
+        context: Box<crate::assessment::ContextHistory>,
+    },
     /// Start an empty native conversation, preserving the logical session.
     ClearContext,
     Prompt {
@@ -149,6 +154,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
             Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
             Self::ContinueAuthorizedWork { .. } => 18,
             Self::Steer { .. } | Self::CancelTurnFor { .. } | Self::ResolveSteering { .. } => 17,
@@ -191,6 +197,7 @@ impl RelayCommand {
                 | Self::AdvanceRecoveryFloor { .. }
                 | Self::RecordNotice { .. }
                 | Self::SetQuotaRecovery { .. }
+                | Self::SeedAssessmentContext { .. }
         )
     }
 
@@ -242,9 +249,9 @@ impl RelayCommand {
             Self::CompleteCheckpoint { .. } => RelayCommandKind::CompleteCheckpoint,
             Self::ReleaseCheckpoint { .. } => RelayCommandKind::ReleaseCheckpoint,
             Self::AdvanceRecoveryFloor { .. } => RelayCommandKind::AdvanceRecoveryFloor,
-            Self::RecordNotice { .. } | Self::SetQuotaRecovery { .. } => {
-                RelayCommandKind::RecordNotice
-            }
+            Self::RecordNotice { .. }
+            | Self::SetQuotaRecovery { .. }
+            | Self::SeedAssessmentContext { .. } => RelayCommandKind::RecordNotice,
         }
     }
 }
@@ -521,6 +528,10 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<Box<crate::assessment::ContextHistory>>,
     /// Recorded completion, independent of process-local activity inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -874,6 +885,9 @@ pub struct RelayEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    TurnAssessmentUpdated {
+        assessment: Box<crate::assessment::TurnAssessment>,
+    },
     SteeringUnconfirmed {
         command_id: String,
         message: String,
@@ -1143,6 +1157,12 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default)]
+    pub assessment_questions: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<crate::assessment::TurnAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<crate::assessment::ContextHistory>,
     /// Recorded completion, independent of process-local activity inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1249,6 +1269,9 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            assessment_questions: Default::default(),
+            assessment: None,
+            assessment_context: Some(Default::default()),
             turn_completion: None,
             continuation: Default::default(),
             steering: None,
@@ -1301,6 +1324,8 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            assessment: self.assessment.clone().map(Box::new),
+            assessment_context: self.assessment_context.clone().map(Box::new),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),
             relay_protocol_version: None,
@@ -1323,7 +1348,12 @@ impl RelaySnapshot {
             inferred_idle_since_ms: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
-            retry_assessment_pending: self.retry_assessment.is_some(),
+            retry_assessment_pending: self.assessment.as_ref().is_some_and(|a| {
+                matches!(
+                    a.status,
+                    crate::assessment::Status::Pending | crate::assessment::Status::Failed
+                )
+            }) || self.retry_assessment.is_some(),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
             store_id: self.store_id.clone(),
             session_id: self.session_id.clone(),

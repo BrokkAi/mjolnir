@@ -50,7 +50,7 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// session and replace the worker with the current build once it is quiet.
 /// Until then, a request the older worker cannot decode is refused on the
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
-pub const RELAY_PROTOCOL_VERSION: u32 = 24;
+pub const RELAY_PROTOCOL_VERSION: u32 = 25;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// The first protocol whose workers read a gzip-compressed skills archive
 /// (`HELSKIL2`). A controller sends an older worker the uncompressed
@@ -69,8 +69,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-// Revision 14 retains command-bound Jev completion across worker restarts.
-pub const RELAY_STATE_VERSION: u32 = 14;
+// Revision 15 is breaking: unified assessment state and events must not be lost by an older writer.
+pub const RELAY_STATE_VERSION: u32 = 15;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
@@ -207,6 +207,9 @@ impl AcpActivityClock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoredRelaySeed {
+    /// Versioned worker assessment state, validated by assessment::Checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_state: Option<serde_json::Value>,
     pub event_frontier: u64,
     pub event_frontier_digest: String,
     /// Commands the archived session still had queued, already filtered by the
@@ -233,6 +236,9 @@ impl RestoredRelaySeed {
     /// The same frontier checks a canonical session snapshot carries, so a
     /// malformed seed is refused before it can become relay state.
     pub fn validate(&self) -> Result<()> {
+        if let Some(value) = &self.assessment_state {
+            crate::assessment::Checkpoint::decode(value)?;
+        }
         validate_relay_digest(
             &self.event_frontier_digest,
             "restored relay event frontier digest",

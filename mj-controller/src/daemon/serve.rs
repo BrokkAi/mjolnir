@@ -9,6 +9,7 @@ pub(super) fn spawn_phone_server(
     cancellation: CancellationToken,
     state: Arc<RuntimeState>,
     worker: SessionManagerChannels,
+    services: super::delegation::Services,
 ) -> tokio::task::JoinHandle<()> {
     state.set_phone_status(WebViewerStatus::Starting);
     let workspaces = state.workspaces();
@@ -19,6 +20,7 @@ pub(super) fn spawn_phone_server(
             worker,
             state.clone(),
             workspaces,
+            services,
         )
         .await
         {

@@ -72,7 +72,11 @@ pub(super) fn reconcile_actors(
         let (release_tx, release_rx) = mpsc::unbounded_channel();
         let (retirement_tx, retirement_rx) = watch::channel(false);
         let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
-        let actor_updates = updates.clone();
+        let mut actor_updates = updates.clone();
+        actor_updates.observer = updates
+            .delegation
+            .as_ref()
+            .map(|feed| feed.register(session_id));
         let task_target = target.clone();
         let task_id = session_id.clone();
         let abort = tasks.spawn(async move {

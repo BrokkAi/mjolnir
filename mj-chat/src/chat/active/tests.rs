@@ -278,6 +278,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
             operational: mj_core::relay::RelayOperationalState {
+                assessment: None,
+                assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
                 relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),

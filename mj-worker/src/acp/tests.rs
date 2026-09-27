@@ -6623,9 +6623,9 @@ async fn classifier_marks_silent_parent_awaiting_input_despite_continuous_native
         let evidence: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(evidence["state"]["phase"], "running");
         let answer = serde_json::json!({"answers": {
-            "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
-            "needs_user_input":{"type":"noul","noul":0.95},
-            "retryable_server_error":{"type":"noul","noul":0.01}
+            "work":{"type":"choice","choice":"waiting","confidence":0.95},
+            "input":{"type":"choice","choice":"required","confidence":0.95},
+            "failure":{"type":"choice","choice":"unclear","confidence":0.5}
         }})
         .to_string();
         socket

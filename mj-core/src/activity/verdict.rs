@@ -31,6 +31,8 @@ pub struct ToolEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<crate::assessment::ContextHistory>,
     pub harness: HarnessKind,
     pub phase: TurnPhase,
     pub silent_for_s: u64,
@@ -50,6 +52,32 @@ pub struct CompletionEvidence {
     pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 }
 
+impl CompletionEvidence {
+    pub fn bounded(
+        stop_reason: &str,
+        diagnostic: Option<&crate::diagnostic::TurnDiagnostic>,
+    ) -> Self {
+        let mut stop_reason = stop_reason.to_owned();
+        stop_reason.truncate(stop_reason.floor_char_boundary(128));
+        let diagnostic = diagnostic.cloned().map(|mut d| {
+            if d.message.len() > 4096 {
+                d.message = "[Provider diagnostic omitted: exceeds 4096 bytes]".into();
+            }
+            if d.code.as_ref().is_some_and(|v| v.len() > 128) {
+                d.code = None;
+            }
+            if d.reset_at.as_ref().is_some_and(|v| v.len() > 256) {
+                d.reset_at = None;
+            }
+            d
+        });
+        Self {
+            stop_reason,
+            diagnostic,
+        }
+    }
+}
+
 pub fn questions() -> Value {
     serde_json::from_str(include_str!("verdict_questions.json"))
         .expect("bundled turn verdict questions are valid JSON")
@@ -65,6 +93,7 @@ pub enum WorkState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TurnVerdict {
+    pub assessment: Option<crate::assessment::Verdict>,
     pub work_state: WorkState,
     pub work_state_confidence: f32,
     pub needs_user_input: f32,
@@ -74,6 +103,30 @@ pub struct TurnVerdict {
 impl TurnVerdict {
     /// Parse the HTTP response shape documented by TypeSafe, including Noul's object wrapper.
     pub fn parse(response: &Value) -> Result<Self> {
+        if response["answers"].get("failure").is_some() {
+            use crate::assessment::{Failure, Input, Work};
+            let v = crate::assessment::Verdict::parse(response)?;
+            return Ok(Self {
+                assessment: Some(v),
+                work_state: match v.work.choice {
+                    Work::Finished => WorkState::Finished,
+                    Work::Waiting => WorkState::BackgroundWork,
+                    Work::AuthorizedUnfinished => WorkState::StillWorking,
+                    Work::Unclear => WorkState::Unclear,
+                },
+                work_state_confidence: v.work.confidence,
+                needs_user_input: match v.input.choice {
+                    Input::Required => v.input.confidence,
+                    Input::None | Input::RedundantRequest => 1.0 - v.input.confidence,
+                    Input::Unclear => 0.5,
+                },
+                retryable_server_error: Some(if v.failure.choice == Failure::TransientProvider {
+                    v.failure.confidence
+                } else {
+                    0.0
+                }),
+            });
+        }
         let answers = response.get("answers").context("missing verdict answers")?;
         let choice = &answers["work_state"];
         ensure!(
@@ -91,6 +144,7 @@ impl TurnVerdict {
             _ => WorkState::Unclear,
         };
         Ok(Self {
+            assessment: None,
             work_state,
             work_state_confidence: probability(&choice["confidence"])?,
             needs_user_input: probability(&answers["needs_user_input"]["noul"])?,
@@ -195,6 +249,7 @@ mod tests {
                 for needs_user_input in [0.0, 0.15, 0.151, 0.849, 0.85, 1.0, -0.1, 1.1, f32::NAN] {
                     for work_state_confidence in [0.0, 0.849, 0.85, 1.0, 1.1, f32::NAN] {
                         let verdict = TurnVerdict {
+                            assessment: None,
                             work_state,
                             work_state_confidence,
                             needs_user_input,

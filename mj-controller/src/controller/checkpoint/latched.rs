@@ -401,7 +401,22 @@ impl Controller {
             "checkpoint projection digest does not match the relay frontier digest"
         );
         ensure_exact_checkpoint_cut(&cursor, expected_ordinal, &expected_digest)?;
-        let canonical_session = canonical_session_from_materialized(&materialized)?;
+        let mut canonical_session = canonical_session_from_materialized(&materialized)?;
+        if barrier
+            .operational
+            .relay_protocol_version
+            .is_some_and(|v| v >= mj_core::assessment::PROTOCOL)
+        {
+            canonical_session.assessment_state =
+                Some(serde_json::to_value(mj_core::assessment::Checkpoint {
+                    version: 1,
+                    context: barrier.operational.assessment_context.as_deref().cloned(),
+                    assessment: barrier.operational.assessment.as_deref().cloned(),
+                    continuation: barrier.operational.continuation.clone(),
+                    capacity_retry: barrier.operational.capacity_retry.clone(),
+                    turn_completion: barrier.operational.turn_completion.clone(),
+                })?);
+        }
         let native_session_id = barrier
             .operational
             .native_session_id

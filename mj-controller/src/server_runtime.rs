@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-mod api;
+pub(crate) mod api;
 mod api_activity;
-mod profile_catalog;
+pub(crate) mod profile_catalog;
 
 use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
 use mj_core::refusal::Refusal;
@@ -31,7 +31,6 @@ use crate::tailscale::TailscaleTls;
 #[cfg(test)]
 use crate::targets::ProcessExecutor;
 use crate::targets::{CancellableProcessExecutor, CommandExecutor};
-use crate::worker_client::CredentialSyncCoordinator;
 use mj_core::relay::RelayCommand;
 use mj_core::workspace::WorkspaceRecord;
 
@@ -40,10 +39,9 @@ use crate::daemon::{
     CreateSessionControl, CreateSessionRequest, ResumeSessionRequest, RuntimeState,
 };
 use crate::pollers::{
-    CredentialSyncNotices, CredentialSyncSignalTracker, QUOTA_STALE_AFTER, QuotaRefreshBatch,
-    QuotaUpdate, apply_worker_record_update, credential_sync_targets, projected_queued_prompts,
-    queued_prompt_projection, quota_refresh_profiles, schedule_due_credential_syncs,
-    spawn_quota_refresher,
+    QUOTA_STALE_AFTER, QuotaRefreshBatch, apply_worker_record_update,
+    projected_queued_prompts, queued_prompt_projection, quota_refresh_profiles,
+
 };
 
 #[derive(Debug, Clone)]
@@ -75,12 +73,13 @@ use args::*;
 mod phone_actions;
 use phone_actions::*;
 mod run;
-pub use run::*;
+pub(crate) use run::*;
 mod support;
 use support::*;
 mod preflight;
 use preflight::*;
 mod actions;
+pub(crate) use actions::republish_quota_profiles;
 use actions::*;
 mod project_sources;
 use project_sources::*;

@@ -13,6 +13,21 @@ fn completed(relay: &mut DurableRelay, id: &str) {
             },
         )
         .unwrap();
+    authorize(relay, mj_core::assessment::Action::Continue);
+}
+fn authorize(relay: &mut DurableRelay, action: mj_core::assessment::Action) {
+    if let Some(mut a) = relay.snapshot.assessment.clone().filter(|a| a.current()) {
+        a.action = Some(action);
+        a.status = mj_core::assessment::Status::Deferred;
+        relay
+            .append_relay_event(
+                None,
+                RelayObservation::TurnAssessmentUpdated {
+                    assessment: Box::new(a),
+                },
+            )
+            .unwrap();
+    }
 }
 fn request(relay: &DurableRelay) -> RelayCommand {
     let s = relay.operational_state();
@@ -148,7 +163,8 @@ fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
     );
 }
 
-fn quota_schedule(relay: &DurableRelay, reset_at_ms: Option<i64>) -> RelayCommand {
+fn quota_schedule(relay: &mut DurableRelay, reset_at_ms: Option<i64>) -> RelayCommand {
+    authorize(relay, mj_core::assessment::Action::RecoverQuota);
     let s = relay.operational_state();
     RelayCommand::SetQuotaRecovery {
         expected: RelayCursor {
@@ -189,7 +205,7 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
         submit_relay(&mut relay, &id, cmd);
         completed(&mut relay, &id);
     }
-    let cmd = quota_schedule(&relay, Some(epoch_millis() - 60_001));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
     submit_relay(&mut relay, "quota-schedule", cmd);
     drop(relay);
     let mut relay = open(root.path());
@@ -214,7 +230,7 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
             .unwrap()
             .is_err()
     );
-    let cmd = quota_schedule(&relay, Some(epoch_millis() - 60_001));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
     submit_relay(&mut relay, "quota-schedule-next", cmd);
     let cmd = quota_resume(&relay);
     submit_relay(&mut relay, "quota-retry-2", cmd);
@@ -233,7 +249,7 @@ fn quota_retry_requires_a_due_deadline_and_is_cancelled_by_user_work() {
             "unknown" => None,
             _ => Some(epoch_millis() - 60_001),
         };
-        let cmd = quota_schedule(&relay, reset);
+        let cmd = quota_schedule(&mut relay, reset);
         submit_relay(&mut relay, "quota-schedule", cmd);
         let retry = quota_resume(&relay);
         match action {
@@ -269,6 +285,7 @@ fn self_started_turn(relay: &mut DurableRelay) -> u64 {
             prompt_in_flight: false,
         })
         .unwrap();
+    authorize(relay, mj_core::assessment::Action::Continue);
     start
 }
 
@@ -341,7 +358,7 @@ fn a_second_self_started_turn_clears_a_waiting_recovery_and_its_end_can_schedule
     submit_relay(&mut relay, "user-request", prompt("Implement"));
     completed(&mut relay, "user-request");
     self_started_turn(&mut relay);
-    let cmd = quota_schedule(&relay, Some(epoch_millis() + 3_600_000));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() + 3_600_000));
     submit_relay(&mut relay, "quota-schedule-1", cmd);
     assert!(relay.snapshot.continuation.quota_recovery.is_some());
 
@@ -356,7 +373,7 @@ fn a_second_self_started_turn_clears_a_waiting_recovery_and_its_end_can_schedule
         c.completed_command_id,
         Some(mj_core::continuation::harness_turn_id(second))
     );
-    let cmd = quota_schedule(&relay, Some(epoch_millis() + 3_600_000));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() + 3_600_000));
     submit_relay(&mut relay, "quota-schedule-2", cmd);
     assert_eq!(
         relay
@@ -391,7 +408,7 @@ fn background_work_holds_continuation_back_only_until_jev_judges_it_idle() {
             .is_err()
     );
     // A due quota recovery is recorded whatever keeps the session busy.
-    let cmd = quota_schedule(&relay, Some(epoch_millis() + 3_600_000));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() + 3_600_000));
     assert!(relay.submit_command("quota-schedule", cmd).unwrap().is_ok());
     let cancel = RelayCommand::SetQuotaRecovery {
         expected: RelayCursor {
@@ -402,7 +419,8 @@ fn background_work_holds_continuation_back_only_until_jev_judges_it_idle() {
     };
     submit_relay(&mut relay, "quota-cancel", cancel);
 
-    let (generation, _, _) = relay.pending_replied_verdict().unwrap();
+    authorize(&mut relay, mj_core::assessment::Action::Continue);
+    let generation = relay.turn_context.generation();
     assert_eq!(
         relay
             .apply_replied_decision(
@@ -445,7 +463,7 @@ fn a_due_recovery_resumes_a_usage_limited_goal_and_a_spent_budget_blocks_everyth
         submit_relay(&mut relay, "user-request", prompt("Implement"));
         completed(&mut relay, "user-request");
         self_started_turn(&mut relay);
-        let cmd = quota_schedule(&relay, Some(epoch_millis() - 60_001));
+        let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
         submit_relay(&mut relay, "quota-schedule", cmd);
         limited_goal(&mut relay, reason);
         let resume = RelayCommand::GoalControl {

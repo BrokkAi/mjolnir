@@ -1,11 +1,5 @@
 use super::*;
 
-fn truncate_utf8(value: &mut String, maximum_bytes: usize) {
-    if value.len() > maximum_bytes {
-        value.truncate(value.floor_char_boundary(maximum_bytes));
-    }
-}
-
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -568,7 +562,10 @@ impl DurableRelay {
             // A background command that Jev judged idle does not hold this
             // back, and plan mode does not either: the prompt cannot get past
             // plan approval, and Jev already weighs whether input is needed.
-            if state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
+            if self.snapshot.assessment.as_ref().is_some_and(|a| {
+                !a.current() || a.action != Some(mj_core::assessment::Action::Continue)
+            }) || !self.snapshot.assessment_questions.is_empty()
+                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
                 || self.snapshot.goal.budget_limited()
                 || !state.eligible()
                 || state.user_command_id.as_ref() != Some(user_command_id)
@@ -588,6 +585,18 @@ impl DurableRelay {
                     None,
                 )));
             }
+        }
+        if let RelayCommand::SeedAssessmentContext { expected, context } = &command
+            && (expected.ordinal != self.snapshot.latest_ordinal
+                || expected.digest != self.snapshot.latest_digest
+                || context.evidence().validate().is_err())
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "assessment context frontier changed or evidence is invalid",
+                false,
+                None,
+            )));
         }
         let created_at_ms = epoch_millis();
         let accepted_ordinal = self.append_relay_event(
@@ -724,6 +733,7 @@ impl DurableRelay {
             RelayCommand::AdvanceRecoveryFloor { .. } => RelayCommandOutcome::RecoveryFloorAdvanced,
             RelayCommand::RecordNotice { .. }
             | RelayCommand::SetQuotaRecovery { .. }
+            | RelayCommand::SeedAssessmentContext { .. }
             | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,
             _ => RelayCommandOutcome::QueueChanged {
                 removed_command_ids,
@@ -1260,6 +1270,10 @@ impl DurableRelay {
     fn quota_recovery_admissible(&self, user: &str, completed: &str) -> bool {
         let c = &self.snapshot.continuation;
         !c.quota_suppressed
+            && self.snapshot.assessment.as_ref().is_none_or(|a| {
+                a.current() && a.action == Some(mj_core::assessment::Action::RecoverQuota)
+            })
+            && self.snapshot.assessment_questions.is_empty()
             && !self.snapshot.goal.budget_limited()
             && c.user_command_id.as_deref() == Some(user)
             && c.completed_command_id.as_deref() == Some(completed)
@@ -1293,7 +1307,15 @@ impl DurableRelay {
         // the reason this is being asked, not a reason to refuse.
         let mut facts = self.activity_facts();
         facts.capacity_retry_armed = false;
-        if retry.retry_at_ms > now_ms
+        if !self.snapshot.assessment_questions.is_empty()
+            || self.snapshot.goal.budget_limited()
+            || self
+                .snapshot
+                .goal
+                .snapshot
+                .as_ref()
+                .is_some_and(|g| g.status == "paused")
+            || retry.retry_at_ms > now_ms
             || !mj_core::activity::is_quiet(&facts)
             || self.pending_close_barrier_id().is_some()
         {
@@ -1323,57 +1345,6 @@ impl DurableRelay {
         let awaiting_input = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if stop_reason == mj_core::acp::AWAITING_INPUT_STOP_REASON);
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
-        let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
-            if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
-        if let RelayCommandOutcome::Prompt {
-            stop_reason,
-            diagnostic,
-            ..
-        } = &outcome
-            && !matches!(
-                mj_core::state::classify_prompt_completion(stop_reason),
-                mj_core::state::PromptCompletion::Cancelled
-                    | mj_core::state::PromptCompletion::QuotaLimit
-                    | mj_core::state::PromptCompletion::InputRequired
-            )
-            && let Some(harness) = self.verdict_harness
-        {
-            let mut evidence = self.turn_context.evidence(
-                harness,
-                mj_core::activity::verdict::TurnPhase::Replied,
-                &self.activity_facts(),
-                mj_core::clock::epoch_millis(),
-            );
-            let mut bounded_stop_reason = stop_reason.clone();
-            truncate_utf8(&mut bounded_stop_reason, 128);
-            evidence.completion = Some(mj_core::activity::verdict::CompletionEvidence {
-                stop_reason: bounded_stop_reason,
-                diagnostic: diagnostic.as_ref().map(|source| {
-                    let mut value = source.clone();
-                    truncate_utf8(&mut value.message, 4096);
-                    if let Some(code) = &mut value.code {
-                        truncate_utf8(code, 128);
-                    }
-                    if let Some(reset) = &mut value.reset_at {
-                        truncate_utf8(reset, 256);
-                    }
-                    value
-                }),
-            });
-            while serde_json::to_vec(&evidence)?.len() > 60 * 1024 {
-                let end = evidence.transcript_summary.len() / 2;
-                evidence
-                    .transcript_summary
-                    .truncate(evidence.transcript_summary.floor_char_boundary(end));
-            }
-            self.append_relay_event(
-                Some(command_id),
-                RelayObservation::RetryAssessmentStarted {
-                    command_id: command_id.to_owned(),
-                    evidence: Box::new(evidence),
-                },
-            )?;
-        }
         // Report confirmed changes in the conversation on every surface.
         // The command identity makes retries of this append project only once.
         let notice = self
@@ -1436,8 +1407,6 @@ impl DurableRelay {
                 mj_core::clock::epoch_millis(),
             )?;
         }
-        self.replied_verdict_pending |=
-            (classify_reply && !awaiting_input) || self.snapshot.retry_assessment.is_some();
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }

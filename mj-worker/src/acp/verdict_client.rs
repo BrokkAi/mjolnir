@@ -4,7 +4,7 @@ use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
 const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v4/turn-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v5/turn-verdict";
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -76,6 +76,11 @@ impl VerdictAttempt {
         });
         if let Some(diagnostic) = &self.diagnostic {
             let (status, action) = match (outcome, reason) {
+                (_, "assessment_uncertain") => ("uncertain", "Jev was uncertain; Mj retained the result until relevant evidence changes.".into()),
+                (_, "authorized_continuation_ready") => ("deferred", "Authorized unfinished work remains; continuation awaits atomic worker admission.".into()),
+                (_, "quota_resolution_required") => ("deferred", "Subscription quota reached; the controller will resolve the provider reset deadline.".into()),
+                (_, "automatic_action_suppressed") => ("suppressed", "User input, pause, or a budget limit prevents automatic work.".into()),
+                (_, "stale_turn") => ("stale", "A newer turn or user action superseded this assessment.".into()),
                 (_, "request_failed") => (
                     "failed",
                     "Jev request failed; mj kept the runtime status.".to_owned(),
@@ -212,11 +217,22 @@ impl VerdictClient {
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
-        let diagnostic = self.log.as_ref().map(|log| log.start(session, "activity",
-            "Does the session need user input, expect more agent work, or appear finished?",
-            "Current delivered user request and assistant conversation, plus live runtime facts. Transcript tool history is excluded; bounded summaries may omit older text."));
+        // Completed-turn diagnostics belong to the durable relay owner. A
+        // request can finish after its turn was superseded or its action admitted.
+        let diagnostic = self
+            .log
+            .as_ref()
+            .filter(|_| evidence.phase == mj_core::activity::verdict::TurnPhase::Running)
+            .map(|log| {
+                log.start(
+                    session,
+                    "activity",
+                    "Does the running turn require user input?",
+                    "Current conversation and live runtime facts.",
+                )
+            });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v4", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v5", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -251,7 +267,7 @@ impl VerdictClient {
                             > mj_core::activity::verdict::NO_INPUT_CONFIDENCE
                             || answer.work_state_confidence
                                 < mj_core::activity::verdict::ACT_CONFIDENCE);
-                    diagnostic.update(Some("Jev assessed user input need, remaining work, and transient server failures independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input, "retryable_server_error":answer.retryable_server_error}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
+                    diagnostic.update(Some("Jev assessed user input need, remaining work, and transient server failures independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input, "retryable_server_error":answer.retryable_server_error,"assessment":answer.assessment}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
                 }
                 Err(error) => diagnostic.update(
                     Some("No usable Jev answer."),
@@ -316,8 +332,8 @@ impl VerdictClient {
             &serde_json::from_slice(&body).context("decode turn verdict JSON")?,
         )?;
         ensure!(
-            verdict.retryable_server_error.is_some(),
-            "missing server retry verdict"
+            verdict.assessment.is_some(),
+            "missing unified turn assessment"
         );
         Ok(verdict)
     }
@@ -477,7 +493,7 @@ mod tests {
         assert_eq!(technical["reason"], "activity_or_generation_changed");
         let text = serde_json::to_string(&page).unwrap();
         assert!(!text.contains("Bearer"));
-        assert!(!text.contains("authorization"));
+        assert!(!text.contains("fake-key"));
         assert!(
             mj_core::jev::read(directory.path(), "isolated", None)
                 .unwrap()
@@ -505,7 +521,7 @@ mod tests {
         let record = &page.decisions[0];
         assert_eq!(record.status, "applied");
         let technical = record.technical.as_ref().unwrap();
-        assert_eq!(technical["contract"], "turn-verdict-v4");
+        assert_eq!(technical["contract"], "turn-verdict-v5");
         assert_eq!(
             technical["confidence_threshold"],
             serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)
@@ -515,7 +531,7 @@ mod tests {
             serde_json::json!(mj_core::activity::verdict::NO_INPUT_CONFIDENCE)
         );
         let scores = technical["result"].as_object().unwrap();
-        assert_eq!(scores.len(), 4);
+        assert_eq!(scores.len(), 5);
         assert_eq!(scores["work_state"], "BackgroundWork");
         assert_eq!(
             scores["work_state_confidence"].as_f64().unwrap() as f32,
@@ -614,7 +630,7 @@ mod tests {
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v4/turn-verdict", listener.local_addr().unwrap());
+            let endpoint = format!("http://{}/v5/turn-verdict", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);
@@ -651,9 +667,9 @@ mod tests {
     async fn classifier_sends_bounded_evidence_and_parses_typed_answers() {
         let (client, server) = server(
             serde_json::json!({"answers": {
-                "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
-                "needs_user_input":{"type":"noul","noul":0.96},
-                "retryable_server_error":{"type":"noul","noul":0.01}
+                "work":{"type":"choice","choice":"waiting","confidence":0.95},
+                "input":{"type":"choice","choice":"required","confidence":0.96},
+                "failure":{"type":"choice","choice":"none","confidence":0.99}
             }})
             .to_string(),
         )
@@ -663,7 +679,7 @@ mod tests {
         let request = server.await.unwrap();
         assert_eq!(request["model"], "jev-latest");
         assert_eq!(request["state"]["phase"], "running");
-        assert_eq!(request["questions"]["needs_user_input"]["type"], "noul");
+        assert_eq!(request["questions"]["input"]["type"], "choice");
     }
 
     #[tokio::test]
@@ -689,9 +705,9 @@ mod tests {
 
     fn response(choice: &str) -> String {
         serde_json::json!({"answers": {
-            "work_state":{"type":"choice","choice":if choice == "user" { "background_work" } else { choice },"confidence":0.95},
-            "needs_user_input":{"type":"noul","noul":if choice == "user" { 0.96 } else { 0.01 }},
-            "retryable_server_error":{"type":"noul","noul":0.01}
+            "work":{"type":"choice","choice":if choice == "user" || choice == "background_work" { "waiting" } else { choice },"confidence":0.95},
+            "input":{"type":"choice","choice":if choice == "user" { "required" } else { "none" },"confidence":if choice == "user" { 0.96 } else { 0.99 }},
+            "failure":{"type":"choice","choice":"none","confidence":0.99}
         }})
         .to_string()
     }

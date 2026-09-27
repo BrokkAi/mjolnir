@@ -266,6 +266,7 @@ impl TurnContext {
         let state = self.0.lock().expect("turn context lock poisoned");
         let summary = state.summary.latest_user_messages();
         let mut evidence = TurnEvidence {
+            authorization: None,
             harness,
             phase,
             silent_for_s: facts
