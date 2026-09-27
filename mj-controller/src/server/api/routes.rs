@@ -8,6 +8,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/events", get(events::events))
         .route("/profiles/{profile_id}/config", get(profile_config))
+        .route(
+            "/profiles/{profile_id}/subagent-options",
+            get(subagent_options),
+        )
         .route("/options", get(options))
         .route(
             "/sessions/{session_id}/config",

@@ -251,7 +251,7 @@ test('entering Review does not wait for project preflight', async () => {
 
 test('the create payload carries a sub-agent choice only for Claude and Codex', async () => {
   const posted = [];
-  const makeContext = (profileId, harnessKind, mjolnirSubagents) => vm.createContext({
+  const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
     snapshot: { profiles: [{ id: profileId, harness_kind: harnessKind }] },
     newDraft: {
       workspaceId: 'test',
@@ -263,7 +263,7 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
       title: '',
       worktreeOptions: { available: false, default_create: false },
       createManagedWorktree: false,
-      mjolnirSubagents,
+      subagents,
     },
     pendingNewPreflight: null,
     targetIsBare: () => false,
@@ -275,18 +275,18 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
   });
 
   for (const [kind, choice, expected] of [
-    ['claude', true, true],
-    ['claude', false, false],
-    ['codex', true, true],
-    ['grok', true, null],
-    ['kimi', false, null],
+    ['claude', { mode: 'all_models' }, { mode: 'all_models' }],
+    ['claude', { mode: 'native' }, { mode: 'native' }],
+    ['codex', { mode: 'none' }, { mode: 'none' }],
+    ['grok', { mode: 'all_models' }, null],
+    ['kimi', { mode: 'native' }, null],
   ]) {
     const context = makeContext('profile', kind, choice);
     context.newDraft.committing = false;
     vm.runInContext(sourceBetween('/// Only Claude and Codex receive', '\nfunction targetIsBare('), context);
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
-    assert.equal(posted.at(-1).mjolnir_subagents, expected, `${kind} with ${choice}`);
+    assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);
   }
 });
 

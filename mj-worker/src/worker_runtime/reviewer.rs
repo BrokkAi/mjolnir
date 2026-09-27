@@ -877,6 +877,7 @@ impl ReviewerRole {
             // which belongs to the primary session alone.
             project_memory: None,
             extra_mcp_servers: config.mcp_servers.clone(),
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             resume_session,
             native_session_may_have_history,

@@ -499,7 +499,7 @@ pub(super) async fn preflight_new(
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         launch_base: None,
         launch_branch: None,

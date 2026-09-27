@@ -844,7 +844,7 @@ pub(super) fn runtime_test_session(
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         id: id.into(),
         workspace_id: workspace_id.into(),

@@ -77,6 +77,13 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       if (result.error) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(result) });
       return json(result);
     }
+    if (pathname.endsWith('/subagent-options')) {
+      const model = new URL(route.request().url()).searchParams.get('model');
+      state.subagentRequests ||= [];
+      state.subagentRequests.push(model);
+      if (state.subagentOptions) return json(await state.subagentOptions(model));
+      return json({ models: [{ value: 'model-a', name: 'Model A' }, { value: 'model-b', name: 'Model B' }], efforts: model === 'model-a' ? [{ value: 'high', name: 'High' }] : [], unavailable: [] });
+    }
     if (pathname === '/api/bundles') {
       state.creates.push(route.request().postDataJSON());
       if (state.holdCreate) await state.holdCreate;
@@ -269,12 +276,12 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(page.locator('#new-back')).toBeEnabled();
   const worktree = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(worktree).toBeDisabled();
-  const subagents = page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' });
-  await subagents.uncheck();
+  const subagents = page.locator('#new-subagents');
+  await subagents.selectOption('native');
   await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   expect(state.actions).toHaveLength(0);
   await refresh(page, state);
-  await expect(subagents).not.toBeChecked();
+  await expect(subagents).toHaveValue('native');
   await expect(page.locator('#new-step')).toContainText('Checking project…');
   expect(state.preflights).toHaveLength(1);
   release();
@@ -283,7 +290,7 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(worktree).toBeChecked();
   await expect(page.locator('#new-step')).toContainText('/resolved/project');
   await page.locator('#new-next').click();
-  expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project', mjolnir_subagents: false });
+  expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project', subagents: { mode: 'native' } });
 });
 
 test('failed Review retries without launching and Back abandons a pending check', async ({ page }) => {
@@ -432,29 +439,28 @@ test('an existing linked checkout can explicitly create a managed worktree', asy
   expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: true, project_directory: '/work/linked' });
 });
 
-test('the sub-agent checkbox appears only for Claude and Codex, starts unchecked, and sends its choice', async ({ page }) => {
+test('the Subagents input offers four modes and preserves the choice on refresh', async ({ page }) => {
   const state = await mount(page);
   await projectStep(page, 'container');
   await page.getByRole('button', { name: 'existing', exact: true }).click();
-  const checkbox = page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' });
-  await expect(checkbox).not.toBeChecked();
-  await expect(page.locator('#new-step')).toContainText('keeps the harness');
-  await checkbox.check();
-  await expect(page.locator('#new-step')).toContainText('share this session');
+  const select = page.locator('#new-subagents');
+  await expect(select).toHaveValue('native');
+  await expect(select.locator('option')).toHaveText(['Native', 'Mjolnir, all models', 'Mjolnir, single model', 'None']);
+  await select.selectOption('all_models');
   await refresh(page, state);
-  await expect(checkbox).toBeChecked();
+  await expect(select).toHaveValue('all_models');
   await page.locator('#new-next').click();
-  expect(state.actions.at(-1)).toMatchObject({ mjolnir_subagents: true });
+  expect(state.actions.at(-1)).toMatchObject({ subagents: { mode: 'all_models' } });
 });
 
-test('a harness that cannot receive Mjolnir sub-agents shows no checkbox and sends no choice', async ({ page }) => {
+test('a harness that cannot receive Mjolnir sub-agents shows no Subagents input and sends no choice', async ({ page }) => {
   const state = await mount(page);
   await page.locator('#new-profile').getByRole('radio', { name: /^gamma/ }).check();
   await projectStep(page, 'container');
   await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' })).toHaveCount(0);
+  await expect(page.locator('#new-subagents')).toHaveCount(0);
   await page.locator('#new-next').click();
-  expect(state.actions.at(-1).mjolnir_subagents).toBe(null);
+  expect(state.actions.at(-1).subagents).toBe(null);
 });
 
 test('changing the directory resets the worktree choice to its inspected default', async ({ page }) => {
@@ -913,4 +919,55 @@ test('group creation is single flight and leaving it preserves the draft while i
     { sources: ['example/app', 'example/shared'] },
     { sources: ['example/app', 'example/shared'] },
   ]);
+});
+
+test('single-model selection loads corresponding efforts and sends the fixed pair', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page, 'container');
+  await page.getByRole('button', { name: 'existing', exact: true }).click();
+  await page.locator('#new-subagents').selectOption('single_model');
+  await expect(page.locator('#new-subagent-model')).toBeEnabled();
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await expect(page.locator('#new-step')).toContainText('Settings → Sub-agents');
+  await page.locator('#new-subagent-model').selectOption('model-a');
+  await expect(page.locator('#new-subagent-effort')).toBeEnabled();
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await page.locator('#new-subagent-effort').selectOption('high');
+  await expect(page.locator('#new-next')).toBeEnabled();
+  await page.locator('#new-next').click();
+  expect(state.actions.at(-1).subagents).toEqual({ mode: 'single_model', model: 'model-a', effort: 'high' });
+});
+
+test('remembered single-model choice is validated and changing to an effortless model clears effort', async ({ page }) => {
+  const state = await mount(page);
+  state.snapshot.last_subagent_policy = { mode: 'single_model', model: 'model-a', effort: 'high' };
+  await refresh(page, state);
+  await page.goto('https://viewer.test/#workspace/test');
+  await page.goto('https://viewer.test/#workspace/test/new');
+  await projectStep(page, 'container');
+  await page.getByRole('button', { name: 'existing', exact: true }).click();
+  await expect(page.locator('#new-subagents')).toHaveValue('single_model');
+  await expect(page.locator('#new-subagent-effort')).toHaveValue('high');
+  await expect(page.locator('#new-next')).toBeEnabled();
+  await page.locator('#new-subagent-model').selectOption('model-b');
+  await expect(page.locator('#new-subagent-effort')).toBeDisabled();
+  await expect(page.locator('#new-next')).toBeEnabled();
+  await page.locator('#new-next').click();
+  expect(state.actions.at(-1).subagents).toEqual({ mode: 'single_model', model: 'model-b', effort: null });
+});
+
+test('unavailable remembered model blocks creation until changed; None needs no discovery', async ({ page }) => {
+  const state = await mount(page);
+  state.snapshot.last_subagent_policy = { mode: 'single_model', model: 'removed', effort: 'high' };
+  await refresh(page, state);
+  await page.goto('https://viewer.test/#workspace/test');
+  await page.goto('https://viewer.test/#workspace/test/new');
+  await projectStep(page, 'container');
+  await page.getByRole('button', { name: 'existing', exact: true }).click();
+  await expect(page.locator('#new-step')).toContainText('removed is unavailable');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await page.locator('#new-subagents').selectOption('none');
+  await expect(page.locator('#new-subagent-model')).toHaveCount(0);
+  await page.locator('#new-next').click();
+  expect(state.actions.at(-1).subagents).toEqual({ mode: 'none' });
 });

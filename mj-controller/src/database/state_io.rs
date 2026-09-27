@@ -10,6 +10,17 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
     let connection = reader.transaction()?;
     let mut state = State::default();
+    let remembered: Option<String> = connection
+        .query_row(
+            "SELECT policy FROM subagent_preference WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    state.last_subagent_policy = remembered
+        .map(|json| serde_json::from_str(&json))
+        .transpose()?
+        .unwrap_or_default();
     let mut statement = connection.prepare(
         "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
                 s.target_template_id, s.state, s.native_session_id, s.acp_session_title,
@@ -17,7 +28,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
-                , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents,
+                , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.expected_runtime_identity
          FROM sessions s JOIN session_contexts c USING(session_id)
@@ -67,7 +78,14 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                     })
                 })
                 .transpose()?,
-            mjolnir_subagents: row.get(24)?,
+            subagents: row
+                .get::<_, Option<String>>(24)?
+                .map(|json| {
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?,
             container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
             build_cache: row
                 .get::<_, Option<String>>(26)?
@@ -594,7 +612,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
-             mjolnir_subagents, container_workspace, build_cache_json, launch_base,
+             subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, expected_runtime_identity
          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
          ON CONFLICT(session_id) DO UPDATE SET
@@ -620,7 +638,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_memory = excluded.container_memory,
              archived = excluded.archived,
              create_managed_worktree = excluded.create_managed_worktree,
-             mjolnir_subagents = excluded.mjolnir_subagents,
+             subagents = excluded.subagents,
              container_workspace = excluded.container_workspace,
              build_cache_json = excluded.build_cache_json,
              launch_base = excluded.launch_base,
@@ -662,7 +680,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
-            session.mjolnir_subagents,
+            session.subagents.as_ref().map(serde_json::to_string).transpose()?,
             session
                 .container_workspace
                 .as_ref()
@@ -725,7 +743,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         checkout: _,
         expected_runtime_identity: _,
         publication: _,
-        mjolnir_subagents: _,
+        subagents: _,
         additional_mounts: _,
         container_cpus: _,
         container_memory: _,

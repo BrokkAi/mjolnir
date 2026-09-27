@@ -445,7 +445,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -692,7 +692,7 @@ fn runtime_identity_migration_and_lifecycle_updates_preserve_selection() {
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        55
+        SCHEMA_VERSION
     );
     let tx = connection.transaction().unwrap();
     let mut stale = record.clone();
@@ -5554,5 +5554,39 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     assert_eq!(
         load_state_from(&database).unwrap().sessions["old-session"].state,
         SessionState::Parked
+    );
+}
+
+#[test]
+fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default() {
+    use mj_core::subagent::SubagentPolicy;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mj.sqlite3");
+    let mut parent = session("fixed-parent", "project");
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    parent.subagents = Some(fixed.clone());
+    save_new_session_to(&path, &parent, None).unwrap();
+    let state = load_state_from(&path).unwrap();
+    assert_eq!(state.last_subagent_policy, fixed);
+    assert_eq!(state.sessions[&parent.id].subagents, Some(fixed.clone()));
+    let mut child = session("child", "project");
+    child.subagents = Some(SubagentPolicy::None);
+    save_session_to(&path, &child).unwrap();
+    parent.title = "resumed parent".into();
+    save_session_to(&path, &parent).unwrap();
+    assert_eq!(load_state_from(&path).unwrap().last_subagent_policy, fixed);
+    let mut next = session("next", "project");
+    next.subagents = Some(SubagentPolicy::None);
+    save_new_session_to(&path, &next, None).unwrap();
+    assert_eq!(
+        load_state_from(&path).unwrap().last_subagent_policy,
+        SubagentPolicy::None
+    );
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions[&parent.id].subagents,
+        Some(fixed)
     );
 }

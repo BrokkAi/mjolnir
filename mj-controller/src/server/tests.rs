@@ -154,6 +154,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         ]),
     };
     let state = AppState {
+        last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(
@@ -167,7 +168,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 publication: None,
                 build_cache: None,
                 container_workspace: None,
-                mjolnir_subagents: None,
+                subagents: None,
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
@@ -3278,7 +3279,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
             launch_branch: None,
             checkout: None,
             expected_runtime_identity: None,
-            mjolnir_subagents: None,
+            subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
             profile_id: "codex-1".into(),
@@ -3305,7 +3306,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
         launch_branch: None,
         checkout: None,
         expected_runtime_identity: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
         profile_id: "codex-1".into(),

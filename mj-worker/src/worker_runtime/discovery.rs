@@ -47,6 +47,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     }
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,
@@ -290,6 +291,7 @@ for line in sys.stdin:
 "#).unwrap();
         let launch = LaunchSpec {
             bridge_spec_path: None,
+            subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             runtime_constraint: None,
             clear_context_request: None,

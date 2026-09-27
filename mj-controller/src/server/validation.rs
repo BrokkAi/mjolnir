@@ -364,7 +364,7 @@ fn validate_action_against(
             launch_branch: _,
             checkout: _,
             expected_runtime_identity: _,
-            mjolnir_subagents: _,
+            subagents: _,
         } => {
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;

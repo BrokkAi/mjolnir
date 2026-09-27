@@ -441,10 +441,18 @@ command-line tool must match the version Mjolnir links.
 
 A Claude or Codex session can start child sessions, called sub-agents, through
 Mjolnir's `spawn` tool. Whether a given session uses Mjolnir's sub-agents at
-all, instead of its harness's own, is a per-session choice: the checkbox in
-the TUI and web new-session forms, or `mj new --mj-subagents` /
-`--native-subagents` (native is the default). This section only sets how many
-sub-agents at once and which profiles the children may run on.
+all, instead of its harness's own, is a per-session choice. The TUI and web
+new-session forms offer **Native**, **Mjolnir, all models**, **Mjolnir, single
+model**, and **None**. The CLI uses `mj new --subagents native|all-models|single-model|none`. Native is the initial choice; the last
+accepted new-session choice is then remembered per instance across both UIs.
+
+Single-model mode selects a model and corresponding effort from eligible
+profiles. Its `spawn` tool always uses that selection and cannot override the
+profile, model, or effort; `list_profiles` is omitted. Configure profiles in
+Settings → Profiles and additional eligible profiles in Settings → Sub-agents.
+Claude/Codex Mjolnir children have native delegation disabled under both modes.
+
+This section sets the concurrent child limit and eligible profiles.
 
 ```toml
 [subagents]

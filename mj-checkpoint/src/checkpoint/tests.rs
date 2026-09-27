@@ -1387,7 +1387,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         cwd: spec.workspace_root.join("app"),
         additional_directories: Vec::new(),
         native_session_id: Some(NATIVE.into()),
-        subagent_tools: false,
+        subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         project_memory: Some(mj_core::worker_launch::ProjectMemoryLaunchConfig {
             history_socket: None,

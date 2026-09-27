@@ -290,7 +290,11 @@ impl DashboardContext {
         };
         self.dashboard.set_workspace_names(update.workspace_names);
         self.select_workspace(next_workspace);
-        self.apply_runtime_records(update.records, update.subagents);
+        self.apply_runtime_records(
+            update.records,
+            update.subagents,
+            update.last_subagent_policy,
+        );
         self.dashboard.set_native_agents(update.native_agents);
         self.dashboard.set_move_operations(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
@@ -427,6 +431,7 @@ impl DashboardContext {
         &mut self,
         records: Vec<SessionRecord>,
         subagents: Vec<SubagentRecord>,
+        last_subagent_policy: mj_core::subagent::SubagentPolicy,
     ) {
         let mut sessions: BTreeMap<String, SessionRecord> = records
             .into_iter()
@@ -466,11 +471,13 @@ impl DashboardContext {
         }
         if self.controller.state.sessions == sessions
             && self.controller.state.subagents == subagents
+            && self.controller.state.last_subagent_policy == last_subagent_policy
         {
             return;
         }
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
+        self.controller.state.last_subagent_policy = last_subagent_policy;
         self.dashboard.set_state(self.controller.state.clone());
         self.finish_sessions_stopped_by_suspend();
         self.reconcile_question_drafts();
@@ -644,10 +651,7 @@ pub(crate) fn refresh_open_chats(
         let count = dashboard.subagent_count_for(chat.session_id());
         chat.set_subagent_count(count);
         chat.set_subagents_enabled(record.is_some_and(|session| {
-            session_uses_mjolnir_subagents(
-                session,
-                controller.state.is_subagent_session(&session.id),
-            )
+            session_uses_subagents(session, controller.state.is_subagent_session(&session.id))
         }));
         let working = dashboard.working_subagent_count_for(chat.session_id());
         chat.set_subagent_working_count(working);
@@ -658,13 +662,13 @@ pub(crate) fn refresh_open_chats(
 /// worker launch rule: the session's own choice, with `None` meaning native
 /// sub-agents; never for a child, and only for harnesses that can receive
 /// the tools.
-fn session_uses_mjolnir_subagents(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
-    session.mjolnir_subagents.unwrap_or(false)
-        && !is_child
-        && matches!(
-            session.harness_kind,
-            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Codex
-        )
+fn session_uses_subagents(session: &mj_core::state::SessionRecord, is_child: bool) -> bool {
+    session
+        .subagents
+        .clone()
+        .unwrap_or_default()
+        .for_launch(session.harness_kind, is_child)
+        .uses_mjolnir()
 }
 
 #[cfg(test)]
@@ -681,7 +685,13 @@ mod tests {
             publication: None,
             build_cache: None,
             container_workspace: None,
-            mjolnir_subagents: choice,
+            subagents: choice.map(|enabled| {
+                if enabled {
+                    mj_core::subagent::SubagentPolicy::AllModels
+                } else {
+                    mj_core::subagent::SubagentPolicy::Native
+                }
+            }),
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
@@ -715,21 +725,9 @@ mod tests {
     /// `None` means native sub-agents, same as `Some(false)`.
     #[test]
     fn none_means_native_subagents() {
-        assert!(!session_uses_mjolnir_subagents(
-            &claude_session(None),
-            false
-        ));
-        assert!(!session_uses_mjolnir_subagents(
-            &claude_session(Some(false)),
-            false
-        ));
-        assert!(session_uses_mjolnir_subagents(
-            &claude_session(Some(true)),
-            false
-        ));
-        assert!(!session_uses_mjolnir_subagents(
-            &claude_session(Some(true)),
-            true
-        ));
+        assert!(!session_uses_subagents(&claude_session(None), false));
+        assert!(!session_uses_subagents(&claude_session(Some(false)), false));
+        assert!(session_uses_subagents(&claude_session(Some(true)), false));
+        assert!(!session_uses_subagents(&claude_session(Some(true)), true));
     }
 }

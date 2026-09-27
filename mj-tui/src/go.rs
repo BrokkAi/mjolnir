@@ -140,7 +140,7 @@ impl DashboardState {
                     .position(|id| id == &recipe.target_id)
                     .unwrap_or(0);
                 wizard.create_managed_worktree = recipe.create_managed_worktree.unwrap_or(false);
-                wizard.mjolnir_subagents = recipe.mjolnir_subagents.unwrap_or(false);
+                *wizard.subagents = recipe.subagents.clone().unwrap_or_default();
                 wizard.resource_allocation = recipe.resource_allocation.clone();
                 wizard.mounts.mounts = recipe.additional_mounts.clone();
             }
@@ -170,7 +170,7 @@ impl DashboardState {
             }),
             project_directory: recipe.project_directory,
             create_managed_worktree: recipe.create_managed_worktree,
-            mjolnir_subagents: recipe.mjolnir_subagents,
+            subagents: Some(recipe.subagents.unwrap_or_default()),
             additional_mounts: recipe.additional_mounts,
             resource_allocation: recipe.resource_allocation,
         }
@@ -187,7 +187,7 @@ impl DashboardState {
             bundle_id,
             project_directory,
             create_managed_worktree,
-            mjolnir_subagents,
+            subagents,
             additional_mounts,
             resource_allocation,
             ..
@@ -210,7 +210,7 @@ impl DashboardState {
             bundle_id: project_directory.is_none().then(|| bundle_id.clone()),
             project_directory: project_directory.clone(),
             create_managed_worktree: *create_managed_worktree,
-            mjolnir_subagents: *mjolnir_subagents,
+            subagents: subagents.clone(),
             additional_mounts: additional_mounts.clone(),
             resource_allocation: resource_allocation.clone(),
         };
@@ -272,7 +272,7 @@ mod tests {
                 bundle_id: Some("hel".into()),
                 project_directory: None,
                 create_managed_worktree: Some(false),
-                mjolnir_subagents: Some(true),
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
                 additional_mounts: Vec::new(),
                 resource_allocation: None,
             }),

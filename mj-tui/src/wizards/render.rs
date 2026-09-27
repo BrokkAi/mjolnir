@@ -89,7 +89,7 @@ pub(crate) fn render_new_wizard(
             ReviewWizardView {
                 subagents: wizard
                     .subagent_choice_applies(&dashboard.config)
-                    .then_some(wizard.mjolnir_subagents),
+                    .then_some(wizard),
                 // Isolated targets always provide the workspace, so the choice
                 // only exists for a bare project directory.
                 worktree: raw_project.then(|| {
@@ -128,11 +128,13 @@ pub(crate) fn render_new_wizard(
                 moving: false,
                 preparing: false,
                 preparation_error: None,
-                submit_enabled: !raw_project
+                submit_enabled: (!raw_project
                     || wizard
                         .selected_worktree_options(&dashboard.config)
                         .is_some()
-                    || wizard.remote_preflight_error.is_some(),
+                    || wizard.remote_preflight_error.is_some())
+                    && (!wizard.subagent_choice_applies(&dashboard.config)
+                        || wizard.subagent_error().is_none()),
                 active_interruption: false,
                 in_place_move: false,
                 source_unavailable: false,
@@ -481,8 +483,8 @@ pub(crate) fn render_new_wizard(
 
 pub(crate) struct ReviewWizardView<'a> {
     worktree: Option<(bool, bool)>,
-    /// `Some(checked)` shows the Mjolnir sub-agent checkbox; `None` hides it.
-    subagents: Option<bool>,
+    /// Only new Claude/Codex sessions display the delegation controls.
+    subagents: Option<&'a NewWizard>,
     pub(crate) profile_id: &'a str,
     pub(crate) project_label: &'a str,
     pub(crate) project: &'a str,
@@ -681,17 +683,50 @@ pub(crate) fn render_review_wizard(
         ));
         row
     });
-    let subagent_row = subagents.map(|checked| {
+    let mut subagent_model_row = None;
+    let mut subagent_effort_row = None;
+    let mut subagent_retry_row = None;
+    let subagent_row = subagents.map(|wizard| {
+        lines.push(Line::styled("Subagents", theme::muted()));
         let row = lines.len() as u16;
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            if checked {
-                "Delegation goes to Mjolnir sub-agents that share this session's files."
-            } else {
-                "Unchecked keeps the harness's own Agent or spawn_agent tools."
-            },
-            theme::muted(),
-        ));
+        for _ in 0..4 {
+            lines.push(Line::raw(""));
+        }
+        if matches!(
+            *wizard.subagents,
+            mj_core::subagent::SubagentPolicy::SingleModel { .. }
+        ) {
+            lines.push(Line::styled("Model", theme::muted()));
+            let height = wizard.subagent_models().len().min(3) as u16;
+            subagent_model_row = Some((lines.len() as u16, height));
+            for _ in 0..height {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled("Effort", theme::muted()));
+            let height = wizard.subagent_efforts().len().min(3) as u16;
+            subagent_effort_row = Some((lines.len() as u16, height));
+            for _ in 0..height {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(
+                "Configure profiles in Settings → Profiles; additional eligible",
+                theme::muted(),
+            ));
+            lines.push(Line::styled(
+                "profiles in Settings → Sub-agents. Your own profile is always eligible.",
+                theme::muted(),
+            ));
+            if let Some(error) = wizard.subagent_error() {
+                lines.push(Line::raw(error));
+            }
+            if let Some(options) = wizard.subagent_options() {
+                for error in &options.unavailable {
+                    lines.push(Line::raw(error.clone()));
+                }
+            }
+            subagent_retry_row = Some(lines.len() as u16);
+            lines.push(Line::raw(""));
+        }
         row
     });
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
@@ -769,7 +804,10 @@ pub(crate) fn render_review_wizard(
     );
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
-        Some(WizardControl::MjolnirSubagents) => subagent_row,
+        Some(WizardControl::Subagents) => subagent_row,
+        Some(WizardControl::SubagentModel) => subagent_model_row.map(|(row, _)| row),
+        Some(WizardControl::SubagentEffort) => subagent_effort_row.map(|(row, _)| row),
+        Some(WizardControl::SubagentRetry) => subagent_retry_row,
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -798,16 +836,59 @@ pub(crate) fn render_review_wizard(
             WizardControl::CreateManagedWorktree,
         );
     }
-    if let Some((checked, row)) = subagents.zip(subagent_row) {
-        Checkbox::render(
+    if let Some((wizard, row)) = subagents.zip(subagent_row) {
+        let modes = mj_core::subagent::SubagentPolicy::LABELS
+            .iter()
+            .map(|label| Line::raw(*label))
+            .collect::<Vec<_>>();
+        ChoiceList::render(
             frame,
-            viewport.row(row, 1),
-            "Use Mjolnir sub-agents",
-            checked,
-            true,
+            viewport.row(row, 4),
+            &modes,
+            wizard.subagents.index(),
             form,
-            WizardControl::MjolnirSubagents,
+            WizardControl::Subagents,
         );
+        if let Some((row, height)) = subagent_model_row {
+            let choices = wizard
+                .subagent_models()
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>();
+            ChoiceList::render(
+                frame,
+                viewport.row(row, height),
+                &choices,
+                wizard.subagent_model_index(),
+                form,
+                WizardControl::SubagentModel,
+            );
+        }
+        if let Some((row, height)) = subagent_effort_row {
+            let choices = wizard
+                .subagent_efforts()
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>();
+            ChoiceList::render(
+                frame,
+                viewport.row(row, height),
+                &choices,
+                wizard.subagent_effort_index(),
+                form,
+                WizardControl::SubagentEffort,
+            );
+        }
+        if let Some(row) = subagent_retry_row {
+            mj_chat::components::Button::render(
+                frame,
+                viewport.row(row, 1),
+                "Refresh profiles",
+                true,
+                form,
+                WizardControl::SubagentRetry,
+            );
+        }
     }
     if can_attach && !mounts.mounts.is_empty() {
         let list_area = viewport.row(summary_height, list_height);

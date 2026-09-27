@@ -416,7 +416,10 @@ impl DashboardState {
             | WizardControl::MountAccess
             | WizardControl::ReviewAttachments
             | WizardControl::CreateManagedWorktree
-            | WizardControl::MjolnirSubagents
+            | WizardControl::Subagents
+            | WizardControl::SubagentModel
+            | WizardControl::SubagentEffort
+            | WizardControl::SubagentRetry
             | WizardControl::DiscardQueue
             | WizardControl::Submit => {
                 self.mode = Mode::New(wizard);

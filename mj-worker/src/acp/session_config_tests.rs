@@ -198,6 +198,7 @@ for line in sys.stdin:
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
         runtime_constraint: None,
         clear_context_request: None,

@@ -140,7 +140,7 @@ pub(super) async fn apply_phone_action(
             launch_branch,
             checkout,
             expected_runtime_identity,
-            mjolnir_subagents,
+            subagents,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -184,7 +184,7 @@ pub(super) async fn apply_phone_action(
                         launch_branch,
                         checkout,
                         expected_runtime_identity,
-                        mjolnir_subagents,
+                        subagents,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,

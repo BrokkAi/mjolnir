@@ -295,6 +295,10 @@ impl WizardDraft for NewWizard {
             self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
+        if id == WizardControl::SubagentRetry {
+            self.subagent_discovery = None;
+            return Ok(dashboard.keep(self));
+        }
         if id == WizardControl::Back {
             return Err(self);
         }
@@ -434,10 +438,21 @@ impl WizardDraft for NewWizard {
                 self.create_managed_worktree = !self.create_managed_worktree;
                 dashboard.record_event_handled();
             }
-            Interaction::Toggle(WizardControl::MjolnirSubagents)
+            Interaction::Select(WizardControl::Subagents, selected)
                 if self.subagent_choice_applies(&dashboard.config) =>
             {
-                self.mjolnir_subagents = !self.mjolnir_subagents;
+                if self.subagents.index() != *selected {
+                    *self.subagents = mj_core::subagent::SubagentPolicy::at_index(*selected);
+                    self.subagent_discovery = None;
+                }
+                dashboard.record_event_handled();
+            }
+            Interaction::Select(WizardControl::SubagentModel, selected) => {
+                self.select_subagent_model(*selected);
+                dashboard.record_event_handled();
+            }
+            Interaction::Select(WizardControl::SubagentEffort, selected) => {
+                self.select_subagent_effort(*selected);
                 dashboard.record_event_handled();
             }
             _ => {}
@@ -572,15 +587,44 @@ impl WizardDraft for NewWizard {
                     .is_some_and(|options| options.available),
             );
         }
-        form.declare_with_enabled(
-            WizardControl::MjolnirSubagents,
-            ControlKind::Checkbox,
-            self.subagent_choice_applies(&dashboard.config),
-        );
+        if self.subagent_choice_applies(&dashboard.config) {
+            form.declare_with_enabled(
+                WizardControl::Subagents,
+                ControlKind::ChoiceList {
+                    len: 4,
+                    selected: self.subagents.index(),
+                },
+                true,
+            );
+            if matches!(
+                *self.subagents,
+                mj_core::subagent::SubagentPolicy::SingleModel { .. }
+            ) {
+                form.declare_with_enabled(
+                    WizardControl::SubagentModel,
+                    ControlKind::ChoiceList {
+                        len: self.subagent_models().len(),
+                        selected: self.subagent_model_index(),
+                    },
+                    self.subagent_options().is_some(),
+                );
+                form.declare_with_enabled(
+                    WizardControl::SubagentEffort,
+                    ControlKind::ChoiceList {
+                        len: self.subagent_efforts().len(),
+                        selected: self.subagent_effort_index(),
+                    },
+                    self.subagent_options().is_some(),
+                );
+                form.declare_with_enabled(WizardControl::SubagentRetry, ControlKind::Button, true);
+            }
+        }
         let ready = !is_bare_project_target(target)
             || self.selected_worktree_options(&dashboard.config).is_some()
             || self.remote_preflight_error.is_some();
-        ready && !self.remote_preflight_in_flight
+        ready
+            && !self.remote_preflight_in_flight
+            && (!self.subagent_choice_applies(&dashboard.config) || self.subagent_error().is_none())
     }
 }
 

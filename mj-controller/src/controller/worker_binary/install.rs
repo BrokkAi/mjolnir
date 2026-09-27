@@ -19,8 +19,36 @@ pub(super) fn append_hel_target_environment(
             return Ok(());
         }
     };
+    append_staged_instructions(harness, destination, &environment)
+}
+
+pub(super) fn append_subagent_policy(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+    policy: &mj_core::subagent::SubagentPolicy,
+    limit: usize,
+) -> Result<()> {
+    if matches!(
+        policy,
+        mj_core::subagent::SubagentPolicy::SingleModel { .. }
+    ) {
+        append_staged_instructions(
+            harness,
+            destination,
+            &mj_core::subagent::delegation_policy(limit),
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn append_staged_instructions(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+    text: &str,
+) -> Result<()> {
     let path = destination.join(harness.agent_instructions_file());
     let separator = match std::fs::read_to_string(&path) {
+        Ok(contents) if contents.contains(text) => return Ok(()),
         Ok(contents) if !contents.is_empty() && !contents.ends_with('\n') => "\n\n",
         Ok(contents) if !contents.is_empty() => "\n",
         Ok(_) => "",
@@ -35,7 +63,7 @@ pub(super) fn append_hel_target_environment(
         .open(&path)
         .with_context(|| format!("open staged harness instructions {}", path.display()))?;
     file.write_all(separator.as_bytes())?;
-    file.write_all(environment.as_bytes())?;
+    file.write_all(text.as_bytes())?;
     Ok(())
 }
 

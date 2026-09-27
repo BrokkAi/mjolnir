@@ -32,7 +32,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         publication: None,
         build_cache: None,
         container_workspace: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,

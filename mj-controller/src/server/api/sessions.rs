@@ -119,7 +119,7 @@ pub(super) async fn start_session(
         launch_branch: request.launch_branch.clone(),
         checkout: request.checkout.clone(),
         expected_runtime_identity: request.expected_runtime_identity.clone(),
-        mjolnir_subagents: request.mjolnir_subagents,
+        subagents: request.subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,

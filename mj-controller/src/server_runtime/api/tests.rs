@@ -773,7 +773,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         checkout: None,
         expected_runtime_identity: None,
         publication: None,
-        mjolnir_subagents: None,
+        subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
         create_managed_worktree: None,
         container_workspace: None,
         build_cache: None,

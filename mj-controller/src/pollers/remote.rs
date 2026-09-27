@@ -55,6 +55,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 recovered || changed
                             });
                             state_tx.send_replace(RuntimeStateUpdate {
+                                last_subagent_policy: snapshot.last_subagent_policy,
                                 native_agents: native.views(),
                                 workspace_names: snapshot.workspace_names,
                                 revision: snapshot.revision,

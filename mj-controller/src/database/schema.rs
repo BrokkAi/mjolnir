@@ -670,6 +670,30 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: older readers/writers cannot honor None or fixed model/effort.
+    if version < 56 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "subagents",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE sessions ADD COLUMN subagents TEXT CHECK(subagents IS NULL OR json_valid(subagents));"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             UPDATE sessions SET subagents = CASE WHEN mjolnir_subagents = 1
+                 THEN '{{\"mode\":\"all_models\"}}' ELSE '{{\"mode\":\"native\"}}' END WHERE subagents IS NULL AND mjolnir_subagents IS NOT NULL;
+             CREATE TABLE IF NOT EXISTS subagent_preference (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), policy TEXT NOT NULL CHECK(json_valid(policy)));
+             UPDATE schema_compatibility SET minimum_compatible_version = 56 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES (56, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 56;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -893,8 +917,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 55 adds runtime identity constraints.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 55;
+    /// `SCHEMA_VERSION`. Migration 56 adds delegation policies older builds cannot honor.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 56;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -923,6 +947,49 @@ mod reader_tests {
         }
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    #[test]
+    fn subagent_policy_migration_preserves_legacy_choices_and_refuses_old_writers() {
+        use mj_core::subagent::SubagentPolicy;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("subagent-policy.sqlite3");
+        for id in ["all", "native", "unset"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE sessions SET mjolnir_subagents = 1 WHERE session_id = 'all';
+             UPDATE sessions SET mjolnir_subagents = 0 WHERE session_id = 'native';
+             ALTER TABLE sessions DROP COLUMN subagents;
+             DROP TABLE subagent_preference;
+             DELETE FROM schema_migrations WHERE version >= 56;
+             UPDATE schema_compatibility SET minimum_compatible_version = 55;
+             PRAGMA user_version = 55;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+        let upgraded = open_writer(&path).unwrap();
+        assert!(
+            read_schema_state(&upgraded)
+                .unwrap()
+                .ensure_supported_by(55)
+                .is_err()
+        );
+        drop(upgraded);
+        let state = load_state_from(&path).unwrap();
+        assert_eq!(
+            state.sessions["all"].subagents,
+            Some(SubagentPolicy::AllModels)
+        );
+        assert_eq!(
+            state.sessions["native"].subagents,
+            Some(SubagentPolicy::Native)
+        );
+        assert_eq!(state.sessions["unset"].subagents, None);
+        assert_eq!(state.last_subagent_policy, SubagentPolicy::Native);
     }
 
     #[test]

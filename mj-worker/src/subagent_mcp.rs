@@ -210,6 +210,7 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     let socket = socket.to_path_buf();
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (SERVER_INSTRUCTIONS, tool_definitions(harness)),
+        SubagentMcpRole::FixedParent => (SERVER_INSTRUCTIONS, fixed_tool_definitions(harness)),
         SubagentMcpRole::Child => (CHILD_INSTRUCTIONS, child_tool_definitions()),
     };
     crate::mcp_stdio::serve(
@@ -299,12 +300,18 @@ fn call_with_budget(
     budget: impl Fn(&SubagentToolAction) -> Duration,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
-    // Each role answers only the tools it lists.
-    match (role, params.name.as_str()) {
-        (SubagentMcpRole::Child, "handback") | (SubagentMcpRole::Parent, _) => {}
-        (SubagentMcpRole::Child, other) => {
-            bail!("unknown sub-agent tool {other:?}; a sub-agent can only call handback")
-        }
+    if !role.tool_names().contains(&params.name.as_str()) {
+        bail!("unknown sub-agent tool {:?} for {role}", params.name);
+    }
+    if role == SubagentMcpRole::FixedParent
+        && params.name == "spawn"
+        && ["profile_id", "model", "effort"]
+            .iter()
+            .any(|key| params.arguments.get(key).is_some())
+    {
+        bail!(
+            "single-model spawn does not accept profile_id, model, or effort; the user fixed them for this session"
+        );
     }
     let action = match params.name.as_str() {
         "list_profiles" => SubagentToolAction::ListProfiles,
@@ -489,7 +496,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. Queued input keeps a child unfinished; pending_inputs lists undelivered request IDs, and input_deliveries records recent delivery outcomes. A delivery failure reports state failed and its cause instead of an old report. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again on another profile, or after that login. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. Queued input keeps a child unfinished; pending_inputs lists undelivered request IDs, and input_deliveries records recent delivery outcomes. A delivery failure reports state failed and its cause instead of an old report. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again after repairing that login or making another eligible profile available. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"required":["child_session_ids"],"additionalProperties":false}),
@@ -505,6 +512,26 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
             child,
         ),
     ]
+}
+
+fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
+    let mut tools = tool_definitions(harness);
+    tools.retain(|tool| tool["name"] != "list_profiles");
+    let spawn = tools
+        .iter_mut()
+        .find(|tool| tool["name"] == "spawn")
+        .expect("spawn tool");
+    for key in ["profile_id", "model", "effort"] {
+        spawn["inputSchema"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .remove(key);
+    }
+    spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
+    spawn["description"] = json!(
+        "Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. Give the child one bounded task and relevant file excerpts. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
+    );
+    tools
 }
 
 /// A child's only tool: its report to the session that started it.
@@ -528,6 +555,40 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
+        let tools = fixed_tool_definitions(None);
+        assert!(!tools.iter().any(|tool| tool["name"] == "list_profiles"));
+        assert!(tools.iter().any(|tool| tool["name"] == "interrupt"));
+        let spawn = tools.iter().find(|tool| tool["name"] == "spawn").unwrap();
+        assert_eq!(
+            spawn["inputSchema"]["required"],
+            json!(["task_name", "instructions"])
+        );
+        let mut calls = vec![json!({"name":"list_profiles", "arguments":{}})];
+        for key in ["profile_id", "model", "effort"] {
+            assert!(spawn["inputSchema"]["properties"].get(key).is_none());
+            let mut args = json!({"task_name":"probe", "instructions":"report"});
+            args[key] = json!("override");
+            calls.push(json!({"name":"spawn", "arguments":args}));
+        }
+        for params in calls {
+            let error = call(
+                Path::new("unused.sock"),
+                None,
+                SubagentMcpRole::FixedParent,
+                Some(&params),
+                &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unknown sub-agent tool")
+                    || error.to_string().contains("does not accept"),
+                "{error:#}"
+            );
+        }
+    }
 
     /// #1160: a parent read a child's failed login as the child's report and
     /// gave up on the profile. The tools say what a refused login looks like
@@ -870,7 +931,7 @@ mod tests {
         )
         .expect_err("a child cannot spawn");
         assert!(
-            format!("{child:#}").contains("only call handback"),
+            format!("{child:#}").contains("unknown sub-agent tool"),
             "{child:#}"
         );
         let parent = call_with_budget(

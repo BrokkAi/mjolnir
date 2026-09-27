@@ -4,6 +4,144 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// A session's delegation policy. Single-model selectors belong to the user,
+/// never to the agent calling spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubagentPolicy {
+    #[default]
+    Native,
+    AllModels,
+    SingleModel {
+        model: String,
+        effort: Option<String>,
+    },
+    None,
+}
+
+impl SubagentPolicy {
+    pub const LABELS: [&str; 4] = [
+        "Native",
+        "Mjolnir, all models",
+        "Mjolnir, single model",
+        "None",
+    ];
+
+    pub fn uses_mjolnir(&self) -> bool {
+        matches!(self, Self::AllModels | Self::SingleModel { .. })
+    }
+
+    pub fn suppresses_native(&self) -> bool {
+        !matches!(self, Self::Native)
+    }
+
+    pub fn index(&self) -> usize {
+        match self {
+            Self::Native => 0,
+            Self::AllModels => 1,
+            Self::SingleModel { .. } => 2,
+            Self::None => 3,
+        }
+    }
+
+    pub fn at_index(index: usize) -> Self {
+        match index {
+            1 => Self::AllModels,
+            2 => Self::SingleModel {
+                model: String::new(),
+                effort: None,
+            },
+            3 => Self::None,
+            _ => Self::Native,
+        }
+    }
+
+    pub fn parent_role(&self) -> Option<SubagentMcpRole> {
+        match self {
+            Self::AllModels => Some(SubagentMcpRole::Parent),
+            Self::SingleModel { .. } => Some(SubagentMcpRole::FixedParent),
+            _ => None,
+        }
+    }
+
+    /// Children and unsupported parent harnesses cannot acquire delegation
+    /// tools. Claude/Codex children still receive their separate handback tool.
+    pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
+        if !harness.supports_delegation_tools() {
+            Self::Native
+        } else if is_child {
+            Self::None
+        } else {
+            self.clone()
+        }
+    }
+}
+
+/// Upgrade compatibility for persisted records and internal handoff only.
+/// Public creation APIs deserialize the policy directly and reject booleans.
+pub fn deserialize_optional_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SubagentPolicy>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Legacy(bool),
+        Policy(SubagentPolicy),
+    }
+    Ok(
+        Option::<Stored>::deserialize(deserializer)?.map(|stored| match stored {
+            Stored::Legacy(true) => SubagentPolicy::AllModels,
+            Stored::Legacy(false) => SubagentPolicy::Native,
+            Stored::Policy(policy) => policy,
+        }),
+    )
+}
+
+pub fn deserialize_launch_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SubagentPolicy, D::Error> {
+    Ok(deserialize_optional_policy(deserializer)?.unwrap_or_default())
+}
+
+pub const PROFILE_HELP: &str = "Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
+
+/// Choices before a parent session exists, using the same eligibility as spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentOptions {
+    pub models: Vec<crate::acp::SessionConfigChoice>,
+    pub efforts: Vec<crate::acp::SessionConfigChoice>,
+    pub unavailable: Vec<String>,
+}
+
+impl SubagentOptions {
+    pub fn validate(&self, policy: &SubagentPolicy) -> Result<(), String> {
+        let SubagentPolicy::SingleModel { model, effort } = policy else {
+            return Ok(());
+        };
+        if !self.models.iter().any(|choice| &choice.value == model) {
+            return Err(format!(
+                "Selected subagent model {model:?} is unavailable. {PROFILE_HELP}"
+            ));
+        }
+        if self.efforts.is_empty() && effort.is_none() {
+            return Ok(());
+        }
+        if effort
+            .as_ref()
+            .is_some_and(|effort| self.efforts.iter().any(|choice| &choice.value == effort))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Select an available effort for subagent model {model:?}. {PROFILE_HELP}"
+        ))
+    }
+}
+
+pub fn delegation_policy(limit: usize) -> String {
+    include_str!("../assets/subagent-delegation.md").replace("$N", &limit.to_string())
+}
+
 /// Longest time a sub-agent completion wait may remain pending.
 pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
@@ -340,6 +478,7 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 pub enum SubagentMcpRole {
     #[default]
     Parent,
+    FixedParent,
     Child,
 }
 
@@ -348,6 +487,7 @@ impl SubagentMcpRole {
     pub fn id(self) -> &'static str {
         match self {
             Self::Parent => "parent",
+            Self::FixedParent => "fixed_parent",
             Self::Child => "child",
         }
     }
@@ -359,6 +499,14 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => &[
                 "list_profiles",
+                "spawn",
+                "list_agents",
+                "send_input",
+                "wait",
+                "interrupt",
+                "close",
+            ],
+            Self::FixedParent => &[
                 "spawn",
                 "list_agents",
                 "send_input",
@@ -383,6 +531,7 @@ impl std::str::FromStr for SubagentMcpRole {
     fn from_str(value: &str) -> anyhow::Result<Self> {
         match value {
             "parent" => Ok(Self::Parent),
+            "fixed_parent" => Ok(Self::FixedParent),
             "child" => Ok(Self::Child),
             other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
         }
@@ -880,6 +1029,60 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn policies_preserve_legacy_records_but_public_policy_rejects_booleans() {
+        #[derive(Deserialize)]
+        struct Stored {
+            #[serde(
+                default,
+                alias = "mjolnir_subagents",
+                deserialize_with = "deserialize_optional_policy"
+            )]
+            subagents: Option<SubagentPolicy>,
+        }
+        for (json, expected) in [
+            (
+                r#"{"mjolnir_subagents":true}"#,
+                Some(SubagentPolicy::AllModels),
+            ),
+            (
+                r#"{"mjolnir_subagents":false}"#,
+                Some(SubagentPolicy::Native),
+            ),
+            ("{}", None),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Stored>(json).unwrap().subagents,
+                expected
+            );
+        }
+        assert!(serde_json::from_str::<SubagentPolicy>("true").is_err());
+        let fixed = SubagentPolicy::SingleModel {
+            model: "chosen".into(),
+            effort: Some("high".into()),
+        };
+        for harness in [
+            crate::config::HarnessKind::Claude,
+            crate::config::HarnessKind::Codex,
+        ] {
+            for policy in [
+                SubagentPolicy::Native,
+                SubagentPolicy::AllModels,
+                fixed.clone(),
+                SubagentPolicy::None,
+            ] {
+                assert_eq!(policy.for_launch(harness, true), SubagentPolicy::None);
+                assert_eq!(policy.for_launch(harness, false), policy);
+                assert_eq!(
+                    serde_json::from_value::<SubagentPolicy>(
+                        serde_json::to_value(&policy).unwrap()
+                    )
+                    .unwrap(),
+                    policy
+                );
+            }
+        }
+    }
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {

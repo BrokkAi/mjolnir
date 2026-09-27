@@ -158,6 +158,10 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
+        if wizard.subagent_choice_applies(&self.config) && wizard.subagent_error().is_some() {
+            self.mode = Mode::New(wizard);
+            return DashboardAction::None;
+        }
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         if !is_bare_project_target(&self.config.targets[&target_template_id]) {
             if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
@@ -190,6 +194,9 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
+        if let Some(action) = self.take_subagent_discovery() {
+            return Some(action);
+        }
         // Checks start on the first step so they are usually done by the time
         // the target step needs them.
         let checks_targets = |step| matches!(step, WizardStep::Profile | WizardStep::Target);
@@ -251,9 +258,9 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
-            mjolnir_subagents: wizard
+            subagents: wizard
                 .subagent_choice_applies(&self.config)
-                .then_some(wizard.mjolnir_subagents),
+                .then(|| (*wizard.subagents).clone()),
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree

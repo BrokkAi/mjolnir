@@ -297,10 +297,16 @@ fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
 /// a child never gets the tools whatever the choice says.
 #[test]
 fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
-    let claude = |choice| {
+    let claude = |choice: Option<bool>| {
         let mut session = crate::controller::test_support::checkpoint_test_session("s-1");
         session.harness_kind = HarnessKind::Claude;
-        session.mjolnir_subagents = choice;
+        session.subagents = choice.map(|enabled| {
+            if enabled {
+                mj_core::subagent::SubagentPolicy::AllModels
+            } else {
+                mj_core::subagent::SubagentPolicy::Native
+            }
+        });
         session
     };
 
@@ -316,7 +322,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
-    codex.mjolnir_subagents = Some(true);
+    codex.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     assert!(subagent_tools_enabled(&codex, false));
 }
 
@@ -4059,7 +4065,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
-        subagent_tools: false,
+        subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -4163,7 +4169,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
-        subagent_tools: false,
+        subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -4252,7 +4258,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         commands: RefCell::new(Vec::new()),
     };
     let mut launch = WorkerLaunchConfig {
-        subagent_tools: false,
+        subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -5465,6 +5471,46 @@ mod container_runtime {
                     !fail_prepare
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
+    use mj_core::subagent::SubagentPolicy;
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join(harness.agent_instructions_file());
+        std::fs::write(&source, "User instructions without final newline").unwrap();
+        for policy in [
+            SubagentPolicy::Native,
+            SubagentPolicy::AllModels,
+            SubagentPolicy::None,
+            SubagentPolicy::SingleModel {
+                model: "model".into(),
+                effort: Some("high".into()),
+            },
+        ] {
+            let stage = tempfile::tempdir().unwrap();
+            let destination = stage.path().join(harness.agent_instructions_file());
+            copy_profile_entry(&source, &destination).unwrap();
+            append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
+            append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
+            let actual = std::fs::read_to_string(&destination).unwrap();
+            let expected = if matches!(policy, SubagentPolicy::SingleModel { .. }) {
+                format!(
+                    "User instructions without final newline\n\n{}",
+                    mj_core::subagent::delegation_policy(9)
+                )
+            } else {
+                "User instructions without final newline".into()
+            };
+            assert_eq!(actual, expected);
+            assert!(!actual.contains("$N"));
+            assert_eq!(
+                std::fs::read_to_string(&source).unwrap(),
+                "User instructions without final newline"
+            );
         }
     }
 }

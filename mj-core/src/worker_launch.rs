@@ -103,13 +103,15 @@ pub struct WorkerLaunchConfig {
     #[serde(default)]
     pub run_mode: WorkerRunMode,
     pub session_id: String,
-    /// Whether this is a supported parent session that receives Mjolnir's
-    /// delegation MCP tools and native-subagent suppression.
-    #[serde(default)]
-    pub subagent_tools: bool,
+    /// Resolved delegation policy; independently controls MCP exposure and native suppression.
+    #[serde(
+        default,
+        alias = "subagent_tools",
+        deserialize_with = "crate::subagent::deserialize_launch_policy"
+    )]
+    pub subagents: crate::subagent::SubagentPolicy,
     /// Whether this is a sub-agent child that hands its report back through
-    /// the `mj-agents` MCP server's `handback` tool. A child keeps its
-    /// harness's native tools.
+    /// the `mj-agents` MCP server's `handback` tool. Children suppress native delegation.
     #[serde(default)]
     pub handback_tool: bool,
     /// Whether a turn review can ever run for this session, which is the only

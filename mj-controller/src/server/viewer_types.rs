@@ -3,6 +3,8 @@ use super::*;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
+    #[serde(default)]
+    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
     pub revision: u64,
     pub generated_at: String,
     /// Unix time in milliseconds, refreshed when serving the projection.
@@ -83,6 +85,7 @@ impl ViewerSnapshot {
                     .map(|child| child.child_session_id.clone())
                     .collect();
                 ViewerSession {
+                    subagents: session.subagents.clone().unwrap_or_default(),
                     checkout: session.checkout.clone(),
                     expected_runtime_identity: session.expected_runtime_identity.clone(),
                     targeted_turn_control_supported: false,
@@ -243,6 +246,7 @@ impl ViewerSnapshot {
             })
             .collect();
         Self {
+            last_subagent_policy: state.last_subagent_policy.clone(),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
@@ -278,6 +282,8 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default)]
+    pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

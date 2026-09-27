@@ -193,7 +193,7 @@ fn sample_state() -> State {
         expected_runtime_identity: None,
         publication: None,
         build_cache: None,
-        mjolnir_subagents: None,
+        subagents: None,
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
@@ -237,6 +237,7 @@ fn sample_state() -> State {
         }),
     };
     State {
+        last_subagent_policy: Default::default(),
         version: STATE_VERSION,
         sessions: BTreeMap::from([(session.id.clone(), session)]),
         subagents: BTreeMap::new(),

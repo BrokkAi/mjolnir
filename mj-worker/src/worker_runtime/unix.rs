@@ -502,13 +502,11 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let dispatch_socket = serve_review_dispatch(&root, reviewer.clone())?;
     // A parent delegates through this socket and a child hands its report
     // back through it; the daemon collects both kinds of request the same way.
-    let subagent_role = if config.subagent_tools {
-        Some(mj_core::subagent::SubagentMcpRole::Parent)
-    } else if config.handback_tool {
-        Some(mj_core::subagent::SubagentMcpRole::Child)
-    } else {
-        None
-    };
+    let subagent_role = config.subagents.parent_role().or_else(|| {
+        config
+            .handback_tool
+            .then_some(mj_core::subagent::SubagentMcpRole::Child)
+    });
     let (subagents, _subagent_socket_guard) = if subagent_role.is_some() {
         let (endpoint, guard) = super::subagents::serve(&root)?;
         (Some(endpoint), Some(guard))
@@ -567,6 +565,11 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),
+            subagent_policy: if config.handback_tool {
+                mj_core::subagent::SubagentPolicy::None
+            } else {
+                config.subagents.clone()
+            },
             subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
                 path: root.join(super::subagents::SUBAGENT_SOCKET),
                 role,

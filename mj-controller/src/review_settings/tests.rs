@@ -225,7 +225,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
                     publication: None,
                     build_cache: None,
                     container_workspace: None,
-                    mjolnir_subagents: None,
+                    subagents: None,
                     create_managed_worktree: None,
                     id: (*session_id).to_owned(),
                     workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
