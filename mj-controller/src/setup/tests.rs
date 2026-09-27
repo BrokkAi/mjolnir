@@ -482,17 +482,15 @@ fn config_contains_discovered_profiles_current_repository_and_selected_target() 
 }
 
 #[test]
-fn runtime_probe_requires_podman_rootless_preflight_and_checks_apple_on_macos() {
+fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     let executor = RuntimeProbeExecutor::new([
         ok(b"podman version 5.4.2\n"),
         ok(b"0 1000 1\n1 100000 65536\n"),
         ok(b"29.0.1 linux\n"),
-        ok(b"container version 1\n"),
-        ok(b"running\n"),
     ]);
-    let runtimes = probe_local_runtimes(&executor, true);
+    let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
 
-    assert_eq!(runtimes.len(), 3);
+    assert_eq!(runtimes.len(), 2);
     assert_eq!(executor.commands.borrow()[0].program, "podman");
     assert_eq!(executor.commands.borrow()[0].args, ["--version"]);
     assert_eq!(
@@ -500,8 +498,7 @@ fn runtime_probe_requires_podman_rootless_preflight_and_checks_apple_on_macos() 
         ["unshare", "cat", "/proc/self/uid_map"]
     );
     assert_eq!(executor.commands.borrow()[2].program, "docker");
-    assert_eq!(executor.commands.borrow()[3].program, "container");
-    assert!(runtimes.iter().all(|runtime| runtime.usable));
+    assert!(runtimes.iter().all(|runtime| runtime.usable()));
 }
 
 #[test]
@@ -511,10 +508,10 @@ fn unusable_podman_carries_the_doctor_remediation_into_the_runtime_list() {
         failed(b"docker is unavailable"),
     ]);
 
-    let runtimes = probe_local_runtimes(&executor, false);
+    let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
 
     assert_eq!(runtimes.len(), 2);
-    assert!(!runtimes[0].usable);
+    assert!(!runtimes[0].usable());
     let remediation = runtimes[0].remediation.as_deref().unwrap();
     assert!(
         remediation.contains("Install or upgrade Podman"),
@@ -529,6 +526,79 @@ fn unusable_podman_carries_the_doctor_remediation_into_the_runtime_list() {
     assert!(
         output.contains("remediation: Install or upgrade Podman"),
         "{output}"
+    );
+}
+
+#[test]
+fn macos_setup_skips_unsupported_runtimes_without_install_advice() {
+    for (architecture, major_version) in [("aarch64", 15), ("x86_64", 26)] {
+        let executor = RuntimeProbeExecutor::new([ok(b"29.0.1 linux\n")]);
+        let runtimes = probe_local_runtimes(
+            &executor,
+            &ApplePlatform::Macos {
+                architecture: architecture.into(),
+                major_version,
+            },
+        );
+        assert_eq!(executor.commands.borrow().len(), 1);
+        assert_eq!(executor.commands.borrow()[0].program, "docker");
+        for kind in [RuntimeKind::Podman, RuntimeKind::AppleContainer] {
+            let runtime = runtimes
+                .iter()
+                .find(|runtime| runtime.kind == kind)
+                .unwrap();
+            assert_eq!(runtime.status, CheckStatus::Unsupported);
+            assert!(!runtime.usable());
+            assert!(runtime.remediation.is_none());
+        }
+        let mut output = Vec::new();
+        write_runtimes(&mut output, &runtimes).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Apple container: unsupported"), "{output}");
+        assert!(output.contains("Podman: unsupported"), "{output}");
+        assert!(
+            !output.contains("apt ") && !output.contains("dnf "),
+            "{output}"
+        );
+        assert!(
+            !output.contains("Install the official signed package"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn supported_macos_setup_probes_apple_daemon_without_running_a_smoke_test() {
+    let platform = ApplePlatform::Macos {
+        architecture: "aarch64".into(),
+        major_version: 26,
+    };
+    let executor = RuntimeProbeExecutor::new([
+        ok(b"29.0.1 linux\n"),
+        ok(b"container version 1\n"),
+        ok(b"running\n"),
+    ]);
+    let runtimes = probe_local_runtimes(&executor, &platform);
+    let apple = runtimes
+        .iter()
+        .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+        .unwrap();
+    assert!(apple.usable());
+    assert_eq!(executor.commands.borrow().len(), 3);
+
+    let missing = RuntimeProbeExecutor::new([ok(b"29.0.1 linux\n")]);
+    let runtimes = probe_local_runtimes(&missing, &platform);
+    let apple = runtimes
+        .iter()
+        .find(|runtime| runtime.kind == RuntimeKind::AppleContainer)
+        .unwrap();
+    assert_eq!(apple.status, CheckStatus::Fixable);
+    assert!(
+        apple
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("official signed package")
     );
 }
 
@@ -1252,13 +1322,13 @@ fn dialog_configures_every_usable_runtime_as_a_normal_target() {
         runtimes: vec![
             RuntimeProbe {
                 kind: RuntimeKind::Podman,
-                usable: true,
+                status: CheckStatus::Ready,
                 detail: "podman version 5".into(),
                 remediation: None,
             },
             RuntimeProbe {
                 kind: RuntimeKind::Docker,
-                usable: true,
+                status: CheckStatus::Ready,
                 detail: "docker version 29".into(),
                 remediation: None,
             },
@@ -1320,7 +1390,7 @@ fn a_failed_smoke_test_becomes_a_fixable_line_in_the_closing_report() {
     let discovery = SetupDiscovery {
         runtimes: vec![RuntimeProbe {
             kind: RuntimeKind::Podman,
-            usable: true,
+            status: CheckStatus::Ready,
             detail: "podman version 5".into(),
             remediation: None,
         }],
@@ -1465,7 +1535,7 @@ fn dialog_configures_raw_localhost_without_a_container_runtime() {
         repository: None,
         runtimes: vec![RuntimeProbe {
             kind: RuntimeKind::Podman,
-            usable: false,
+            status: CheckStatus::Fixable,
             detail: "not installed".into(),
             remediation: Some("Install Podman.".into()),
         }],
