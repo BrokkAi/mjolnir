@@ -18,6 +18,13 @@ use serde::{Deserialize, Serialize};
 
 use mj_core::attachment::AttachmentRef;
 
+/// The platform's primary terminal clipboard shortcut, shared by help and footers.
+pub const PASTE_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd-V"
+} else {
+    "Ctrl-V"
+};
+
 /// Keep one image comfortably below the one-megabyte durable relay command
 /// budget after PNG base64 encoding and JSON framing are added.
 pub const MAX_IMAGE_BYTES: usize = mj_core::attachment::MAX_IMAGE_BYTES;

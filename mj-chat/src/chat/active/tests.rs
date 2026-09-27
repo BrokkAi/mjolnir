@@ -1766,7 +1766,12 @@ fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
 
     let idle = draw(&chat);
     assert!(idle.is_ascii(), "{idle:?}");
-    assert!(idle.contains("Ctrl-V paste"), "{idle:?}");
+    let paste = if cfg!(target_os = "macos") {
+        "Cmd-V paste"
+    } else {
+        "Ctrl-V paste"
+    };
+    assert!(idle.contains(paste), "{idle:?}");
 
     chat.queued_prompts.push_back(queued("queued-1", "next"));
     let queued_footer = draw(&chat);

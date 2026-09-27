@@ -233,7 +233,12 @@ fn composer_renders_numbered_images_and_advertises_control_v() {
     chat.feedback.clear();
     let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
     assert!(screen.contains("[image 1]"));
-    assert!(screen.contains("Ctrl-V paste"));
+    let paste = if cfg!(target_os = "macos") {
+        "Cmd-V paste"
+    } else {
+        "Ctrl-V paste"
+    };
+    assert!(screen.contains(paste));
     chat.handle_key(key(KeyCode::Backspace));
     let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
     assert!(!screen.contains("[image 1]"));

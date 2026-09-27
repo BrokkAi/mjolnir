@@ -365,7 +365,8 @@ pub(crate) fn render_chat_footer(
         queued_keys
     } else {
         format!(
-            "Tab pane{sep}Ctrl-V paste{sep}Enter send{sep}Ctrl-R history{sep}Shift-Enter newline"
+            "Tab pane{sep}{} paste{sep}Enter send{sep}Ctrl-R history{sep}Shift-Enter newline",
+            crate::clipboard::PASTE_SHORTCUT,
         )
     };
     let groups = theme::fit_prefixed_footer_items(

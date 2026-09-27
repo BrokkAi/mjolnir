@@ -126,7 +126,10 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
         "walk prompt history, or move within the prompt",
     ),
     ("Ctrl-R", "search prompt history"),
-    ("Ctrl-V", "paste from the system clipboard"),
+    (
+        mj_chat::clipboard::PASTE_SHORTCUT,
+        "paste from the system clipboard",
+    ),
     ("Ctrl-A / Ctrl-E", "start or end of the line"),
     ("Ctrl-B / Ctrl-F", "back or forward one character"),
     ("Alt-B / Alt-F", "back or forward one word"),

@@ -292,7 +292,7 @@ impl ChatState {
         self.entries.push(ChatEntry::plain(
             self.latest_seq,
             ChatRole::System,
-            format!("Clipboard: Ctrl-V paste text/image (Ctrl-Alt-V if intercepted by your terminal) · Backspace/Delete remove image markers · Ctrl-Alt-R restore a failed submission (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
+            format!("Clipboard: {} paste text/image (Ctrl-Alt-V if intercepted by your terminal) · Backspace/Delete remove image markers · Ctrl-Alt-R restore a failed submission (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}", crate::clipboard::PASTE_SHORTCUT),
         ));
     }
 }
