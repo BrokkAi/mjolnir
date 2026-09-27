@@ -46,10 +46,7 @@ pub(super) fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
 }
 
 pub(super) fn install_renamed_controller(state: &RuntimeState, controller: Controller) {
-    *state
-        .controller
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = controller;
+    state.owner().install_controller(controller);
     state.publish_revision();
 }
 

@@ -120,10 +120,8 @@ pub(super) async fn prepare(
     let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
     let turn = ended_turn(snapshot).context("missing quota completion")?;
     let (profile_id, profile) = {
-        let controller = state
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let controller_owner = state.owner();
+        let controller = controller_owner.controller();
         let session = controller
             .state
             .sessions

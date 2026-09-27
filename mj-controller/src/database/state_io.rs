@@ -1,6 +1,9 @@
 use super::*;
 
 pub fn load_state() -> Result<State> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state);
+    }
     load_state_from(&database_path())
 }
 
@@ -1241,6 +1244,15 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
 
 /// Read one complete record with indexed queries from the caller's WAL snapshot.
 pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
+    if let Some(committed) = committed_state()? {
+        return Ok(committed.state.sessions.get(id).cloned());
+    }
+    read_durable_session_record(id)
+}
+
+/// Recovery checks storage under target ownership before touching a process.
+/// This bounded read also detects a broken store even without a pending write.
+pub(crate) fn read_durable_session_record(id: &str) -> Result<Option<SessionRecord>> {
     let mut connection = open_reader(&database_path())?;
     let snapshot = connection.transaction()?;
     load_session_with(&snapshot, id)
@@ -1266,6 +1278,7 @@ pub(super) fn load_session_with(
     load_targets_selected(connection, &mut state, Some(id))?;
     load_mounts_selected(connection, &mut state, Some(id))?;
     load_checkpoints_selected(connection, &mut state, Some(id))?;
+    state.validate()?;
     Ok(state.sessions.remove(id))
 }
 

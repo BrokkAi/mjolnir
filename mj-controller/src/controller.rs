@@ -501,17 +501,21 @@ impl Controller {
     pub fn load() -> Result<Self> {
         let config = Config::load()?;
         let state = crate::database::load_state()?;
+        Ok(Self { config, state })
+    }
+
+    /// Startup-only traversal for legacy metadata and configuration diagnostics.
+    /// Ordinary readers consume the writer's committed snapshot directly.
+    pub(crate) fn prepare_persisted_sessions(&mut self) -> Result<()> {
         // Missing session dependencies must not lock users out of the tools
         // needed to repair them. Operations validate the session they act on.
-        state.validate()?;
-        for session in state.sessions.values() {
-            if let Some(issue) = session.configuration_issue(&config) {
+        self.state.validate()?;
+        for session in self.state.sessions.values() {
+            if let Some(issue) = session.configuration_issue(&self.config) {
                 tracing::warn!(session_id = %session.id, "{issue}");
             }
         }
-        let mut controller = Self { config, state };
-        controller.backfill_target_runtime()?;
-        Ok(controller)
+        self.backfill_target_runtime()
     }
 
     pub fn reload(&mut self) -> Result<()> {

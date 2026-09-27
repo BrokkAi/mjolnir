@@ -131,6 +131,7 @@ fn open_writable(path: &Path) -> Result<Connection> {
          PRAGMA synchronous = FULL;",
     )?;
     verify_schema_once(path, &connection)?;
+    committed::observe_connection(&connection, path)?;
     Ok(connection)
 }
 

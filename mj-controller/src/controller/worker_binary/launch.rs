@@ -265,7 +265,7 @@ impl Controller {
             .then(|| self.config.bundles.get(&session.bundle_id))
             .flatten();
         let target = session.target_runtime_settings(&self.config)?;
-        let subagent = crate::database::load_subagent(session_id)?;
+        let subagent = self.state.subagents.get(session_id);
         // A sub-agent child shares its parent's container, so it works in the
         // parent's workspace. The parent record is authoritative for that path.
         let (workspace_session_id, workspace_container) = match subagent.as_ref() {

@@ -17,9 +17,8 @@ pub(super) fn report_worker_upgrade(
         Ok(WorkerUpgradeOutcome::Upgraded { build }) => {
             tracing::info!(%session_id, %build, "replaced the session worker with the current build");
             let name = state
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .owner()
+                .controller()
                 .state
                 .sessions
                 .get(session_id)

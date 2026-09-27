@@ -2,20 +2,16 @@ use super::*;
 
 impl RuntimeState {
     pub(super) fn cancel_lifecycle(&self, session_id: &str) -> Result<()> {
-        // Controller before lifecycle, the order worker polling takes.
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let lifecycle = self
+        let mut controller_owner = self.owner();
+        let durable = durable_session_state(controller_owner.controller(), session_id);
+        let active = controller_owner
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let active = lifecycle.get(session_id).with_context(|| {
-            format!("no lifecycle operation is running for session {session_id}")
-        })?;
+            .get_mut(session_id)
+            .with_context(|| {
+                format!("no lifecycle operation is running for session {session_id}")
+            })?;
         ensure!(
-            lifecycle_cancellable(active.kind, durable_session_state(&controller, session_id)),
+            lifecycle_cancellable(active.kind, durable),
             "stop of {session_id} has passed its verified checkpoint and is removing the target; \
              it cannot be cancelled"
         );
@@ -23,8 +19,7 @@ impl RuntimeState {
             active.request_cancel(),
             "lifecycle operation is no longer cancellable"
         );
-        drop(lifecycle);
-        drop(controller);
+        drop(controller_owner);
         self.publish_revision();
         Ok(())
     }
@@ -35,13 +30,11 @@ impl RuntimeState {
     /// seconds to each session serially.
     pub(super) async fn cancel_and_wait_lifecycles(&self) -> Result<()> {
         let mut pending = {
-            let lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut lifecycle_owner = self.owner();
+            let lifecycle = &mut lifecycle_owner.lifecycle;
             lifecycle
-                .iter()
-                .filter(|(_, active)| active.result.borrow().is_none())
+                .iter_mut()
+                .filter(|(_, active)| active.is_running())
                 .map(|(session_id, active)| {
                     if active.kind != LifecycleKind::Cleanup {
                         active.request_cancel();
@@ -120,26 +113,15 @@ impl RuntimeState {
     /// and it happens once per published snapshot, so it never blocks the
     /// loop the way an await on the async snapshot path would.
     pub fn active_lifecycles(&self) -> Vec<RuntimeLifecycleView> {
-        // Controller before lifecycle, the order worker polling takes. Both are
-        // plain mutex acquisitions over small maps, so a render loop calling
-        // this never awaits.
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.active_lifecycles_with(&controller)
+        let controller_owner = self.owner();
+        Self::active_lifecycles_with(&controller_owner)
     }
 
-    /// The same view for a caller that already holds the controller lock.
-    /// The lock is not reentrant, so taking it again here would deadlock the
-    /// daemon.
-    pub(super) fn active_lifecycles_with(
-        &self,
-        controller: &Controller,
-    ) -> Vec<RuntimeLifecycleView> {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    /// Project records and ownership from the same transition boundary.
+    pub(super) fn active_lifecycles_with(owner: &RuntimeStateOwner) -> Vec<RuntimeLifecycleView> {
+        let controller = owner.controller();
+        owner
+            .lifecycle
             .iter()
             .filter(|(_, active)| active.is_visible())
             .map(|(session_id, active)| RuntimeLifecycleView {
@@ -167,12 +149,12 @@ impl RuntimeState {
     /// holds no record for it. Reading one field costs one lock rather than a
     /// clone of every record, which is what a poll wants.
     pub fn session_state(&self, session_id: &str) -> Option<mj_core::state::SessionState> {
-        if self.close_is_requested(session_id) {
+        let owner = self.owner();
+        if owner.close_requested.contains(session_id) {
             return Some(SessionState::Closing);
         }
-        self.controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        owner
+            .controller()
             .state
             .sessions
             .get(session_id)
@@ -181,9 +163,8 @@ impl RuntimeState {
 
     /// One in-memory session record, or `None` when the daemon holds none.
     pub fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
-        self.controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.owner()
+            .controller()
             .state
             .sessions
             .get(session_id)
@@ -231,15 +212,11 @@ impl RuntimeState {
     /// along with its age. A checkpoint conflicts only with its own session's
     /// operations, never with another session's (#1010).
     pub(super) fn session_lifecycle_busy(&self, session_id: &str) -> Option<SessionLifecycleBusy> {
-        let lifecycle = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let lifecycle_owner = self.owner();
+        let lifecycle = &lifecycle_owner.lifecycle;
         let active = lifecycle.get(session_id)?;
         active
-            .result
-            .borrow()
-            .is_none()
+            .is_running()
             .then(|| describe_lifecycle_busy(session_id, active))
     }
 
@@ -247,11 +224,10 @@ impl RuntimeState {
     /// config-rename guard reports this, so its refusal says which operation
     /// stands in the way rather than only that one does (#1010).
     pub(super) fn any_lifecycle_busy(&self) -> Option<SessionLifecycleBusy> {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.owner()
+            .lifecycle
             .iter()
-            .find(|(_, active)| active.result.borrow().is_none())
+            .find(|(_, active)| active.is_running())
             .map(|(session_id, active)| describe_lifecycle_busy(session_id, active))
     }
 
@@ -264,18 +240,11 @@ impl RuntimeState {
         mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
         Vec<RuntimeLifecycleView>,
     ) {
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let operations = self.active_lifecycles_with(&controller);
+        let controller_owner = self.owner();
+        let controller = controller_owner.controller();
+        let operations = Self::active_lifecycles_with(&controller_owner);
         let mut records = controller.state.sessions.clone();
-        for id in self
-            .close_requested
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
+        for id in &controller_owner.close_requested {
             if let Some(record) = records.get_mut(id)
                 && record.state != SessionState::Stopped
             {
@@ -286,12 +255,7 @@ impl RuntimeState {
     }
 
     pub fn cancel_lifecycle_if_active(&self, session_id: &str) {
-        if let Some(active) = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(session_id)
-        {
+        if let Some(active) = self.owner().lifecycle.get_mut(session_id) {
             active.request_cancel();
             self.publish_revision();
         }
@@ -303,12 +267,7 @@ impl RuntimeState {
         profile_id: String,
         target_id: String,
     ) {
-        if let Some(active) = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(session_id)
-        {
+        if let Some(active) = self.owner().lifecycle.get_mut(session_id) {
             active.resume_destination = Some((profile_id, target_id));
             self.publish_revision();
         }
@@ -321,10 +280,8 @@ impl RuntimeState {
         active: bool,
     ) {
         let changed = {
-            let mut lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut lifecycle_owner = self.owner();
+            let lifecycle = &mut lifecycle_owner.lifecycle;
             let Some(operation) = lifecycle.get_mut(session_id) else {
                 return;
             };
@@ -374,12 +331,7 @@ impl RuntimeState {
     }
 
     pub(super) fn set_lifecycle_notice(&self, session_id: &str, notice: &str) {
-        if let Some(active) = self
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(session_id)
-        {
+        if let Some(active) = self.owner().lifecycle.get_mut(session_id) {
             if active.kind == LifecycleKind::Move && notice == "Preparing destination" {
                 active.move_source_closed = true;
             }

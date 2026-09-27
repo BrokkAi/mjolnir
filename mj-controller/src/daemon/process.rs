@@ -65,7 +65,13 @@ pub(super) async fn run_daemon_runtime(
     )?;
     crate::controller::reconcile_managed_checkpoint_archives()?;
 
-    let controller = Controller::load()?;
+    let controller = tokio::task::spawn_blocking(|| {
+        let mut controller = Controller::load()?;
+        controller.prepare_persisted_sessions()?;
+        Ok::<_, anyhow::Error>(controller)
+    })
+    .await
+    .context("prepare persisted daemon sessions")??;
     // A local session an earlier release started from a profile home keeps
     // running from it until it is next staged. The link has to be in place
     // before any launch configuration is refreshed or any credential sync runs.
@@ -659,82 +665,101 @@ pub(super) fn spawn_manager_target_refresher(
     state: Arc<RuntimeState>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut committed = state
+            .committed
+            .as_ref()
+            .expect("daemon owns the writer")
+            .clone();
+        let mut revisions = state.revisions();
+        let mut compatibility = tokio::time::interval(Duration::from_millis(500));
+        compatibility.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut installed = None;
         loop {
+            let inputs = {
+                let owner = state.owner();
+                if let Err(error) = owner.ensure_available() {
+                    tracing::error!(%error, "daemon durable state is unavailable; shutting down");
+                    cancellation.cancel();
+                    return;
+                }
+                owner.pollable_worker_inputs()
+            };
+            if installed.as_ref() != Some(&inputs) {
+                let preparation = inputs.clone();
+                let refreshed =
+                    match tokio::task::spawn_blocking(move || preparation.prepare()).await {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            tracing::error!(%error, "worker target preparation failed");
+                            cancellation.cancel();
+                            return;
+                        }
+                    };
+                let retained = refreshed
+                    .iter()
+                    .map(|target| target.session_id.clone())
+                    .collect();
+                {
+                    let owner = state.owner();
+                    // A lifecycle may have claimed a target while its commands
+                    // were being prepared. Only the owner can authorize install.
+                    if owner.pollable_worker_inputs() != inputs {
+                        continue;
+                    }
+                    targets.send_if_modified(|current| {
+                        if *current == refreshed {
+                            false
+                        } else {
+                            *current = refreshed;
+                            true
+                        }
+                    });
+                }
+                state.review_host().retain_sessions(retained);
+                installed = Some(inputs);
+            }
             tokio::select! {
                 _ = cancellation.cancelled() => return,
-                _ = interval.tick() => {
-                    // Keep a controller loaded from the old config from being
-                    // installed after a concurrent id rename has committed.
+                changed = committed.changed() => {
+                    if changed.is_err() {
+                        tracing::error!("database publication feed stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                    state.publish_revision();
+                }
+                changed = revisions.changed() => {
+                    if changed.is_err() { return; }
+                }
+                _ = compatibility.tick() => {
                     let _config_mutation = state.config_mutation.lock().await;
-                    match tokio::task::spawn_blocking(Controller::load).await {
-                        Ok(Ok(controller)) => {
-                            // Startup, force-stop, relocation, and the teardown
-                            // phase of close own the worker target. Graceful
-                            // close keeps polling only until it has released the
-                            // manager lease after sealing the relay.
-                            let lifecycle_sessions =
-                                state.worker_poll_exclusion_session_ids(&controller);
-                            let refreshed = dashboard_worker_targets_excluding(
-                                &controller,
-                                &lifecycle_sessions,
-                            );
+                    let refreshed = tokio::task::spawn_blocking(|| {
+                        crate::database::check_read_compatibility()?;
+                        Config::load()
+                    }).await;
+                    match refreshed {
+                        Ok(Ok(config)) => {
+                            state.review_config.lock().unwrap_or_else(PoisonError::into_inner)
+                                .clone_from(&config.review);
                             let changed = {
-                                let mut review = state
-                                    .review_config
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner);
-                                review.clone_from(&controller.config.review);
-                                drop(review);
-                                let mut current = state
-                                    .controller
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner);
-                                let changed = current.config != controller.config;
-                                *current = controller;
+                                let mut owner = state.owner();
+                                let changed = owner.controller().config != config;
+                                owner.install_config(config);
                                 changed
                             };
-                            // Prune the review host's retained transcripts to the
-                            // same live set, so a stopped or destroyed session's
-                            // MaterializedSession does not linger there forever.
-                            state.review_host().retain_sessions(
-                                refreshed
-                                    .iter()
-                                    .map(|target| target.session_id.clone())
-                                    .collect(),
-                            );
-                            targets.send_replace(refreshed);
-                            if changed {
-                                state.publish_revision();
-                            }
+                            if changed { state.publish_revision(); }
                         }
                         Ok(Err(error)) => {
-                            // The one place divergence is classified. Every
-                            // read re-checks store compatibility, so an
-                            // incompatible migration reaches this branch
-                            // within one tick. A daemon that
-                            // cannot read its own store cannot serve anyone,
-                            // and its writer is already refusing work, so the
-                            // answer is the shutdown it already knows how to
-                            // perform.
-                            if let Some(mismatch) = error
-                                .chain()
-                                .find_map(|cause| cause.downcast_ref::<StoreSchemaMismatch>())
-                            {
-                                tracing::error!(
-                                    found = mismatch.found,
-                                    supported = mismatch.supported,
-                                    error = %mismatch,
-                                    "daemon store schema diverged underneath the daemon; shutting down"
-                                );
+                            if error.chain().any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()) {
+                                tracing::error!(%error, "daemon store schema diverged underneath the daemon; shutting down");
                                 cancellation.cancel();
                                 return;
                             }
-                            tracing::warn!(error = format!("{error:#}"), "could not refresh daemon session targets");
+                            tracing::warn!(error = format!("{error:#}"), "could not refresh daemon configuration");
                         }
                         Err(error) => {
-                            tracing::error!(%error, "daemon target refresh task failed");
+                            tracing::error!(%error, "daemon configuration reader failed");
+                            cancellation.cancel();
                             return;
                         }
                     }

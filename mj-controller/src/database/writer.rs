@@ -24,6 +24,8 @@ pub(super) enum DatabaseWriterMessage {
 pub struct DatabaseWriter {
     pub(super) id: u64,
     pub(super) sender: SyncSender<DatabaseWriterMessage>,
+    path: Arc<PathBuf>,
+    committed: tokio::sync::watch::Sender<std::result::Result<CommittedState, Arc<str>>>,
 }
 
 impl std::fmt::Debug for DatabaseWriter {
@@ -36,18 +38,51 @@ impl std::fmt::Debug for DatabaseWriter {
 }
 
 impl DatabaseWriter {
+    pub fn committed_state(&self) -> Result<CommittedState> {
+        self.committed
+            .borrow()
+            .clone()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    pub fn committed_changes(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::result::Result<CommittedState, Arc<str>>> {
+        self.committed.subscribe()
+    }
+
     pub(super) fn execute<T, F>(&self, label: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let (reply_tx, reply_rx) = sync_channel(1);
+        let publication = self.clone();
         self.sender
             .send(DatabaseWriterMessage::Run {
                 label,
                 job: Box::new(move |connection| {
                     let reply = match connection {
-                        Ok(connection) => operation(connection),
+                        Ok(connection) => (|| {
+                            let previous = publication.committed_state()?;
+                            committed::begin_operation(&publication.path);
+                            let result = operation(connection);
+                            match committed::finish_operation(connection, &previous) {
+                                Ok(Some(next)) => { drop(publication.committed.send_replace(Ok(next))); }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    // The write may already be durable. Refuse all
+                                    // further jobs rather than classify a readback
+                                    // failure as a retryable write failure.
+                                    let detail: Arc<str> = format!(
+                                        "database publication failed after {label}; a commit may have occurred, do not replay this mutation: {error:#}"
+                                    ).into();
+                                    drop(publication.committed.send_replace(Err(detail.clone())));
+                                    bail!("{detail}");
+                                }
+                            }
+                            result
+                        })(),
                         // The mismatch travels as the operation's own failure,
                         // so a refused write reports why rather than the
                         // writer-stopped message a dropped reply would give.
@@ -139,6 +174,26 @@ pub(crate) fn database_writer_installed() -> bool {
         .is_some()
 }
 
+/// The daemon's current durable records. Client/offline readers have no writer
+/// and use explicit store reads; a failed daemon projection remains an error.
+pub fn committed_state() -> Result<Option<CommittedState>> {
+    let writer = database_writer_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    writer.map(|writer| writer.committed_state()).transpose()
+}
+
+pub fn subscribe_committed_state()
+-> Result<tokio::sync::watch::Receiver<std::result::Result<CommittedState, Arc<str>>>> {
+    let writer = database_writer_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .context("database writer is not installed")?;
+    Ok(writer.committed_changes())
+}
+
 pub(super) fn clear_database_writer(id: u64) {
     let mut installed = database_writer_slot()
         .lock()
@@ -181,11 +236,21 @@ pub(super) fn start_database_writer_at(
 
     let connection = schema::open_writer(path)?;
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
+    let initial = CommittedState {
+        sequence: 0,
+        state: load_state_from(path)?,
+    };
+    let (committed, _) = tokio::sync::watch::channel(Ok(initial));
     let path = path.to_owned();
     let (sender, receiver) = sync_channel(DATABASE_WRITE_QUEUE_CAPACITY);
     let (stopped_tx, stopped) = sync_channel(1);
     let id = NEXT_WRITER_ID.fetch_add(1, Ordering::Relaxed);
-    let writer = DatabaseWriter { id, sender };
+    let writer = DatabaseWriter {
+        id,
+        sender,
+        path: Arc::new(path.clone()),
+        committed,
+    };
     if install_globally {
         let mut installed = database_writer_slot()
             .lock()
@@ -193,6 +258,7 @@ pub(super) fn start_database_writer_at(
         ensure!(installed.is_none(), "database writer is already running");
         *installed = Some(writer.clone());
     }
+    let publication = writer.clone();
     let thread = match thread::Builder::new()
         .name("hel-database-writer".to_owned())
         .spawn(move || {
@@ -213,6 +279,9 @@ pub(super) fn start_database_writer_at(
                                 Ok(()) => job(Ok(&mut connection)),
                                 Err(error) => job(Err(error)),
                             }
+                            if let Err(error) = publication.committed_state() {
+                                break Err(error);
+                            }
                         }
                         Ok(DatabaseWriterMessage::Shutdown) => break Ok(()),
                         Err(error) => {
@@ -229,7 +298,16 @@ pub(super) fn start_database_writer_at(
                     .unwrap_or("unknown panic payload");
                 Err(anyhow::anyhow!("database writer thread panicked: {detail}"))
             });
-            clear_database_writer(id);
+            if let Err(error) = &result {
+                drop(
+                    publication
+                        .committed
+                        .send_replace(Err(format!("database writer stopped: {error:#}").into())),
+                );
+            }
+            if result.is_ok() {
+                clear_database_writer(id);
+            }
             let _ = stopped_tx.send(result);
         }) {
         Ok(thread) => thread,

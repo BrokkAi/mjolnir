@@ -1,10 +1,13 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod owner;
+mod record_index;
 mod session_move;
 use crate::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
 };
 pub use mj_client::daemon::*;
+use owner::RuntimeStateOwner;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -47,8 +50,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_suspend_session_ids,
-    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
+    dashboard_worker_targets, interrupted_suspend_session_ids, reserve_recovery_or_cancel,
+    spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -115,7 +118,12 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
-    lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
+    owner: Mutex<RuntimeStateOwner>,
+    committed: Option<
+        tokio::sync::watch::Receiver<
+            std::result::Result<crate::database::CommittedState, Arc<str>>,
+        >,
+    >,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     /// Resume ownership can precede its durable workspace assignment.
     workspace_resume_admission: Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>,
@@ -126,8 +134,6 @@ pub struct RuntimeState {
     /// person typed while it started, and the hand-off a restored session
     /// carries. One ordered queue per session, each drained by one task.
     startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
-    close_requested: Mutex<BTreeSet<String>>,
-    controller: Mutex<Controller>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     recovery_observer: RecoveryObserver,
@@ -364,6 +370,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    phase: LifecyclePhase,
     operation_id: String,
     create_control: Option<CreateSessionControl>,
     kind: LifecycleKind,
@@ -381,26 +388,42 @@ struct ActiveLifecycle {
     result: LifecycleWatch,
 }
 
+enum LifecyclePhase {
+    Executing,
+    Cancelling,
+    Completed(LifecycleResult),
+}
+
 impl ActiveLifecycle {
+    fn is_running(&self) -> bool {
+        !matches!(self.phase, LifecyclePhase::Completed(_))
+    }
+
     fn is_visible(&self) -> bool {
-        let result = self.result.borrow();
-        result.is_none()
+        self.is_running()
             || matches!(
-                result.as_ref(),
-                Some(Ok(DaemonLifecycleResult::DeferredCleanup))
+                self.phase,
+                LifecyclePhase::Completed(Ok(DaemonLifecycleResult::DeferredCleanup))
             )
     }
 
-    fn request_cancel(&self) -> bool {
-        if let Some(control) = &self.create_control {
+    fn request_cancel(&mut self) -> bool {
+        if !matches!(self.phase, LifecyclePhase::Executing) {
+            return false;
+        }
+        let accepted = if let Some(control) = &self.create_control {
             control.request_cancel()
         } else {
             !self.cancelled.swap(true, Ordering::AcqRel)
+        };
+        if accepted {
+            self.phase = LifecyclePhase::Cancelling;
         }
+        accepted
     }
 
     fn is_cancellable(&self) -> bool {
-        self.result.borrow().is_none()
+        matches!(self.phase, LifecyclePhase::Executing)
             && self.create_control.as_ref().map_or_else(
                 || !self.cancelled.load(Ordering::Acquire),
                 CreateSessionControl::is_cancellable,

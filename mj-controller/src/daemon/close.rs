@@ -2,26 +2,17 @@ use super::*;
 
 impl RuntimeState {
     pub fn request_close(&self, session_id: &str) {
-        self.close_requested
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(session_id.to_owned());
+        self.owner().close_requested.insert(session_id.to_owned());
         self.publish_revision();
     }
 
     pub fn clear_close_request(&self, session_id: &str) {
-        self.close_requested
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(session_id);
+        self.owner().close_requested.remove(session_id);
         self.publish_revision();
     }
 
     pub fn close_is_requested(&self, session_id: &str) -> bool {
-        self.close_requested
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(session_id)
+        self.owner().close_requested.contains(session_id)
     }
 
     /// Make the intent durable before an HTTP caller receives acceptance.
@@ -29,12 +20,11 @@ impl RuntimeState {
     pub async fn prepare_suspension(self: &Arc<Self>, session_id: &str) -> Result<()> {
         self.wait_before_close(session_id).await?;
         if self
+            .owner()
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get(session_id)
             .is_some_and(|operation| {
-                operation.kind == LifecycleKind::Suspend && operation.result.borrow().is_none()
+                operation.kind == LifecycleKind::Suspend && operation.is_running()
             })
         {
             return Ok(());
@@ -336,12 +326,10 @@ impl RuntimeState {
         // Cancellation is a request: the old owner must actually finish before
         // close acquires the target, including an irreversible create commit.
         let pending = {
-            let operations = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut owner = self.owner();
+            let operations = &mut owner.lifecycle;
             operations
-                .get(session_id)
+                .get_mut(session_id)
                 .filter(|operation| {
                     !matches!(
                         operation.kind,
@@ -500,9 +488,8 @@ impl RuntimeState {
 
     pub(super) fn resume_retained_cleanups(self: &Arc<Self>) {
         let session_ids = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .owner()
+            .controller()
             .state
             .sessions
             .iter()
@@ -530,10 +517,8 @@ impl RuntimeState {
         session_id: &str,
     ) -> Result<()> {
         let existing = {
-            let lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let lifecycle_owner = self.owner();
+            let lifecycle = &lifecycle_owner.lifecycle;
             lifecycle.get(session_id).and_then(|active| {
                 (active.kind == LifecycleKind::Cleanup).then(|| active.result.clone())
             })

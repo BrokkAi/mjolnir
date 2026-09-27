@@ -116,9 +116,9 @@ pub(crate) fn recover_worker_controlled(
         })
         .transpose()?;
     if let Some(id) = session_id {
-        let state =
-            crate::database::load_state().context("read durable session before worker recovery")?;
-        let eligible = state.sessions.get(id).is_some_and(|session| {
+        let session = crate::database::read_durable_session_record(id)
+            .context("read durable session before worker recovery")?;
+        let eligible = session.as_ref().is_some_and(|session| {
             crate::pollers::session_target_is_pollable(session)
                 && session.target.as_ref() == Some(&plan.source_target)
         });

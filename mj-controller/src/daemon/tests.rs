@@ -319,9 +319,10 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     assert!(!state.workspace_has_active_resume("workspace-a"));
 
     let (_completed, result) = tokio::sync::watch::channel(None);
-    state.lifecycle.lock().unwrap().insert(
+    state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
             create_control: None,
             kind: LifecycleKind::Resume,
@@ -344,9 +345,10 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
 async fn checkpoint_lifecycle_guard_is_per_session() {
     let state = test_runtime_state();
     let (_completed, result) = tokio::sync::watch::channel(None);
-    state.lifecycle.lock().unwrap().insert(
+    state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
             create_control: None,
             kind: LifecycleKind::Resume,
@@ -1018,13 +1020,9 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
 async fn daemon_records_definitive_missing_workspaces_without_an_attached_surface() {
     let state = test_runtime_state();
     let session = runtime_test_session("missing", "workspace", SessionState::Running);
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .insert(session.id.clone(), session.clone());
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session.clone());
+    });
     assert!(state.attachments.lock().unwrap().is_empty());
     let mut view = ManagedSessionView {
         snapshot: None,
@@ -1044,25 +1042,13 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
             session.updated_at
         )),
     );
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut(&session.id)
-        .unwrap()
-        .state = SessionState::Closing;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut(&session.id).unwrap().state = SessionState::Closing;
+    });
     assert!(state.missing_target_record(&session.id, &view).is_none());
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut(&session.id)
-        .unwrap()
-        .state = SessionState::Error;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut(&session.id).unwrap().state = SessionState::Error;
+    });
     assert!(state.missing_target_record(&session.id, &view).is_none());
 }
 
@@ -1661,16 +1647,7 @@ async fn close_keeps_worker_target_available_for_checkpoint_lease() {
         })
         .unwrap();
 
-    assert!(
-        state
-            .worker_poll_exclusion_session_ids(
-                &state
-                    .controller
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-            )
-            .is_empty()
-    );
+    assert!(state.worker_poll_exclusion_session_ids().is_empty());
 
     release.notify_one();
     RuntimeState::wait_lifecycle_result(result).await.unwrap();
@@ -1792,12 +1769,7 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
         })
         .unwrap();
     assert_eq!(
-        state.worker_poll_exclusion_session_ids(
-            &state
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-        ),
+        state.worker_poll_exclusion_session_ids(),
         BTreeSet::from(["session-1".to_owned()])
     );
     let executor = DaemonStageReportingExecutor::new(
@@ -1810,10 +1782,8 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
     executor.stage_started(ProvisionStage::Syncing);
     executor.stage_finished(ProvisionStage::Cloning);
     {
-        let lifecycle = state
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let lifecycle_owner = state.owner();
+        let lifecycle = &lifecycle_owner.lifecycle;
         let stages = &lifecycle.get("session-1").unwrap().active_stages;
         assert_eq!(stages.get(&ProvisionStage::Cloning).unwrap().0, 1);
         assert_eq!(stages.get(&ProvisionStage::Syncing).unwrap().0, 1);
@@ -1822,9 +1792,8 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
     executor.stage_finished(ProvisionStage::Syncing);
     assert!(
         state
+            .owner()
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get("session-1")
             .unwrap()
             .active_stages
@@ -1912,9 +1881,10 @@ fn create_cancellation_and_commit_have_one_winner() {
 async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     let state = test_runtime_state();
     let (complete, result) = tokio::sync::watch::channel(None);
-    state.lifecycle.lock().unwrap().insert(
+    state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            phase: LifecyclePhase::Executing,
             operation_id: "closing-operation".into(),
             create_control: None,
             kind: LifecycleKind::Suspend,
@@ -1930,6 +1900,12 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             result: result.clone(),
         },
     );
+    state
+        .owner()
+        .lifecycle
+        .get_mut("cleanup-gap")
+        .unwrap()
+        .phase = LifecyclePhase::Completed(Ok(DaemonLifecycleResult::DeferredCleanup));
     complete.send_replace(Some(Ok(DaemonLifecycleResult::DeferredCleanup)));
     state.remove_completed_lifecycle(&result);
     let view = state.active_lifecycles();
@@ -2075,7 +2051,7 @@ async fn close_waits_for_cancelled_or_committed_provisioning_to_release_ownershi
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(!state.lifecycle.lock().unwrap().contains_key("close-race"));
+        assert!(!state.owner().lifecycle.contains_key("close-race"));
     }
 }
 
@@ -2119,13 +2095,9 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
         container_id: "a".repeat(64),
         workspace_storage: Default::default(),
     });
-    state
-        .controller
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .state
-        .sessions
-        .insert(session.id.clone(), session.clone());
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session.clone());
+    });
     let release = Arc::new(tokio::sync::Notify::new());
     let result = state
         .start_or_join_lifecycle("destroying".into(), LifecycleKind::Suspend, {
@@ -2141,13 +2113,9 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     assert!(state.active_lifecycles()[0].cancellable);
 
     session.state = SessionState::Destroying;
-    state
-        .controller
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
 
     assert!(!state.active_lifecycles()[0].cancellable);
     let error = state.cancel_lifecycle("destroying").unwrap_err();
@@ -2157,9 +2125,8 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     );
     assert!(
         !state
+            .owner()
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get("destroying")
             .expect("lifecycle entry")
             .cancelled
@@ -2191,10 +2158,8 @@ async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
         tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
     tokio::task::yield_now().await;
     {
-        let lifecycle = state
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let lifecycle_owner = state.owner();
+        let lifecycle = &lifecycle_owner.lifecycle;
         assert!(
             lifecycle
                 .get("session-1")
@@ -2357,13 +2322,9 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     };
     let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
     session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2379,15 +2340,9 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
 
     // A retry must pick up the current record, not a retained copy from the
     // original worker event. No new worker event or UI publication is needed.
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .title = "renamed".into();
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("session-1").unwrap().title = "renamed".into();
+    });
     state.refresh_background_policies();
     let retry = observed.try_recv().unwrap();
     assert_eq!(retry.session.title, "renamed");
@@ -2395,26 +2350,14 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     assert_eq!(retry.checkpoint_wait, None);
     assert_eq!(state.revisions.current(), revision);
 
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .state = SessionState::Parked;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("session-1").unwrap().state = SessionState::Parked;
+    });
     state.refresh_background_policies();
     assert!(observed.try_recv().is_err());
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .state = SessionState::Running;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("session-1").unwrap().state = SessionState::Running;
+    });
     state.refresh_background_policies();
     assert!(
         observed.try_recv().is_err(),
@@ -2437,13 +2380,9 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     };
     let mut session = runtime_test_session("session-1", "workspace", SessionState::Running);
     session.harness_kind = mj_core::config::HarnessKind::Claude;
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2483,13 +2422,9 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
         gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
     };
     let session = runtime_test_session("session-1", "workspace", SessionState::Running);
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
     state
         .publish_session("session-1".into(), ready_startup_view())
         .await
@@ -2509,13 +2444,9 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
         .await
         .unwrap();
     observed.try_recv().unwrap();
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .remove("session-1");
+    state.owner().edit_sessions(|sessions| {
+        sessions.remove("session-1");
+    });
     state.refresh_background_policies();
     assert!(observed.try_recv().is_err());
     assert!(state.background_policies.lock().unwrap().is_empty());
@@ -2526,13 +2457,9 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
 fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {
     let mut session = runtime_test_session("session-1", "workspace", SessionState::Provisioning);
     draft.clone_into(&mut session.draft_input);
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .insert(session.id.clone(), session);
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
 }
 
 /// The smallest archived snapshot a hand-off step can carry.
@@ -2737,15 +2664,9 @@ async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
     )
     .await
     .expect("queue the startup prompt");
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .state = SessionState::Stopped;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
+    });
 
     let draft = wait_for_draft(&state, "undelivered prompt").await;
     assert_eq!(draft, "half-written note\n\nundelivered prompt");
@@ -2858,15 +2779,9 @@ async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessio
         "{unknown:#}"
     );
 
-    state
-        .controller
-        .lock()
-        .unwrap()
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .state = SessionState::Stopped;
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
+    });
     let stopped = handle_action(
         queued_prompt_action("hello"),
         &metadata,

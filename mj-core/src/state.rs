@@ -1957,31 +1957,8 @@ impl State {
         for (id, session) in &self.sessions {
             session.validate(id)?;
         }
-        for (child_id, subagent) in &self.subagents {
-            if child_id != &subagent.child_session_id {
-                bail!("sub-agent key {child_id:?} does not match its child session id");
-            }
-            if child_id == &subagent.parent_session_id {
-                bail!("sub-agent {child_id:?} cannot be its own parent");
-            }
-            if !self.sessions.contains_key(child_id) {
-                bail!("sub-agent {child_id:?} has no child session");
-            }
-            if !self.sessions.contains_key(&subagent.parent_session_id) {
-                bail!(
-                    "sub-agent {child_id:?} has unknown parent {:?}",
-                    subagent.parent_session_id
-                );
-            }
-            if self.subagents.contains_key(&subagent.parent_session_id) {
-                bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
-            }
-            if subagent.task_name.trim().is_empty()
-                || subagent.profile_id.trim().is_empty()
-                || subagent.request_key.trim().is_empty()
-            {
-                bail!("sub-agent {child_id:?} has incomplete relationship metadata");
-            }
+        for child_id in self.subagents.keys() {
+            self.validate_subagent(child_id)?;
         }
         for (host, sources) in &self.mount_history {
             if host.trim().is_empty() {
@@ -2001,6 +1978,38 @@ impl State {
             if size.cpus > i64::MAX as u64 || size.memory_bytes > i64::MAX as u64 {
                 bail!("container size history for {host:?} exceeds SQLite integer range");
             }
+        }
+        Ok(())
+    }
+
+    /// Validate one relationship after an incremental committed update.
+    pub fn validate_subagent(&self, child_id: &str) -> Result<()> {
+        let Some(subagent) = self.subagents.get(child_id) else {
+            return Ok(());
+        };
+        if child_id != subagent.child_session_id {
+            bail!("sub-agent key {child_id:?} does not match its child session id");
+        }
+        if child_id == subagent.parent_session_id {
+            bail!("sub-agent {child_id:?} cannot be its own parent");
+        }
+        if !self.sessions.contains_key(child_id) {
+            bail!("sub-agent {child_id:?} has no child session");
+        }
+        if !self.sessions.contains_key(&subagent.parent_session_id) {
+            bail!(
+                "sub-agent {child_id:?} has unknown parent {:?}",
+                subagent.parent_session_id
+            );
+        }
+        if self.subagents.contains_key(&subagent.parent_session_id) {
+            bail!("sub-agent {child_id:?} cannot belong to another sub-agent");
+        }
+        if subagent.task_name.trim().is_empty()
+            || subagent.profile_id.trim().is_empty()
+            || subagent.request_key.trim().is_empty()
+        {
+            bail!("sub-agent {child_id:?} has incomplete relationship metadata");
         }
         Ok(())
     }

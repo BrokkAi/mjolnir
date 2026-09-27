@@ -361,9 +361,8 @@ pub(super) async fn handle_action(
                     .context("serialized prompt content is not an array")?;
                 let text = mj_core::transcript::materialized_content_text(values);
                 let bundle_id = state
-                    .controller
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
+                    .owner()
+                    .controller()
                     .state
                     .sessions
                     .get(&session_id)
@@ -394,17 +393,13 @@ pub(super) async fn handle_action(
                     )
                 })
                 .await?;
-                if let Some(record) = state
-                    .controller
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .state
-                    .sessions
-                    .get_mut(&session_id)
-                    && record.draft_input == expected
-                {
-                    record.draft_input.clear();
-                }
+                state.owner().edit_sessions(|sessions| {
+                    if let Some(record) = sessions.get_mut(&session_id)
+                        && record.draft_input == expected
+                    {
+                        record.draft_input.clear();
+                    }
+                });
                 state.publish_revision();
             }
             if let Some((bundle_id, text)) = history

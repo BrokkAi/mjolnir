@@ -72,13 +72,12 @@ impl RuntimeState {
             "Move queue admission is incomplete; retry Move on the same destination before another lifecycle operation"
         );
         let result = {
-            let mut lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut lifecycle_owner = self.owner();
+            lifecycle_owner.ensure_available()?;
+            let lifecycle = &mut lifecycle_owner.lifecycle;
             let completed_other_kind = lifecycle
                 .get(&session_id)
-                .is_some_and(|active| active.kind != kind && active.result.borrow().is_some());
+                .is_some_and(|active| active.kind != kind && !active.is_running());
             if completed_other_kind {
                 lifecycle.remove(&session_id);
             }
@@ -111,6 +110,7 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
+                        phase: LifecyclePhase::Executing,
                         operation_id: operation_reference.clone(),
                         create_control,
                         kind,
@@ -214,18 +214,17 @@ impl RuntimeState {
                     if let Err(error) = &result {
                         tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
                     }
-                    result_tx.send_replace(Some(result));
-                    // Completion must release transient mutation ownership even
-                    // when every requesting client has disconnected. Durable
-                    // partial queue admission has its own independent hold.
-                    if let Some(active) = state
-                        .lifecycle
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .get_mut(&operation_session_id)
-                        && active.result.same_channel(&completed_channel)
                     {
-                        active._move_guard.take();
+                        let mut owner = state.owner();
+                        if let Some(active) = owner.lifecycle.get_mut(&operation_session_id)
+                            && active.operation_id == operation_reference
+                        {
+                            active.phase = LifecyclePhase::Completed(result.clone());
+                            active._move_guard.take();
+                        }
+                        // Waiters and state readers cross the same completion
+                        // boundary; the channel is notification, not ownership.
+                        result_tx.send_replace(Some(result));
                     }
                     // Hand off under daemon ownership even if the requesting
                     // client disconnects. The completed close remains visible
@@ -237,9 +236,8 @@ impl RuntimeState {
                         tracing::warn!(session_id = %operation_session_id, %error, "could not start retained cleanup");
                         state.push_notice(&operation_session_id, "Container cleanup could not start; retry cleanup from the stopped session.");
                         state
+                            .owner()
                             .lifecycle
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
                             .retain(|_, active| !active.result.same_channel(&completed_channel));
                     }
                     state.publish_revision();
@@ -282,9 +280,8 @@ impl RuntimeState {
     }
 
     pub(super) fn remove_completed_lifecycle(&self, channel: &LifecycleWatch) {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.owner()
+            .lifecycle
             .retain(|_, active| !active.result.same_channel(channel) || active.is_visible());
     }
 }

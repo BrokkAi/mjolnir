@@ -23,9 +23,9 @@ interface; do not implement a second delegation scheduler.
 - [x] User approved incremental TUI and web feeds as part of this refactor.
 - [x] Claimed #1172 and added `agent-in-progress`.
 - [x] Introduce structurally shared session/relation maps and point-read support.
-- [ ] Add the operational owner and transition/index tests.
-- [ ] Integrate ordered persistence receipts and lifecycle ownership.
-- [ ] Replace daemon reloads and poller scans with maintained projections.
+- [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; additional concurrency/scaling coverage remains).
+- [ ] Integrate ordered persistence receipts and lifecycle ownership (committed publication integrated; lifecycle phases explicit; remaining late-effect and worker-incarnation audit pending).
+- [ ] Replace daemon reloads and poller scans with maintained projections (pollable workers maintained in memory; historical runtime snapshot projections remain).
 - [ ] Implement cursor-based incremental TUI and web feeds.
 - [ ] Remove obsolete caches, validate scaling, upgrade, and recovery behavior.
 - [ ] Complete required Cargo checks and commit validated checkpoints.
@@ -70,14 +70,29 @@ map on mutation. Structural sharing must happen inside the collections.
   poison the writer and its snapshot feed, never permit mutation replay.
   Date: 2026-09-27.
 
+- Decision: Keep worker eligibility in `RuntimeStateOwner` with structurally shared
+  record indexes. Polling enumerates this set and checks lifecycle ownership under
+  the same lock. It does not query SQLite or inspect unrelated historical records.
+  Rationale: SQL can supply committed changes and bootstrap data, but repeatedly
+  reconstructing eligibility would leave frequent work proportional to history.
+  Date: 2026-09-27.
+- Decision: A lifecycle watch channel carries notifications only. Executing,
+  Cancelling, and Completed phases determine ownership. Completion applies the
+  phase and sends the result under the owner lock, checking operation identity.
+  Rationale: Channel contents and separately locked records cannot independently
+  determine whether the worker belongs to a lifecycle operation.
+  Date: 2026-09-27.
+
 ## Outcomes & Retrospective
 
 The foundation compiles with `cargo check --all-targets`. The persistent-map
 copy-count test passes at 100, 10,000, and 100,000 records, and the wire-format
 test confirms ordinary JSON objects. Single-session durable reads now query only
 the selected session and its target, mounts, and checkpoint; session-manager
-outcome and repair reads use this path. The owner, indexes, and feed changes
-remain pending, so the original reload loops have not yet been removed.
+outcome and repair reads use this path. The owner and indexes now consume committed changes. The daemon target refresher
+uses the in-memory pollable index and no longer reloads historical records.
+Incremental client feeds and the remaining historical snapshot projections are
+still pending.
 
 The working tree was clean at the start, on commit 40922d77. During implementation
 the user pulled master forward to bbdef44b. Their changes are retained. All runtime
@@ -88,7 +103,8 @@ experiments must use the named instance below; never upgrade the live daemon.
 `mj-controller/src/daemon.rs` and its modules implement the background process.
 `controller.rs` defines a mutable configuration/state snapshot and lifecycle
 methods. `database/writer.rs` provides the sole serialized persistence lane;
-`database/state_io.rs` currently reconstructs the entire store. `server_runtime`
+`database/state_io.rs` supplies full bootstrap and bounded point reads; daemon
+`load_state()` now acquires the writer’s immutable committed snapshot. `server_runtime`
 owns the web projection and presently reloads its own controller. `pollers/remote`
 and `pollers/runtime_feed` bridge daemon snapshots into the TUI. `mj-client` owns
 the internal daemon wire types, and `server/handlers` plus `web/viewer.js` own the
@@ -146,7 +162,8 @@ mbx Cargo configuration without changing target directories or build profiles.
 Run focused tests after each coherent change and the full required checks at the
 end. Every cargo test command runs outside the restricted sandbox.
 
-    cargo test
+    mkdir -p /tmp/mj-state-owner-1172-tests/config /tmp/mj-state-owner-1172-tests/data
+    MJ_INSTANCE=state-owner-1172 MJ_CONFIG_DIR=/tmp/mj-state-owner-1172-tests/config MJ_DATA_DIR=/tmp/mj-state-owner-1172-tests/data cargo test
     cargo clippy --all-targets -- -D warnings
 
 Live experiments must use `mj --instance state-owner-1172` and isolated config
@@ -210,6 +227,42 @@ Validation note (2026-09-27): Default workspace checking and Clippy pass.
 The controller suite passed 1,869 tests, including the new point-read regression
 and historical migrations. The full workspace run stopped at the existing
 worker test `checkpoint_wake_records_already_queued_runtime_events_first`, whose
-one-second wait timed out. The isolated rerun passed in 0.12 seconds; the unreached CLI tests are
-still running. `database/committed.rs` is a separate, not-yet-integrated prototype for
-the next checkpoint; it is not part of the foundation validation.
+one-second wait timed out. The isolated rerun passed in 0.12 seconds; the remaining CLI tests subsequently passed, including isolated terminal upgrade
+handoff. Foundation committed as c2617cce. The committed-state publisher is now
+integrated with the owner; four focused publication tests passed. A subsequent
+controller run passed 1,872 tests and failed two damaged-store regressions.
+Connection observer installation had incorrectly depended on an unrelated optional
+table, and worker recovery had lost its fresh storage check. Fixes preserve the
+optional write failure and use a bounded single-session recovery read. Both repaired regressions passed in the next controller run. All five publication
+regressions pass, including the fatal-publication case. That broader run passed
+1,860 tests but exposed 15 older worker-launch tests reading the ambient store,
+whose schema had advanced from 57 to 58. Compatibility checks refused those reads.
+The whole Cargo test process now receives dedicated config/data directories and
+MJ_INSTANCE, in addition to preserving each test’s existing isolation.
+
+Revision note (2026-09-27): Pollable workers are maintained in memory, as clarified
+with the user. Committed row readback updates that state; it is not the polling
+query. Record diagnostics and metadata backfill now run during startup instead of
+every Controller::load. Lifecycle completion sets its explicit phase and notifies
+waiters under the owner lock. The full refactor and final validation remain open.
+
+Revision note (2026-09-27): Isolate the entire Cargo test environment because
+some existing launch helper tests consult the ambient database even when they
+construct their session records in memory. Never rely solely on fixture-level
+isolation to protect the live store. The existing schema refusal prevented the
+ambient reads; no live daemon was started or upgraded.
+
+Checkpoint note (2026-09-27): `cargo clippy --all-targets -- -D warnings` passes
+for the owner integration. Full workspace tests are running with the dedicated
+whole-process environment. No manual daemon/TUI invocation has been made yet.
+The next implementation checkpoint must remove historical work from
+`daemon/snapshot.rs::runtime_snapshot`, `server_runtime/run.rs::publish_snapshot`,
+and the TUI’s vector replacement path. Worker views and close intent still need
+the remaining single-owner transition audit. Do not describe this intermediate
+checkpoint as the complete refactor.
+
+Validation checkpoint (2026-09-27): With whole-process isolation, the controller
+suite passes 1,875 tests (8 ignored). All five publication regressions and the
+previously failing launch tests pass. Clippy passes. Remaining workspace suites
+are still running; the current checkpoint covers ownership, publication, and
+the primary daemon pollable-worker index, not the later consumer/feed work.

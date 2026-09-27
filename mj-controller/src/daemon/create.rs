@@ -243,10 +243,8 @@ impl RuntimeState {
 
     pub async fn wait_create_session(&self, session_id: &str) -> Result<()> {
         let result = {
-            let lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let lifecycle_owner = self.owner();
+            let lifecycle = &lifecycle_owner.lifecycle;
             let active = lifecycle
                 .get(session_id)
                 .with_context(|| format!("no create operation exists for session {session_id}"))?;

@@ -38,10 +38,8 @@ impl RuntimeState {
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
         let (source_harness, source_active) = {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let controller_owner = self.owner();
+            let controller = controller_owner.controller();
             let source = controller
                 .state
                 .sessions
@@ -155,9 +153,8 @@ impl RuntimeState {
         for operation in operations.into_iter().filter(|op| {
             op.is_active()
                 || self
-                    .controller
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
+                    .owner()
+                    .controller()
                     .state
                     .sessions
                     .get(&op.selection.session_id)

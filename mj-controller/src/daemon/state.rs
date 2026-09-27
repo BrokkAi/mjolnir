@@ -12,14 +12,18 @@ impl RuntimeState {
         worker_upgrade_observer: WorkerUpgradeObserver,
         workspaces: Vec<WorkspaceRecord>,
     ) -> Self {
-        Self::new_with_controller_loader(
+        let mut state = Self::new_with_controller_loader(
             session_manager,
             controller,
             recovery_observer,
             worker_upgrade_observer,
             workspaces,
             Controller::load,
-        )
+        );
+        state.committed = crate::database::database_writer_installed().then(|| {
+            crate::database::subscribe_committed_state().expect("installed database writer")
+        });
+        state
     }
 
     pub(super) fn new_with_controller_loader(
@@ -66,13 +70,12 @@ impl RuntimeState {
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
-            lifecycle: Mutex::new(BTreeMap::new()),
+            owner: Mutex::new(RuntimeStateOwner::new(controller)),
+            committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
             harness_readiness: Mutex::new(HarnessReadinessWatch::default()),
             startup_prompts: Mutex::new(BTreeMap::new()),
-            close_requested: Mutex::new(BTreeSet::new()),
-            controller: Mutex::new(controller),
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
             recovery_observer,
@@ -224,9 +227,8 @@ impl RuntimeState {
     }
 
     pub(super) fn live_session_ids(&self) -> BTreeSet<String> {
-        self.controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.owner()
+            .controller()
             .state
             .sessions
             .keys()
@@ -244,10 +246,8 @@ impl RuntimeState {
         snapshot: &mj_core::archive::CanonicalSessionSnapshot,
     ) -> Result<()> {
         let (config, profile_id) = {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let controller_owner = self.owner();
+            let controller = controller_owner.controller();
             let profile_id = controller
                 .state
                 .sessions
@@ -347,11 +347,9 @@ impl RuntimeState {
         error: &str,
     ) {
         let provisioning = {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            durable_session_state(&controller, session_id) == Some(SessionState::Provisioning)
+            let controller_owner = self.owner();
+            let controller = controller_owner.controller();
+            durable_session_state(controller, session_id) == Some(SessionState::Provisioning)
         };
         if !provisioning {
             return;
@@ -449,9 +447,8 @@ impl RuntimeState {
     /// such as a prompt, that do not.
     pub async fn clear_recorded_close_failure(self: &Arc<Self>, session_id: &str) {
         let recorded = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .owner()
+            .controller()
             .state
             .sessions
             .get(session_id)
@@ -485,11 +482,9 @@ impl RuntimeState {
 
     pub(super) fn note_lifecycle_outcome(&self, session_id: &str) {
         let stopped = {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            durable_session_state(&controller, session_id) == Some(SessionState::Stopped)
+            let controller_owner = self.owner();
+            let controller = controller_owner.controller();
+            durable_session_state(controller, session_id) == Some(SessionState::Stopped)
         };
         if stopped {
             self.wiki.request_sync(false);
@@ -516,14 +511,9 @@ impl RuntimeState {
     }
 
     pub(super) fn workspace_has_active_resume(&self, workspace_id: &str) -> bool {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .any(|active| {
-                active.result.borrow().is_none()
-                    && active.resume_workspace_id.as_deref() == Some(workspace_id)
-            })
+        self.owner().lifecycle.values().any(|active| {
+            active.is_running() && active.resume_workspace_id.as_deref() == Some(workspace_id)
+        })
     }
 
     pub fn publish_web_access(&self, access: crate::server::WebViewerAccess) {
@@ -573,27 +563,14 @@ impl RuntimeState {
         self.workspaces_tx.subscribe()
     }
 
-    pub(super) fn worker_poll_exclusion_session_ids(
-        &self,
-        controller: &Controller,
-    ) -> BTreeSet<String> {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter(|(session_id, active)| {
-                active.result.borrow().is_none()
-                    && (active.move_source_closed
-                        || lifecycle_owns_worker_target(
-                            active.kind,
-                            controller
-                                .state
-                                .sessions
-                                .get(*session_id)
-                                .map(|session| session.state),
-                        ))
-            })
-            .map(|(session_id, _)| session_id.clone())
+    #[cfg(test)]
+    pub(super) fn worker_poll_exclusion_session_ids(&self) -> BTreeSet<String> {
+        let owner = self.owner();
+        owner
+            .lifecycle
+            .keys()
+            .filter(|id| owner.worker_is_owned(id))
+            .cloned()
             .collect()
     }
 
@@ -604,13 +581,7 @@ impl RuntimeState {
     /// Read the config the daemon serves right now. A task on a schedule reads
     /// it again on every tick, so a reload reaches it without a restart.
     pub fn with_config<T>(&self, read: impl FnOnce(&Config) -> T) -> T {
-        read(
-            &self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .config,
-        )
+        read(&self.owner().controller().config)
     }
 
     /// Create a bundle under the daemon's config-mutation coordinator. The
@@ -843,9 +814,8 @@ impl RuntimeState {
         inherited_draft: Option<&str>,
     ) -> Result<()> {
         let bundle_id = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .owner()
+            .controller()
             .state
             .sessions
             .get(session_id)
@@ -875,17 +845,13 @@ impl RuntimeState {
                     "the delivered prompt's draft could not be cleared"
                 );
             }
-            if let Some(record) = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .state
-                .sessions
-                .get_mut(session_id)
-                && record.draft_input == expected
-            {
-                record.draft_input.clear();
-            }
+            self.owner().edit_sessions(|sessions| {
+                if let Some(record) = sessions.get_mut(session_id)
+                    && record.draft_input == expected
+                {
+                    record.draft_input.clear();
+                }
+            });
             self.publish_revision();
         }
         if let Some(bundle_id) = bundle_id {
@@ -991,16 +957,11 @@ impl RuntimeState {
         let stored =
             blocking(move || crate::database::set_session_draft_input(&persisted_id, &persisted))
                 .await;
-        if let Some(record) = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .state
-            .sessions
-            .get_mut(session_id)
-        {
-            record.draft_input = combined;
-        }
+        self.owner().edit_sessions(|sessions| {
+            if let Some(record) = sessions.get_mut(session_id) {
+                record.draft_input = combined;
+            }
+        });
         self.publish_revision();
         stored
     }

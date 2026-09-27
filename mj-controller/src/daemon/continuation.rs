@@ -241,21 +241,15 @@ fn check_eligible(view: &ManagedSessionView) -> bool {
 
 fn allowed(state: &RuntimeState, session: &str) -> bool {
     let enabled = {
-        let controller = state
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let controller_owner = state.owner();
+        let controller = controller_owner.controller();
         controller.config.automatic_continuation_enabled()
             && controller.state.sessions.contains_key(session)
             && !controller.state.subagents.contains_key(session)
     };
     enabled
         && !crate::controller::move_session::move_owns_session(session)
-        && !state
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(session)
+        && !state.owner().lifecycle.contains_key(session)
         && crate::review_host::prompt_refusal(session).is_none()
 }
 
@@ -340,9 +334,8 @@ pub(super) fn spawn(
             let state = state.clone();
             Arc::new(move |id| {
                 state
-                    .controller
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
+                    .owner()
+                    .controller()
                     .state
                     .sessions
                     .get(id)

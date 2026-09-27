@@ -554,14 +554,12 @@ impl RuntimeState {
     /// under.
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
         let mut result = {
-            let lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let Some(active) = lifecycle.get(session_id) else {
+            let mut lifecycle_owner = self.owner();
+            let lifecycle = &mut lifecycle_owner.lifecycle;
+            let Some(active) = lifecycle.get_mut(session_id) else {
                 return Ok(());
             };
-            if !active.result.borrow().is_none() {
+            if !active.is_running() {
                 return Ok(());
             }
             active.request_cancel();

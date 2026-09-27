@@ -6,34 +6,39 @@ pub fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget
         .sessions
         .values()
         .filter(|session| session_target_is_pollable(session))
-        .filter_map(|session| {
-            let spec = match controller.reconnect_command(&session.id) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    tracing::warn!(session_id = %session.id, "could not build worker poll target: {error:#}");
-                    return None;
-                }
-            };
-            Some(WorkerPollTarget {
-                session_id: session.id.clone(),
-                spec,
-                worker_recovery: match controller.worker_recovery_plan(&session.id) {
-                    Ok(plan) => Some(plan),
-                    Err(error) => {
-                        tracing::debug!(session_id = %session.id, "worker recovery target unavailable: {error:#}");
-                        None
-                    }
-                },
-                project_memory: match controller.project_memory_sync_target(&session.id) {
-                    Ok(target) => Some(target),
-                    Err(error) => {
-                        tracing::debug!(session_id = %session.id, "project memory target unavailable: {error:#}");
-                        None
-                    }
-                },
-            })
-        })
+        .filter_map(|session| worker_poll_target(controller, session))
         .collect()
+}
+
+pub(crate) fn worker_poll_target(
+    controller: &Controller,
+    session: &SessionRecord,
+) -> Option<WorkerPollTarget> {
+    let spec = match controller.reconnect_command(&session.id) {
+        Ok(spec) => spec,
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, "could not build worker poll target: {error:#}");
+            return None;
+        }
+    };
+    Some(WorkerPollTarget {
+        session_id: session.id.clone(),
+        spec,
+        worker_recovery: match controller.worker_recovery_plan(&session.id) {
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                tracing::debug!(session_id = %session.id, "worker recovery target unavailable: {error:#}");
+                None
+            }
+        },
+        project_memory: match controller.project_memory_sync_target(&session.id) {
+            Ok(target) => Some(target),
+            Err(error) => {
+                tracing::debug!(session_id = %session.id, "project memory target unavailable: {error:#}");
+                None
+            }
+        },
+    })
 }
 
 pub fn dashboard_worker_targets_excluding(

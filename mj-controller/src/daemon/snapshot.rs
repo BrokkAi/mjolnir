@@ -36,10 +36,8 @@ impl RuntimeState {
     /// Quiet workers need no new view to retry a skipped or delayed operation.
     /// This only queues observations; coordinators perform the actual I/O.
     pub(super) fn refresh_background_policies(&self) {
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let controller_owner = self.owner();
+        let controller = controller_owner.controller();
         self.background_policies
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -61,17 +59,19 @@ impl RuntimeState {
         // Serialize installs so an earlier phone publication cannot overwrite
         // a later completed lifecycle with the controller snapshot it loaded.
         let _mutation = self.config_mutation.lock().await;
-        let controller_loader = self.controller_loader;
-        let controller = tokio::task::spawn_blocking(controller_loader)
-            .await
-            .context("daemon controller reload task panicked")??;
-        let session_count = controller.state.sessions.len();
-        *self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = controller;
-        let revision = self.publish_revision();
-        tracing::debug!(revision, session_count, "daemon controller state reloaded");
+        if self.committed.is_some() {
+            let config = tokio::task::spawn_blocking(Config::load)
+                .await
+                .context("daemon configuration reader panicked")??;
+            self.owner().install_config(config);
+        } else {
+            let controller_loader = self.controller_loader;
+            let controller = tokio::task::spawn_blocking(controller_loader)
+                .await
+                .context("daemon controller loader panicked")??;
+            self.owner().install_controller(controller);
+        }
+        self.publish_revision();
         Ok(())
     }
 
@@ -88,19 +88,15 @@ impl RuntimeState {
         if view.connected {
             return None;
         }
-        if self
+        let controller_owner = self.owner();
+        if controller_owner
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get(session_id)
-            .is_some_and(|active| active.result.borrow().is_none())
+            .is_some_and(|active| active.is_running())
         {
             return None;
         }
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let controller = controller_owner.controller();
         let session = controller.state.sessions.get(session_id)?;
         if !matches!(
             session.state,
@@ -151,28 +147,20 @@ impl RuntimeState {
     /// this belongs on the daemon's background tick. The write it leads to
     /// does not; see [`Self::fail_unready_session`].
     pub(super) fn sessions_without_a_usable_harness(&self) -> Vec<UnreadySession> {
-        let busy = {
-            let lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            lifecycle
-                .iter()
-                .filter(|(_, active)| active.result.borrow().is_none())
-                .map(|(session_id, _)| session_id.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-        };
         let live = {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            controller
-                .state
-                .sessions
-                .values()
-                .filter(|record| record.state == SessionState::Running)
-                .filter(|record| !busy.contains(&record.id))
+            let owner = self.owner();
+            owner
+                .indexes
+                .running
+                .keys()
+                .filter(|id| {
+                    !owner
+                        .lifecycle
+                        .get(*id)
+                        .is_some_and(|active| active.is_running())
+                })
+                .filter(|id| !owner.close_requested.contains(*id))
+                .filter_map(|id| owner.controller().state.sessions.get(id))
                 .map(|record| (record.id.clone(), record.updated_at.clone()))
                 .collect::<Vec<_>>()
         };
@@ -180,7 +168,6 @@ impl RuntimeState {
         let observations = {
             let sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
             live.into_iter()
-                .filter(|(session_id, _)| !self.close_is_requested(session_id))
                 .map(|(session_id, updated_at)| {
                     let view = sessions.get(&session_id);
                     ReadinessObservation {
@@ -251,10 +238,8 @@ impl RuntimeState {
             "daemon received a session view"
         );
         {
-            let controller = self
-                .controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let controller_owner = self.owner();
+            let controller = controller_owner.controller();
             let mut policies = self
                 .background_policies
                 .lock()
@@ -310,9 +295,8 @@ impl RuntimeState {
             .map(|workspace| (workspace.id, workspace.name))
             .collect();
         let session_ids = if all_workspaces {
-            self.controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            self.owner()
+                .controller()
                 .state
                 .sessions
                 .keys()
@@ -345,14 +329,10 @@ impl RuntimeState {
         // Match the controller -> lifecycle lock order used by worker polling.
         // Completion reloads records before publishing its result, so holding
         // this guard prevents an absent operation paired with older records.
-        let controller = self
-            .controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let lifecycles = self
+        let controller_owner = self.owner();
+        let controller = controller_owner.controller();
+        let lifecycles = controller_owner
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter(|(session_id, active)| {
                 (all_workspaces
@@ -365,7 +345,7 @@ impl RuntimeState {
                 cancellable: active.is_cancellable()
                     && lifecycle_cancellable(
                         active.kind,
-                        durable_session_state(&controller, session_id),
+                        durable_session_state(controller, session_id),
                     ),
                 session_id: session_id.clone(),
                 kind: active.kind.into(),
@@ -393,8 +373,8 @@ impl RuntimeState {
             .filter(|notice| notice_reaches_workspace(notice, &session_ids))
             .cloned()
             .collect();
-        let records = runtime_records_for_workspace(&controller, &session_ids);
-        let subagents = runtime_subagents_for_workspace(&controller, &records);
+        let records = runtime_records_for_workspace(controller, &session_ids);
+        let subagents = runtime_subagents_for_workspace(controller, &records);
         Ok(RuntimeSnapshot {
             last_subagent_policy: controller.state.last_subagent_policy.clone(),
             native_agents,

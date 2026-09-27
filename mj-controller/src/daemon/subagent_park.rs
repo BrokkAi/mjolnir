@@ -90,21 +90,17 @@ impl RuntimeState {
 
     /// Whether a park of this child has started and not finished.
     pub fn subagent_park_running(&self, child_session_id: &str) -> bool {
-        self.lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.owner()
+            .lifecycle
             .get(child_session_id)
-            .is_some_and(|active| {
-                active.kind == LifecycleKind::Park && active.result.borrow().is_none()
-            })
+            .is_some_and(|active| active.kind == LifecycleKind::Park && active.is_running())
     }
 
     /// Wait for a park of this child that is still running, if there is one.
     async fn wait_for_subagent_park(self: &Arc<Self>, child_session_id: &str) {
         let pending = self
+            .owner()
             .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get(child_session_id)
             .filter(|active| active.kind == LifecycleKind::Park)
             .map(|active| active.result.clone());
