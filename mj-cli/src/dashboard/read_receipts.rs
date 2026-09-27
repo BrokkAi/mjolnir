@@ -5,15 +5,22 @@ use mj_core::state::SessionRecord;
 use std::collections::BTreeMap;
 
 pub(super) fn preserve_read_positions(
-    incoming: &mut BTreeMap<String, SessionRecord>,
-    previous: &BTreeMap<String, SessionRecord>,
+    incoming: &mut mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    previous: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
 ) {
-    for (id, session) in incoming {
-        if let Some(previous) = previous.get(id) {
-            session.viewed_through_event_ordinal = session
-                .viewed_through_event_ordinal
-                .max(previous.viewed_through_event_ordinal);
-        }
+    let preserved: Vec<_> = previous
+        .changes(incoming)
+        .filter_map(|(id, record)| {
+            let record = record?;
+            let frontier = previous.get(id)?.viewed_through_event_ordinal;
+            (frontier > record.viewed_through_event_ordinal).then(|| (id.clone(), frontier))
+        })
+        .collect();
+    for (id, frontier) in preserved {
+        incoming
+            .get_mut(&id)
+            .expect("changed record exists")
+            .viewed_through_event_ordinal = frontier;
     }
 }
 

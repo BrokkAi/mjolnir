@@ -43,7 +43,7 @@ fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
     let controller = Controller {
         config: resume_compatibility_config(),
         state: State {
-            sessions: BTreeMap::from([(session_id.clone(), session)]),
+            sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -165,7 +165,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -226,7 +226,7 @@ fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -268,7 +268,7 @@ fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
             ..Config::default()
         },
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -427,7 +427,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
             ..Config::default()
         },
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -631,7 +631,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1241,7 +1241,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1364,7 +1364,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1553,7 +1553,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1846,7 +1846,7 @@ exit 0
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };

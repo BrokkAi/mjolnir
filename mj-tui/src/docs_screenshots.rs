@@ -125,7 +125,7 @@ fn documentation_dashboard() -> DashboardState {
     );
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut sessions = BTreeMap::new();
+    let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
     for (index, (id, title, profile, harness, target)) in [
         (
             CONVERSATION_ID,

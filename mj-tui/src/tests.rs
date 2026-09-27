@@ -1589,12 +1589,14 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
         config(),
         State {
             last_subagent_policy: Default::default(),
-            subagents: BTreeMap::from([(child.id.clone(), relation)]),
+            subagents: [(child.id.clone(), relation)].into_iter().collect(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([
+            sessions: [
                 (parent.id.clone(), parent.clone()),
                 (child.id.clone(), child.clone()),
-            ]),
+            ]
+            .into_iter()
+            .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -1685,12 +1687,14 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         config(),
         State {
             last_subagent_policy: Default::default(),
-            subagents: BTreeMap::from([(child.id.clone(), relation)]),
+            subagents: [(child.id.clone(), relation)].into_iter().collect(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([
+            sessions: [
                 (parent.id.clone(), parent.clone()),
                 (child.id.clone(), child.clone()),
-            ]),
+            ]
+            .into_iter()
+            .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -1782,12 +1786,16 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         config(),
         State {
             last_subagent_policy: Default::default(),
-            subagents: BTreeMap::from([(first_child.id.clone(), first_relation.clone())]),
+            subagents: [(first_child.id.clone(), first_relation.clone())]
+                .into_iter()
+                .collect(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([
+            sessions: [
                 (parent.id.clone(), parent.clone()),
                 (first_child.id.clone(), first_child.clone()),
-            ]),
+            ]
+            .into_iter()
+            .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -1813,16 +1821,20 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     };
     dashboard.set_state(State {
         last_subagent_policy: Default::default(),
-        subagents: BTreeMap::from([
+        subagents: [
             (first_child.id.clone(), first_relation),
             (second_child.id.clone(), second_relation),
-        ]),
+        ]
+        .into_iter()
+        .collect(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([
+        sessions: [
             (parent.id.clone(), parent.clone()),
             (first_child.id.clone(), first_child.clone()),
             (second_child.id.clone(), second_child.clone()),
-        ]),
+        ]
+        .into_iter()
+        .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     });
@@ -2218,7 +2230,9 @@ fn the_tab_ring_visits_every_pane_and_keeps_the_session_selection() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([(active.id.clone(), active), (other.id.clone(), other)]),
+            sessions: [(active.id.clone(), active), (other.id.clone(), other)]
+                .into_iter()
+                .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -2580,7 +2594,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([(other.id.clone(), other)]),
+            sessions: [(other.id.clone(), other)].into_iter().collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -3517,7 +3531,7 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
 /// is waiting on a question, `done` has an unread answer, `quiet` is idle and
 /// read, and `remote` (in `other`) is also waiting on a question.
 fn dashboard_with_attention_mix() -> DashboardState {
-    let mut sessions = BTreeMap::new();
+    let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
     for (id, workspace, created) in [
         ("quiet", "default", "2026-08-01T00:00:00Z"),
         ("asks", "default", "2026-08-02T00:00:00Z"),

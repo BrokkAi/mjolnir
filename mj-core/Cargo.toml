@@ -44,6 +44,7 @@ chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
+imbl.workspace = true
 libc.workspace = true
 memchr.workspace = true
 regex = "1"

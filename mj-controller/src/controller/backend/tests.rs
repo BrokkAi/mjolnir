@@ -209,7 +209,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: mj_core::state::STATE_VERSION,
-        sessions: BTreeMap::from([(session_id.into(), record)]),
+        sessions: [(session_id.into(), record)].into_iter().collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };

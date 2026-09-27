@@ -37,6 +37,7 @@ pub mod review;
 pub mod runtime;
 pub mod second_opinion;
 pub mod skills;
+pub mod snapshot_map;
 pub mod state;
 pub mod storage;
 pub mod subagent;

@@ -523,10 +523,15 @@ impl Controller {
     }
 
     fn backfill_target_runtime(&mut self) -> Result<()> {
-        for session in self.state.sessions.values_mut() {
-            if session.target_runtime.is_some() {
-                continue;
-            }
+        let missing: Vec<_> = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| session.target_runtime.is_none())
+            .map(|session| session.id.clone())
+            .collect();
+        for id in missing {
+            let session = self.state.sessions.get_mut(&id).expect("collected session");
             match session.target_runtime_settings(&self.config) {
                 Ok(runtime) => {
                     let runtime = runtime.into_owned();
@@ -1003,10 +1008,19 @@ impl Controller {
             }
             return Err(error).context("rename profile references");
         }
-        for session in self.state.sessions.values_mut() {
-            if session.last_profile == old_id {
-                session.last_profile = new_id.to_owned();
-            }
+        let affected: Vec<_> = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| session.last_profile == old_id)
+            .map(|session| session.id.clone())
+            .collect();
+        for id in affected {
+            self.state
+                .sessions
+                .get_mut(&id)
+                .expect("collected session")
+                .last_profile = new_id.to_owned();
         }
         remove_config_rename_journal()?;
         Ok(())
@@ -1081,10 +1095,19 @@ impl Controller {
             }
             return Err(error).context("rename target references");
         }
-        for session in self.state.sessions.values_mut() {
-            if session.target_template_id == old_id {
-                session.target_template_id = new_id.to_owned();
-            }
+        let affected: Vec<_> = self
+            .state
+            .sessions
+            .values()
+            .filter(|session| session.target_template_id == old_id)
+            .map(|session| session.id.clone())
+            .collect();
+        for id in affected {
+            self.state
+                .sessions
+                .get_mut(&id)
+                .expect("collected session")
+                .target_template_id = new_id.to_owned();
         }
         remove_config_rename_journal()?;
         Ok(())

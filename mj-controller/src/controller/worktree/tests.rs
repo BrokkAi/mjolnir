@@ -1600,7 +1600,7 @@ fn a_converted_record_is_a_valid_bundle_session() {
     assert_eq!(record.managed_worktree, None);
     assert_eq!(record.bundle_id, "project");
     let state = State {
-        sessions: BTreeMap::from([(session_id.into(), record)]),
+        sessions: [(session_id.into(), record)].into_iter().collect(),
         ..State::default()
     };
     state.validate_against_config(&config).unwrap();
@@ -1619,7 +1619,7 @@ fn a_session_leaving_its_target_claims_a_worktree_of_its_own_repository() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1676,7 +1676,7 @@ fn a_return_to_local_reuses_its_retained_branch_and_preserves_its_tip() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1746,7 +1746,7 @@ fn a_return_to_local_rejects_a_retained_branch_checked_out_elsewhere() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+            sessions: [(session_id.into(), session.clone())].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1811,7 +1811,7 @@ fn a_session_that_left_its_target_is_a_valid_raw_session() {
     );
     assert_eq!(record.bundle_id, "project", "the bundle still describes it");
     let state = State {
-        sessions: BTreeMap::from([(session_id.into(), record)]),
+        sessions: [(session_id.into(), record)].into_iter().collect(),
         ..State::default()
     };
     state.validate_against_config(&config).unwrap();
@@ -1915,7 +1915,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     let controller = Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };

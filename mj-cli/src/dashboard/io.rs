@@ -1699,10 +1699,9 @@ mod tests {
         titled.session_title_override = Some("Fix the parser".into());
         let untitled = lifecycle_session("a1a8109b-untitled", "default", SessionState::Stopped);
         let state = State {
-            sessions: BTreeMap::from([
-                (titled.id.clone(), titled),
-                (untitled.id.clone(), untitled),
-            ]),
+            sessions: [(titled.id.clone(), titled), (untitled.id.clone(), untitled)]
+                .into_iter()
+                .collect(),
             ..State::default()
         };
         assert_eq!(
@@ -1721,7 +1720,7 @@ mod tests {
         let mut created = lifecycle_session("036b869b-created", "default", SessionState::Running);
         created.title = "project via fake".into();
         let state = State {
-            sessions: BTreeMap::from([(created.id.clone(), created)]),
+            sessions: [(created.id.clone(), created)].into_iter().collect(),
             ..State::default()
         };
         assert_eq!(
@@ -1750,7 +1749,7 @@ mod tests {
         let mut renamed = lifecycle_session("5590965c-gamma", "default", SessionState::Stopped);
         renamed.session_title_override = Some("gamma two".into());
         let state = State {
-            sessions: BTreeMap::from([(renamed.id.clone(), renamed)]),
+            sessions: [(renamed.id.clone(), renamed)].into_iter().collect(),
             ..State::default()
         };
         assert_eq!(
@@ -1771,7 +1770,7 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         let session = lifecycle_session("session-1", "default", SessionState::Running);
         let state = State {
-            sessions: BTreeMap::from([(session.id.clone(), session)]),
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
             ..State::default()
         };
         let mut updated = original.clone();

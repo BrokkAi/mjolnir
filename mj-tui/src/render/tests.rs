@@ -872,7 +872,9 @@ fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_card
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
+            .into_iter()
+            .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -1007,7 +1009,9 @@ fn project_groups_have_one_blank_row_between_them() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
+            .into_iter()
+            .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -1050,7 +1054,9 @@ fn project_hotkeys_collapse_and_expand_groups_independently() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
+            .into_iter()
+            .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -2314,7 +2320,9 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: mj_core::state::STATE_VERSION,
-            sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+            sessions: [(first.id.clone(), first), (second.id.clone(), second)]
+                .into_iter()
+                .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -2375,7 +2383,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
 /// the minimized list has headings and enough sessions to scroll. Project
 /// directories are zero-padded so they sort in the obvious order.
 fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> DashboardState {
-    let mut sessions = BTreeMap::new();
+    let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
     let mut index = 0;
     for project in 0..projects {
         for _ in 0..per_project {
@@ -3342,7 +3350,7 @@ fn dashboard_colors_named_host_permission_badges() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(session.id.clone(), session)]),
+        sessions: [(session.id.clone(), session)].into_iter().collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -3511,7 +3519,7 @@ fn selected_transcript_tail_adapts_to_a_constrained_terminal() {
 
 #[test]
 fn overflowing_session_pane_shows_a_scrollbar() {
-    let mut sessions = BTreeMap::new();
+    let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
     for index in 0..6 {
         let mut session = running_session();
         session.id = format!("active-{index:02}");
@@ -3898,7 +3906,9 @@ fn only_focused_pane_draws_caret_without_shifting_table_columns() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
+            sessions: [(first.id.clone(), first), (second.id.clone(), second)]
+                .into_iter()
+                .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },

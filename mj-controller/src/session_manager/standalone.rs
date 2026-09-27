@@ -221,11 +221,12 @@ impl StandaloneSession {
     }
 
     pub(super) async fn repair_projection(&mut self) -> Result<()> {
-        let state = crate::database::load_state()?;
-        let record = state
-            .sessions
-            .get(&self.materialized.session_id)
-            .context("controller session disappeared while repairing its projection")?;
+        let session_id = self.materialized.session_id.clone();
+        let record =
+            tokio::task::spawn_blocking(move || crate::database::load_session_record(&session_id))
+                .await
+                .context("projection repair record reader failed")??
+                .context("controller session disappeared while repairing its projection")?;
         let Some(checkpoint) = record.checkpoint.as_ref() else {
             let replacement = MaterializedSession::empty(&self.materialized.session_id);
             self.client

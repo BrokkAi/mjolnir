@@ -133,7 +133,7 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
     Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     }
@@ -246,7 +246,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -478,7 +478,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -556,7 +556,7 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -606,7 +606,7 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -656,7 +656,7 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -694,7 +694,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -724,7 +724,7 @@ fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
     let mut controller = Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -806,7 +806,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -862,7 +862,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -948,7 +948,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1045,7 +1045,7 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1096,7 +1096,7 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1129,7 +1129,7 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
     let mut controller = Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1170,7 +1170,7 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1215,7 +1215,7 @@ fn force_destroy_tolerates_a_missing_archive() {
     let mut controller = Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -1244,7 +1244,7 @@ fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
     let mut controller = Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.into(), session)]),
+            sessions: [(session_id.into(), session)].into_iter().collect(),
             ..State::default()
         },
     };

@@ -252,7 +252,9 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
         });
         session.checkpoint = Some(checkpoint.clone());
         let state = State {
-            sessions: BTreeMap::from([(session_id.clone(), session.clone())]),
+            sessions: [(session_id.clone(), session.clone())]
+                .into_iter()
+                .collect(),
             ..State::default()
         };
         crate::database::save_state(&state).unwrap();
@@ -330,7 +332,7 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session.id.clone(), session)]),
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
             ..State::default()
         },
     };
@@ -380,7 +382,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
     running.state = SessionState::Running;
     let previous = running.clone();
     let state = State {
-        sessions: BTreeMap::from([(session_id.into(), running)]),
+        sessions: [(session_id.into(), running)].into_iter().collect(),
         ..State::default()
     };
     crate::database::save_state(&state).unwrap();
@@ -457,7 +459,9 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
     incompatible.state = SessionState::Running;
     incompatible.bundle_id = "project".into();
     let incompatible_state = State {
-        sessions: BTreeMap::from([(session_id.into(), incompatible.clone())]),
+        sessions: [(session_id.into(), incompatible.clone())]
+            .into_iter()
+            .collect(),
         ..State::default()
     };
     crate::database::save_state(&incompatible_state).unwrap();
@@ -607,7 +611,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     session.native_session_id = None;
     session.state = SessionState::Running;
     let state = State {
-        sessions: BTreeMap::from([(session.id.clone(), session)]),
+        sessions: [(session.id.clone(), session)].into_iter().collect(),
         ..State::default()
     };
     crate::database::save_state(&state).unwrap();
@@ -755,7 +759,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
     let state = State {
-        sessions: BTreeMap::from([(session_id.into(), session.clone())]),
+        sessions: [(session_id.into(), session.clone())].into_iter().collect(),
         ..State::default()
     };
     crate::database::save_state(&state).unwrap();
@@ -1014,7 +1018,9 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(session.id.clone(), session.clone())]),
+            sessions: [(session.id.clone(), session.clone())]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };
@@ -1166,7 +1172,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
     let state = State {
-        sessions: BTreeMap::from([(session_id.into(), session)]),
+        sessions: [(session_id.into(), session)].into_iter().collect(),
         ..State::default()
     };
     crate::database::save_state(&state).unwrap();
@@ -1491,7 +1497,9 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session)]),
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };

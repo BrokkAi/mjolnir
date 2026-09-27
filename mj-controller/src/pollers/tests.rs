@@ -217,7 +217,18 @@ fn a_bare_session_is_left_out_of_resource_sampling_without_a_warning() {
         "local-bare".into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
-    for session in controller.state.sessions.values_mut() {
+    for id in controller
+        .state
+        .sessions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let session = controller
+            .state
+            .sessions
+            .get_mut(&id)
+            .expect("collected session");
         session.target_template_id = "local-bare".into();
         session.target = Some(mj_core::state::TargetLocator::LocalBare {
             worker_root: PathBuf::from("/tmp/mj-workers").join(&session.id),
@@ -266,7 +277,18 @@ fn a_provisioning_session_is_not_polled_before_its_worker_exists() {
 #[test]
 fn failed_destruction_stays_out_of_pollers_without_an_active_lifecycle() {
     let mut controller = podman_controller(SessionState::Destroying);
-    for session in controller.state.sessions.values_mut() {
+    for id in controller
+        .state
+        .sessions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let session = controller
+            .state
+            .sessions
+            .get_mut(&id)
+            .expect("collected session");
         session.last_error =
             Some("verified checkpoint retained; cleanup is safely retryable".into());
     }
@@ -884,7 +906,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             "local-bare".into(),
             mj_core::config::TargetTemplate::LocalBare,
         );
-        let session = controller.state.sessions.values_mut().next().unwrap();
+        let session = controller.state.sessions.first_value_mut().unwrap();
         session.harness_kind = kind;
         session.last_profile = kind.id().into();
         let session_id = session.id.clone();

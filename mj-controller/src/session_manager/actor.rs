@@ -32,11 +32,10 @@ async fn durable_session_outcome(
 ) -> Option<(mj_core::state::SessionState, Option<String>)> {
     let session_id = session_id.to_owned();
     tokio::task::spawn_blocking(move || {
-        let state = crate::database::load_state().ok()?;
-        let Some(record) = state.sessions.get(&session_id) else {
+        let Some(record) = crate::database::load_session_record(&session_id).ok()? else {
             return Some((mj_core::state::SessionState::Lost, None));
         };
-        Some((record.state, record.last_error.clone()))
+        Some((record.state, record.last_error))
     })
     .await
     .ok()

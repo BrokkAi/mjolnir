@@ -239,8 +239,8 @@ fn sample_state() -> State {
     State {
         last_subagent_policy: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(session.id.clone(), session)]),
-        subagents: BTreeMap::new(),
+        sessions: [(session.id.clone(), session)].into_iter().collect(),
+        subagents: Default::default(),
         mount_history: BTreeMap::from([("local".into(), vec![PathBuf::from("/home/test/cache")])]),
         container_sizes: BTreeMap::new(),
     }
@@ -1048,7 +1048,7 @@ fn project_directory_history_is_recent_and_isolated_per_remote_host() {
 fn a_refused_setup_change_names_the_session_and_setting_by_display_name() {
     let mut state = sample_state();
     let before = sample_config();
-    let session = state.sessions.values_mut().next().unwrap();
+    let session = state.sessions.first_value_mut().unwrap();
     session.session_title_override = Some("Fix the login page".into());
     let project = session.project_name(&before);
     let mut after = before.clone();
@@ -1131,7 +1131,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
     container.image = "ubuntu:22.04".into();
     assert!(state.validate_setup_update(&before, &after).is_err());
     let mut stopped = state.clone();
-    stopped.sessions.values_mut().next().unwrap().state = SessionState::Stopped;
+    stopped.sessions.first_value_mut().unwrap().state = SessionState::Stopped;
     stopped
         .validate_setup_update(&before, &Config::default())
         .unwrap();
@@ -1241,7 +1241,7 @@ fn the_stopped_state_reads_the_retired_archived_name_and_writes_the_new_one() {
 #[test]
 fn the_archived_flag_defaults_off_and_is_omitted_when_it_is_off() {
     let mut state = sample_state();
-    let session = state.sessions.values_mut().next().unwrap();
+    let session = state.sessions.first_value_mut().unwrap();
     assert!(!session.archived);
     let json = serde_json::to_string(&*session).unwrap();
     assert!(!json.contains("archived"), "{json}");
@@ -1259,7 +1259,7 @@ fn the_archived_flag_defaults_off_and_is_omitted_when_it_is_off() {
 #[test]
 fn stopped_session_does_not_pin_renamed_config_entries() {
     let mut state = sample_state();
-    state.sessions.values_mut().next().unwrap().state = SessionState::Stopped;
+    state.sessions.first_value_mut().unwrap().state = SessionState::Stopped;
     state.validate_against_config(&Config::default()).unwrap();
 }
 
@@ -1275,7 +1275,7 @@ fn only_inactive_sessions_can_be_removed_from_the_archive() {
     );
     assert!(state.sessions.contains_key("0123456789abcdef"));
 
-    state.sessions.values_mut().next().unwrap().state = SessionState::Stopped;
+    state.sessions.first_value_mut().unwrap().state = SessionState::Stopped;
     let removed = state.destroy_stopped_session("0123456789abcdef").unwrap();
     assert_eq!(removed.id, "0123456789abcdef");
     assert!(state.sessions.is_empty());
@@ -1470,7 +1470,7 @@ fn harness_titles_are_normalized_to_one_complete_line() {
 #[test]
 fn locator_rejects_parent_traversal() {
     let mut state = sample_state();
-    state.sessions.values_mut().next().unwrap().target = Some(TargetLocator::SshBare {
+    state.sessions.first_value_mut().unwrap().target = Some(TargetLocator::SshBare {
         host: "builder".into(),
         workspace: PathBuf::from("~/hel/../other"),
         worker_id: None,

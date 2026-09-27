@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn dashboard() -> DashboardState {
-        let mut sessions = BTreeMap::new();
+        let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
         for id in ["asks", "done"] {
             let mut session = running_session();
             session.id = id.into();

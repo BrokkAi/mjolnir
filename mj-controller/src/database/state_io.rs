@@ -21,132 +21,8 @@ pub fn load_state_from(path: &Path) -> Result<State> {
         .map(|json| serde_json::from_str(&json))
         .transpose()?
         .unwrap_or_default();
-    let mut statement = connection.prepare(
-        "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
-                s.target_template_id, s.state, s.native_session_id, s.acp_session_title,
-                s.session_title_override, c.created_at, s.updated_at,
-                s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
-                s.last_checkpoint_error, s.project_directory, s.managed_worktree,
-                s.draft_input, s.container_cpus, s.container_memory, s.archived
-                , c.workspace_id, s.create_managed_worktree, s.subagents,
-                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
-                s.launch_branch, s.publication_json, s.checkout_json, s.expected_runtime_identity
-         FROM sessions s JOIN session_contexts c USING(session_id)
-         ORDER BY s.session_id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        // A harness Mjolnir no longer supports can still own rows an earlier
-        // release wrote. Skip such a session with a warning rather than
-        // failing the whole listing and hiding every other session with it.
-        let harness_text: String = row.get(2)?;
-        let Ok(harness_kind) = harness_text.parse() else {
-            let session_id: String = row.get(0)?;
-            tracing::warn!(
-                session_id,
-                harness = %harness_text,
-                "session harness is no longer supported; the session is not listed"
-            );
-            return Ok(None);
-        };
-        Ok(Some(SessionRecord {
-            target_runtime: row
-                .get::<_, Option<String>>(28)?
-                .map(|json| {
-                    serde_json::from_str(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
-                    })
-                })
-                .transpose()?,
-            harness_kind,
-            create_managed_worktree: row.get(23)?,
-            launch_base: row.get(27)?,
-            launch_branch: row.get(29)?,
-            expected_runtime_identity: row.get(32)?,
-            checkout: row
-                .get::<_, Option<String>>(31)?
-                .map(|json| {
-                    serde_json::from_str(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(31, Type::Text, Box::new(error))
-                    })
-                })
-                .transpose()?,
-            publication: row
-                .get::<_, Option<String>>(30)?
-                .map(|json| {
-                    serde_json::from_str(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(30, Type::Text, Box::new(error))
-                    })
-                })
-                .transpose()?,
-            subagents: row
-                .get::<_, Option<String>>(24)?
-                .map(|json| {
-                    serde_json::from_str(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
-                    })
-                })
-                .transpose()?,
-            container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
-            build_cache: row
-                .get::<_, Option<String>>(26)?
-                .as_deref()
-                .and_then(|text| match serde_json::from_str(text) {
-                    Ok(build_cache) => Some(build_cache),
-                    Err(error) => {
-                        tracing::warn!(%error, "session build cache record is unreadable");
-                        None
-                    }
-                }),
-            workspace_id: row.get(22)?,
-            archived: row.get(21)?,
-            container_cpus: row.get(19)?,
-            container_memory: row.get(20)?,
-            id: row.get(0)?,
-            title: row.get(1)?,
-            last_profile: row.get(3)?,
-            bundle_id: row.get(4)?,
-            project_directory: row.get_ref(16)?.blob_or_null()?.map(blob_to_path),
-            managed_worktree: row
-                .get::<_, Option<String>>(17)?
-                .map(|json| serde_json::from_str::<ManagedWorktree>(&json))
-                .transpose()
-                .map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        17,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-            target_template_id: row.get(5)?,
-            resource_allocation: row
-                .get::<_, Option<String>>(14)?
-                .map(|json| serde_json::from_str::<SessionResourceAllocation>(&json))
-                .transpose()
-                .map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        14,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-            additional_mounts: Vec::new(),
-            state: stored_session_state(&row.get::<_, String>(6)?),
-            target: None,
-            native_session_id: row.get(7)?,
-            acp_session_title: row
-                .get::<_, Option<String>>(8)?
-                .as_deref()
-                .and_then(mj_core::state::normalize_session_title),
-            session_title_override: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
-            viewed_through_event_ordinal: row.get::<_, u64>(12)?,
-            draft_input: row.get(18)?,
-            last_error: row.get(13)?,
-            last_checkpoint_error: row.get(15)?,
-            checkpoint: None,
-        }))
-    })?;
+    let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
+    let rows = statement.query_map([], decode_session)?;
     for row in rows {
         if let Some(session) = row? {
             state.sessions.insert(session.id.clone(), session);
@@ -985,11 +861,26 @@ pub(super) fn insert_target(
 }
 
 pub(super) fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
-    let mut statement = connection.prepare(
-        "SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
-         FROM session_targets",
-    )?;
-    let rows = statement.query_map([], |row| {
+    load_targets_selected(connection, state, None)
+}
+
+fn load_targets_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    let predicate = if id.is_some() {
+        " WHERE session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
+         FROM session_targets{predicate}"))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
         let session_id: String = row.get(0)?;
         let kind: String = row.get(1)?;
         let host: Option<String> = row.get(2)?;
@@ -1106,16 +997,33 @@ pub(super) fn replace_mounts(
 }
 
 pub(super) fn load_mounts(connection: &Connection, state: &mut State) -> Result<()> {
-    let mut statement = connection.prepare(
+    load_mounts_selected(connection, state, None)
+}
+
+fn load_mounts_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    let predicate = if id.is_some() {
+        " WHERE m.session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT m.session_id, m.source, m.destination, m.read_only, a.access IS NOT NULL
          FROM session_mounts m
          LEFT JOIN session_mount_access a
              ON a.session_id = m.session_id
              AND a.source = m.source
              AND a.destination = m.destination
-         ORDER BY m.session_id, m.ordinal",
-    )?;
-    let rows = statement.query_map([], |row| {
+         {predicate} ORDER BY m.session_id, m.ordinal"
+    ))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
         // An older build that made the mount read-only left the access row
         // behind; its later choice wins.
         let access = match (row.get::<_, bool>(3)?, row.get::<_, bool>(4)?) {
@@ -1142,10 +1050,25 @@ pub(super) fn load_mounts(connection: &Connection, state: &mut State) -> Result<
 }
 
 pub(super) fn load_checkpoints(connection: &Connection, state: &mut State) -> Result<()> {
-    let mut statement = connection.prepare(
-        "SELECT session_id, archive_path, sha256, created_at, event_frontier FROM session_checkpoints",
-    )?;
-    let rows = statement.query_map([], |row| {
+    load_checkpoints_selected(connection, state, None)
+}
+
+fn load_checkpoints_selected(
+    connection: &Connection,
+    state: &mut State,
+    id: Option<&str>,
+) -> Result<()> {
+    let predicate = if id.is_some() {
+        " WHERE session_id=?1"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!("SELECT session_id, archive_path, sha256, created_at, event_frontier FROM session_checkpoints{predicate}"))?;
+    let arguments: Vec<&dyn rusqlite::ToSql> = id
+        .as_ref()
+        .map(|id| vec![id as &dyn rusqlite::ToSql])
+        .unwrap_or_default();
+    let rows = statement.query_map(arguments.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
             CheckpointMetadata {
@@ -1188,4 +1111,191 @@ pub fn backfill_target_runtime(
         tx.commit()?;
         Ok(runtime)
     })
+}
+
+const SESSION_QUERY: &str =
+    "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
+                s.target_template_id, s.state, s.native_session_id, s.acp_session_title,
+                s.session_title_override, c.created_at, s.updated_at,
+                s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
+                s.last_checkpoint_error, s.project_directory, s.managed_worktree,
+                s.draft_input, s.container_cpus, s.container_memory, s.archived
+                , c.workspace_id, s.create_managed_worktree, s.subagents,
+                s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
+                s.launch_branch, s.publication_json, s.checkout_json, s.expected_runtime_identity
+         FROM sessions s JOIN session_contexts c USING(session_id)";
+
+fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
+    // A harness Mjolnir no longer supports can still own rows an earlier
+    // release wrote. Skip such a session with a warning rather than
+    // failing the whole listing and hiding every other session with it.
+    let harness_text: String = row.get(2)?;
+    let Ok(harness_kind) = harness_text.parse() else {
+        let session_id: String = row.get(0)?;
+        tracing::warn!(
+            session_id,
+            harness = %harness_text,
+            "session harness is no longer supported; the session is not listed"
+        );
+        return Ok(None);
+    };
+    Ok(Some(SessionRecord {
+        target_runtime: row
+            .get::<_, Option<String>>(28)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        harness_kind,
+        create_managed_worktree: row.get(23)?,
+        launch_base: row.get(27)?,
+        launch_branch: row.get(29)?,
+        expected_runtime_identity: row.get(32)?,
+        checkout: row
+            .get::<_, Option<String>>(31)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(31, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        publication: row
+            .get::<_, Option<String>>(30)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(30, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        subagents: row
+            .get::<_, Option<String>>(24)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
+        container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
+        build_cache: row
+            .get::<_, Option<String>>(26)?
+            .as_deref()
+            .and_then(|text| match serde_json::from_str(text) {
+                Ok(build_cache) => Some(build_cache),
+                Err(error) => {
+                    tracing::warn!(%error, "session build cache record is unreadable");
+                    None
+                }
+            }),
+        workspace_id: row.get(22)?,
+        archived: row.get(21)?,
+        container_cpus: row.get(19)?,
+        container_memory: row.get(20)?,
+        id: row.get(0)?,
+        title: row.get(1)?,
+        last_profile: row.get(3)?,
+        bundle_id: row.get(4)?,
+        project_directory: row.get_ref(16)?.blob_or_null()?.map(blob_to_path),
+        managed_worktree: row
+            .get::<_, Option<String>>(17)?
+            .map(|json| serde_json::from_str::<ManagedWorktree>(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        target_template_id: row.get(5)?,
+        resource_allocation: row
+            .get::<_, Option<String>>(14)?
+            .map(|json| serde_json::from_str::<SessionResourceAllocation>(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    14,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        additional_mounts: Vec::new(),
+        state: stored_session_state(&row.get::<_, String>(6)?),
+        target: None,
+        native_session_id: row.get(7)?,
+        acp_session_title: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .and_then(mj_core::state::normalize_session_title),
+        session_title_override: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        viewed_through_event_ordinal: row.get::<_, u64>(12)?,
+        draft_input: row.get(18)?,
+        last_error: row.get(13)?,
+        last_checkpoint_error: row.get(15)?,
+        checkpoint: None,
+    }))
+}
+
+/// Read one complete record with indexed queries from the caller's WAL snapshot.
+pub fn load_session_record(id: &str) -> Result<Option<SessionRecord>> {
+    let mut connection = open_reader(&database_path())?;
+    let snapshot = connection.transaction()?;
+    load_session_with(&snapshot, id)
+}
+
+pub(super) fn load_session_with(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<SessionRecord>> {
+    let record = connection
+        .query_row(
+            &format!("{SESSION_QUERY} WHERE s.session_id=?1"),
+            [id],
+            decode_session,
+        )
+        .optional()?
+        .flatten();
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let mut state = State::default();
+    state.sessions.insert(id.to_owned(), record);
+    load_targets_selected(connection, &mut state, Some(id))?;
+    load_mounts_selected(connection, &mut state, Some(id))?;
+    load_checkpoints_selected(connection, &mut state, Some(id))?;
+    Ok(state.sessions.remove(id))
+}
+
+#[cfg(test)]
+mod targeted_read_tests {
+    use super::*;
+
+    #[test]
+    fn single_session_read_includes_related_rows_and_ignores_unrelated_invalid_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        let expected = super::super::tests::session("selected", "project");
+        save_session_to(&path, &expected).unwrap();
+        save_session_to(&path, &super::super::tests::session("unrelated", "project")).unwrap();
+        let connection = open(&path).unwrap();
+        // A corrupt unrelated value makes a full-state read fail. A point read
+        // must not decode it or any of its related rows.
+        connection
+            .execute(
+                "UPDATE sessions SET resource_allocation = '[]' WHERE session_id = 'unrelated'",
+                [],
+            )
+            .unwrap();
+        assert!(load_state_from(&path).is_err());
+        let mut reader = open_reader(&path).unwrap();
+        let snapshot = reader.transaction().unwrap();
+        assert_eq!(
+            load_session_with(&snapshot, "selected").unwrap(),
+            Some(expected)
+        );
+        assert_eq!(load_session_with(&snapshot, "missing").unwrap(), None);
+    }
 }

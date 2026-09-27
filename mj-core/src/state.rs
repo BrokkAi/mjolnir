@@ -12,6 +12,7 @@ use crate::credentials::CredentialSyncSignal;
 use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
 };
+use crate::snapshot_map::SnapshotMap;
 use crate::subagent::SubagentRecord;
 use crate::targets::{AdditionalMount, validate_additional_mounts};
 
@@ -1877,12 +1878,12 @@ pub struct State {
     #[serde(default)]
     pub last_subagent_policy: crate::subagent::SubagentPolicy,
     pub version: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sessions: BTreeMap<String, SessionRecord>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub sessions: SnapshotMap<String, SessionRecord>,
     /// Child sessions keyed by their session id. The relationship lives in
     /// controller state so every control surface sees the same session family.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub subagents: BTreeMap<String, SubagentRecord>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub subagents: SnapshotMap<String, SubagentRecord>,
     /// Recently used source directories, keyed by `local` or SSH host name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mount_history: BTreeMap<String, Vec<PathBuf>>,
@@ -1896,8 +1897,8 @@ impl Default for State {
         Self {
             version: STATE_VERSION,
             last_subagent_policy: Default::default(),
-            sessions: BTreeMap::new(),
-            subagents: BTreeMap::new(),
+            sessions: SnapshotMap::new(),
+            subagents: SnapshotMap::new(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         }

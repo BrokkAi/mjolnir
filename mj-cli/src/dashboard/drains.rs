@@ -433,12 +433,12 @@ impl DashboardContext {
         subagents: Vec<SubagentRecord>,
         last_subagent_policy: mj_core::subagent::SubagentPolicy,
     ) {
-        let mut sessions: BTreeMap<String, SessionRecord> = records
+        let mut sessions: mj_core::snapshot_map::SnapshotMap<String, SessionRecord> = records
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect();
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
-        let subagents: BTreeMap<String, SubagentRecord> = subagents
+        let subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord> = subagents
             .into_iter()
             .map(|subagent| (subagent.child_session_id.clone(), subagent))
             .collect();

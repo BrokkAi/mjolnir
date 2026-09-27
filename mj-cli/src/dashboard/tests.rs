@@ -15,7 +15,7 @@ use ratatui::layout::{Position, Rect};
 
 #[test]
 fn background_records_preserve_read_positions_without_resurrecting_sessions() {
-    let mut old = BTreeMap::from([(
+    let mut old = mj_core::snapshot_map::SnapshotMap::from([(
         "session-1".to_owned(),
         live_session("session-1", "2026-09-19T00:00:00Z"),
     )]);
@@ -1426,7 +1426,9 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
     let mut controller = mj_controller::controller::Controller {
         config: Config::default(),
         state: State {
-            sessions: BTreeMap::from([(session_id.to_owned(), record.clone())]),
+            sessions: [(session_id.to_owned(), record.clone())]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };

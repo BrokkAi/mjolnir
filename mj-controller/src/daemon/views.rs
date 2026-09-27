@@ -260,7 +260,10 @@ impl RuntimeState {
     /// of ownership, even while its background database reload is in flight.
     pub fn session_projection(
         &self,
-    ) -> (BTreeMap<String, SessionRecord>, Vec<RuntimeLifecycleView>) {
+    ) -> (
+        mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+        Vec<RuntimeLifecycleView>,
+    ) {
         let controller = self
             .controller
             .lock()

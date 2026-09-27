@@ -54,7 +54,7 @@ struct ArchiveFile {
 /// conversation in the daemon's own database rather than in a checkpoint.
 #[derive(Default)]
 struct Sessions {
-    records: BTreeMap<String, SessionRecord>,
+    records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     subagent_ids: BTreeSet<String>,
     /// Session id to change token, for sessions indexed from the projection.
     live: BTreeMap<String, i64>,
@@ -1650,8 +1650,8 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
 ///
 /// Pure over controller state, so the rule can be tested without a daemon.
 pub fn sessions_ready_to_archive(
-    sessions: &BTreeMap<String, SessionRecord>,
-    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
     now: DateTime<Utc>,
     older_than_days: u32,
 ) -> Vec<String> {
@@ -1698,7 +1698,7 @@ pub fn sessions_ready_to_archive(
 /// visit.
 fn ancestor_depth(
     session_id: &str,
-    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
 ) -> usize {
     let mut depth = 0;
     let mut current = session_id;
@@ -1750,8 +1750,8 @@ pub fn archive_space_preview(older_than_days: Option<u32>) -> Result<ArchiveSpac
 /// can be tested without the live data directory.
 fn archive_space_over(
     sessions_root: &Path,
-    sessions: &BTreeMap<String, SessionRecord>,
-    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
     now: DateTime<Utc>,
     older_than_days: Option<u32>,
 ) -> ArchiveSpacePreview {
@@ -2326,7 +2326,7 @@ mod tests {
         MjolnirAdapter {
             sessions_dir: directory.to_path_buf(),
             sessions: std::sync::Mutex::new(Sessions {
-                records: BTreeMap::from([(session_id.to_owned(), record)]),
+                records: [(session_id.to_owned(), record)].into_iter().collect(),
                 subagent_ids: BTreeSet::new(),
                 live,
             }),
@@ -2955,7 +2955,7 @@ mod tests {
     fn the_space_preview_sizes_every_session_and_only_the_aged_ones_as_reclaimable() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let sessions: BTreeMap<String, SessionRecord> = [
+        let sessions: mj_core::snapshot_map::SnapshotMap<String, SessionRecord> = [
             sized_session(root, "old-stopped", "2026-09-01T00:00:00Z", 1000, &[10, 20]),
             sized_session(root, "just-stopped", "2026-09-09T00:00:00Z", 500, &[]),
             // A record whose checkpoint file is already gone counts as zero
@@ -2979,13 +2979,13 @@ mod tests {
         .collect();
         let now = parse_time("2026-09-10T00:00:00Z").unwrap();
 
-        let all = archive_space_over(root, &sessions, &BTreeMap::new(), now, None);
+        let all = archive_space_over(root, &sessions, &Default::default(), now, None);
         assert_eq!(all.sessions, 3);
         assert_eq!(all.bytes, 1530);
         assert_eq!(all.reclaimable_sessions, 0);
         assert_eq!(all.reclaimable_bytes, 0);
 
-        let aged = archive_space_over(root, &sessions, &BTreeMap::new(), now, Some(3));
+        let aged = archive_space_over(root, &sessions, &Default::default(), now, Some(3));
         assert_eq!(aged.bytes, 1530);
         assert_eq!(
             (aged.reclaimable_sessions, aged.reclaimable_bytes),
@@ -3555,17 +3555,21 @@ mod tests {
             )
         };
         let state = State {
-            sessions: BTreeMap::from([
+            sessions: [
                 record("parent"),
                 record("child"),
                 record("grandchild"),
                 record("sibling"),
-            ]),
-            subagents: BTreeMap::from([
+            ]
+            .into_iter()
+            .collect(),
+            subagents: [
                 ("child".to_owned(), child("child", "parent")),
                 ("grandchild".to_owned(), child("grandchild", "child")),
                 ("sibling".to_owned(), child("sibling", "other-parent")),
-            ]),
+            ]
+            .into_iter()
+            .collect(),
             ..State::default()
         };
         assert_eq!(

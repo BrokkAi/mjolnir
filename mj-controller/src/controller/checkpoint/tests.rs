@@ -2151,7 +2151,9 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session)]),
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };
@@ -2469,7 +2471,9 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session)]),
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };
@@ -2922,7 +2926,9 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let mut controller = Controller {
         config,
         state: State {
-            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session.clone())]),
+            sessions: [(LATCH_RELAY_SESSION.into(), session.clone())]
+                .into_iter()
+                .collect(),
             ..State::default()
         },
     };

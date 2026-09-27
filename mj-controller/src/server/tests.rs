@@ -157,7 +157,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(
+        sessions: [(
             "session-1".into(),
             SessionRecord {
                 target_runtime: None,
@@ -197,7 +197,9 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
-        )]),
+        )]
+        .into_iter()
+        .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };

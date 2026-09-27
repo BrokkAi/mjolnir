@@ -392,7 +392,7 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([(session.id.clone(), session)]),
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },

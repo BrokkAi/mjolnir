@@ -331,7 +331,9 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
+            sessions: [("session-1".into(), stopped_session())]
+                .into_iter()
+                .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -362,7 +364,7 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(imported.id.clone(), imported)]),
+        sessions: [(imported.id.clone(), imported)].into_iter().collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -1743,7 +1745,9 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(older.id.clone(), older), (recent.id.clone(), recent)]),
+        sessions: [(older.id.clone(), older), (recent.id.clone(), recent)]
+            .into_iter()
+            .collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -1796,7 +1800,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
         last_subagent_policy: Default::default(),
         subagents: Default::default(),
         version: STATE_VERSION,
-        sessions: BTreeMap::from([(recent.id.clone(), recent)]),
+        sessions: [(recent.id.clone(), recent)].into_iter().collect(),
         mount_history: BTreeMap::new(),
         container_sizes: BTreeMap::new(),
     };
@@ -3607,7 +3611,7 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([(session.id.clone(), session)]),
+            sessions: [(session.id.clone(), session)].into_iter().collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -3659,7 +3663,9 @@ fn resume_target_step_minus_halves_container_size_through_the_key_path() {
             last_subagent_policy: Default::default(),
             subagents: Default::default(),
             version: STATE_VERSION,
-            sessions: BTreeMap::from([("session-1".into(), stopped_session())]),
+            sessions: [("session-1".into(), stopped_session())]
+                .into_iter()
+                .collect(),
             mount_history: BTreeMap::new(),
             container_sizes: BTreeMap::new(),
         },
@@ -4902,7 +4908,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     // The last session ran on podman, so the draft starts there.
     let session = stopped_session();
     let state = State {
-        sessions: BTreeMap::from([(session.id.clone(), session)]),
+        sessions: [(session.id.clone(), session)].into_iter().collect(),
         ..State::default()
     };
     let mut dashboard =

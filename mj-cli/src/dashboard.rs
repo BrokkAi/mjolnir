@@ -433,12 +433,19 @@ pub(super) fn retain_workspace_sessions(
     _workspace_id: &str,
     client_id: &str,
 ) -> Result<()> {
-    for session in controller
+    let active: Vec<_> = controller
         .state
         .sessions
-        .values_mut()
+        .values()
         .filter(|session| session.state.is_active())
-    {
+        .map(|session| session.id.clone())
+        .collect();
+    for id in active {
+        let session = controller
+            .state
+            .sessions
+            .get_mut(&id)
+            .expect("active session exists");
         let frontier = mj_controller::database::client_read_frontier(
             client_id,
             &session.workspace_id,

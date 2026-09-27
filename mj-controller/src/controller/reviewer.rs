@@ -562,7 +562,7 @@ mod tests {
             Controller {
                 config,
                 state: State {
-                    sessions: BTreeMap::from([(session_id.into(), session)]),
+                    sessions: [(session_id.into(), session)].into_iter().collect(),
                     ..State::default()
                 },
             },
