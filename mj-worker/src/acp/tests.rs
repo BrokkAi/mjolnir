@@ -5877,12 +5877,10 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     assert!(complete_error.contains("specific supervisor failure"));
 
     let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, RuntimeEvent::Warning { message } if
-            message.contains("ACP runtime failed")))
-    );
+    assert!(events.iter().any(
+        |event| matches!(event, RuntimeEvent::SessionFault { message } if
+            message.contains("ACP runtime failed"))
+    ));
     assert!(
         events
             .iter()
@@ -5939,7 +5937,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         assert!(format!("{error:#}").contains(&format!("working directory {}", cwd.display())));
         assert!(matches!(
             event_rx.recv().await,
-            Some(RuntimeEvent::Warning { message }) if message.contains("ACP runtime failed")
+            Some(RuntimeEvent::SessionFault { message }) if message.contains("ACP runtime failed")
         ));
         assert!(matches!(event_rx.recv().await, Some(RuntimeEvent::Stopped)));
     }
@@ -7064,7 +7062,7 @@ for line in sys.stdin:
         .await
         .unwrap();
     if fail_replacement {
-        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message } if request_id == "clear-request" && message.contains("replacement refused"))).await;
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message , ..} if request_id == "clear-request" && message.contains("replacement refused"))).await;
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
     } else {
         wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
@@ -7183,6 +7181,7 @@ async fn live_adapter_compacts_and_replaces_context() {
                 RuntimeEvent::CommandRejected {
                     request_id,
                     message,
+                    ..
                 } if request_id == id => panic!("{id}: {message}"),
                 _ => {}
             }

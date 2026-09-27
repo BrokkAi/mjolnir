@@ -64,9 +64,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use mj_core::state::{
-    MaterializedExecutionState, MaterializedTurn, MaterializedTurnOutcome, TurnOutcomeKind,
-};
+use mj_core::state::{MaterializedExecutionState, MaterializedTurn, MaterializedTurnOutcome};
 
 use mj_core::relay::CapacityRetry;
 

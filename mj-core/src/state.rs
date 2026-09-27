@@ -197,34 +197,46 @@ pub enum TurnOutcomeKind {
     /// The harness finished the turn and reported this stop reason.
     Completed { stop_reason: String },
     /// The relay refused the command before it ran.
-    Rejected { message: String },
+    Rejected {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::event_outcome::OutcomeReason>,
+    },
     /// The command was interrupted after being accepted.
-    Interrupted { message: String },
+    Interrupted {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::event_outcome::OutcomeReason>,
+    },
 }
 
 /// How a turn ended, in words a person reads: "completed, end of turn",
 /// "interrupted", or "failed: <reason>".
 impl std::fmt::Display for TurnOutcomeKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Completed { stop_reason } => match classify_prompt_completion(stop_reason) {
-                PromptCompletion::Finished => formatter.write_str("completed, end of turn"),
-                PromptCompletion::InputRequired => {
-                    formatter.write_str("completed, waiting for input")
+        use crate::event_outcome::{OutcomeReason, TurnResultKind};
+        let result = self.result();
+        match result.kind {
+            TurnResultKind::Completed => formatter.write_str("completed, end of turn"),
+            TurnResultKind::InputRequired => formatter.write_str("completed, waiting for input"),
+            TurnResultKind::Cancelled | TurnResultKind::Interrupted => {
+                formatter.write_str("interrupted")
+            }
+            TurnResultKind::Failed if result.reason == Some(OutcomeReason::QuotaLimit) => {
+                formatter.write_str("failed: quota limit reached")
+            }
+            TurnResultKind::Failed | TurnResultKind::Rejected => {
+                let message = result.message.as_deref().unwrap_or("unknown failure");
+                if result.stop_reason.is_some() {
+                    write!(formatter, "failed: {}", stop_reason_words(message))
+                } else {
+                    write!(
+                        formatter,
+                        "failed: {}",
+                        message.lines().next().unwrap_or_default().trim()
+                    )
                 }
-                // A harness reports `cancelled` for a turn the client stopped.
-                PromptCompletion::Cancelled => formatter.write_str("interrupted"),
-                PromptCompletion::QuotaLimit => formatter.write_str("failed: quota limit reached"),
-                PromptCompletion::Error => {
-                    write!(formatter, "failed: {}", stop_reason_words(stop_reason))
-                }
-            },
-            Self::Rejected { message } => write!(
-                formatter,
-                "failed: {}",
-                message.lines().next().unwrap_or_default().trim()
-            ),
-            Self::Interrupted { .. } => formatter.write_str("interrupted"),
+            }
         }
     }
 }

@@ -176,3 +176,78 @@ pub fn validate_relay_digest(digest: &str, name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use crate::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayCommandKind};
+
+    #[derive(Serialize)]
+    #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+    // Preserve the exact historical wire names independently of the new enum.
+    #[allow(clippy::enum_variant_names)]
+    enum OldObservation {
+        CommandInterrupted {
+            command_id: String,
+            command: RelayCommandKind,
+            message: String,
+        },
+        CommandRejected {
+            command_id: String,
+            command: RelayCommandKind,
+            message: String,
+        },
+        CommandCompleted {
+            command_id: String,
+            outcome: crate::relay::RelayCommandOutcome,
+        },
+    }
+
+    #[test]
+    fn pre_classification_journals_keep_their_original_digest_in_both_formats() {
+        for format in [RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2] {
+            for old in [
+                OldObservation::CommandInterrupted {
+                    command_id: "opaque".into(),
+                    command: RelayCommandKind::BeginCheckpoint,
+                    message: "old cleanup".into(),
+                },
+                OldObservation::CommandRejected {
+                    command_id: "opaque".into(),
+                    command: RelayCommandKind::Prompt,
+                    message: "old failure".into(),
+                },
+                OldObservation::CommandCompleted {
+                    command_id: "opaque".into(),
+                    outcome: crate::relay::RelayCommandOutcome::Cancelled,
+                },
+            ] {
+                let raw = serde_json::to_string(&old).unwrap();
+                let mut event = RelayEvent {
+                    format,
+                    ordinal: 1,
+                    previous_digest: if format == RELAY_EVENT_FORMAT_V1 {
+                        RELAY_EVENT_GENESIS_DIGEST.into()
+                    } else {
+                        String::new()
+                    },
+                    digest: String::new(),
+                    recorded_at_ms: 123,
+                    command_id: Some("opaque".into()),
+                    observation: serde_json::from_str(&raw).unwrap(),
+                };
+                event.digest = relay_event_digest_over(&event, &old).unwrap();
+                assert_eq!(serde_json::to_string(&event.observation).unwrap(), raw);
+                validate_relay_event_self(&event).unwrap();
+                if let RelayObservation::CommandInterrupted { reason, .. } = &mut event.observation
+                {
+                    *reason = Some(crate::event_outcome::OutcomeReason::ControllerDisconnected);
+                    assert!(
+                        validate_relay_event_self(&event).is_err(),
+                        "classification must be covered by the digest"
+                    );
+                }
+            }
+        }
+    }
+}

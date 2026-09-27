@@ -2595,6 +2595,7 @@ fn interruption_summary_matches_full_projection_and_legacy_outcomes() {
         completed_ordinal: 3,
         completed_at_ms: 1_500,
         outcome: TurnOutcomeKind::Interrupted {
+            reason: None,
             message: "worker restarted".into(),
         },
     });
@@ -5533,7 +5534,10 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(triggers, 2, "the table's own triggers are recreated");
+    assert_eq!(
+        triggers, 0,
+        "generic error triggers are retired by migration 57"
+    );
     assert!(
         !connection
             .prepare("PRAGMA foreign_key_check")

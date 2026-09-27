@@ -144,7 +144,9 @@ async fn probe_with_close_timeout(
                 | RuntimeEvent::CommandInterrupted { message, .. } => {
                     bail!("discover model configuration: {message}")
                 }
-                RuntimeEvent::Warning { message } => warning = message,
+                RuntimeEvent::Warning { message } | RuntimeEvent::SessionFault { message } => {
+                    warning = message
+                }
                 RuntimeEvent::Stopped => bail!("discovery harness stopped: {warning}"),
                 _ => {}
             }

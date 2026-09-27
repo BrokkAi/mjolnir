@@ -433,6 +433,8 @@ fn a_codex_refresh_failure_is_an_auth_failure() {
     let failed_turn = |data: serde_json::Value| {
         let error = agent_client_protocol::Error::internal_error().data(data);
         event(RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: "prompt-1".into(),
             outcome: crate::relay::RelayCommandOutcome::Prompt {
                 stop_reason: "error".into(),
@@ -562,6 +564,7 @@ fn only_harness_observations_request_credential_sync() {
     assert!(!events_report_auth_failure(
         HarnessKind::Claude,
         &[event(RelayObservation::CommandInterrupted {
+            reason: None,
             command_id: "command-1".into(),
             command: crate::relay::RelayCommandKind::Prompt,
             message: "invalid_grant".into(),

@@ -175,26 +175,21 @@ impl WaitDecision {
     }
 
     pub(super) fn from_outcome(outcome: &MaterializedTurnOutcome) -> Self {
-        let (kind, stop_reason, message) = match &outcome.outcome {
-            TurnOutcomeKind::Completed { stop_reason } => {
-                let (kind, message) = map_stop_reason(stop_reason);
-                (
-                    kind,
-                    Some(stop_reason.clone()),
-                    outcome
-                        .diagnostic
-                        .as_ref()
-                        .map(|d| d.message.clone())
-                        .or(message),
-                )
+        use mj_core::event_outcome::{OutcomeReason, TurnResultKind};
+        let result = outcome.result();
+        let kind = match result.kind {
+            TurnResultKind::Completed => WaitOutcome::Finished,
+            TurnResultKind::InputRequired => WaitOutcome::InputRequired,
+            TurnResultKind::Cancelled => WaitOutcome::Cancelled,
+            TurnResultKind::Failed if result.reason == Some(OutcomeReason::QuotaLimit) => {
+                WaitOutcome::QuotaLimit
             }
-            TurnOutcomeKind::Rejected { message } => {
-                (WaitOutcome::Error, None, Some(message.clone()))
-            }
-            TurnOutcomeKind::Interrupted { message } => {
-                (WaitOutcome::Error, None, Some(message.clone()))
+            TurnResultKind::Rejected | TurnResultKind::Interrupted | TurnResultKind::Failed => {
+                WaitOutcome::Error
             }
         };
+        let stop_reason = result.stop_reason;
+        let message = result.message;
         Self {
             outcome: kind,
             stop_reason,

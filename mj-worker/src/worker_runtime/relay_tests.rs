@@ -1594,6 +1594,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-2".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     drop(event_tx);
@@ -1676,6 +1677,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "config-while-running".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     event_tx.send(RuntimeEvent::Stopped).unwrap();
@@ -1749,7 +1751,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
                         RelayObservation::CommandCompleted {
                             command_id,
                             outcome: mj_core::relay::RelayCommandOutcome::Cancelled,
-                        } if command_id == "cancel-turn"
+                         ..} if command_id == "cancel-turn"
                     )
                 });
             cancel_completed
@@ -1890,6 +1892,7 @@ async fn prompt_dispatch_preserves_the_complete_acp_content_vector() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-blocks".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     drop(event_tx);
@@ -1947,6 +1950,7 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "z-accepted-first".into(),
             message: "advance the queue".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     assert!(matches!(
@@ -1962,6 +1966,7 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "a-accepted-second".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     event_tx.send(RuntimeEvent::Stopped).unwrap();
@@ -2034,6 +2039,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-first".into(),
             message: "advance the bounded batch".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     assert!(matches!(
@@ -2047,6 +2053,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "cancel-second".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     event_tx.send(RuntimeEvent::Stopped).unwrap();
@@ -2309,6 +2316,7 @@ async fn different_command_types_dispatch_in_acceptance_order() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-second".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     event_tx.send(RuntimeEvent::Stopped).unwrap();
@@ -2344,6 +2352,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-1".into(),
             message: "agent rejected prompt".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     assert_prompt(command_rx.recv().await.unwrap(), "prompt-2", "second");
@@ -2366,6 +2375,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-2".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     drop(event_tx);
@@ -2486,6 +2496,7 @@ async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_
         .send(RuntimeEvent::CommandRejected {
             request_id: "session-mode-1".into(),
             message: "set session mode to plan: no such mode".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     wait_for_relay_state(&relay, |state| !state.config.contains_key("mode")).await;
@@ -2630,7 +2641,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
         RelayObservation::CommandCompleted {
             command_id,
             outcome: mj_core::relay::RelayCommandOutcome::Cancelled,
-        } if command_id == "cancel-1"
+         ..} if command_id == "cancel-1"
     )));
     assert!(
         observations
@@ -4010,6 +4021,7 @@ async fn checkpoint_freezes_effectful_commands_submitted_after_the_barrier() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "config-after".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     event_tx.send(RuntimeEvent::Stopped).unwrap();
@@ -4208,6 +4220,7 @@ async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-1".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     drop(event_tx);
@@ -4498,6 +4511,7 @@ async fn relay_v1_client_disconnect_does_not_own_command_execution() {
         .send(RuntimeEvent::CommandRejected {
             request_id: "prompt-1".into(),
             message: "test shutdown".into(),
+            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
         })
         .unwrap();
     drop(event_tx);

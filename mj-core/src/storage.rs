@@ -294,9 +294,19 @@ pub enum ApiEventData {
         turn: MaterializedTurn,
     },
     TurnEnded {
-        turn: MaterializedTurnOutcome,
+        turn: crate::event_outcome::ApiTurnOutcome,
     },
-    Error {
+    CommandEnded {
+        #[serde(flatten)]
+        result: crate::event_outcome::CommandResult,
+    },
+    SessionFault {
+        reason: crate::event_outcome::OutcomeReason,
+        message: String,
+        command_id: Option<String>,
+    },
+    LegacyNotice {
+        original_type: String,
         message: String,
         command_id: Option<String>,
     },
@@ -322,7 +332,9 @@ impl ApiEventData {
             Self::RuntimeResolved { .. } => "runtime_resolved",
             Self::TurnStarted { .. } => "turn_started",
             Self::TurnEnded { .. } => "turn_ended",
-            Self::Error { .. } => "error",
+            Self::CommandEnded { .. } => "command_ended",
+            Self::SessionFault { .. } => "session_fault",
+            Self::LegacyNotice { .. } => "legacy_notice",
             Self::InputRequired { .. } => "input_required",
             Self::InputResolved { .. } => "input_resolved",
             Self::ActivityChanged { .. } => "activity_changed",

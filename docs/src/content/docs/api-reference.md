@@ -212,8 +212,11 @@ The same object, plus `last_turn_outcome` when a prompt has finished on it:
 ```
 
 `outcome.kind` is `completed` with a `stop_reason`, `rejected` with a `message`,
-or `interrupted` with a `message`. The list route omits the field: it is built
-from the dashboard projection, which carries no turn identity.
+or `interrupted` with a `message`. This field retains the raw harness evidence:
+`completed` means the harness returned, and its `stop_reason` may report failure.
+Use `mj wait` or the normalized `turn_ended` event outcome to determine success.
+The list route omits the field: it is built from the dashboard projection,
+which carries no turn identity.
 
 ### Resolved harness runtime
 
@@ -971,10 +974,57 @@ data: {"seq":42,"session_id":"SESSION","recorded_at_ms":1789200000000,"type":"in
 | --- | --- |
 | `turn_started` | `turn`: prompt command ID, `accepted_ordinal` (the API turn ID, when known), transcript start position, and start timestamp. |
 | `turn_ended` | `turn`: command and turn identity, completion ordinal and timestamp, outcome, and optional reported usage. |
-| `error` | `message` and nullable `command_id`, covering command failures and recorded session/startup failures. |
+| `command_ended` | Command identity, owner, kind, structured outcome, and optional cause and correlation. |
+| `session_fault` | Typed `reason`, `message`, and nullable `command_id` for a session-level failure. |
+| `legacy_notice` | `original_type`, `message`, and nullable `command_id` for unclassified historical diagnostics. |
 | `input_required` | Nullable `turn_id`; `request` contains the normalized ACP elicitation and response schema for structured input. It is absent when Jev ends a turn with `awaiting_input`. |
 | `input_resolved` | `elicitation_id`, nullable `turn_id`, and `action`; `cleared` means the request disappeared without an explicit response observation. |
 | `activity_changed` | `activity`: the UI's `state`, nullable `details`, `is_idle`, `waiting_for_input`, and `capacity_retry`. |
+
+Terminal events describe the object that ended. A failed `turn_ended` is the
+signal that an accepted prompt failed. A failed `command_ended` describes its
+control or shell operation; it does not establish a failed agent turn.
+`session_fault` records a session-level problem, not a retrospective change to
+completed turns. These events do not prescribe retries or automatic pauses.
+
+`turn.outcome.kind` is `completed`, `input_required`, `cancelled`, `rejected`,
+`interrupted`, or `failed`. Unsuccessful outcomes include `reason` and `message`;
+`stop_reason` preserves the original harness value. Provider diagnostics and
+usage remain on `turn`. Quota exhaustion is `failed` with reason `quota_limit`.
+Unknown harness endings are `failed` with reason `unrecognized_stop_reason`.
+Events, `mj wait`, and transcript rendering share this classification; `wait`
+retains its existing exit codes and continuation policy.
+
+`command_ended` includes `owner` (`worker` or `daemon`), `command_id`,
+`command_kind`, and `outcome` (`succeeded`, `cancelled`, `rejected`, or `failed`).
+Unsuccessful results include `reason` and `message`. A successful cancellation
+command has outcome `succeeded`; its target has outcome `cancelled`.
+Daemon checkpoint results can include `related_command_ids` for their worker
+barriers. A checkpoint succeeds only after its verified archive and metadata
+are durable. Barrier release alone is not proof of checkpoint success.
+
+For example, controller disconnection releases a worker checkpoint barrier:
+
+```json
+{"type":"command_ended","data":{"owner":"worker","command_id":"opaque-id","command_kind":"begin_checkpoint","outcome":"cancelled","reason":"controller_disconnected","message":"Checkpoint barrier cancelled because its controller disconnected"}}
+```
+
+Other reasons include `owner_lost_on_restart`, `requested_cancellation`,
+`admission_rejected`, `command_failed`, `worker_restarted`, `runtime_stopped`,
+`runtime_failure`, `nonzero_exit`, `signaled`, `timed_out`, `startup_failed`,
+`lifecycle_failed`, `runtime_unavailable`, `checkpoint_failed`,
+`checkpoint_deferred`, `controller_restarted`, and `provider_failure`.
+Reasons are structured facts; diagnostic wording and command-ID prefixes are
+not classification contracts.
+
+This contract replaces new generic `error` events. Upgrade preserves historical
+sequence numbers and timestamps, normalizes retained turn results, and exposes
+old generic errors as `legacy_notice` with `original_type: "error"`. It does not
+guess their domain from messages or IDs. Older workers without typed terminal
+causes can also produce legacy notices until their normal idle upgrade. Missing
+historical turn causes are `legacy_unclassified`, never assumed harmless.
+The new stored event variants require a forward database migration; older
+incompatible executables cannot access that upgraded store.
 
 Prompt starts, completions, and explicit input transitions are journaled with
 their relay projection transaction, including intermediate transitions within one

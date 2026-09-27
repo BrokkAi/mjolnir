@@ -611,6 +611,9 @@ pub enum RuntimeEvent {
     Notice {
         message: String,
     },
+    SessionFault {
+        message: String,
+    },
     Warning {
         message: String,
     },
@@ -671,10 +674,14 @@ pub enum RuntimeEvent {
         modes: Option<SessionModeState>,
     },
     CommandRejected {
+        #[serde(default)]
+        reason: crate::event_outcome::OutcomeReason,
         request_id: String,
         message: String,
     },
     CommandInterrupted {
+        #[serde(default)]
+        reason: crate::event_outcome::OutcomeReason,
         request_id: String,
         message: String,
     },

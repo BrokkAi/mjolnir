@@ -1704,6 +1704,8 @@ fn completion_event(ordinal: u64, previous_digest: &str, command_id: &str) -> Re
         recorded_at_ms: i64::try_from(ordinal).unwrap_or_default() * 100,
         command_id: Some(command_id.to_owned()),
         observation: RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
             command_id: command_id.to_owned(),
             outcome: RelayCommandOutcome::Prompt {
                 diagnostic: None,

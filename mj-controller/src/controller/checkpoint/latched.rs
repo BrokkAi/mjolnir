@@ -9,6 +9,27 @@ impl Controller {
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
     ) -> Result<LatchedCheckpoint> {
+        self.checkpoint_session_latched_for_operation(
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn checkpoint_session_latched_for_operation(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        requested_operation_id: Option<&str>,
+    ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
             session_id,
             executor,
@@ -16,10 +37,12 @@ impl Controller {
             exclusivity,
             export_policy,
             exclusivity == LatchExclusivity::HoldThroughClose,
+            requested_operation_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn checkpoint_session_latched_with_recovery_stage(
         &self,
         session_id: &str,
@@ -28,6 +51,7 @@ impl Controller {
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
         recovery_copy: bool,
+        requested_operation_id: Option<&str>,
     ) -> Result<LatchedCheckpoint> {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
@@ -243,6 +267,13 @@ impl Controller {
                 }
             }
             let barrier_command_id = new_command_id("checkpoint")?;
+            if let Some(operation_id) = requested_operation_id {
+                crate::database::correlate_checkpoint_barrier(
+                    session_id,
+                    operation_id,
+                    &barrier_command_id,
+                )?;
+            }
             let timeout = if restarted_worker {
                 CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART
             } else {

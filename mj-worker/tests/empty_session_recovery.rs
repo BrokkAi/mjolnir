@@ -305,6 +305,7 @@ for line in sys.stdin:
             RelayObservation::CommandCompleted {
                 command_id,
                 outcome: RelayCommandOutcome::Prompt { stop_reason, .. },
+                ..
             } if command_id == "queued-prompt" && stop_reason == "EndTurn"
         )),
         "{events:#?}"

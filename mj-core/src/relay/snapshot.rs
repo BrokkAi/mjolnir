@@ -273,6 +273,32 @@ pub enum RelayCommandKind {
     RecordNotice,
 }
 
+impl RelayCommandKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::ResolveSteering => "resolve_steering",
+            Self::ClearContext => "clear_context",
+            Self::Prompt => "prompt",
+            Self::RunUserShell => "run_user_shell",
+            Self::CancelUserShell => "cancel_user_shell",
+            Self::RemoveQueuedPrompt => "remove_queued_prompt",
+            Self::ClearQueuedPrompts => "clear_queued_prompts",
+            Self::SetConfig => "set_config",
+            Self::GoalControl => "goal_control",
+            Self::SetSessionMode => "set_session_mode",
+            Self::CancelTurn => "cancel_turn",
+            Self::Cancel => "cancel",
+            Self::Close => "close",
+            Self::BeginCheckpoint => "begin_checkpoint",
+            Self::CompleteCheckpoint => "complete_checkpoint",
+            Self::ReleaseCheckpoint => "release_checkpoint",
+            Self::AdvanceRecoveryFloor => "advance_recovery_floor",
+            Self::RecordNotice => "record_notice",
+        }
+    }
+}
+
 /// Durable delivery state, independent of transport acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -910,6 +936,10 @@ pub enum RelayObservation {
         started_at_ms: i64,
     },
     CommandCompleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        barrier_command_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<RelayCommandKind>,
         command_id: String,
         outcome: RelayCommandOutcome,
     },
@@ -923,11 +953,15 @@ pub enum RelayObservation {
         retryable: bool,
     },
     CommandRejected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::event_outcome::OutcomeReason>,
         command_id: String,
         command: RelayCommandKind,
         message: String,
     },
     CommandInterrupted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::event_outcome::OutcomeReason>,
         command_id: String,
         command: RelayCommandKind,
         message: String,
@@ -947,6 +981,10 @@ pub enum RelayObservation {
     CheckpointReady {
         command_id: String,
         through: u64,
+    },
+    SessionFault {
+        reason: crate::event_outcome::OutcomeReason,
+        message: String,
     },
     Warning {
         message: String,

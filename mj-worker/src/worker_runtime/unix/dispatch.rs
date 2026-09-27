@@ -603,16 +603,18 @@ pub(crate) fn record_runtime_event(
         RuntimeEvent::CommandRejected {
             request_id,
             message,
+            reason,
         } => {
             in_flight.remove(&request_id);
-            relay.record_command_rejected(&request_id, message)?;
+            relay.record_command_rejected(&request_id, reason, message)?;
         }
         RuntimeEvent::CommandInterrupted {
             request_id,
             message,
+            reason,
         } => {
             in_flight.remove(&request_id);
-            relay.record_command_interrupted(&request_id, message)?;
+            relay.record_command_interrupted(&request_id, reason, message)?;
         }
         RuntimeEvent::CancelApplied { request_id } => {
             in_flight.remove(&request_id);
@@ -658,6 +660,12 @@ pub(crate) fn record_runtime_event(
         RuntimeEvent::Notice { message } => {
             relay.record_observation(RelayObservation::Notice { message })?;
         }
+        RuntimeEvent::SessionFault { message } => {
+            relay.record_observation(RelayObservation::SessionFault {
+                reason: mj_core::event_outcome::OutcomeReason::RuntimeUnavailable,
+                message,
+            })?;
+        }
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;
         }
@@ -670,7 +678,11 @@ pub(crate) fn record_runtime_event(
                 message: message.clone(),
             })?;
             for (command_id, _) in std::mem::take(in_flight) {
-                relay.record_command_interrupted(&command_id, message.clone())?;
+                relay.record_command_interrupted(
+                    &command_id,
+                    mj_core::event_outcome::OutcomeReason::WorkerRestarted,
+                    message.clone(),
+                )?;
             }
             relay.record_observation(RelayObservation::SessionRestarted)?;
         }
@@ -747,6 +759,7 @@ pub(crate) fn record_runtime_event(
             for (command_id, _) in std::mem::take(in_flight) {
                 relay.record_command_interrupted(
                     &command_id,
+                    mj_core::event_outcome::OutcomeReason::RuntimeStopped,
                     "ACP runtime stopped before the command completed",
                 )?;
             }
@@ -803,8 +816,16 @@ pub(crate) fn interrupt_in_flight(
     message: &str,
 ) -> Result<()> {
     let mut relay = relay.lock().expect("relay state lock poisoned");
+    relay.record_observation(RelayObservation::SessionFault {
+        reason: mj_core::event_outcome::OutcomeReason::RuntimeUnavailable,
+        message: message.into(),
+    })?;
     for (command_id, _) in std::mem::take(in_flight) {
-        relay.record_command_interrupted(&command_id, message)?;
+        relay.record_command_interrupted(
+            &command_id,
+            mj_core::event_outcome::OutcomeReason::RuntimeFailure,
+            message,
+        )?;
     }
     Ok(())
 }
@@ -861,6 +882,7 @@ pub(crate) fn dispatch_pending(
                 .expect("relay state lock poisoned")
                 .record_command_rejected(
                     &claimed.command_id,
+                    mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                     "relay-local command was unexpectedly claimed for ACP dispatch",
                 )?;
             continue;
@@ -973,6 +995,7 @@ pub(crate) fn dispatch_user_shells(
                 {
                     relay.record_command_interrupted(
                         &shell_command_id,
+                        mj_core::event_outcome::OutcomeReason::RequestedCancellation,
                         "shell command was cancelled before it started",
                     )?;
                 }

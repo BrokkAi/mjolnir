@@ -47,6 +47,7 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::ElicitationRequested { .. }
         | RelayObservation::ElicitationResolved { .. }
         | RelayObservation::ElicitationsCleared
+        | RelayObservation::SessionFault { .. }
         | RelayObservation::Warning { .. }
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
@@ -361,6 +362,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         RelayObservation::CommandCompleted {
             command_id,
             outcome,
+            command: observed_kind,
+            barrier_command_id: observed_barrier,
         } => {
             let command = snapshot
                 .dispatches
@@ -368,6 +371,17 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("completed unknown relay command {command_id}"))?
                 .command
                 .clone();
+            if observed_kind.is_some_and(|kind| kind != command.kind()) {
+                bail!("completed command {command_id} has the wrong command identity");
+            }
+            if let Some(observed_barrier) = observed_barrier {
+                match &command {
+                    RelayCommand::CompleteCheckpoint { barrier_command_id }
+                    | RelayCommand::ReleaseCheckpoint { barrier_command_id }
+                        if barrier_command_id == observed_barrier => {}
+                    _ => bail!("completed command {command_id} has the wrong checkpoint identity"),
+                }
+            }
             snapshot
                 .dispatches
                 .get_mut(command_id)
@@ -750,11 +764,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command_id,
             command: observed_command,
             message,
+            ..
         }
         | RelayObservation::CommandInterrupted {
             command_id,
             command: observed_command,
             message,
+            ..
         } => {
             if snapshot
                 .retry_assessment
@@ -1082,6 +1098,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         | RelayObservation::ElicitationRequested { .. }
         | RelayObservation::ElicitationResolved { .. }
         | RelayObservation::ElicitationsCleared
+        | RelayObservation::SessionFault { .. }
         | RelayObservation::Warning { .. }
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }

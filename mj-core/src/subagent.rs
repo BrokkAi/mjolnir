@@ -682,8 +682,8 @@ pub fn failed_turn(
                 format!("the turn ended with stop reason {stop_reason:?}"),
             ),
         },
-        TurnOutcomeKind::Interrupted { message } => ("interrupted", message.clone()),
-        TurnOutcomeKind::Rejected { message } => ("failed", message.clone()),
+        TurnOutcomeKind::Interrupted { message, .. } => ("interrupted", message.clone()),
+        TurnOutcomeKind::Rejected { message, .. } => ("failed", message.clone()),
     };
     let reason = turn
         .diagnostic
@@ -1165,6 +1165,7 @@ mod tests {
         }
         let mut interrupted = finished("task", "end_turn");
         interrupted.outcome = crate::state::TurnOutcomeKind::Interrupted {
+            reason: None,
             message: "stopped".to_owned(),
         };
         assert_eq!(

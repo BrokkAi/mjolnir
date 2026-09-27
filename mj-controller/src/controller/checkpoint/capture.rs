@@ -7,6 +7,41 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: Option<&SessionManagerControl>,
     ) -> Result<CheckpointMetadata> {
+        let previous = self.state.sessions.get(session_id).cloned();
+        let operation_id = new_command_id("checkpoint-operation")?;
+        let result = self
+            .checkpoint_session_owned(session_id, executor, manager, &operation_id)
+            .await;
+        if let Err(error) = &result
+            && let Some(record) = self.state.sessions.get_mut(session_id)
+        {
+            if record.state == SessionState::Checkpointing {
+                record.state = previous
+                    .as_ref()
+                    .map_or(SessionState::Running, |record| record.state);
+            }
+            if !checkpoint_was_deferred(error) {
+                record.last_checkpoint_error = Some(format!("{error:#}"));
+            }
+            record.updated_at = now();
+            crate::database::finish_failed_checkpoint(
+                record,
+                &operation_id,
+                checkpoint_was_deferred(error),
+                format!("{error:#}"),
+            )
+            .with_context(|| format!("persist checkpoint failure after: {error:#}"))?;
+        }
+        result
+    }
+
+    async fn checkpoint_session_owned(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        operation_id: &str,
+    ) -> Result<CheckpointMetadata> {
         let previous = self
             .state
             .sessions
@@ -25,19 +60,19 @@ impl Controller {
         record.state = SessionState::Checkpointing;
         record.updated_at = now();
         record.last_checkpoint_error = None;
-        self.persist_session_transition_or_restore(
-            session_id,
-            &previous,
-            "persist checkpointing state before creating a checkpoint",
-        )?;
+        if let Err(error) = crate::database::begin_checkpoint_operation(record, operation_id) {
+            self.state.sessions.insert(session_id.to_owned(), previous);
+            return Err(error.context("persist checkpoint operation before capture"));
+        }
 
         match self
-            .checkpoint_session_latched(
+            .checkpoint_session_latched_for_operation(
                 session_id,
                 executor,
                 manager,
                 LatchExclusivity::ReleaseAfterLatch,
                 CheckpointExportPolicy::Always,
+                Some(operation_id),
             )
             .await
         {
@@ -62,11 +97,16 @@ impl Controller {
                     record.last_checkpoint_error = None;
                 }
                 let persist_started = Instant::now();
-                if let Err(error) = self.persist_checkpoint_transition_or_restore(
-                    session_id,
-                    &previous,
-                    "persist verified checkpoint before releasing relay history",
+                if let Err(error) = crate::database::save_requested_checkpoint(
+                    self.state
+                        .sessions
+                        .get(session_id)
+                        .expect("checkpoint session exists"),
+                    operation_id,
                 ) {
+                    self.state
+                        .sessions
+                        .insert(session_id.to_owned(), previous.clone());
                     latched.abandon(session_id).await;
                     return Err(error);
                 }
@@ -107,7 +147,7 @@ impl Controller {
                         record.last_checkpoint_error = Some(format!("{error:#}"));
                     }
                 }
-                Err(self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error))
+                Err(error)
             }
         }
     }
@@ -145,6 +185,7 @@ impl Controller {
                 LatchExclusivity::ReleaseAfterLatch,
                 CheckpointExportPolicy::Always,
                 true,
+                None,
             )
             .await?;
         let artifact = latched.artifact.clone();

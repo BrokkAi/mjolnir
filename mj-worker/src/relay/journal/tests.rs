@@ -263,7 +263,7 @@ fn restart_finishes_a_durably_accepted_queue_removal() {
         RelayObservation::CommandCompleted {
             command_id,
             outcome: RelayCommandOutcome::QueueChanged { removed_command_ids },
-        } if command_id == "remove-after-crash"
+         ..} if command_id == "remove-after-crash"
             && removed_command_ids == &["queued-prompt".to_owned()]
     )));
 }
@@ -294,7 +294,7 @@ fn restart_finishes_a_durably_accepted_queue_clear() {
         RelayObservation::CommandCompleted {
             command_id,
             outcome: RelayCommandOutcome::QueueChanged { removed_command_ids },
-        } if command_id == "clear-after-crash"
+         ..} if command_id == "clear-after-crash"
             && removed_command_ids
                 == &["queued-one".to_owned(), "queued-two".to_owned()]
     )));
@@ -350,6 +350,7 @@ fn restart_interrupts_ownerless_checkpoint_but_preserves_accepted_close() {
         RelayObservation::CommandInterrupted {
             command_id,
             command: RelayCommandKind::BeginCheckpoint,
+            reason: Some(mj_core::event_outcome::OutcomeReason::OwnerLostOnRestart),
             ..
         } if command_id == "close-barrier"
     )));

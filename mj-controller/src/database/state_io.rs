@@ -575,6 +575,7 @@ pub(super) fn parse_materialized_execution(
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
 pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    let previous_error = super::events::previous_session_error(tx, &session.id)?;
     tx.execute(
         "INSERT INTO session_contexts(session_id, bundle_id, created_at, workspace_id)
          VALUES (?1, ?2, ?3, ?4)
@@ -706,6 +707,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
     replace_targets(tx, session)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
+    super::events::record_session_fault_transition(tx, session, previous_error)?;
     Ok(())
 }
 
@@ -713,6 +715,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
 /// that provisioning and teardown maintain with them. The row must exist:
 /// a transition never resurrects a session another writer deleted.
 pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    let previous_error = super::events::previous_session_error(tx, &session.id)?;
     // Destructured exhaustively and without `..` on purpose. This statement is
     // the only thing standing between a new `SessionRecord` field and a value
     // that is set in memory, read back as its default, and never missed until
@@ -813,6 +816,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     if changed != 1 {
         bail!("unknown session {id}");
     }
+    super::events::record_session_fault_transition(tx, session, previous_error)?;
     replace_targets(tx, session)
 }
 

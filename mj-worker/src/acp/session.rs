@@ -637,6 +637,7 @@ pub(super) async fn serve_session(
                         emit_runtime_event(
                             events,
                             RuntimeEvent::CommandRejected {
+                                reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                                 request_id,
                                 message,
                             },
@@ -663,6 +664,7 @@ pub(super) async fn serve_session(
                     emit_runtime_event(
                         events,
                         RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                             request_id,
                             message: "/clear requires all pending interactions to be resolved"
                                 .into(),
@@ -709,6 +711,7 @@ pub(super) async fn serve_session(
                     emit_runtime_event(
                         events,
                         RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                             request_id,
                             message: "ACP prompt has no content blocks".into(),
                         },
@@ -1012,7 +1015,7 @@ pub(super) async fn serve_session(
                         }, if implementation_deadline.is_some() => {
                             let message = "Plan implementation timed out while finishing planning or restoring bypassPermissions; restarting the harness without submitting the continuation.";
                             emit_runtime_event(events, RuntimeEvent::Warning { message: message.into() }).await?;
-                            emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() }).await?;
+                            emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() , reason: mj_core::event_outcome::OutcomeReason::TimedOut }).await?;
                             return Ok(Some(SessionRestart::Resume(session_id.to_string())));
                         }
                         _ = async {
@@ -1030,7 +1033,7 @@ pub(super) async fn serve_session(
                             .await?;
                             emit_runtime_event(
                                 events,
-                                RuntimeEvent::CommandInterrupted {
+                                RuntimeEvent::CommandInterrupted { reason: mj_core::event_outcome::OutcomeReason::RequestedCancellation,
                                     request_id,
                                     message: CANCEL_UNACKED_WARNING.to_owned(),
                                 },
@@ -1062,7 +1065,7 @@ pub(super) async fn serve_session(
                         command = requests.recv() => match command {
                             Some(CommandRequest::CancelTurnFor { request_id: cancel_id, active_prompt_id }) => {
                                 if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() {
-                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() , reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected }).await?;
                                 } else {
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
@@ -1074,7 +1077,7 @@ pub(super) async fn serve_session(
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected {
                                         request_id: steer_id,
                                         message: if !steering_supported { "This harness does not support steering" } else { "The requested turn is no longer available for steering" }.into(),
-                                    }).await?;
+                                     reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected }).await?;
                                 } else {
                                     pending_steer = Some(start_steer(connection, &session_id, steer_id, steering_prompt));
                                     steering_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
@@ -1085,7 +1088,7 @@ pub(super) async fn serve_session(
                                 steering_prompt,
                             }) => {
                                 if steering_prompt.is_some() && pending_steer.is_some() {
-                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "Steering is already pending".into() }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "Steering is already pending".into() , reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected }).await?;
                                     continue;
                                 }
                                 implementation_rx.close();
@@ -1102,7 +1105,7 @@ pub(super) async fn serve_session(
                                         emit_runtime_event(events, RuntimeEvent::CommandRejected {
                                             request_id: cancel_id,
                                             message: "Steering is not available. The prompt remains queued; cancel the turn explicitly to apply it next.".into(),
-                                        }).await?;
+                                         reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected }).await?;
                                     } else {
                                         pending_steer = Some(start_steer(connection, &session_id, cancel_id, steering_prompt));
                                     }
@@ -1125,7 +1128,7 @@ pub(super) async fn serve_session(
                                 }
                                 emit_runtime_event(
                                     events,
-                                    RuntimeEvent::CommandInterrupted {
+                                    RuntimeEvent::CommandInterrupted { reason: mj_core::event_outcome::OutcomeReason::RequestedCancellation,
                                         request_id: request_id.clone(),
                                         message: "prompt interrupted because the session was closed".into(),
                                     },
@@ -1143,7 +1146,7 @@ pub(super) async fn serve_session(
                                     .send_notification(CancelNotification::new(session_id.clone()));
                                 emit_runtime_event(
                                     events,
-                                    RuntimeEvent::CommandInterrupted {
+                                    RuntimeEvent::CommandInterrupted { reason: mj_core::event_outcome::OutcomeReason::RuntimeStopped,
                                         request_id: request_id.clone(),
                                         message: "ACP command channel closed while the prompt was running".into(),
                                     },
@@ -1196,7 +1199,7 @@ pub(super) async fn serve_session(
                             Some(CommandRequest::Prompt { request_id, .. } | CommandRequest::PromptAttachments { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
-                                    RuntimeEvent::CommandRejected {
+                                    RuntimeEvent::CommandRejected { reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                                         request_id,
                                         message: "a prompt is already running".into(),
                                     },
@@ -1213,7 +1216,7 @@ pub(super) async fn serve_session(
                             Some(CommandRequest::SetConfig { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
-                                    RuntimeEvent::CommandRejected {
+                                    RuntimeEvent::CommandRejected { reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                                         request_id,
                                         message: "configuration can only be changed while the agent is idle".into(),
                                     },
@@ -1223,7 +1226,7 @@ pub(super) async fn serve_session(
                             Some(CommandRequest::SetSessionMode { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
-                                    RuntimeEvent::CommandRejected {
+                                    RuntimeEvent::CommandRejected { reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                                         request_id,
                                         message: "the session mode can only be changed while the agent is idle".into(),
                                     },
@@ -1369,6 +1372,7 @@ pub(super) async fn serve_session(
                         emit_runtime_event(
                             events,
                             RuntimeEvent::CommandRejected {
+                                reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                                 request_id,
                                 message: format!("{error:#}"),
                             },
@@ -1422,6 +1426,7 @@ pub(super) async fn serve_session(
                         emit_runtime_event(
                             events,
                             RuntimeEvent::CommandRejected {
+                                reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                                 request_id,
                                 message: format!("{error:#}"),
                             },
@@ -1435,6 +1440,7 @@ pub(super) async fn serve_session(
                 emit_runtime_event(
                     events,
                     RuntimeEvent::CommandRejected {
+                        reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
                         request_id,
                         message: "The requested turn is no longer running".into(),
                     },
