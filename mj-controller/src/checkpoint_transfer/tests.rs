@@ -100,7 +100,7 @@ fn transfer_plans_cover_all_target_boundaries() {
 }
 
 fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
-    let worker_root = temp.join("worker");
+    let worker_root = temp.join("worker").join(SESSION);
     fs::create_dir_all(&worker_root).unwrap();
     let harness_home = temp.join("codex");
     let native = harness_home.join("sessions/2026/08/09");
@@ -313,6 +313,56 @@ fn export_and_transfer_only_gate_after_local_verification() {
     );
 }
 
+#[test]
+fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(
+        "Library/Application Support/mjolnir/instances/mac-checkpoint-1154/資料's $(literal)",
+    );
+    let (spec, source) = fixture(&root);
+    let target = export_checkpoint(&spec).unwrap();
+    let destination = root.join("controller/session.hel.zip");
+    let locator = TargetLocator::LocalBare {
+        worker_root: spec.relay_root.to_string_lossy().into_owned(),
+    };
+    let transfer = CheckpointTransfer {
+        locator: &locator,
+        session_id: SESSION,
+        operation_id: "mac-checkpoint-1154",
+        remote_archive: source.to_str().unwrap(),
+        destination: &destination,
+        expected_sha256: &target.sha256,
+        expected_event_frontier: 1,
+        expected_event_frontier_digest: &spec.canonical_session.event_frontier_digest,
+    };
+    let gate = transfer.execute(&crate::targets::ProcessExecutor).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+    assert_eq!(
+        read_archive_verified(&destination).unwrap().archive_sha256,
+        target.sha256
+    );
+    transfer
+        .cleanup_plan(&gate)
+        .unwrap()
+        .execute(&crate::targets::ProcessExecutor)
+        .unwrap();
+    assert!(!source.exists());
+    assert!(destination.exists());
+
+    let spec_path = root.join("checkpoint spec.json");
+    for command in [
+        export_command(&locator, SESSION, spec_path.to_str().unwrap()).unwrap(),
+        restore_command(&locator, SESSION, spec_path.to_str().unwrap()).unwrap(),
+    ] {
+        assert_eq!(command.args.last().unwrap(), spec_path.to_str().unwrap());
+    }
+    let invalid = format!("{}/../source.hel.zip", spec.relay_root.display());
+    let error = transfer_plan(&locator, SESSION, &invalid, &destination, "staging")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&invalid), "{error}");
+}
+
 /// The controller streams the export spec to save a round trip to the
 /// target. Both spellings have to produce the same archive.
 #[test]
@@ -332,7 +382,7 @@ fn a_streamed_spec_exports_the_same_archive_as_a_spec_file() {
     let from_file = export_from_spec_file(&spec_path).unwrap();
     let file_archive = fs::read(&spec.output_path).unwrap();
 
-    spec.output_path = temp.path().join("worker/streamed.hel.zip");
+    spec.output_path = spec.relay_root.join("streamed.hel.zip");
     let body = serde_json::to_vec(&spec).unwrap();
     let streamed = export_from_spec_reader(&mut body.as_slice()).unwrap();
     let streamed_archive = fs::read(&spec.output_path).unwrap();

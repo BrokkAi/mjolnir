@@ -45,3 +45,7 @@ mj-controller/src/targets/platform.rs
 mj-controller/src/targets/bootstrap.rs
 mj-controller/src/targets/resources.rs
 mj-controller/src/controller/worker_binary/*
+
+# Native checkpoint paths include macOS's Application Support directory.
+mj-controller/src/checkpoint_transfer.rs
+mj-controller/src/checkpoint_transfer/*

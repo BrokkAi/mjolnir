@@ -47,7 +47,7 @@ pub fn export_command(
     session_id: &str,
     spec_path: &str,
 ) -> Result<CommandSpec> {
-    validate_remote_path(spec_path)?;
+    validate_checkpoint_path(locator, spec_path)?;
     let root = worker_root(locator, session_id)?;
     let args = vec![
         format!("{root}/hel"),
@@ -64,7 +64,7 @@ pub fn restore_command(
     session_id: &str,
     spec_path: &str,
 ) -> Result<CommandSpec> {
-    validate_remote_path(spec_path)?;
+    validate_checkpoint_path(locator, spec_path)?;
     let root = worker_root(locator, session_id)?;
     let args = vec![
         format!("{root}/hel"),
@@ -119,7 +119,7 @@ impl VerifiedCheckpoint {
 
 impl CheckpointTransfer<'_> {
     pub fn execute(&self, executor: &impl CommandExecutor) -> Result<VerifiedCheckpoint> {
-        validate_remote_path(self.remote_archive)?;
+        validate_checkpoint_path(self.locator, self.remote_archive)?;
         let parent = self.destination.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
         let temporary = tempfile::Builder::new()
@@ -232,7 +232,7 @@ pub fn transfer_plan(
     local_temporary: &Path,
     staging: &str,
 ) -> Result<CommandPlan> {
-    validate_remote_path(remote_archive)?;
+    validate_checkpoint_path(locator, remote_archive)?;
     validate_remote_path(staging)?;
     ensure!(
         local_temporary.is_absolute(),
@@ -242,7 +242,7 @@ pub fn transfer_plan(
     let local = local_temporary.to_string_lossy().into_owned();
     let mut commands = match locator {
         TargetLocator::LocalBare { .. } => vec![
-            CommandSpec::new("cp", [remote_archive, local.as_str()])
+            CommandSpec::new("cp", ["--", remote_archive, local.as_str()])
                 .purpose("copy local bare checkpoint"),
         ],
         TargetLocator::LocalPodman { container_id, .. } => vec![
@@ -307,7 +307,7 @@ pub fn transfer_plan(
 }
 
 fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Result<CommandPlan> {
-    validate_remote_path(remote)?;
+    validate_checkpoint_path(locator, remote)?;
     worker_root(locator, session_id)?;
     let commands = vec![
         crate::targets::locator_command(
@@ -330,17 +330,35 @@ fn remote_staging_path(session_id: &str, operation_id: &str) -> Result<String> {
     ))
 }
 
+fn validate_checkpoint_path(locator: &TargetLocator, path: &str) -> Result<()> {
+    if matches!(locator, TargetLocator::LocalBare { .. }) {
+        // Local commands receive argv directly. Their paths never pass through
+        // SCP or a remote shell and may contain spaces, Unicode, and punctuation.
+        ensure!(
+            !path.is_empty()
+                && !path.contains('\0')
+                && !Path::new(path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir),
+            "invalid local checkpoint path {path:?}"
+        );
+        Ok(())
+    } else {
+        validate_remote_path(path)
+    }
+}
+
 fn validate_remote_path(path: &str) -> Result<()> {
-    ensure!(!path.is_empty());
+    ensure!(!path.is_empty(), "empty remote checkpoint path");
     ensure!(
         path.bytes()
             .all(|byte| byte.is_ascii_alphanumeric()
                 || matches!(byte, b'/' | b'~' | b'.' | b'-' | b'_')),
-        "unsafe remote path"
+        "unsafe remote checkpoint path {path:?}"
     );
     ensure!(
         !path.split('/').any(|component| component == ".."),
-        "remote path traverses parent"
+        "remote checkpoint path traverses parent: {path:?}"
     );
     Ok(())
 }
