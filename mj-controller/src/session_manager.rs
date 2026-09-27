@@ -52,6 +52,8 @@ mod types;
 pub use types::*;
 mod recovery;
 pub(crate) use recovery::*;
+mod delegation;
+pub(crate) use delegation::*;
 mod channels;
 pub use channels::*;
 mod handle;

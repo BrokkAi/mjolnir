@@ -1,40 +1,24 @@
 use super::*;
 
 mod project_discovery;
-mod subagent_dispatch;
 
-pub async fn run_server(
+pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
     worker: SessionManagerChannels,
     daemon_runtime: Arc<RuntimeState>,
     mut workspace_updates: tokio::sync::watch::Receiver<Vec<WorkspaceRecord>>,
+    services: crate::daemon::delegation::Services,
 ) -> Result<()> {
     let resolved = resolve_server_args(args, termination.clone()).await?;
     let bind = resolved.bind;
     let mut controller = Controller::load()?;
-    // `list_profiles` is called in the middle of a model's turn, so the
-    // catalogue discovers the profiles' capabilities in the background and
-    // the call only waits for what is already under way.
-    let profile_catalog = profile_catalog::ProfileCatalog::new(termination.child_token());
-    profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     workspace_updates.borrow_and_update();
-    let mut quotas = std::collections::BTreeMap::new();
-    let subagent_quota_reports = Arc::new(std::sync::Mutex::new(quotas.clone()));
-    let rejected_logins = Arc::new(std::sync::Mutex::new(
-        mj_core::credentials::RejectedLogins::default(),
-    ));
-    let (quota_profiles_tx, mut quota_updates_rx) = spawn_quota_refresher();
-    let mut quota_batch = QuotaRefreshBatch::default();
-    let mut published_quota_profiles = std::collections::BTreeMap::new();
-    republish_quota_profiles(
-        &controller,
-        &mut published_quota_profiles,
-        &mut quota_batch,
-        &quota_profiles_tx,
-    );
+    let mut quota_updates = services.quotas.clone();
+    let mut quotas = quota_updates.borrow_and_update().clone();
+    let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = std::collections::BTreeMap::new();
     let mut queued_prompts = projected_queued_prompts(&controller)?;
@@ -105,12 +89,6 @@ pub async fn run_server(
     } = worker;
     worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
     publish_capacity_targets(&controller, &capacity_targets_tx, &mut capacity_state);
-    let mut credential_sync =
-        CredentialSyncCoordinator::spawn_guarded(daemon_runtime.worker_background_gate());
-    let credential_sync_handle = credential_sync.handle();
-    credential_sync_handle.set_targets(credential_sync_targets(&controller));
-    let mut credential_sync_signals = CredentialSyncSignalTracker::default();
-    let mut credential_sync_notices = CredentialSyncNotices::default();
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
@@ -139,17 +117,6 @@ pub async fn run_server(
     options.set_api_token(crate::server::load_or_create_api_token(
         &crate::server::api_token_path(),
     )?);
-    let api_runtime = daemon_runtime.clone();
-    let api_backend = Arc::new(
-        api::ApiBackend::new(
-            worker_commands_tx.client(),
-            Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
-            daemon_runtime.clone(),
-        )
-        .with_quota_reports(subagent_quota_reports.clone())
-        .with_rejected_logins(rejected_logins.clone())
-        .with_profile_catalog(profile_catalog.clone()),
-    );
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
@@ -210,7 +177,6 @@ pub async fn run_server(
     });
     let conversation_projection_shutdown = termination.child_token();
     let control = async {
-        let mut credential_tick = tokio::time::interval(Duration::from_millis(250));
         // Stored viewer state expires with the authentication that created it.
         // The sweep is hourly rather than on every request, because it is
         // housekeeping and nothing waits for it.
@@ -257,17 +223,12 @@ pub async fn run_server(
         let mut action_sessions = std::collections::BTreeMap::<u64, String>::new();
         let mut action_replies = PendingActionReplies::default();
         let mut launch_workspaces = std::collections::BTreeMap::new();
-        let mut subagent_jobs = tokio::task::JoinSet::new();
-        let mut subagent_completion_jobs = tokio::task::JoinSet::new();
-        let mut subagent_dispatch = subagent_dispatch::SubagentDispatch::default();
-        let mut subagent_task_ids = std::collections::BTreeMap::new();
         let (conversation_projection_tx, mut conversation_projection_rx) =
             tokio::sync::mpsc::channel(CONVERSATION_PROJECTION_CHANNEL_CAPACITY);
         let mut conversation_projections = ConversationProjectionDispatcher::new(
             conversation_projection_tx,
             conversation_projection_shutdown.clone(),
         );
-        let mut quota_updates_open = true;
         // A feed that ends is not a reason to exit quietly: the phone server
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
@@ -319,47 +280,6 @@ pub async fn run_server(
             };
         }
         loop {
-            subagent_dispatch.retain_parents(|parent| {
-                controller
-                    .state
-                    .sessions
-                    .get(parent)
-                    .is_some_and(|session| session.state.has_live_worker())
-            });
-            if !crate::upgrade::is_draining() {
-                for (parent_session_id, request) in subagent_dispatch.ready(Instant::now()) {
-                    let identity = (parent_session_id.clone(), request.request_id.clone());
-                    let backend = api_backend.clone();
-                    let runtime = daemon_runtime.clone();
-                    let task = subagent_jobs.spawn(async move {
-                        // Inputs and waits remain on the worker while deferred.
-                        // Only bounded submission and result delivery hold admission.
-                        let upgrade_task = if matches!(
-                            request.action,
-                            mj_core::subagent::SubagentToolAction::WaitAgents { .. }
-                                | mj_core::subagent::SubagentToolAction::SendInput { .. }
-                        ) {
-                            None
-                        } else {
-                            Some(crate::upgrade::activity("subagent tool")?)
-                        };
-                        let _upgrade_task = upgrade_task;
-                        let result = backend
-                            .execute_subagent_tool(parent_session_id.clone(), request)
-                            .await;
-                        let _delivery = crate::upgrade::activity("subagent result delivery")?;
-                        let handle = runtime.workspace_session_handle(&parent_session_id).await?;
-                        let mut lease = handle.lease_connection().await?;
-                        lease
-                            .connection_mut()
-                            .complete_subagent_request(result)
-                            .await?;
-                        lease.release();
-                        anyhow::Ok(())
-                    });
-                    subagent_task_ids.insert(task.id(), identity);
-                }
-            }
             if native_agents_dirty && native_agent_jobs.is_empty() {
                 native_agents_dirty = false;
                 native_agent_jobs.spawn(load_native_agents(
@@ -502,27 +422,11 @@ pub async fn run_server(
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!(revision);
                 }
-                update = quota_updates_rx.recv(), if quota_updates_open => {
-                    match update {
-                        Some(QuotaUpdate::Report(outcome)) => {
-                            if outcome.credentials_changed {
-                                credential_sync_handle
-                                    .sync_profile_now(&outcome.report.profile_id, None);
-                            }
-                            quotas.insert(outcome.report.profile_id.clone(), outcome.report.clone());
-                            subagent_quota_reports
-                                .lock()
-                                .expect("sub-agent quota reports lock poisoned")
-                                .insert(outcome.report.profile_id.clone(), outcome.report);
-                            revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!(revision);
-                        }
-                        Some(QuotaUpdate::Refreshing { .. } | QuotaUpdate::Finished { .. }) => {}
-                        None => {
-                            quota_updates_open = false;
-                            tracing::warn!("quota refresher stopped while the phone server is running");
-                        }
-                    }
+                changed = quota_updates.changed() => {
+                    if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
+                    quotas = quota_updates.borrow_and_update().clone();
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!(revision);
                 }
                 projected = conversation_projection_rx.recv() => {
                     let Some(projected) = projected else {
@@ -572,100 +476,8 @@ pub async fn run_server(
                         failure = feed_stopped(termination.is_cancelled(), "the session manager stopped; the phone server can no longer follow sessions");
                         break;
                     };
-                    if let Some(snapshot) = update.view.snapshot.as_ref()
-                        && let Some(session) = controller.state.sessions.get(&update.session_id)
-                        && let Some(signal) = snapshot.latest_credential_sync_signal.clone()
-                    {
-                        credential_sync_signals.observe(
-                            &update.session_id,
-                            &session.last_profile,
-                            signal,
-                        );
-                    }
-                    schedule_due_credential_syncs(
-                        &mut credential_sync_signals,
-                        &credential_sync_handle,
-                        Instant::now(),
-                    );
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
-                        subagent_dispatch.observe(&update.session_id, &snapshot.subagent_requests);
-                        if let Some(relation) = controller.state.subagents.get_mut(&update.session_id)
-                            && matches!(snapshot.materialized.execution, mj_core::state::MaterializedExecutionState::Idle)
-                            && let Some(outcome) = snapshot.materialized.last_turn_outcome.as_ref()
-                            && relation.noticed_turn != Some(outcome.completed_ordinal)
-                        {
-                            let turn = outcome.completed_ordinal;
-                            let child_id = relation.child_session_id.clone();
-                            let parent_id = relation.parent_session_id.clone();
-                            // The notice names the child as every listing does.
-                            let child_title = controller
-                                .state
-                                .sessions
-                                .get(&child_id)
-                                .map_or_else(|| relation.task_name.clone(), |child| child.listed_title().to_owned());
-                            let handback_tool = relation.handback_tool;
-                            let last_turn = outcome.clone();
-                            let in_flight = snapshot
-                                .materialized
-                                .active_turn
-                                .iter()
-                                .map(|turn| turn.command_id.clone())
-                                .chain(
-                                    snapshot
-                                        .materialized
-                                        .queued_prompts
-                                        .iter()
-                                        .map(|queued| queued.command_id.clone()),
-                                )
-                                .collect::<Vec<_>>();
-                            relation.noticed_turn = Some(turn);
-                            let backend = api_backend.clone();
-                            let Ok(upgrade_task) = crate::upgrade::activity("subagent completion notice") else { continue };
-                            subagent_completion_jobs.spawn(async move {
-                                let _upgrade_task = upgrade_task;
-                                let result = async {
-                                    // A child that owes its report is reminded
-                                    // first; the parent hears about it when the
-                                    // reminder turn ends.
-                                    let reminded = backend
-                                        .remind_subagent_to_hand_back(
-                                            &child_id,
-                                            handback_tool,
-                                            &last_turn,
-                                            &in_flight,
-                                        )
-                                        .await?;
-                                    if !reminded {
-                                        backend
-                                            .record_subagent_completion_notice(
-                                                parent_id,
-                                                &child_id,
-                                                &child_title,
-                                                &last_turn,
-                                            )
-                                            .await?;
-                                    }
-                                    tokio::task::spawn_blocking({
-                                        let child_id = child_id.clone();
-                                        move || crate::database::mark_subagent_turn_noticed(&child_id, turn)
-                                    })
-                                    .await??;
-                                    // The parent has been told this turn
-                                    // ended and nothing else is queued, so
-                                    // the child gives its processes back until
-                                    // the parent sends it more input (#1161).
-                                    // The park checks again, under the
-                                    // child's lifecycle, that it is idle.
-                                    if !reminded && in_flight.is_empty() {
-                                        backend.park_subagent(&child_id).await;
-                                    }
-                                    anyhow::Ok(())
-                                }
-                                .await;
-                                (child_id, turn, result)
-                            });
-                        }
                         if snapshot.operational.native_session_is_ready()
                             && operational.get(&update.session_id).is_none_or(|old: &mj_core::relay::RelayOperationalState| old.config_options != snapshot.operational.config_options)
                             && let Some(session) = controller.state.sessions.get(&update.session_id)
@@ -728,36 +540,6 @@ pub async fn run_server(
                     // update even when the worker is publishing continuously.
                     tokio::task::yield_now().await;
                 }
-                completed = subagent_jobs.join_next_with_id(), if !subagent_jobs.is_empty() => {
-                    if let Some(completed) = completed {
-                        let (task_id, result) = match completed {
-                            Ok((id, result)) => (id, result),
-                            Err(error) => (error.id(), Err(anyhow::Error::from(error))),
-                        };
-                        if let Some(identity) = subagent_task_ids.remove(&task_id) {
-                            subagent_dispatch.finish(&identity, result.is_ok());
-                            if let Err(error) = result {
-                                tracing::warn!(parent_session_id = %identity.0, request_id = %identity.1,
-                                    error = %format!("{error:#}"), "sub-agent tool request failed; retrying from worker queue");
-                            }
-                        }
-                    }
-                }
-                completed = subagent_completion_jobs.join_next(), if !subagent_completion_jobs.is_empty() => {
-                    match completed {
-                        Some(Ok((_, _, Ok(())))) => {}
-                        Some(Ok((child_id, turn, Err(error)))) => {
-                            if let Some(relation) = controller.state.subagents.get_mut(&child_id)
-                                && relation.noticed_turn == Some(turn)
-                            {
-                                relation.noticed_turn = None;
-                            }
-                            tracing::warn!(%child_id, turn, error = %format!("{error:#}"), "could not record the sub-agent completion notice");
-                        }
-                        Some(Err(error)) => tracing::warn!(%error, "sub-agent completion task panicked"),
-                        None => {}
-                    }
-                }
                 _ = prune_tick.tick() => {
                     // The hourly full SessionWiki sync. Session closes drive
                     // bounded syncs; this one also reconciles sessions deleted
@@ -807,31 +589,6 @@ pub async fn run_server(
                             Err(error) => tracing::warn!(%error, "phone viewer state pruning task failed"),
                         }
                     });
-                }
-                _ = credential_tick.tick() => {
-                    schedule_due_credential_syncs(
-                        &mut credential_sync_signals,
-                        &credential_sync_handle,
-                        Instant::now(),
-                    );
-                    while let Some(result) = credential_sync.try_result() {
-                        crate::pollers::log_credential_sync_actions(&result);
-                        if let Some(profile) = controller.config.profiles.get(&result.profile_id) {
-                            rejected_logins
-                                .lock()
-                                .expect("refused logins lock poisoned")
-                                .observe(&result, profile);
-                        }
-                        let harness = controller
-                            .config
-                            .profiles
-                            .get(&result.profile_id)
-                            .map(|profile| profile.kind);
-                        if let Some(notice) = credential_sync_notices.notice(&result, harness, &controller.state) {
-                            eprintln!("Mjolnir: {notice}");
-                            daemon_runtime.push_notice("", notice);
-                        }
-                    }
                 }
                 request = dictation_rx.recv() => {
                     let Some(request) = request else {
@@ -1348,12 +1105,7 @@ pub async fn run_server(
                         ControllerAction::RefreshQuota { profile_id } => {
                             let known = controller.config.enabled_profile(profile_id).is_some();
                             if known {
-                                // The refresher works from a generation-stamped
-                                // batch, so a new generation is how one is asked
-                                // for again rather than a per-profile trigger.
-                                quota_batch.generation = quota_batch.generation.saturating_add(1);
-                                quota_batch.profiles = quota_refresh_profiles(&controller);
-                                quota_profiles_tx.send_replace(quota_batch.clone());
+                                services.refresh_quotas();
                             }
                             let outcome = if known {
                                 ActionOutcome::accepted()
@@ -1701,31 +1453,12 @@ pub async fn run_server(
                             }
                             controller = reloaded;
                             quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
-                            subagent_quota_reports
-                                .lock()
-                                .expect("sub-agent quota reports lock poisoned")
-                                .retain(|id, _| controller.config.enabled_profile(id).is_some());
                             worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
                             publish_capacity_targets(
                                 &controller,
                                 &capacity_targets_tx,
                                 &mut capacity_state,
                             );
-                            credential_sync_handle.set_targets(credential_sync_targets(&controller));
-                            republish_quota_profiles(
-                                &controller,
-                                &mut published_quota_profiles,
-                                &mut quota_batch,
-                                &quota_profiles_tx,
-                            );
-                            // A changed profile set or sub-agent policy makes
-                            // the catalogue's answers wrong, so it drops them,
-                            // adopts the configuration it is given here, and
-                            // discovers the new one in the background. A
-                            // `list_profiles` call that arrives first waits on
-                            // that pass's discoveries rather than starting its
-                            // own.
-                            profile_catalog.sync(&controller.config);
                             queued_prompts.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });

@@ -1305,6 +1305,33 @@ fn leased_relay_child_serves_stdio() {
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
             };
             let history = match &request.request {
+                RelayRequest::SubagentRequests => {
+                    let path = PathBuf::from(&root).join("subagent-request.json");
+                    let requests = if path.exists() {
+                        vec![serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()]
+                    } else {
+                        Vec::new()
+                    };
+                    let path = PathBuf::from(&root).join("subagent-result.json");
+                    let results = if path.exists() {
+                        vec![serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()]
+                    } else {
+                        Vec::new()
+                    };
+                    Some(RelayResponsePayload::SubagentRequests { requests, results })
+                }
+                RelayRequest::CompleteSubagentRequest { result } => {
+                    std::fs::write(
+                        PathBuf::from(&root).join("subagent-result.json"),
+                        serde_json::to_vec(result).unwrap(),
+                    )
+                    .unwrap();
+                    let path = PathBuf::from(&root).join("subagent-request.json");
+                    if path.exists() {
+                        std::fs::remove_file(path).unwrap();
+                    }
+                    Some(RelayResponsePayload::SubagentRequestCompleted)
+                }
                 RelayRequest::HistoryRequests => {
                     let path = PathBuf::from(&root).join("history-request.json");
                     let requests = if path.exists() {
@@ -2408,4 +2435,191 @@ async fn a_discarded_session_retires_its_relay_actor() {
         .await
         .expect("the actor of a discarded session must stop reconnecting")
         .expect("the actor must not panic");
+}
+
+#[tokio::test]
+async fn delegation_bypasses_an_unconsumed_dashboard_and_observes_request_only_changes() {
+    let (feed, mut observations) = delegation_channel();
+    let (mut updates, _unconsumed_dashboard) = coalesced_update_channel();
+    updates.observer = Some(feed.register("parent"));
+    let mut view = view_at_ordinal(1);
+    let (watch, _) = watch::channel(ManagedSessionView::default());
+    publish_view("parent", view.clone(), &watch, &updates);
+    assert!(
+        observations
+            .recv()
+            .await
+            .unwrap()
+            .1
+            .unwrap()
+            .requests
+            .is_empty()
+    );
+    view.snapshot.as_mut().unwrap().subagent_requests.push(
+        mj_core::subagent::SubagentToolRequest {
+            request_id: "spawn".into(),
+            created_at_ms: 1,
+            action: mj_core::subagent::SubagentToolAction::ListAgents,
+        },
+    );
+    publish_view("parent", view, &watch, &updates);
+    let (_, observation) = tokio::time::timeout(Duration::from_secs(1), observations.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(observation.unwrap().requests[0].request_id, "spawn");
+}
+
+#[tokio::test]
+async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
+    let (feed, mut observations) = delegation_channel();
+    let early = feed.register("a");
+    let old = feed.register("z");
+    early.publish(&view_at_ordinal(1));
+    old.publish(&view_at_ordinal(1));
+    assert_eq!(observations.recv().await.unwrap().0, "a");
+    for n in 2..200 {
+        let mut view = view_at_ordinal(n);
+        view.snapshot.as_mut().unwrap().subagent_requests.push(
+            mj_core::subagent::SubagentToolRequest {
+                request_id: n.to_string(),
+                created_at_ms: 1,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        );
+        early.publish(&view);
+    }
+    assert_eq!(observations.recv().await.unwrap().0, "z");
+    assert_eq!(
+        observations.recv().await.unwrap().1.unwrap().requests[0].request_id,
+        "199"
+    );
+    let replacement = feed.register("z");
+    let mut view = view_at_ordinal(2);
+    view.snapshot.as_mut().unwrap().subagent_requests.push(
+        mj_core::subagent::SubagentToolRequest {
+            request_id: "new-actor".into(),
+            created_at_ms: 1,
+            action: mj_core::subagent::SubagentToolAction::ListAgents,
+        },
+    );
+    replacement.publish(&view);
+    old.publish(&view_at_ordinal(3));
+    drop(old);
+    assert_eq!(
+        observations.recv().await.unwrap().1.unwrap().requests[0].request_id,
+        "new-actor"
+    );
+    drop(replacement);
+    assert!(observations.recv().await.unwrap().1.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
+    const CHILD: &str = "MJ_TEST_DELEGATION_NO_DASHBOARD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "delegation_completes_with_web_disabled_and_dashboard_unconsumed",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "delegation-1171-unit")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let mut parent = crate::database::load_state()
+        .unwrap()
+        .sessions
+        .remove(LEASED_RELAY_SESSION)
+        .unwrap();
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: relay_root.path().join(LEASED_RELAY_SESSION),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let (feed, observations) = delegation_channel();
+    let manager = spawn_session_manager_observed(Some(feed)).unwrap();
+    manager
+        .targets
+        .send_replace(vec![leased_relay_target(relay_root.path())]);
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        manager.control.clone(),
+        &recovery.observer(),
+    );
+    let mut controller = crate::controller::Controller::load().unwrap();
+    controller.config.phone.enabled = false;
+    controller.config.profiles.clear();
+    let state = Arc::new(crate::daemon::RuntimeState::new(
+        manager.control.clone(),
+        controller,
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+    ));
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (_services, task) = crate::daemon::delegation::spawn(
+        state,
+        manager.control.clone(),
+        observations,
+        stop.clone(),
+    );
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while handle.view().snapshot.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = handle
+        .view()
+        .snapshot
+        .unwrap()
+        .materialized
+        .applied_event_ordinal;
+    // The worker's request changes without a transcript event. No reader ever
+    // consumes manager.updates and no web server or remote facade exists.
+    let request = mj_core::subagent::SubagentToolRequest {
+        request_id: "list-without-dashboard".into(),
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+        action: mj_core::subagent::SubagentToolAction::ListAgents,
+    };
+    std::fs::write(
+        relay_root.path().join("subagent-request.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    let path = relay_root.path().join("subagent-result.json");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("delegation completes without a dashboard consumer");
+    let result: mj_core::subagent::SubagentToolResult =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(result.request_id, request.request_id);
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        handle
+            .view()
+            .snapshot
+            .unwrap()
+            .materialized
+            .applied_event_ordinal,
+        before
+    );
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    manager.shutdown.shutdown().await.unwrap();
 }
