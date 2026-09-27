@@ -40,17 +40,29 @@ and [Targets](/targets/) for the concepts behind these fields.
 
 ## Location and version
 
-The default path is the operating system's configuration directory followed by
-`mjolnir/config.toml`. On a typical Linux installation that is
-`~/.config/mjolnir/config.toml`. Set `MJ_CONFIG_DIR` to replace the directory;
-Mjolnir appends `config.toml` to it.
+The default paths follow the operating system's configuration and data directories:
+
+| File | Linux (default XDG directories) | macOS |
+| --- | --- | --- |
+| Configuration | `~/.config/mjolnir/config.toml` | `~/Library/Application Support/mjolnir/config.toml` |
+| State database | `~/.local/share/mjolnir/mj.sqlite3` | `~/Library/Application Support/mjolnir/mj.sqlite3` |
+
+Set `MJ_CONFIG_DIR` to replace the configuration directory; Mjolnir appends
+`config.toml` to it. `MJ_DATA_DIR` replaces the data directory.
 
 Pass `--instance <name>` (short `-i`, or `MJ_INSTANCE=<name>`) to run a fully
 isolated copy: configuration, database, daemon, and logs move under
-`instances/<name>` inside the default directories (for example
-`~/.config/mjolnir/instances/dev/config.toml` and
-`~/.local/share/mjolnir/instances/dev/mj.sqlite3`). Each instance runs its own
-daemon, so parallel instances never share sessions. The name may only use ASCII
+`instances/<name>` inside the default directories. For `--instance dev`:
+
+| File | Linux | macOS |
+| --- | --- | --- |
+| Configuration | `~/.config/mjolnir/instances/dev/config.toml` | `~/Library/Application Support/mjolnir/instances/dev/config.toml` |
+| State database | `~/.local/share/mjolnir/instances/dev/mj.sqlite3` | `~/Library/Application Support/mjolnir/instances/dev/mj.sqlite3` |
+
+On macOS, configuration and data share the same instance directory under
+`Application Support`. Quote paths containing spaces when using them in a shell.
+Each instance runs its own daemon, so parallel instances never share sessions.
+The name may only use ASCII
 letters, digits, `.`, `-`, and `_`. Explicit `MJ_CONFIG_DIR`/`MJ_DATA_DIR`
 still take precedence over the instance directories.
 
