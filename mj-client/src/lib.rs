@@ -4,6 +4,7 @@ pub mod auth;
 pub mod image;
 pub mod quota;
 pub mod review;
+pub mod runtime_feed;
 pub mod session;
 pub mod target;
 pub mod web;

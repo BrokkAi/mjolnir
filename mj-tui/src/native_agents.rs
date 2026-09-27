@@ -69,13 +69,33 @@ impl DashboardState {
     }
 
     pub fn set_native_agents(&mut self, views: Vec<NativeAgentView>) {
-        let ids: BTreeSet<_> = views.iter().map(|view| view.agent.view_id()).collect();
-        for id in self.native_agents.keys().filter(|id| !ids.contains(*id)) {
-            self.state.sessions.remove(id);
+        self.set_native_agent_snapshot(
+            views
+                .into_iter()
+                .map(|view| (view.agent.view_id(), view))
+                .collect(),
+        );
+    }
+
+    pub fn set_native_agent_snapshot(
+        &mut self,
+        views: mj_core::snapshot_map::SnapshotMap<String, NativeAgentView>,
+    ) {
+        let changes = self
+            .native_sources
+            .changes(&views)
+            .map(|(id, view)| (id.clone(), view.cloned()))
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return;
         }
-        self.native_agents.retain(|id, _| ids.contains(id));
-        for view in views {
-            let id = view.agent.view_id();
+        self.native_sources = views;
+        for (id, view) in changes {
+            let Some(view) = view else {
+                self.state.sessions.remove(&id);
+                self.native_agents.remove(&id);
+                continue;
+            };
             // These records exist only in the presentation model. The controller
             // never sees a native child as a provisionable session.
             if let Some(mut row) = self

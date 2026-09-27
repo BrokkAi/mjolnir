@@ -69,6 +69,7 @@ impl RuntimeState {
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
             owner: Mutex::new(RuntimeStateOwner::new(controller)),
+            feed: Mutex::new(feed::RuntimeHistory::default()),
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),

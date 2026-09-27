@@ -638,9 +638,29 @@ impl DashboardState {
     /// row visible while the normal lifecycle feed catches up. Retained failed
     /// and cancelled intents stay attached to resume rows for explicit recovery.
     pub fn set_move_operations(&mut self, operations: impl IntoIterator<Item = MoveOperation>) {
-        let previous_active = self
+        self.set_move_snapshot(
+            operations
+                .into_iter()
+                .map(|operation| (operation.selection.session_id.clone(), operation))
+                .collect(),
+        );
+    }
+
+    pub fn set_move_snapshot(
+        &mut self,
+        operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
+    ) {
+        let changes = self
             .move_operations
-            .values()
+            .changes(&operations)
+            .map(|(id, next)| (self.move_operations.get(id).cloned(), next.cloned()))
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return;
+        }
+        let previous_active = changes
+            .iter()
+            .filter_map(|(previous, _)| previous.as_ref())
             .filter(|operation| operation.is_active())
             .map(|operation| {
                 (
@@ -649,13 +669,10 @@ impl DashboardState {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        self.move_operations = operations
-            .into_iter()
-            .map(|operation| (operation.selection.session_id.clone(), operation))
-            .collect();
-        let active = self
-            .move_operations
-            .values()
+        self.move_operations = operations;
+        let active = changes
+            .iter()
+            .filter_map(|(_, next)| next.as_ref())
             .filter(|operation| operation.is_active())
             .map(|operation| {
                 (

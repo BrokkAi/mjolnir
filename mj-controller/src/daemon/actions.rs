@@ -324,6 +324,9 @@ pub(super) async fn handle_action(
                 .runtime_snapshot(&workspace_id, after_revision, all_workspaces)
                 .await?,
         ))),
+        DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
+            state.runtime_changes(cursor, wait).await?,
+        ))),
         DaemonAction::RenameProfile { old_id, new_id } => {
             let _config_mutation = state.config_mutation.lock().await;
             ensure_no_active_lifecycle(state)?;
@@ -590,6 +593,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
             | DaemonAction::RuntimeSnapshot { .. }
+            | DaemonAction::RuntimeChanges { .. }
     ) {
         Ok(None)
     } else {

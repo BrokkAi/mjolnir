@@ -564,6 +564,10 @@ pub enum DaemonAction {
         #[serde(default)]
         all_workspaces: bool,
     },
+    RuntimeChanges {
+        cursor: Option<crate::runtime_feed::RuntimeCursor>,
+        wait: bool,
+    },
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -718,6 +722,7 @@ pub enum DaemonReply {
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
     RuntimeSnapshot(Box<RuntimeSnapshot>),
+    RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     RegisteredSession(Box<RegisteredSession>),
     MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
@@ -1623,6 +1628,20 @@ impl DaemonClient {
         }
     }
 
+    pub async fn runtime_changes(
+        &mut self,
+        cursor: Option<crate::runtime_feed::RuntimeCursor>,
+        wait: bool,
+    ) -> Result<crate::runtime_feed::RuntimeFrame> {
+        match self
+            .request(DaemonAction::RuntimeChanges { cursor, wait })
+            .await?
+        {
+            DaemonReply::RuntimeChanges(frame) => Ok(*frame),
+            reply => bail!("unexpected runtime changes reply {reply:?}"),
+        }
+    }
+
     pub async fn submit_session_command(
         &mut self,
         session_id: String,
@@ -1991,7 +2010,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
     )
 }
 // Delegation policies replace boolean creation fields and extend runtime snapshots.
-pub const PROTOCOL_VERSION: u32 = 39;
+pub const PROTOCOL_VERSION: u32 = 40;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

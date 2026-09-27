@@ -18,9 +18,15 @@ pub fn spawn_remote_dashboard_worker_poller(
     let (config_tx, config_rx) = tokio::sync::watch::channel(mj_core::config::Config::default());
     let (health_tx, health_rx) = tokio::sync::watch::channel(RuntimeFeedHealth::default());
     tokio::spawn(async move {
+        let replica = Arc::new(tokio::sync::Mutex::new(
+            mj_client::runtime_feed::RuntimeReplica::default(),
+        ));
         let mut feed = spawn_runtime_feed_with(
             workspace_id,
-            |workspace, revision| poll_daemon_runtime(workspace, revision, true),
+            move |_, revision| {
+                let replica = replica.clone();
+                async move { poll_daemon_runtime(replica, revision).await }
+            },
             load_runtime_projection,
         );
         let mut native = super::native_agents::NativeAgentLoader::default();
@@ -29,7 +35,7 @@ pub fn spawn_remote_dashboard_worker_poller(
             tokio::select! {
                 _ = state_tx.closed() => return,
                 () = native.next(), if native.has_work() => {
-                    state_tx.send_modify(|state| state.native_agents = native.views());
+                    state_tx.send_modify(|state| state.native_agents = native.views_snapshot());
                     health_tx.send_if_modified(|health| {
                         let error = native.error();
                         if health.native_error == error { false } else { health.native_error = error; true }
@@ -42,11 +48,12 @@ pub fn spawn_remote_dashboard_worker_poller(
                 update = feed.updates.recv() => {
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
+                            let metadata = snapshot.metadata;
                             config_tx.send_if_modified(|config| {
-                                if *config == snapshot.config { false }
-                                else { *config = snapshot.config.clone(); true }
+                                if *config == metadata.config { false }
+                                else { *config = metadata.config.clone(); true }
                             });
-                            native.update(snapshot.native_agents);
+                            native.update_snapshot(snapshot.native_agents);
                             health_tx.send_if_modified(|health| {
                                 let recovered = health.refresh_error.take().is_some();
                                 let native_error = native.error();
@@ -55,17 +62,17 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 recovered || changed
                             });
                             state_tx.send_replace(RuntimeStateUpdate {
-                                last_subagent_policy: snapshot.last_subagent_policy,
-                                native_agents: native.views(),
-                                workspace_names: snapshot.workspace_names,
+                                last_subagent_policy: metadata.last_subagent_policy,
+                                native_agents: native.views_snapshot(),
+                                workspace_names: metadata.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,
-                                lifecycles: snapshot.lifecycles,
+                                lifecycles: metadata.lifecycles,
                                 moves: snapshot.moves,
                                 subagents: snapshot.subagents,
                             });
-                            reviews_tx.send_replace(snapshot.reviews);
-                            notices_tx.send_replace(snapshot.notices);
+                            reviews_tx.send_replace(metadata.reviews);
+                            notices_tx.send_replace(metadata.notices);
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
                             if publisher.publish(session_id, *view).await.is_err() { return; }
@@ -101,14 +108,23 @@ pub fn spawn_remote_dashboard_worker_poller(
 }
 
 pub(super) async fn poll_daemon_runtime(
-    workspace_id: String,
+    replica: Arc<tokio::sync::Mutex<mj_client::runtime_feed::RuntimeReplica>>,
     after_revision: u64,
-    all_workspaces: bool,
-) -> Result<daemon::RuntimeSnapshot> {
-    let mut daemon = mj_client::daemon::connect_existing().await?;
-    daemon
-        .runtime_snapshot(workspace_id, after_revision, all_workspaces)
-        .await
+) -> Result<mj_client::runtime_feed::RuntimeProjection> {
+    let mut replica = replica.lock().await;
+    loop {
+        let mut daemon = mj_client::daemon::connect_existing().await?;
+        let wait = after_revision != 0 && after_revision == replica.projection.revision;
+        let frame = daemon.runtime_changes(replica.cursor.clone(), wait).await?;
+        if let Err(error) = replica.apply(frame) {
+            replica.cursor = None;
+            return Err(error);
+        }
+        if replica.cursor.is_none() {
+            continue;
+        }
+        return Ok(replica.projection.clone());
+    }
 }
 
 /// A submit the daemon answered with an error was refused, not lost, unless

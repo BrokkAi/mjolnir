@@ -1,4 +1,6 @@
 use super::*;
+use mj_client::runtime_feed::RuntimeProjection;
+use mj_core::snapshot_map::SnapshotMap;
 
 pub struct RemoteDashboardWorkerPoller {
     pub targets: tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
@@ -18,16 +20,16 @@ pub struct RemoteDashboardWorkerPoller {
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeStateUpdate {
     pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
-    pub native_agents: Vec<mj_core::native_agent::NativeAgentView>,
+    pub native_agents: SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,
-    pub records: Vec<SessionRecord>,
+    pub records: SnapshotMap<String, SessionRecord>,
     pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
-    pub moves: Vec<mj_core::state::MoveOperation>,
+    pub moves: SnapshotMap<String, mj_core::state::MoveOperation>,
     /// Parent/child relations for the sessions in `records`, so a surface can
     /// keep a daemon-created child out of the real workspace without a full
     /// state reload.
-    pub subagents: Vec<SubagentRecord>,
+    pub subagents: SnapshotMap<String, SubagentRecord>,
 }
 
 /// What a session looked like the last time a view was published for it.
@@ -102,7 +104,7 @@ impl ProjectionConvergence {
 /// Read-only updates shared by the dashboard and workspace preview. A snapshot
 /// precedes its session views, so consumers can establish membership first.
 pub enum RuntimeFeedUpdate {
-    Snapshot(Box<daemon::RuntimeSnapshot>),
+    Snapshot(Box<RuntimeProjection>),
     Session {
         session_id: String,
         view: Box<ManagedSessionView>,
@@ -151,14 +153,15 @@ pub(super) async fn load_runtime_projection(session_id: String) -> Result<Stored
     .context("projection load task failed")?
 }
 
-pub(super) fn spawn_runtime_feed_with<P, PF, L, LF>(
+pub(super) fn spawn_runtime_feed_with<P, PF, L, LF, S>(
     workspace_id: String,
     poll: P,
     load: L,
 ) -> RuntimeFeed
 where
     P: Fn(String, u64) -> PF + Send + 'static,
-    PF: Future<Output = Result<daemon::RuntimeSnapshot>> + Send,
+    PF: Future<Output = Result<S>> + Send,
+    S: Into<RuntimeProjection> + Send + 'static,
     L: Fn(String) -> LF + Clone + Send + 'static,
     LF: Future<Output = Result<StoredProjection>> + Send + 'static,
 {
@@ -183,7 +186,7 @@ fn refresh_failure_notice(error: &anyhow::Error) -> String {
     }
 }
 
-pub(super) async fn run_runtime_feed<P, PF, L, LF>(
+pub(super) async fn run_runtime_feed<P, PF, L, LF, S>(
     workspace_id: String,
     poll: P,
     load: L,
@@ -191,16 +194,19 @@ pub(super) async fn run_runtime_feed<P, PF, L, LF>(
 ) -> Result<()>
 where
     P: Fn(String, u64) -> PF,
-    PF: Future<Output = Result<daemon::RuntimeSnapshot>>,
+    PF: Future<Output = Result<S>>,
+    S: Into<RuntimeProjection>,
     L: Fn(String) -> LF + Clone + Send + 'static,
     LF: Future<Output = Result<StoredProjection>> + Send + 'static,
 {
     let mut revision = 0;
     let mut convergence = ProjectionConvergence::default();
     let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
+    let mut previous_sessions = SnapshotMap::new();
+    let mut pending_ids = std::collections::BTreeSet::new();
     loop {
         let mut snapshot = match poll(workspace_id.clone(), revision).await {
-            Ok(snapshot) => snapshot,
+            Ok(snapshot) => snapshot.into(),
             Err(error) => {
                 if tx
                     .send(RuntimeFeedUpdate::Error(refresh_failure_notice(&error)))
@@ -215,10 +221,20 @@ where
         };
         let snapshot_revision = snapshot.revision;
         let sessions = std::mem::take(&mut snapshot.sessions);
-        published.retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
-        convergence
-            .attempts
-            .retain(|id, _| sessions.iter().any(|session| &session.session_id == id));
+        for (id, runtime) in previous_sessions.changes(&sessions) {
+            match runtime {
+                Some(runtime) if !published.get(id).is_some_and(|last| last.matches(runtime)) => {
+                    pending_ids.insert(id.clone());
+                }
+                None => {
+                    published.remove(id);
+                    pending_ids.remove(id);
+                    convergence.attempts.remove(id);
+                }
+                Some(_) => {}
+            }
+        }
+        previous_sessions = sessions.clone();
         if tx
             .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
             .await
@@ -226,13 +242,9 @@ where
         {
             return Ok(());
         }
-        let mut pending = sessions
-            .into_iter()
-            .filter(|runtime| {
-                !published
-                    .get(&runtime.session_id)
-                    .is_some_and(|last| last.matches(runtime))
-            })
+        let mut pending = pending_ids
+            .iter()
+            .filter_map(|id| sessions.get(id).cloned())
             .collect::<std::collections::VecDeque<_>>();
         let mut tasks = tokio::task::JoinSet::new();
         let mut retry = false;
@@ -259,12 +271,14 @@ where
             let (runtime, stored) = result.context("join runtime projection reader")?;
             let session_id = runtime.session_id.clone();
             let fingerprint = PublishedView::of(&runtime);
+            let expects_projection = runtime.operational.is_some();
             let Some(view) = runtime_projection_view(runtime, stored, &mut convergence) else {
                 retry = true;
                 continue;
             };
-            if view.snapshot.is_some() {
+            if view.snapshot.is_some() || !expects_projection {
                 published.insert(session_id.clone(), fingerprint);
+                pending_ids.remove(&session_id);
             } else {
                 published.remove(&session_id);
             }

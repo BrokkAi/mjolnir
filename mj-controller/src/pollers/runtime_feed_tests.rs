@@ -216,7 +216,7 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
     match first {
         RuntimeFeedUpdate::Snapshot(snapshot) => {
             assert_eq!(snapshot.records.len(), 1);
-            assert_eq!(snapshot.records[0].id, "session-1");
+            assert_eq!(snapshot.records["session-1"].id, "session-1");
         }
         RuntimeFeedUpdate::Session { .. } => panic!("session projection preceded its snapshot"),
         RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
@@ -380,6 +380,50 @@ async fn runtime_feed_reports_poll_failure_and_recovers() {
 }
 
 #[tokio::test]
+async fn a_worker_without_a_projection_is_not_retried_until_its_view_changes() {
+    let (poll_tx, mut polls) = tokio::sync::mpsc::unbounded_channel::<
+        tokio::sync::oneshot::Sender<Result<daemon::RuntimeSnapshot>>,
+    >();
+    let poll = move |_: String, _: u64| {
+        let poll_tx = poll_tx.clone();
+        async move {
+            let (finish, answer) = tokio::sync::oneshot::channel();
+            poll_tx.send(finish).unwrap();
+            answer.await.unwrap()
+        }
+    };
+    let load = |_: String| async { panic!("a worker without a projection must not read one") };
+    let mut feed = spawn_runtime_feed_with("workspace".into(), poll, load);
+    for revision in 1..=2 {
+        let mut view = runtime_view("session", 0, "");
+        view.operational = None;
+        view.connected = false;
+        polls
+            .recv()
+            .await
+            .unwrap()
+            .send(Ok(snapshot(revision, vec![view], Vec::new())))
+            .unwrap();
+        assert!(matches!(
+            feed.updates.recv().await,
+            Some(RuntimeFeedUpdate::Snapshot(_))
+        ));
+        if revision == 1 {
+            assert!(matches!(
+                feed.updates.recv().await,
+                Some(RuntimeFeedUpdate::Session { .. })
+            ));
+        }
+    }
+    // The next poll starts only after the preceding publication is complete.
+    let _pending_poll = polls.recv().await.unwrap();
+    assert!(matches!(
+        feed.updates.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn dropping_runtime_feed_cancels_a_delayed_poll() {
     let poll_dropped = Arc::new(AtomicBool::new(false));
     let (poll_started_tx, mut poll_started_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -391,8 +435,7 @@ async fn dropping_runtime_feed_cancels_a_delayed_poll() {
             async move {
                 poll_started_tx.send(()).expect("poll starts");
                 let _guard = DropFlag(poll_dropped);
-                std::future::pending::<()>().await;
-                unreachable!("pending poll completed")
+                std::future::pending::<Result<daemon::RuntimeSnapshot>>().await
             }
         }
     };

@@ -1,6 +1,7 @@
 //! Native transcript loading never delays the shared runtime subscription.
 use super::*;
 use mj_core::native_agent::{NativeAgentHistoryPage, NativeAgentSummary, NativeAgentView};
+use mj_core::snapshot_map::SnapshotMap;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,33 +20,60 @@ impl RuntimeFeedHealth {
 
 #[derive(Default)]
 pub(super) struct NativeAgentLoader {
-    desired: BTreeMap<String, NativeAgentSummary>,
-    views: BTreeMap<String, NativeAgentView>,
+    desired: SnapshotMap<String, NativeAgentSummary>,
+    views: SnapshotMap<String, NativeAgentView>,
     failures: BTreeMap<String, (NativeAgentSummary, String)>,
     retry: BTreeSet<String>,
     active: BTreeSet<String>,
+    pending: BTreeSet<String>,
     tasks: tokio::task::JoinSet<(String, NativeAgentSummary, Result<NativeAgentView>)>,
 }
 
 impl NativeAgentLoader {
+    #[cfg(test)]
     pub fn update(&mut self, summaries: Vec<NativeAgentSummary>) {
-        self.desired = summaries
-            .into_iter()
-            .map(|summary| (summary.agent.view_id(), summary))
-            .collect();
-        self.views.retain(|id, view| {
-            self.desired
-                .get(id)
-                .is_some_and(|summary| summary.generation_ordinal == view.generation_ordinal)
-        });
+        self.update_snapshot(
+            summaries
+                .into_iter()
+                .map(|summary| (summary.agent.view_id(), summary))
+                .collect(),
+        );
+    }
+
+    pub fn update_snapshot(&mut self, summaries: SnapshotMap<String, NativeAgentSummary>) {
+        for (id, summary) in self.desired.changes(&summaries) {
+            if summary.is_some_and(|summary| {
+                self.views
+                    .get(id)
+                    .is_none_or(|view| !summary.is_satisfied_by(view))
+            }) {
+                self.pending.insert(id.clone());
+            } else {
+                self.pending.remove(id);
+            }
+            if summary.is_none_or(|summary| {
+                self.views
+                    .get(id)
+                    .is_some_and(|view| summary.generation_ordinal != view.generation_ordinal)
+            }) {
+                self.views.remove(id);
+            }
+            self.failures.remove(id);
+        }
+        self.desired = summaries;
         // A subsequent successful poll gives transient read failures another try.
         self.failures
             .retain(|id, (summary, _)| self.desired.get(id) == Some(summary));
         self.retry = self.failures.keys().cloned().collect();
     }
 
+    #[cfg(test)]
     pub fn views(&self) -> Vec<NativeAgentView> {
         self.views.values().cloned().collect()
+    }
+
+    pub fn views_snapshot(&self) -> SnapshotMap<String, NativeAgentView> {
+        self.views.clone()
     }
 
     pub fn error(&self) -> Option<String> {
@@ -56,8 +84,9 @@ impl NativeAgentLoader {
     }
 
     fn pending(&self) -> Option<(String, NativeAgentSummary)> {
-        self.desired
+        self.pending
             .iter()
+            .filter_map(|id| self.desired.get(id).map(|summary| (id, summary)))
             .find(|(id, summary)| {
                 !self.active.contains(*id)
                     && (!self.failures.contains_key(*id) || self.retry.contains(*id))
@@ -128,6 +157,7 @@ impl NativeAgentLoader {
         match result {
             Ok(view) if desired.is_satisfied_by(&view) => {
                 self.failures.remove(&id);
+                self.pending.remove(&id);
                 self.views.insert(id, view);
             }
             Ok(_) => {} // The next read follows the newer published fingerprint.

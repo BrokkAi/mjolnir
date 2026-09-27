@@ -1,5 +1,6 @@
 //! Persistent per-user controller daemon and its authenticated local protocol.
 
+mod feed;
 mod owner;
 mod record_index;
 mod session_move;
@@ -117,6 +118,7 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
+    feed: Mutex<feed::RuntimeHistory>,
     committed: Option<
         tokio::sync::watch::Receiver<
             std::result::Result<crate::database::CommittedState, Arc<str>>,

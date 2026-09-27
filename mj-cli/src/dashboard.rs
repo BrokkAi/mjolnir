@@ -1506,7 +1506,7 @@ impl DashboardContext {
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
         let runtime_state_rx = remote_worker.state;
-        dashboard.set_move_operations(runtime_state_rx.borrow().moves.clone());
+        dashboard.set_move_snapshot(runtime_state_rx.borrow().moves.clone());
         let runtime_reviews_rx = remote_worker.reviews;
         let runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView> =
             runtime_reviews_rx

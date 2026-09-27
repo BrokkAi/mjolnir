@@ -295,8 +295,9 @@ impl DashboardContext {
             update.subagents,
             update.last_subagent_policy,
         );
-        self.dashboard.set_native_agents(update.native_agents);
-        self.dashboard.set_move_operations(update.moves);
+        self.dashboard
+            .set_native_agent_snapshot(update.native_agents);
+        self.dashboard.set_move_snapshot(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
         self.controller_changed = true;
     }
@@ -429,19 +430,12 @@ impl DashboardContext {
 
     pub(crate) fn apply_runtime_records(
         &mut self,
-        records: Vec<SessionRecord>,
-        subagents: Vec<SubagentRecord>,
+        records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+        subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord>,
         last_subagent_policy: mj_core::subagent::SubagentPolicy,
     ) {
-        let mut sessions: mj_core::snapshot_map::SnapshotMap<String, SessionRecord> = records
-            .into_iter()
-            .map(|session| (session.id.clone(), session))
-            .collect();
+        let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
-        let subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentRecord> = subagents
-            .into_iter()
-            .map(|subagent| (subagent.child_session_id.clone(), subagent))
-            .collect();
         let Self {
             chats, dashboard, ..
         } = self;

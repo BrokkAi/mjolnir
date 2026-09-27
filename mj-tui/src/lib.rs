@@ -796,7 +796,7 @@ pub struct DashboardState {
     pub(crate) launch_standby_anchor: Option<String>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
-    pub(crate) move_operations: BTreeMap<String, MoveOperation>,
+    pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
     /// The build stamped on the workspace pane, as `v2.11.0`. It is a field
     /// rather than the compiled constant so the documentation capture can pin
@@ -969,6 +969,8 @@ pub struct DashboardState {
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
     subagent_parent_id: Option<String>,
     pub(crate) native_agents: BTreeMap<String, native_agents::NativeAgentPane>,
+    pub(crate) native_sources:
+        mj_core::snapshot_map::SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
     /// read-only because there is no worker to attach to.
     pub(crate) stopped_subagents: BTreeMap<String, stopped_subagents::StoppedSubagentPane>,
@@ -1077,7 +1079,7 @@ impl DashboardState {
             standby_prompts: BTreeMap::new(),
             launch_standby: None,
             launch_standby_anchor: None,
-            move_operations: BTreeMap::new(),
+            move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
@@ -1143,6 +1145,7 @@ impl DashboardState {
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
             subagent_parent_id: None,
             native_agents: BTreeMap::new(),
+            native_sources: Default::default(),
             stopped_subagents: BTreeMap::new(),
             stopped_by_suspend: StoppedBySuspend::default(),
             workspace_views: BTreeMap::new(),

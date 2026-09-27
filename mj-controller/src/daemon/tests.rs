@@ -411,7 +411,7 @@ fn zombie_only_daemon_group_counts_as_gone() {
     child.wait().expect("reap process-group leader");
 }
 
-fn test_runtime_state() -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(

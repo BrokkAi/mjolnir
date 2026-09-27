@@ -26,7 +26,7 @@ interface; do not implement a second delegation scheduler.
 - [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; pollability work-count coverage passes at 100, 10,000, and 100,000 historical sessions; remaining consumer scaling coverage is pending).
 - [ ] Integrate ordered persistence receipts and lifecycle ownership (committed publication integrated; lifecycle phases explicit; remaining late-effect and worker-incarnation audit pending).
 - [ ] Replace daemon reloads and poller scans with maintained projections (pollable workers maintained in memory; historical runtime snapshot projections remain).
-- [ ] Implement cursor-based incremental TUI and web feeds.
+- [ ] Implement cursor-based incremental TUI and web feeds (daemon cursor protocol and keyed TUI consumers implemented; browser projection and SSE conversion remain).
 - [ ] Remove obsolete caches, validate scaling, upgrade, and recovery behavior.
 - [ ] Complete required Cargo checks and commit validated checkpoints.
 
@@ -314,3 +314,37 @@ library tests, 235 CLI unit tests, 11 daemon-startup tests, all 11 terminal PTY
 tests, and all 4 store-divergence tests. `cargo clippy --all-targets -- -D warnings`
 and formatting checks pass. No live instance was started or upgraded. The
 remaining work is incremental client feeds and the remaining ownership audit.
+
+Checkpoint note (2026-09-27): 98960791 commits worker observations under the
+operational owner and bounded lifecycle retention. The next checkpoint introduces
+protocol 40 with RuntimeChanges: an incarnation/sequence cursor, immutable keyed
+snapshots, deltas, and explicit ResetRequired. The daemon retains at most 4,096
+snapshots or 16 MiB of changes. An oversized change discards prior history and
+keeps the current snapshot as the reset boundary. Capture subscribes before
+reading owner state, so a transition during attachment leaves a pending wakeup.
+Records, workers, and lifecycles cross the same owner boundary; serialization and
+history bookkeeping happen after releasing that owner lock.
+
+The normal TUI poller now consumes RuntimeChanges and keeps records, relations,
+moves, native summaries, and native views in structurally shared keyed maps.
+Transcript reads come from changed worker entries or outstanding retries.
+Native projection loading maintains pending keys instead of scanning all desired
+children. Existing explicit RuntimeSnapshot callers remain for one-shot actions.
+Legacy revision ordering is preserved for management-response reconciliation;
+the transport's incarnation cursor controls resynchronization across replacement.
+
+Validation note (2026-09-27): The first cursor/feed validation passed 41 client
+tests and 1,884 controller tests (8 ignored). New tests exercise atomic delta
+application, duplicate delivery, gaps, replacement, bounded retention, oversized
+changes, and attachment followed by owner mutation. Additional TUI keyed-consumer
+validation and Clippy are running. Browser snapshots, browser SSE, and the web
+runtime's project/native metadata refresh loops still require conversion.
+
+Validation checkpoint (2026-09-27): The keyed TUI projection passes 835 TUI
+tests (2 ignored), seven native-loader regressions, and ten runtime-feed
+regressions. A worker observation with no projection is now published once and
+waits for a changed observation rather than staying in the retry set. Protocol
+40 passes all 11 isolated daemon-startup tests, all 11 terminal PTY/handoff tests,
+and all four store-divergence tests. Clippy and formatting checks pass. The full
+workspace suite passed at 98960791; final full validation remains due after the
+remaining web/ownership work. No live daemon was launched or upgraded.
