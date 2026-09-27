@@ -1002,7 +1002,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
             label_area,
         );
         frame.render_widget(
-            Paragraph::new(" X ").style(theme::selection(false)),
+            Paragraph::new(" X ").style(theme::actionable_chip()),
             close_area,
         );
         return;

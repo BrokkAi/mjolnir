@@ -2089,50 +2089,63 @@ fn composer_title_names_plan_mode_even_during_a_turn() {
 
 #[test]
 fn effort_separator_between_prompt_chips_is_not_clickable() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[
-        select_config("model", "fast", &["fast", "slow"]),
-        select_config("effort", "high", &["low", "high"]),
-    ]);
-    let (title, _, chips) = prompt_title_line(&chat, Rect::new(0, 0, 100, 3));
-    chat.config_chip_areas = chips;
+    for palette in theme::UiTheme::ALL {
+        theme::with_theme(palette, || {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_config_options(&[
+                select_config("model", "fast", &["fast", "slow"]),
+                select_config("effort", "high", &["low", "high"]),
+            ]);
+            let (title, _, chips) = prompt_title_line(&chat, Rect::new(0, 0, 100, 3));
+            chat.config_chip_areas = chips;
 
-    let separator = title
-        .spans
-        .iter()
-        .position(|span| span.content == "· ")
-        .expect("the effort separator is rendered");
-    assert_eq!(title.spans[separator].style, theme::muted());
-    assert_eq!(
-        title.spans[separator + 1].content,
-        format!("{} ", chat.current_effort().unwrap())
-    );
-    assert_eq!(title.spans[separator + 1].style, theme::selection(false));
+            let separator = title
+                .spans
+                .iter()
+                .position(|span| span.content == "· ")
+                .expect("the effort separator is rendered");
+            assert_eq!(title.spans[separator].style, theme::muted());
+            assert_eq!(
+                title.spans[separator + 1].content,
+                format!("{} ", chat.current_effort().unwrap())
+            );
+            assert_eq!(title.spans[separator + 1].style, theme::actionable_chip());
 
-    let (_, model) = chat
-        .config_chip_areas
-        .iter()
-        .find(|(key, _)| *key == "model")
-        .copied()
-        .expect("the model chip is rendered");
-    let (_, effort) = chat
-        .config_chip_areas
-        .iter()
-        .find(|(key, _)| *key == "effort")
-        .copied()
-        .expect("the effort value is rendered");
-    assert_eq!(effort.x, model.right() + display_width("· ") as u16);
-    assert_eq!(
-        chat.prompt_config_chip_at(model.right(), model.y),
-        None,
-        "the separator dot has no click hitbox"
-    );
-    assert_eq!(chat.prompt_config_chip_at(model.right() + 1, model.y), None);
-    assert_eq!(chat.prompt_config_chip_at(model.x, model.y), Some("model"));
-    assert_eq!(
-        chat.prompt_config_chip_at(effort.x, effort.y),
-        Some("effort")
-    );
+            let (_, model) = chat
+                .config_chip_areas
+                .iter()
+                .find(|(key, _)| *key == "model")
+                .copied()
+                .expect("the model chip is rendered");
+            let (_, effort) = chat
+                .config_chip_areas
+                .iter()
+                .find(|(key, _)| *key == "effort")
+                .copied()
+                .expect("the effort value is rendered");
+            assert_eq!(effort.x, model.right() + display_width("· ") as u16);
+            assert_eq!(
+                chat.prompt_config_chip_at(model.right(), model.y),
+                None,
+                "the separator dot has no click hitbox"
+            );
+            assert_eq!(chat.prompt_config_chip_at(model.right() + 1, model.y), None);
+            assert_eq!(chat.prompt_config_chip_at(model.x, model.y), Some("model"));
+            assert_eq!(
+                chat.prompt_config_chip_at(effort.x, effort.y),
+                Some("effort")
+            );
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal
+                .draw(|frame| render_full_frame(frame, &mut chat, false))
+                .unwrap();
+            for (_, area) in &chat.config_chip_areas {
+                let cell = &terminal.backend().buffer()[(area.x, area.y)];
+                assert_eq!(cell.fg, theme::palette().accent);
+                assert_eq!(cell.bg, theme::palette().selection);
+            }
+        });
+    }
 }
 
 fn select_config(key: &str, current: &str, values: &[&'static str]) -> SessionConfigOption {
@@ -2152,68 +2165,98 @@ fn select_config(key: &str, current: &str, values: &[&'static str]) -> SessionCo
 }
 
 #[test]
-fn subagents_are_blue_highlighted_as_clickable_on_prompt_border() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_subagent_count(2);
-    let mut terminal =
-        Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("chat draws");
-    let area = chat
-        .subagent_control_area
-        .expect("the sub-agent control is rendered");
-    let buffer = terminal.backend().buffer();
-    let label = (area.x..area.right())
-        .map(|x| buffer[(x, area.y)].symbol())
-        .collect::<String>();
-    assert_eq!(label, " Subagents · 0 working ");
-    assert!((area.x..area.right()).all(|x| {
-        let cell = &buffer[(x, area.y)];
-        cell.bg == theme::palette().selection && cell.fg == theme::palette().text
-    }));
+fn subagents_are_accented_as_clickable_on_prompt_border() {
+    for palette in theme::UiTheme::ALL {
+        theme::with_theme(palette, || {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_subagent_count(2);
+            let mut terminal =
+                Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
+            terminal
+                .draw(|frame| render_full_frame(frame, &mut chat, false))
+                .expect("chat draws");
+            let area = chat
+                .subagent_control_area
+                .expect("the sub-agent control is rendered");
+            let buffer = terminal.backend().buffer();
+            let label = (area.x..area.right())
+                .map(|x| buffer[(x, area.y)].symbol())
+                .collect::<String>();
+            assert_eq!(label, " Subagents · 0 working ");
+            assert!((area.x..area.right()).all(|x| {
+                let cell = &buffer[(x, area.y)];
+                cell.bg == theme::palette().selection && cell.fg == theme::palette().accent
+            }));
+            chat.subagent_control_focused = true;
+            terminal
+                .draw(|frame| render_full_frame(frame, &mut chat, false))
+                .unwrap();
+            let cell = &terminal.backend().buffer()[(area.x, area.y)];
+            let focused = theme::focus_control();
+            if !theme::is_mono() {
+                assert_eq!(Some(cell.bg), focused.bg);
+                assert_eq!(Some(cell.fg), focused.fg);
+            }
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        });
+    }
 }
 
 #[test]
-fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        checking_response: false,
-        quota_recovery: None,
-        capacity_retry: None,
-        activity_turn_started_at_ms: None,
-        prompt_in_flight: false,
-        idle_since_ms: None,
-        execution: None,
-        harness_turn_started_at_ms: None,
-        state: None,
-        foreground_tool_started_at_ms: None,
-        background_commands: vec![mj_core::relay::BackgroundCommand {
-            id: "test:task".into(),
-            started_at_ms: 0,
-            command: "cargo test".into(),
-            can_stop: false,
-        }],
-        active_user_shells: Vec::new(),
-    });
-    let mut terminal =
-        Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("chat draws");
-    let area = chat
-        .task_control_area
-        .expect("the running-task control is rendered");
-    let buffer = terminal.backend().buffer();
-    let label = (area.x..area.right())
-        .map(|x| buffer[(x, area.y)].symbol())
-        .collect::<String>();
-    assert_eq!(label, " View tasks (1) ");
-    assert!((area.x..area.right()).all(|x| {
-        let cell = &buffer[(x, area.y)];
-        cell.bg == theme::palette().selection && cell.fg == theme::palette().text
-    }));
+fn running_tasks_are_accented_as_clickable_on_prompt_border() {
+    for palette in theme::UiTheme::ALL {
+        theme::with_theme(palette, || {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_session_activity(mj_client::usage_format::SessionActivity {
+                pursuing_goal: Default::default(),
+                checking_response: false,
+                quota_recovery: None,
+                capacity_retry: None,
+                activity_turn_started_at_ms: None,
+                prompt_in_flight: false,
+                idle_since_ms: None,
+                execution: None,
+                harness_turn_started_at_ms: None,
+                state: None,
+                foreground_tool_started_at_ms: None,
+                background_commands: vec![mj_core::relay::BackgroundCommand {
+                    id: "test:task".into(),
+                    started_at_ms: 0,
+                    command: "cargo test".into(),
+                    can_stop: false,
+                }],
+                active_user_shells: Vec::new(),
+            });
+            let mut terminal =
+                Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
+            terminal
+                .draw(|frame| render_full_frame(frame, &mut chat, false))
+                .expect("chat draws");
+            let area = chat
+                .task_control_area
+                .expect("the running-task control is rendered");
+            let buffer = terminal.backend().buffer();
+            let label = (area.x..area.right())
+                .map(|x| buffer[(x, area.y)].symbol())
+                .collect::<String>();
+            assert_eq!(label, " View tasks (1) ");
+            assert!((area.x..area.right()).all(|x| {
+                let cell = &buffer[(x, area.y)];
+                cell.bg == theme::palette().selection && cell.fg == theme::palette().accent
+            }));
+            chat.task_control_focused = true;
+            terminal
+                .draw(|frame| render_full_frame(frame, &mut chat, false))
+                .unwrap();
+            let cell = &terminal.backend().buffer()[(area.x, area.y)];
+            let focused = theme::focus_control();
+            if !theme::is_mono() {
+                assert_eq!(Some(cell.bg), focused.bg);
+                assert_eq!(Some(cell.fg), focused.fg);
+            }
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        });
+    }
 }
 
 #[test]

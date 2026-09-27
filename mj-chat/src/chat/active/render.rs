@@ -620,11 +620,10 @@ pub(crate) fn render_composer_band(
         bottom_spans.push(Span::styled(
             task_label,
             if chat.task_control_focused() {
-                theme::selection(true)
+                theme::focus_control()
             } else {
-                // The chip is always clickable while its work is running, so
-                // keep its blue highlight; focus only adds accent foreground.
-                theme::selection(false)
+                // Advertise the action before keyboard focus reaches it.
+                theme::actionable_chip()
             },
         ));
         bottom_left_width = task_start + usize::from(task_width);
@@ -653,11 +652,10 @@ pub(crate) fn render_composer_band(
             if !subagents_ready {
                 theme::hint_description()
             } else if chat.subagent_control_focused() {
-                theme::selection(true)
+                theme::focus_control()
             } else {
-                // The chip is always clickable, so keep its blue highlight;
-                // keyboard focus only adds the accent foreground.
-                theme::selection(false)
+                // Advertise the action before keyboard focus reaches it.
+                theme::actionable_chip()
             },
         ));
     }
@@ -859,7 +857,7 @@ pub(crate) fn prompt_title_line(
                 ),
             ));
         }
-        spans.push(Span::styled(text, theme::selection(false)));
+        spans.push(Span::styled(text, theme::actionable_chip()));
         chip_x = chip_x.saturating_add(width);
     }
     if let Some(effort) = effort {
@@ -894,7 +892,7 @@ pub(crate) fn prompt_title_line(
             } else {
                 text
             },
-            theme::selection(false),
+            theme::actionable_chip(),
         ));
     }
     if !suffix.is_empty() {

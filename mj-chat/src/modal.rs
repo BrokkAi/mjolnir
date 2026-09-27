@@ -66,9 +66,9 @@ pub fn dismissible_modal_title<K: Copy + Eq>(
     let dismiss_style = if !enabled {
         theme::muted().patch(theme::raised())
     } else if form.dismiss_is_armed() {
-        theme::selection(true)
+        theme::focus_control()
     } else {
-        theme::selection(false)
+        theme::actionable_chip()
     };
     Line::from(vec![
         Span::styled(theme::glyphs().close, dismiss_style),
@@ -347,7 +347,7 @@ mod tests {
         let popup = Rect::new(10, 6, 30, 12);
         let mut form = Form::<u8>::new();
         let available = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
-        assert_eq!(available.spans[0].style, theme::selection(false));
+        assert_eq!(available.spans[0].style, theme::actionable_chip());
 
         let mouse = |kind, column, row| {
             Event::Mouse(crossterm::event::MouseEvent {
@@ -363,7 +363,7 @@ mod tests {
             popup.y,
         ));
         let armed = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
-        assert_eq!(armed.spans[0].style, theme::selection(true));
+        assert_eq!(armed.spans[0].style, theme::focus_control());
 
         let disabled = dismissible_modal_title(&mut form, popup, "Title", Style::default(), false);
         assert_eq!(

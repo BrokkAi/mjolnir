@@ -446,6 +446,11 @@ pub fn actionable() -> Style {
     Style::default().fg(palette().accent)
 }
 
+/// A clickable chip that retains its surface and monochrome affordance.
+pub fn actionable_chip() -> Style {
+    selection(false).patch(actionable())
+}
+
 pub fn muted() -> Style {
     Style::default().fg(palette().muted)
 }

@@ -783,7 +783,7 @@
     <text x="167" y="280" fill="#efede8">t</text>
     <text x="176" y="280" fill="#efede8">e</text>
     <text x="212" y="280" fill="#97a3a3">╭</text>
-    <text x="230" y="280" fill="#efede8" font-weight="700">×</text>
+    <text x="230" y="280" fill="#9de5ca" font-weight="700">×</text>
     <text x="248" y="280" fill="#9de5ca" font-weight="700">N</text>
     <text x="257" y="280" fill="#9de5ca" font-weight="700">e</text>
     <text x="266" y="280" fill="#9de5ca" font-weight="700">w</text>
