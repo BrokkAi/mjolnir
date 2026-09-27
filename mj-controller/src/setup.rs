@@ -8,9 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, ensure};
 
 use crate::doctor::{
-    CheckStatus, DoctorCheck, DoctorOptions, all_ready, apple_container_daemon_check,
-    current_apple_platform, local_docker_runtime_check, local_podman_runtime_check, probe_executor,
-    render_human, run_with_config_path,
+    ApplePlatform, CheckStatus, DoctorCheck, DoctorOptions, all_ready,
+    apple_container_runtime_check, current_apple_platform, local_docker_runtime_check,
+    local_podman_runtime_check, probe_executor, render_human, run_with_config_path,
 };
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandSpec,
@@ -85,11 +85,17 @@ impl RuntimeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProbe {
     pub kind: RuntimeKind,
-    pub usable: bool,
+    pub status: CheckStatus,
     pub detail: String,
     /// The fix `mj doctor` would print for this runtime, carried through so
     /// setup never invents its own remediation wording.
     pub remediation: Option<String>,
+}
+
+impl RuntimeProbe {
+    pub fn usable(&self) -> bool {
+        self.status == CheckStatus::Ready
+    }
 }
 
 /// An AWS identity that `aws sts get-caller-identity` confirmed.
@@ -276,7 +282,7 @@ pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome>
 /// The container runtimes on this machine alone, usable or not, so a caller
 /// can report why an unusable one was skipped.
 pub fn discover_runtimes(executor: &impl CommandExecutor) -> Vec<RuntimeProbe> {
-    probe_local_runtimes(executor, cfg!(target_os = "macos"))
+    probe_local_runtimes(executor, &current_apple_platform(executor))
 }
 
 /// A configuration holding the discovered profiles and nothing else, for
@@ -581,15 +587,21 @@ fn discover_github_repository(
 
 /// Probe the container runtimes setup can configure, reusing the doctor checks
 /// so an unavailable runtime carries doctor's detail and remediation.
-pub fn probe_local_runtimes(executor: &impl CommandExecutor, is_macos: bool) -> Vec<RuntimeProbe> {
+pub fn probe_local_runtimes(
+    executor: &impl CommandExecutor,
+    platform: &ApplePlatform,
+) -> Vec<RuntimeProbe> {
     let mut probes = vec![
-        runtime_probe_from_check(RuntimeKind::Podman, local_podman_runtime_check(executor)),
+        runtime_probe_from_check(
+            RuntimeKind::Podman,
+            local_podman_runtime_check(executor, platform),
+        ),
         runtime_probe_from_check(RuntimeKind::Docker, local_docker_runtime_check(executor)),
     ];
-    if is_macos {
+    if matches!(platform, ApplePlatform::Macos { .. }) {
         probes.push(runtime_probe_from_check(
             RuntimeKind::AppleContainer,
-            apple_container_daemon_check(executor),
+            apple_container_runtime_check(platform, executor),
         ));
     }
     probes
@@ -598,7 +610,7 @@ pub fn probe_local_runtimes(executor: &impl CommandExecutor, is_macos: bool) -> 
 fn runtime_probe_from_check(kind: RuntimeKind, check: crate::doctor::DoctorCheck) -> RuntimeProbe {
     RuntimeProbe {
         kind,
-        usable: check.status == CheckStatus::Ready,
+        status: check.status,
         detail: check.detail,
         remediation: check.remediation,
     }
@@ -858,7 +870,7 @@ fn run_setup_dialog_inner(
     write_repository(output, discovery.repository.as_ref())?;
     write_runtimes(output, &discovery.runtimes)?;
 
-    let runtimes = if discovery.runtimes.iter().any(|runtime| runtime.usable) {
+    let runtimes = if discovery.runtimes.iter().any(|runtime| runtime.usable()) {
         let image = prompt(
             input,
             output,
@@ -872,7 +884,7 @@ fn run_setup_dialog_inner(
         discovery
             .runtimes
             .iter()
-            .filter(|runtime| runtime.usable)
+            .filter(|runtime| runtime.usable())
             .map(|runtime| (runtime.kind, image.clone()))
             .collect::<Vec<_>>()
     } else {
@@ -1099,10 +1111,10 @@ fn write_repository(output: &mut impl Write, repository: Option<&GithubRepositor
 fn write_runtimes(output: &mut impl Write, runtimes: &[RuntimeProbe]) -> Result<()> {
     writeln!(output, "Local runtimes:")?;
     for runtime in runtimes {
-        let state = if runtime.usable {
-            "usable"
-        } else {
-            "unavailable"
+        let state = match runtime.status {
+            CheckStatus::Ready => "usable",
+            CheckStatus::Unsupported => "unsupported",
+            CheckStatus::Warning | CheckStatus::Fixable => "unavailable",
         };
         if runtime.detail.is_empty() {
             writeln!(output, "  {}: {state}", runtime.kind.label())?;
@@ -1371,7 +1383,10 @@ fn write_doctor_report(
     checks.extend(extra);
     render_human(&checks, output)?;
     if all_ready(&checks) {
-        writeln!(output, "Every check is ready.")?;
+        writeln!(
+            output,
+            "No fixable checks remain. Review any warnings or unsupported runtimes above."
+        )?;
     } else {
         writeln!(
             output,

@@ -191,7 +191,7 @@ pub fn run_with_config_path(
     checks.push(harness_discovery_check(config, executor));
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_eligibility_checks(config));
-    let podman = podman_checks(config, executor, options.smoke);
+    let podman = podman_checks(config, executor, options.smoke, &apple_platform);
     let docker = docker_checks(config, executor, options.smoke);
     let apple_container = apple_container_check(
         &apple_platform,
@@ -403,24 +403,42 @@ prerequisites.\n\n\
         ),
         InstructionsPlatform::Macos => format!(
             "# Mjolnir setup instructions for macOS\n\n\
-This page is self-contained. Follow this exact loop as the user who will run `mj`:\n\n\
-1. Run `mj doctor --json`.\n\
-2. Follow every `fixable` remediation from its JSON output.\n\
-3. Run `mj doctor --json` again. Repeat until no check is `fixable`.\n\n\
+Run these commands as the user who will run `mj`:\n\n\
+1. Install and sign in to a supported coding agent, then run `mj setup`.\n\
+   Setup discovers agent homes and local runtimes, offers AWS when the AWS CLI\n\
+   has credentials, and offers SSH hosts from `~/.ssh/config`. Review its\n\
+   proposed configuration and confirm writing `config.toml`. It runs smoke\n\
+   tests for newly added container targets and ends with a doctor report.\n\
+2. Run `mj doctor --json` and follow every `fixable` remediation. Repeat until\n\
+   no check is `fixable`. Review warnings for any target you intend to use;\n\
+   `unsupported` runtimes are unavailable, not ready.\n\
+3. If you intend to use containers, start the runtime and run\n\
+   `mj doctor --json --smoke`. Do this for Docker Desktop as well as Apple\n\
+   container. Resolve failures for the target you intend to use.\n\
+4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
+   If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
+   to add one first.\n\n\
+You can also configure profiles and targets in Settings instead of `mj setup`.\n\
+For a named instance, use the same `--instance <name>` on every command above.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
 ## Local bare runtime\n\n\
 A local bare runtime runs the agent directly on this machine. It needs the\n\
-native `mj-worker` installed beside `mj`; the release installer and the npm\n\
-package include it. The worker installs the pinned harness version itself.\n\
-Codex and Claude need Node.js 22 or newer and npm on `PATH`. Kimi and Grok\n\
-need curl and Bash. Muse needs curl and tar. Mjolnir does not install these\n\
-prerequisites.\n\n\
+native `mj-worker` installed beside `mj`; the release installer, npm package,\n\
+and Homebrew formula include it (Homebrew keeps both binaries in libexec).\n\
+The worker installs the pinned harness version itself. Codex and Claude need\n\
+Node.js 22 or newer and npm on `PATH`. Kimi and Grok need curl and Bash.\n\
+Muse needs curl and tar. Mjolnir does not install these prerequisites.\n\n\
+## Docker Desktop\n\n\
+Start Docker Desktop and wait for its Linux daemon to be ready before setup\n\
+or the smoke test. `mj doctor --json --smoke` checks the container image and\n\
+the OverlayFS copy-on-write attachment, including disposable container cleanup.\n\
+A connected daemon alone does not establish that these operations work.\n\n\
 ## Apple container runtime\n\n\
 Mjolnir's Apple container target requires Apple silicon and macOS 26 or newer.\n\
 On an Intel Mac or an older macOS release, the target is unsupported; use the\n\
 local bare runtime, an SSH target, or an AWS target instead.\n\n\
-If the `container` command is absent, install only the official signed package:\n\n\
+On a supported Mac, if `container` is absent, install only the official signed package:\n\n\
 <https://github.com/apple/container#initial-install>\n\n\
 Mjolnir never downloads or installs that package. If doctor reports a stopped\n\
 daemon, run exactly:\n\n```console\ncontainer system start\n```\n\n\
@@ -809,6 +827,7 @@ fn podman_checks(
     config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
+    platform: &ApplePlatform,
 ) -> Vec<DoctorCheck> {
     let effective = config.map(|config| config.clone().with_local_targets());
     let effective = effective.as_ref().map_err(|gap| *gap);
@@ -818,7 +837,7 @@ fn podman_checks(
             .any(|(id, _)| config.configures_target(id))
     });
     let preflight = builtin_target_availability(
-        podman_check(effective, executor),
+        podman_check(effective, executor, platform),
         explicit,
         "Podman",
         "podman",
@@ -885,7 +904,11 @@ fn builtin_target_availability(
     )
 }
 
-fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> DoctorCheck {
+fn podman_check(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+    platform: &ApplePlatform,
+) -> DoctorCheck {
     let config = match config {
         Ok(config) => config,
         Err(ConfigGap::NewerVersion(version)) => {
@@ -909,7 +932,7 @@ fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Do
             "No local-podman target is configured.",
         );
     }
-    local_podman_runtime_check(executor)
+    local_podman_runtime_check(executor, platform)
 }
 
 /// Probe the local rootless Podman prerequisites and phrase the result as a
@@ -918,7 +941,17 @@ fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Do
 /// This is the single source of truth for Podman availability wording and
 /// remediation. `mj setup` calls it directly so its runtime list reports the
 /// same detail and fix that `mj doctor` would.
-pub fn local_podman_runtime_check(executor: &impl CommandExecutor) -> DoctorCheck {
+pub fn local_podman_runtime_check(
+    executor: &impl CommandExecutor,
+    platform: &ApplePlatform,
+) -> DoctorCheck {
+    if !matches!(platform, ApplePlatform::Linux) {
+        return DoctorCheck::unsupported(
+            "runtime.podman",
+            "Rootless Podman",
+            "Mjolnir's local Podman target requires a Linux host; Podman machine is not supported. Use localhost or an SSH target on a Linux host.",
+        );
+    }
     match verify_local_podman(executor) {
         Ok(preflight) => DoctorCheck::ready(
             "runtime.podman",
@@ -2397,11 +2430,10 @@ fn apple_container_image(config: ConfigStatus<'_>) -> String {
         .unwrap_or_else(|| DEFAULT_CONTAINER_IMAGE.into())
 }
 
-pub fn apple_container_check(
+/// Platform support and daemon readiness shared by setup and doctor.
+pub fn apple_container_runtime_check(
     platform: &ApplePlatform,
     executor: &impl CommandExecutor,
-    smoke: bool,
-    image: String,
 ) -> DoctorCheck {
     match platform {
         ApplePlatform::Linux => {
@@ -2438,7 +2470,16 @@ pub fn apple_container_check(
         ApplePlatform::Macos { .. } => {}
     }
 
-    let daemon = apple_container_daemon_check(executor);
+    apple_container_daemon_check(executor)
+}
+
+pub fn apple_container_check(
+    platform: &ApplePlatform,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+    image: String,
+) -> DoctorCheck {
+    let daemon = apple_container_runtime_check(platform, executor);
     if daemon.status != CheckStatus::Ready {
         return daemon;
     }
@@ -2477,10 +2518,8 @@ pub fn apple_container_check(
 /// Probe that the Apple `container` command is installed and its daemon is
 /// running, phrased as a doctor check.
 ///
-/// Split out of [`apple_container_check`] so `mj setup` can reuse the same
-/// probes and remediation text without also demanding the opt-in smoke test.
-/// The caller is responsible for platform gating.
-pub fn apple_container_daemon_check(executor: &impl CommandExecutor) -> DoctorCheck {
+/// Called only after [`apple_container_runtime_check`] checks platform support.
+fn apple_container_daemon_check(executor: &impl CommandExecutor) -> DoctorCheck {
     let installed =
         CommandSpec::new("container", ["--version"]).purpose("check Apple container installation");
     match executor.execute(&installed) {
@@ -2488,7 +2527,10 @@ pub fn apple_container_daemon_check(executor: &impl CommandExecutor) -> DoctorCh
             return DoctorCheck::fixable(
                 "runtime.apple-container",
                 "Apple container runtime",
-                format!("The `container` command is not available: {error}"),
+                format!(
+                    "The `container` command is not available: {}",
+                    error.root_cause()
+                ),
                 format!("Install the official signed package: {APPLE_CONTAINER_INSTALL_URL}"),
             );
         }

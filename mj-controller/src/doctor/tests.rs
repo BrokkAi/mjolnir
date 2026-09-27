@@ -461,7 +461,7 @@ fn runtime_ssh() -> RuntimeSshTarget {
 fn podman_check_is_unsupported_without_a_valid_config() {
     let executor = FakeExecutor::new([]);
 
-    let check = podman_check(Err(ConfigGap::Unreadable), &executor);
+    let check = podman_check(Err(ConfigGap::Unreadable), &executor, &ApplePlatform::Linux);
 
     assert_eq!(check.status, CheckStatus::Unsupported);
     assert_eq!(
@@ -481,7 +481,7 @@ fn podman_check_is_unsupported_without_a_local_podman_target() {
         },
     )]);
 
-    let check = podman_check(Ok(&config), &executor);
+    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
 
     assert_eq!(check.status, CheckStatus::Unsupported);
     assert_eq!(check.detail, "No local-podman target is configured.");
@@ -498,7 +498,7 @@ fn podman_check_probes_the_host_when_a_local_podman_target_exists() {
         },
     )]);
 
-    let check = podman_check(Ok(&config), &executor);
+    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
 
     assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("Podman 5.4.2"));
@@ -515,7 +515,7 @@ fn podman_check_is_fixable_with_an_upgrade_remediation_for_an_old_runtime() {
         },
     )]);
 
-    let check = podman_check(Ok(&config), &executor);
+    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
 
     assert_eq!(check.status, CheckStatus::Fixable);
     assert!(
@@ -591,7 +591,7 @@ fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
         },
     )]);
 
-    let checks = podman_checks(Ok(&config), &executor, false);
+    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.podman");
@@ -620,7 +620,7 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
         ),
     ]);
 
-    let checks = podman_checks(Ok(&config), &executor, false);
+    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
 
     assert_eq!(
         checks
@@ -786,7 +786,12 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
         docker[0].detail
     );
     assert!(docker[0].detail.contains("built-in `docker` target"));
-    let podman = podman_checks(Ok(&written), &AlwaysFailingExecutor, false);
+    let podman = podman_checks(
+        Ok(&written),
+        &AlwaysFailingExecutor,
+        false,
+        &ApplePlatform::Linux,
+    );
     assert_eq!(podman.len(), 1);
     assert_eq!(
         podman[0].status,
@@ -807,7 +812,12 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
 
 #[test]
 fn podman_checks_cover_the_built_in_podman_target() {
-    let checks = podman_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    let checks = podman_checks(
+        Ok(&Config::default()),
+        &AlwaysFailingExecutor,
+        false,
+        &ApplePlatform::Linux,
+    );
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Unsupported);
     assert!(
@@ -1631,7 +1641,8 @@ fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
         Err(anyhow!("No such file or directory (os error 2)")),
         Ok(failed(b"podman: command not found")),
     ] {
-        let check = local_podman_runtime_check(&FakeExecutor::new([response]));
+        let check =
+            local_podman_runtime_check(&FakeExecutor::new([response]), &ApplePlatform::Linux);
         assert_eq!(check.status, CheckStatus::Fixable);
         let remediation = check.remediation.as_deref().unwrap();
         let mut human = Vec::new();
@@ -1711,7 +1722,8 @@ fn apple_container_is_unsupported_before_macos_26() {
 
 #[test]
 fn apple_container_not_installed_has_official_package_remediation() {
-    let executor = FakeExecutor::new([Err(anyhow!("No such file or directory"))]);
+    let executor = FakeExecutor::new([Err(anyhow!("No such file or directory")
+        .context("run container for check Apple container installation"))]);
 
     let check = apple_container_check(
         &ApplePlatform::Macos {
@@ -1724,6 +1736,8 @@ fn apple_container_not_installed_has_official_package_remediation() {
     );
 
     assert_eq!(check.status, CheckStatus::Fixable);
+    assert!(check.detail.contains("No such file or directory"));
+    assert!(!check.detail.contains("run container for"));
     assert_eq!(
         check.remediation.as_deref(),
         Some(

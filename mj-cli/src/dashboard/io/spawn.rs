@@ -539,7 +539,7 @@ pub(crate) fn spawn_setup_discovery(
                 }
                 DetectScope::Runtimes => {
                     for runtime in setup::discover_runtimes(&executor) {
-                        if runtime.usable {
+                        if runtime.usable() {
                             let (id, target) =
                                 setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
                             config.targets.insert(id.to_owned(), target);
