@@ -118,6 +118,11 @@ pub(super) fn open_writer(path: &Path) -> Result<Connection> {
 }
 
 fn open_writable(path: &Path) -> Result<Connection> {
+    // A writable open migrates the store, so this is where the decision
+    // belongs: test binaries reach it without the controller lock.
+    if let Some(store) = path.parent() {
+        mj_core::config::ensure_may_control_store(store, "open this database for writing")?;
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Mjolnir data directory {}", parent.display()))?;
