@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -15,15 +16,15 @@ use mj_core::subagent::{
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for context-heavy work: exploration, census, suite runs and mechanical implementation slices. Give each child files excerpts and one question or one bounded slice. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. When a child's turn ends and you are told so, Mjolnir parks it: its processes stop, and it keeps its conversation and report. send_input starts a parked child again. Only children that hold processes count toward this session's limit on children; a parked child does not. The user can see every child in the Sub-agents workspace.";
+const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for exploration, research, validation, implementation, and artifact creation. Give each child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. Leave routine decisions and necessary supporting work within that scope to the child; you own consequential design decisions and final acceptance. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. When a child's turn ends and you are told so, Mjolnir parks it: its processes stop, and it keeps its conversation and report. send_input starts a parked child again. Only children that hold processes count toward this session's limit on children; a parked child does not. The user can see every child in the Sub-agents workspace.";
 
-/// A child's server instructions: its report reaches the parent only through
-/// `handback`, which is the rule Claude Code's own subagents follow.
-const CHILD_INSTRUCTIONS: &str = concat!(
-    "You are a Mjolnir sub-agent working for another session. Deliver your report for each task by calling handback once, as your last action. The session that started you reads that report, not the rest of this conversation. If you need a decision from it, hand back your question and stop; its answer arrives as your next prompt. Your report directory is named in your first prompt. ",
-    // Kept in step with `mj_core::subagent::HANDBACK_REPORT_RULES` by a test.
-    "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Hand back a question and stop when the fix needs a design choice, touches a file you were not given, changes a persisted identity, a public contract or an epoch, or the failure also occurs on the base commit."
-);
+/// A child's server instructions: its report reaches the parent through `handback`.
+static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "You are a Mjolnir sub-agent working for another session. Deliver your report for each task by calling handback once, as your last action. The session that started you reads that report, not the rest of this conversation. If a parent decision blocks further progress, hand back your question and stop; its answer arrives as your next prompt. Your report directory is named in your first prompt. {}",
+        mj_core::subagent::HANDBACK_REPORT_RULES
+    )
+});
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -211,7 +212,7 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (SERVER_INSTRUCTIONS, tool_definitions(harness)),
         SubagentMcpRole::FixedParent => (SERVER_INSTRUCTIONS, fixed_tool_definitions(harness)),
-        SubagentMcpRole::Child => (CHILD_INSTRUCTIONS, child_tool_definitions()),
+        SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
     };
     crate::mcp_stdio::serve(
         reader,
@@ -471,7 +472,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Use a child for context-heavy work (exploration, census, suite runs, a mechanical implementation slice), and give it files excerpts and one question or one bounded slice. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Give the child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. The child handles routine decisions and necessary supporting work within that scope; you retain consequential design decisions and final acceptance. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again.",
             json!({
                 "type":"object",
                 "properties":{
@@ -529,7 +530,7 @@ fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
     }
     spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
     spawn["description"] = json!(
-        "Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. Give the child one bounded task and relevant file excerpts. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
+        "Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. Give the child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. The child handles routine decisions and necessary supporting work within that scope; you retain consequential design decisions and final acceptance. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
     );
     tools
 }
@@ -539,7 +540,7 @@ fn child_tool_definitions() -> Vec<Value> {
     vec![tool(
         "handback",
         &format!(
-            "Deliver your report to the session that started you. Call it once, as your last action for the task: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If you need a decision from that session, hand back your question and stop; its answer arrives as your next prompt. {}",
+            "Deliver your report to the session that started you. Call it once, as your last action for the task: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If a decision from that session blocks further progress, hand back your question and stop; its answer arrives as your next prompt. {}",
             mj_core::subagent::HANDBACK_REPORT_RULES
         ),
         json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
@@ -553,7 +554,6 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -699,18 +699,60 @@ mod tests {
 
     #[test]
     fn the_child_is_told_the_same_report_rules_everywhere() {
-        assert!(
-            CHILD_INSTRUCTIONS.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
-            "{CHILD_INSTRUCTIONS}"
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Exercise the instructions the harness actually receives, not just
+        // the constants and tool constructors used to build them.
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         );
-        let handback = child_tool_definitions().remove(0);
-        assert!(
-            handback["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains(mj_core::subagent::HANDBACK_REPORT_RULES),
-            "{handback}"
-        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        run(
+            input.as_bytes(),
+            SharedWriter(Arc::clone(&output)),
+            Path::new("unused.sock"),
+            None,
+            SubagentMcpRole::Child,
+        )
+        .unwrap();
+        let output = output.lock().unwrap();
+        let responses: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let initialized = responses.iter().find(|reply| reply["id"] == 1).unwrap();
+        let listed = responses.iter().find(|reply| reply["id"] == 2).unwrap();
+        let handback = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "handback")
+            .unwrap();
+        let prompt = mj_core::subagent::handback_prompt_note("/workspace/reports/child");
+        for instructions in [
+            prompt.as_str(),
+            initialized["result"]["instructions"].as_str().unwrap(),
+            handback["description"].as_str().unwrap(),
+        ] {
+            assert!(
+                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+                "{instructions}"
+            );
+        }
     }
 
     #[test]

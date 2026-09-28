@@ -1862,8 +1862,7 @@ fn composer_title_shows_fast_only_while_the_confirmed_mode_is_active() {
     assert!(!prompt_title(&chat).contains("Fast"));
 }
 
-/// The relay cannot cancel a turn the harness started on its own, so the
-/// composer offers Esc only while a prompt of ours is in flight.
+/// A phase alone is not evidence of an interruptible turn.
 #[test]
 fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1876,6 +1875,64 @@ fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
         " Esc interrupts"
     );
     assert!(!prompt_title(&chat).contains("Esc interrupts"));
+}
+
+#[tokio::test]
+async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
+    for harness_started in [false, true] {
+        let mut fixture =
+            mj_client::session::replacement_session_test_fixture("goal-interrupt", 12);
+        let mut chat = ActiveChat::open(
+            fixture.stopped,
+            "bundle-1",
+            None,
+            fixture.control,
+            SessionHeaderIdentity::default(),
+            String::new(),
+            Notices::default(),
+        );
+        let mut materialized = MaterializedSession::empty("goal-interrupt");
+        let goal: mj_core::goal::GoalState = serde_json::from_value(serde_json::json!({
+            "known": true,
+            "snapshot": {"objective": "finish the work", "status": "active"},
+            "execution": {"version": 1, "status": "running", "turnId": "native-turn"}
+        }))
+        .unwrap();
+        materialized.configuration.insert(
+            mj_core::goal::PROJECTION_KEY.into(),
+            serde_json::to_value(&goal).unwrap(),
+        );
+        let mut view = managed_view(materialized);
+        let operational = &mut view.snapshot.as_mut().unwrap().operational;
+        operational.goal = goal;
+        operational.execution = mj_core::relay::RelayExecutionState::Running;
+        if harness_started {
+            operational.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+        }
+        apply_session_view(&mut chat.state, Ok(view));
+        assert!(!chat.state.prompt_in_flight());
+        assert!(chat.state.session_activity.pursuing_goal);
+        assert!(
+            prompt_bottom_queue_control(&chat.state)
+                .unwrap()
+                .to_string()
+                .contains("Esc interrupts")
+        );
+
+        chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), fixture.submitted.recv())
+                .await
+                .expect("Esc must submit cancellation for the native turn"),
+            Some(mj_core::relay::RelayCommand::CancelTurn)
+        );
+
+        // An active goal between turns is not itself a running turn.
+        chat.state.goal_state.execution.as_mut().unwrap().status = "idle".into();
+        chat.state.session_activity.harness_turn_started_at_ms = None;
+        assert!(!chat.state.turn_interruptible());
+        assert!(prompt_bottom_queue_control(&chat.state).is_none());
+    }
 }
 
 #[tokio::test]

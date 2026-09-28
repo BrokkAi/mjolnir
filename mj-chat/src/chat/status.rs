@@ -181,18 +181,14 @@ impl ChatState {
         self.prompt_in_flight
     }
 
-    /// Whether a turn Claude Code started on its own is running, which Stop
-    /// interrupts. A Codex turn of this kind is a native goal, which has its
-    /// own controls.
+    /// Autonomous harness turns use the same interrupt path as prompted turns.
+    /// Goal controls manage continuation; they do not replace turn cancellation.
     pub(crate) fn harness_turn_stoppable(&self) -> bool {
-        self.session_activity.harness_turn_started_at_ms.is_some()
-            && !self.session_activity.pursuing_goal
+        self.session_activity.harness_turn_started_at_ms.is_some() || self.goal_state.running()
     }
 
     /// Whether Esc (or the host's Interrupt turn command) has a turn to
-    /// interrupt. A prompt of ours, or a turn Claude Code started on its own
-    /// after a background task, can be interrupted. A Codex goal turn also
-    /// reads as Running but has its own controls.
+    /// interrupt, including autonomous harness and native goal turns.
     pub(crate) fn turn_interruptible(&self) -> bool {
         self.prompt_in_flight
             || self.harness_turn_stoppable()

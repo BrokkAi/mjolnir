@@ -1363,15 +1363,14 @@ fn escape_only_cancels_an_active_turn() {
     assert_eq!(chat.handle_key(control_c), ChatAction::None);
     assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
 
-    // Running with nothing of ours or Claude Code's to stop: Esc offers
-    // nothing.
+    // A phase alone does not identify a running turn.
     chat.phase = WorkerPhase::Running;
     assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
 
-    // A Codex goal turn has its own controls.
+    // Esc interrupts a Codex goal turn as well as a prompted turn.
     chat.session_activity.harness_turn_started_at_ms = Some(1_000);
     chat.session_activity.pursuing_goal = true;
-    assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
+    assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::Cancel);
 
     // A turn Claude Code started on its own after a background task can be
     // stopped.
