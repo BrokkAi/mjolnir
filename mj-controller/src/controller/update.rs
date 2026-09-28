@@ -105,7 +105,7 @@ impl InstallMethod {
         match self {
             Self::Npm => Some("npm install -g @brokkai/mjolnir@latest".to_string()),
             Self::Npx => Some("npx -y @brokkai/mjolnir@latest".to_string()),
-            Self::Homebrew => Some("brew upgrade mjolnir".to_string()),
+            Self::Homebrew => Some("brew upgrade --formula brokkai/tap/mjolnir".to_string()),
             Self::Cargo { voice_worker: true } => {
                 Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker".to_string())
             }
@@ -541,9 +541,10 @@ pub enum StartupUpdateOutcome {
 /// changing anything, and on consent performs the upgrade:
 ///
 /// - npm installs run `npm install -g @brokkai/mjolnir@latest` and Homebrew
-///   installs run `brew update` followed by `brew upgrade mjolnir`; mj never
-///   writes into `node_modules` or the Cellar itself, because those trees
-///   belong to the package managers.
+///   installs run `brew update` followed by
+///   `brew upgrade --formula brokkai/tap/mjolnir`; mj never writes into
+///   `node_modules` or the Cellar itself, because those trees belong to the
+///   package managers.
 /// - curl installs download the release archive, verify its SHA-256 sidecar,
 ///   update the controller and every bundled application helper, and re-exec.
 /// - npx and cargo installs are notice-only.
@@ -666,7 +667,9 @@ fn brew_update_command() -> Command {
 
 fn brew_upgrade_command() -> Command {
     let mut command = Command::new("brew");
-    command.args(["upgrade", "mjolnir"]);
+    // A bare `mjolnir` resolves to an unrelated Homebrew cask, so name the
+    // tap formula explicitly.
+    command.args(["upgrade", "--formula", "brokkai/tap/mjolnir"]);
     command
 }
 
@@ -697,9 +700,9 @@ fn run_managed_upgrade(version: &Version, method: &InstallMethod) -> Result<Rest
             let status = mj_core::subprocess::run_inherited(&mut brew_update_command())
                 .context("run brew update")?;
             ensure!(status.success(), "brew update exited with {status}");
-            println!("mj: running brew upgrade mjolnir");
+            println!("mj: running brew upgrade --formula brokkai/tap/mjolnir");
             let status = mj_core::subprocess::run_inherited(&mut brew_upgrade_command())
-                .context("run brew upgrade mjolnir")?;
+                .context("run brew upgrade --formula brokkai/tap/mjolnir")?;
             ensure!(status.success(), "brew upgrade exited with {status}");
         }
         other => bail!("{other:?} installs do not support delegated upgrades"),
