@@ -1540,7 +1540,7 @@ fn run_smoke_test(
     );
     let description = match target {
         RuntimeTargetTemplate::LocalDocker(_) => {
-            "Smoke test: verifying a disposable container and writable OverlayFS attachment..."
+            "Smoke test: verifying a disposable container and host directory attachment..."
         }
         _ => "Smoke test: verifying a disposable container...",
     };
