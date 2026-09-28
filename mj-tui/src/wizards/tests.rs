@@ -2434,10 +2434,12 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
 
 fn move_preparation() -> mj_core::state::MovePreparation {
     mj_core::state::MovePreparation {
+        workspace: None,
         in_place: false,
         source_unavailable: false,
         conversion: None,
         selection: mj_core::state::MoveSelection {
+            workspace: Default::default(),
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),
             target_template_id: Some("podman".into()),
@@ -3433,6 +3435,50 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     dashboard.set_state(dashboard.state.clone());
     assert!(!dashboard.apply_move_preparation(request_id, preparation));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn bare_profile_switch_submits_the_resolved_preparation() {
+    let mut session = running_session();
+    session.target_template_id = "bare".into();
+    session.project_directory = Some(PathBuf::from("/work/project"));
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config.targets.clear();
+    dashboard
+        .config
+        .targets
+        .insert("bare".into(), TargetTemplate::LocalBare);
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    let DashboardAction::MoveSession {
+        clear_resource_allocation: true,
+        preparation_request_id: Some(request_id),
+        ..
+    } = ready_key(&mut dashboard, key(KeyCode::Enter))
+    else {
+        panic!("one bare target should prepare directly after profile selection");
+    };
+    let mut preparation = move_preparation();
+    preparation.selection.target_template_id = Some("bare".into());
+    preparation.selection.clear_resource_allocation = false;
+    preparation.in_place = true;
+    assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(
+            action,
+            DashboardAction::MoveSession {
+                clear_resource_allocation: false,
+                preparation_request_id: None,
+                ..
+            }
+        ),
+        "{action:?}"
+    );
+    assert_eq!(
+        dashboard.take_move_preparation("session-1"),
+        Some(preparation)
+    );
 }
 
 #[test]
@@ -5900,5 +5946,46 @@ fn subagent_model_combobox_discovers_only_after_a_changed_model_is_committed() {
     );
     assert!(
         matches!(dashboard.take_subagent_discovery(), Some(DashboardAction::DiscoverSubagentOptions { model: Some(model), .. }) if model == "next")
+    );
+}
+
+#[test]
+fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
+    use mj_core::move_workspace::*;
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = open_move_review(&mut dashboard);
+    let mut preparation = move_preparation();
+    let mut assessment = WorkspaceAssessment::default();
+    assessment.files = vec![
+        WorkspaceFile {
+            location: WorkspacePath {
+                repository: "repo".into(),
+                path: ".agents/qualification/java-b/staged/tool.bin".into(),
+            },
+            bytes: 1_000_000_000,
+        },
+        WorkspaceFile {
+            location: WorkspacePath {
+                repository: "repo".into(),
+                path: ".agents/qualification/java-b/staged/readme.txt".into(),
+            },
+            bytes: 1234,
+        },
+    ];
+    assessment.roots = file_tree(&assessment);
+    assessment.initially_expanded = initial_expansion(&assessment.roots);
+    preparation.workspace = Some(assessment);
+    assert!(dashboard.apply_move_preparation(request_id, preparation));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+    assert!(rendered.contains("Choose files to transfer"), "{rendered}");
+    assert!(rendered.contains("1.00 GB"), "{rendered}");
+    assert!(
+        rendered.contains(".agents/qualification/java-b/staged"),
+        "{rendered}"
     );
 }

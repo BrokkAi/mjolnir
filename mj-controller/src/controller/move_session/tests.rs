@@ -127,6 +127,10 @@ fn move_queue_relay_child() {
         if let RelayRequest::Submit {
             command_id,
             command,
+        }
+        | RelayRequest::SubmitDurable {
+            command_id,
+            command,
         } = &request.request
         {
             let observed = marker.with_extension("observed");
@@ -142,6 +146,9 @@ fn move_queue_relay_child() {
             && matches!(
                 &request.request,
                 RelayRequest::Submit {
+                    command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
+                    ..
+                } | RelayRequest::SubmitDurable {
                     command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
                     ..
                 }
@@ -264,6 +271,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             state,
         };
         let selection = MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session_id.clone(),
             profile_id: Some("codex".into()),
@@ -272,6 +280,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            workspace_transfer: None,
+            handoff: None,
             in_place: false,
             source_checkpoint_only: false,
             operation_id: format!("move-recovery-terminal-{prefix}"),
@@ -337,6 +347,7 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
         },
     };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: "0123456789abcdef0123456789abcdef".into(),
         profile_id: Some("codex".into()),
@@ -391,6 +402,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown target",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -403,6 +415,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown profile",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("missing-profile".into()),
@@ -415,6 +428,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "invalid resource allocation",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -475,6 +489,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         .unwrap()
         .block_on(controller.prepare_move_session_controlled(
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -622,6 +637,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
 
     let mut controller = Controller { config, state };
     let selection = MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: MOVE_QUEUE_SESSION_ID.into(),
         profile_id: Some("codex".into()),
@@ -634,6 +650,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
@@ -760,6 +778,9 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
     let state = State {
         sessions: [(session_id.into(), session.clone())].into_iter().collect(),
         ..State::default()
@@ -775,6 +796,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         state: state.clone(),
     };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
         profile_id: Some("codex".into()),
@@ -860,6 +882,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     source.additional_mounts = Vec::new();
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: source.id.clone(),
         profile_id: Some("codex".into()),
@@ -885,6 +908,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different target template",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 target_template_id: Some("ssh-bare".into()),
                 ..baseline.clone()
             },
@@ -895,6 +919,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different attached mounts",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 additional_mounts: another_mount,
                 ..baseline.clone()
             },
@@ -905,6 +930,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different resource allocation",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 resource_allocation: another_allocation,
                 ..baseline.clone()
             },
@@ -913,14 +939,15 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
             false,
         ),
         (
-            "cleared resource allocation",
+            "clearing absent resources is a no-op",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: true,
                 ..baseline.clone()
             },
             false,
             false,
-            false,
+            true,
         ),
         ("retry", baseline.clone(), false, true, false),
         ("sub-agent", baseline.clone(), true, false, false),
@@ -959,12 +986,15 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
 }
 
 #[cfg(unix)]
-fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
+pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session.id.clone(),
             profile_id: Some("destination".into()),
@@ -1131,6 +1161,19 @@ struct GitWithPodmanPreflightExecutor {
 }
 
 impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        assert!(command.purpose.contains("Move workspace"));
+        let request = serde_json::from_reader(input)?;
+        Ok(CommandOutput {
+            status: 0,
+            stdout: serde_json::to_vec(&mj_worker::move_workspace::execute(request)?)?,
+            stderr: Vec::new(),
+        })
+    }
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if command.program == "git" {
             return crate::controller::test_support::FixtureRemoteExecutor {
@@ -1138,7 +1181,9 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
             }
             .execute(command);
         }
-        assert_eq!(command.program, "podman", "unexpected {}", command.program);
+        if command.program != "podman" {
+            return ProcessExecutor.execute(command);
+        }
         let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
             b"podman version 5.4.2\n"
         } else {
@@ -1173,6 +1218,9 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
     let state = State {
         sessions: [(session_id.into(), session)].into_iter().collect(),
         ..State::default()
@@ -1180,6 +1228,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
         profile_id: Some("codex".into()),
@@ -1311,15 +1360,32 @@ impl CommandExecutor for RecordingProcessExecutor {
         {
             anyhow::bail!("{} failed in this test", command.purpose);
         }
+        if command.purpose == "restore target checkpoint" {
+            let spec = command.args.last().expect("restore spec path");
+            mj_worker::checkpoint::restore_from_spec_file(Path::new(spec))?;
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
         ProcessExecutor.execute(command)
     }
 
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
-        input: &mut (dyn io::Read + Send),
+        mut input: &mut (dyn io::Read + Send),
     ) -> Result<CommandOutput> {
         self.record(command);
+        if command.purpose == "export target checkpoint" {
+            let checkpoint = mj_worker::checkpoint::export_from_spec_reader(&mut input)?;
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&checkpoint)?,
+                stderr: Vec::new(),
+            });
+        }
         ProcessExecutor.execute_with_stdin(command, input)
     }
 
@@ -1401,6 +1467,20 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
     ] {
         fs::create_dir_all(path).unwrap();
     }
+    let git = crate::controller::test_support::test_git;
+    git(&checkout, &["init", "-b", "main"]);
+    git(&checkout, &["config", "user.email", "move@example.invalid"]);
+    git(&checkout, &["config", "user.name", "Move test"]);
+    git(&checkout, &["commit", "--allow-empty", "-m", "fixture"]);
+    git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+    );
     // `stage_profile` copies an allowlist per harness kind, so the file that
     // tells the two profiles apart has to be one of those names.
     for (home, owner) in [(&source_home, "source"), (&destination_home, "destination")] {
@@ -1519,6 +1599,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
 #[cfg(unix)]
 fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),
         profile_id: Some(destination_profile.into()),
@@ -1528,6 +1609,8 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
     };
     let source = &controller.state.sessions[LATCH_RELAY_SESSION];
     MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: true,
         source_checkpoint_only: false,
         operation_id: "move-in-place".into(),
@@ -1631,6 +1714,41 @@ fn start_source_relay_manager(
 /// the workspace survive, and only the previous profile home is removed.
 #[cfg(unix)]
 #[test]
+fn bare_move_preparation_normalizes_an_empty_resource_reset() {
+    let name = test_name("bare_move_preparation_normalizes_an_empty_resource_reset");
+    if !isolated_test_child(&name, "MJ_EMPTY_RESOURCE_RESET_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let mut selection =
+        in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
+    selection.clear_resource_allocation = true;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(selection, &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(prepared.in_place);
+    assert!(!prepared.selection.clear_resource_allocation);
+    let mut source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
+    source.container_cpus = Some("4".into());
+    let mut selection = prepared.selection;
+    selection.clear_resource_allocation = true;
+    assert!(
+        !super::in_place_move_eligible(&source, &selection, false, false),
+        "clearing a legacy CPU allocation changes the environment"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     let name = test_name("in_place_move_reinstalls_the_harness_without_removing_the_worker_root");
     if std::env::var_os(IN_PLACE_MOVE_CHILD).is_none() {
@@ -1656,10 +1774,58 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         mut controller,
         ..
     } = fixture;
+    let mut owned = managed_raw_session(mj_core::state::ManagedWorktreeTarget::Local)
+        .managed_worktree
+        .unwrap();
+    owned.kind = mj_core::state::ManagedCheckoutKind::Clone;
+    // The original seed repository is gone, but the session's independent
+    // clone still exists under its recorded owner path.
+    let project = checkout.with_file_name("retained-project");
+    let retained_checkout = project.join(".mj/clones").join(LATCH_RELAY_SESSION);
+    fs::create_dir_all(retained_checkout.parent().unwrap()).unwrap();
+    fs::rename(&checkout, &retained_checkout).unwrap();
+    let checkout = retained_checkout;
+    let git = crate::controller::test_support::test_git;
+    git(&checkout, &["init", "--initial-branch=master"]);
+    git(&checkout, &["config", "user.name", "Move Test"]);
+    git(&checkout, &["config", "user.email", "move@example.invalid"]);
+    fs::write(checkout.join("tracked.txt"), b"committed source\n").unwrap();
+    git(&checkout, &["add", "tracked.txt"]);
+    git(&checkout, &["commit", "-m", "source checkout"]);
+    owned.base_commit = Some(git(&checkout, &["rev-parse", "HEAD"]));
+    owned.branch = "master".into();
+    owned.worktree_root = checkout.clone();
+    owned.source_repository = project.clone();
+    owned.source_project_directory = project;
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .project_directory = Some(checkout.clone());
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .managed_worktree = Some(owned);
+    crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
     let source_target = controller.state.sessions[LATCH_RELAY_SESSION]
         .target
         .clone();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    // This fixture's fake worker restores native state but does not export Git.
+    // Model the verified, sealed source boundary before replacing the harness.
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .state = SessionState::Closing;
+    operation.phase = MovePhase::ResumingDestination;
+    operation.checkpoint = Some(checkpoint.clone());
+    operation.recovery_session = Some(controller.state.sessions[LATCH_RELAY_SESSION].clone());
+    crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
     crate::database::save_move_operation(&operation).unwrap();
 
     let executor = RecordingProcessExecutor::default();
@@ -1732,6 +1898,10 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     assert_eq!(persisted.destination_target, source_target);
     assert_eq!(persisted.checkpoint.as_ref(), Some(&checkpoint));
     let moved = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert!(
+        moved.publication.is_none(),
+        "retaining the checkout must not assess remote publication"
+    );
     assert_eq!(moved.state, SessionState::Running);
     assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
     assert_eq!(moved.target, source_target);
@@ -1879,8 +2049,8 @@ fn in_place_cross_harness_move_installs_the_handoff_without_provisioning() {
 /// than offering a retried Move that would rebuild a fresh destination.
 #[cfg(unix)]
 #[test]
-fn in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint() {
-    let name = test_name("in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint");
+fn in_place_move_failure_retains_environment_for_retry() {
+    let name = test_name("in_place_move_failure_retains_environment_for_retry");
     if std::env::var_os("MJ_MOVE_IN_PLACE_FAILURE_CHILD").is_none() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(name)
@@ -1916,40 +2086,66 @@ fn in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint() {
         .finish_move_result(&mut operation, Err(failure), &executor)
         .unwrap();
     assert_eq!(outcome.outcome, "failed");
-    assert_eq!(
-        outcome.recovery.as_deref(),
-        Some(
-            "Source is stopped with a verified checkpoint. Bring it back with \
-             `mj resume --session 018f9dd2-a3b4-7c8d-9000-0123456789ab --profile \
-             claude-destination --target local-bare --queue start`."
-        )
-    );
+    assert!(outcome.recovery.as_deref().unwrap().contains("Retry Move"));
 
     let rolled_back = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(rolled_back.state, SessionState::Stopped);
-    assert_eq!(rolled_back.target, None);
+    assert_eq!(rolled_back.state, SessionState::Error);
+    assert!(rolled_back.target.is_some());
     assert_eq!(rolled_back.checkpoint.as_ref(), Some(&checkpoint));
     // The record the swap replaced is back, harness and profile included.
     assert_eq!(rolled_back.last_profile, IN_PLACE_SOURCE_PROFILE);
     assert_eq!(rolled_back.harness_kind, HarnessKind::Claude);
-    // The environment was released rather than left half-swapped.
+    // Only the worker was stopped; the checkout and build cache survive.
     assert!(
-        !worker_root.exists(),
-        "the rollback tears the target down: {}",
+        worker_root.exists(),
+        "the rollback retains the environment: {}",
         worker_root.display()
     );
     let persisted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
-    assert_eq!(persisted.state, SessionState::Stopped);
+    assert_eq!(persisted.state, SessionState::Error);
     assert!(persisted.checkpoint.is_some());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let preparation = controller
+            .prepare_move_session_controlled(operation.selection.clone(), &ProcessExecutor)
+            .await
+            .unwrap();
+        assert!(
+            preparation.in_place,
+            "retry must retain its durable environment decision"
+        );
+        controller
+            .execute_move(
+                &mut operation,
+                Some(&preparation),
+                &RecordingProcessExecutor::default(),
+                &channels.control,
+            )
+            .await
+            .unwrap();
+        channels.shutdown.shutdown().await.unwrap();
+    });
+    assert_eq!(
+        controller.state.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert_eq!(
+        fs::read(worker_root.join("build-cache.txt")).unwrap(),
+        b"warm cache"
+    );
 }
 
 /// A daemon restart in the middle of the swap does not resume it: the record
-/// is rolled back to the source identity, the environment is released, and the
-/// session is stopped with its verified checkpoint.
+/// is rolled back to the source identity and retains its verified checkpoint
+/// and environment for explicit retry.
 #[cfg(unix)]
 #[test]
-fn in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped() {
-    let name = test_name("in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped");
+fn in_place_move_recovery_after_restart_during_swap_retains_environment() {
+    let name = test_name("in_place_move_recovery_after_restart_during_swap_retains_environment");
     if std::env::var_os("MJ_MOVE_IN_PLACE_SWAP_RESTART_CHILD").is_none() {
         let directory = tempfile::tempdir().unwrap();
         IsolatedTest::new(name)
@@ -2008,20 +2204,19 @@ fn in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped() {
         outcome.error
     );
     let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(recovered.state, SessionState::Stopped);
-    assert_eq!(recovered.target, None);
+    assert_eq!(recovered.state, SessionState::Error);
+    assert!(recovered.target.is_some());
     assert_eq!(recovered.last_profile, IN_PLACE_SOURCE_PROFILE);
     assert_eq!(recovered.checkpoint.as_ref(), Some(&checkpoint));
     assert!(
-        !worker_root.exists(),
-        "the interrupted swap released its environment: {}",
+        worker_root.exists(),
+        "the interrupted swap retains its environment: {}",
         worker_root.display()
     );
 }
 
 /// A daemon restart before the swap started finishes the interrupted close
-/// instead, and says that the environment the in-place move promised to keep
-/// was released.
+/// while retaining the environment the move promised to keep.
 #[cfg(unix)]
 #[test]
 fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
@@ -2037,69 +2232,74 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let InPlaceFixture {
-        _directory,
-        worker_root,
-        mut controller,
-        ..
-    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
-    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    operation.phase = MovePhase::ClosingSource;
-    crate::database::save_move_operation(&operation).unwrap();
-    let source_relay = seed_source_relay(&worker_root);
+    for cancelled in [false, true] {
+        let InPlaceFixture {
+            _directory,
+            worker_root,
+            mut controller,
+            ..
+        } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+        operation.phase = MovePhase::ClosingSource;
+        crate::database::save_move_operation(&operation).unwrap();
+        let source_relay = seed_source_relay(&worker_root);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let executor = RecordingProcessExecutor::default();
-    // One daemon lifetime: seal the source and keep its target, exactly as the
-    // first half of an in-place move does.
-    runtime.block_on(async {
-        let channels = start_source_relay_manager(&source_relay);
-        let deferred = controller
-            .suspend_session_for_move(
-                LATCH_RELAY_SESSION,
-                &executor,
-                &channels.control,
-                &mut operation,
-                None,
-                crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
-            )
-            .await;
-        channels.shutdown.shutdown().await.unwrap();
-        assert!(!deferred.unwrap());
-    });
-    let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(sealed.state, SessionState::Closing);
-    assert!(sealed.target.is_some());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let executor = RecordingProcessExecutor::default();
+        // One daemon lifetime: seal the source and keep its target, exactly as the
+        // first half of an in-place move does.
+        runtime.block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let deferred = controller
+                .suspend_session_for_move(
+                    LATCH_RELAY_SESSION,
+                    &executor,
+                    &channels.control,
+                    &mut operation,
+                    None,
+                    crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+                )
+                .await;
+            channels.shutdown.shutdown().await.unwrap();
+            assert!(!deferred.unwrap());
+        });
+        let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(sealed.state, SessionState::Closing);
+        assert!(sealed.target.is_some());
 
-    // The next daemon lifetime recovers the interrupted move.
-    let outcome = runtime.block_on(async {
-        let channels = start_source_relay_manager(&source_relay);
-        let outcome = controller
-            .recover_move_managed_controlled(operation, &executor, &channels.control)
-            .await;
-        channels.shutdown.shutdown().await.unwrap();
-        outcome.unwrap()
-    });
+        // Cancellation after sealing must retain the same environment as a crash.
+        operation.cancellation_requested = cancelled;
+        // The next daemon lifetime recovers the interrupted move.
+        let outcome = runtime.block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let outcome = controller
+                .recover_move_managed_controlled(operation, &executor, &channels.control)
+                .await;
+            channels.shutdown.shutdown().await.unwrap();
+            outcome.unwrap()
+        });
 
-    assert_eq!(outcome.outcome, "failed");
-    assert_eq!(
-        outcome.error.as_deref(),
-        Some(
-            "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings; the in-place swap was interrupted; the environment was released"
-        )
-    );
-    let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(recovered.state, SessionState::Stopped);
-    assert_eq!(recovered.target, None);
-    assert!(recovered.checkpoint.is_some());
-    assert!(
-        !worker_root.exists(),
-        "the recovered close tears the environment down: {}",
-        worker_root.display()
-    );
+        assert_eq!(
+            outcome.outcome,
+            if cancelled { "cancelled" } else { "failed" }
+        );
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("Move source sealed; environment retained for explicit retry")
+        );
+        let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(recovered.state, SessionState::Error);
+        assert!(recovered.target.is_some());
+        assert!(recovered.checkpoint.is_some());
+        assert!(
+            worker_root.exists(),
+            "the recovered close retains its environment: {}",
+            worker_root.display()
+        );
+    }
 }
 
 #[test]
@@ -2137,4 +2337,61 @@ fn move_queue_handoff_never_exposes_unowned_session() {
     reader.join().unwrap();
     drop(guard);
     assert!(!move_owns_session(session));
+}
+
+#[cfg(unix)]
+#[test]
+fn in_place_move_with_oversized_file_exports_only_session_handoff() {
+    let name = test_name("in_place_move_with_oversized_file_exports_only_session_handoff");
+    if std::env::var_os("MJ_MOVE_LARGE_IN_PLACE_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_LARGE_IN_PLACE_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    fs::File::create(fixture.checkout.join("large-build-output"))
+        .unwrap()
+        .set_len(9 * 1024 * 1024 * 1024)
+        .unwrap();
+    fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .checkpoint = None;
+    crate::database::save_session(&fixture.controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    crate::database::save_move_operation(&operation).unwrap();
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(
+        &mut fixture.controller,
+        &mut operation,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap();
+    assert!(fixture.checkout.join("large-build-output").exists());
+    let handoff = operation.handoff.as_ref().unwrap();
+    assert!(fs::metadata(&handoff.archive_path).unwrap().len() < 1024 * 1024);
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&handoff.archive_path).unwrap();
+    assert!(
+        verified
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| payload.path.starts_with("repositories/"))
+            .all(|payload| payload.size < 1024)
+    );
+    assert!(
+        fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+            .checkpoint
+            .is_none()
+    );
 }

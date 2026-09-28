@@ -150,7 +150,9 @@ impl RuntimeState {
                 );
                 active.result.clone()
             } else {
-                let upgrade_work = crate::upgrade::activity("session lifecycle")?;
+                let upgrade_work = Arc::new(Mutex::new(Some(crate::upgrade::activity(
+                    "session lifecycle",
+                )?)));
                 let cancelled = create_control
                     .as_ref()
                     .map(|control| control.cancelled.clone())
@@ -163,6 +165,7 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
+                        upgrade_work: upgrade_work.clone(),
                         phase,
                         operation_id: operation_reference.clone(),
                         create_control,
@@ -186,7 +189,7 @@ impl RuntimeState {
                 let operation = work.take().expect("new lifecycle operation has work");
                 let completed_channel = result_rx.clone();
                 tokio::spawn(async move {
-                    let _upgrade_work = upgrade_work;
+                    let _upgrade_work = LifecycleAdmission(upgrade_work);
                     let operation_state = state.clone();
                     let operation_id = operation_session_id.clone();
                     let mut result = match tokio::spawn(async move {
@@ -334,5 +337,15 @@ impl RuntimeState {
         self.owner()
             .lifecycle
             .retain(|_, active| !active.result.same_channel(channel) || active.is_visible());
+    }
+}
+
+struct LifecycleAdmission(Arc<Mutex<Option<crate::upgrade::Work>>>);
+impl Drop for LifecycleAdmission {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }

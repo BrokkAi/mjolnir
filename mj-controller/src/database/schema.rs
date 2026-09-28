@@ -836,6 +836,23 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;")?;
     }
 
+    // Breaking: Move-only handoffs do not contain workspace backups. Older
+    // daemons can mistake a retained source for a target safe to destroy.
+    if version < 64 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS retained_move_sources (
+                operation_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source_json TEXT NOT NULL,
+                exclusions_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            ) STRICT;
+            UPDATE schema_compatibility SET minimum_compatible_version = 64 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (64, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 64;
+            COMMIT;")?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -979,6 +996,28 @@ mod reader_tests {
     use super::*;
 
     #[test]
+    fn move_ownership_upgrade_retains_sources_and_refuses_previous_daemons() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("move.sqlite");
+        let connection = open_writer(&path).unwrap();
+        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; PRAGMA user_version=63;").unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+        let upgraded = open_writer(&path).unwrap();
+        let schema = read_schema_state(&upgraded).unwrap();
+        assert!(schema.ensure_supported_by(63).is_err());
+        upgraded.execute("INSERT INTO retained_move_sources VALUES ('move-one','session-one','{}','[]','now')", []).unwrap();
+        drop(upgraded);
+        let reopened = open_writer(&path).unwrap();
+        let count: i64 = reopened
+            .query_row("SELECT count(*) FROM retained_move_sources", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn every_historical_revision_upgrades_directly_and_preserves_user_data() {
         for revision in 1..SCHEMA_VERSION {
             let directory = tempfile::tempdir().unwrap();
@@ -1060,7 +1099,7 @@ mod reader_tests {
 
     /// The oldest executable revision that can still read and write a store at
     /// `SCHEMA_VERSION`. Migration 62 requires durable worker-swap recovery.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 63;
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 64;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

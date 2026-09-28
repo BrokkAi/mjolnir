@@ -27,9 +27,8 @@ impl Controller {
     /// The session must be the one [`Controller::suspend_session_for_move`] left
     /// behind for an in-place swap: `Closing`, with its verified checkpoint and
     /// its target still on the record. On success the session is `Running` on
-    /// `profile_id` in the same target. On any failure the session is torn down
-    /// to `Stopped` with its verified checkpoint, because a half-written worker
-    /// root is never retried in place.
+    /// `profile_id` in the same target. Failures stop only the worker and keep
+    /// the environment and checkpoint for an explicit retry.
     // The target gate below is an ordinary lock held across the restore on
     // purpose; see the comment where it is taken.
     #[allow(
@@ -56,9 +55,11 @@ impl Controller {
             .target
             .as_ref()
             .context("an in-place harness replacement has no target to replace it in")?;
-        let checkpoint = previous
-            .checkpoint
+        let move_operation = crate::database::load_move_operation(session_id)?;
+        let checkpoint = move_operation
             .as_ref()
+            .and_then(|op| op.handoff.as_ref())
+            .or(previous.checkpoint.as_ref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
         let profile = self
@@ -92,6 +93,24 @@ impl Controller {
         // read from the record's own profile, before the record names the
         // destination one.
         let backend = backend_locator(locator, &previous, &self.config)?;
+        let worker_root = crate::targets::worker_root(&backend, session_id)?;
+        super::super::execute_checked(
+            executor,
+            crate::targets::command_on_locator(
+                &backend,
+                session_id,
+                vec!["test".into(), "-d".into(), worker_root],
+                "verify retained worker root",
+            )?,
+        )?;
+        if let Some(checkout) = &previous.managed_worktree {
+            ensure!(
+                super::managed_worktree_checkout_exists(executor, checkout)?,
+                "retained checkout is missing; refusing to recreate it"
+            );
+        } else if let Some(path) = &previous.project_directory {
+            self.validate_project_directory(&previous.target_template_id, path, executor)?;
+        }
         let source_profile = self
             .config
             .profiles
@@ -140,8 +159,8 @@ impl Controller {
 
         // One record transition, and the crash boundary of the whole swap:
         // before it, recovery finishes the interrupted close; after it,
-        // recovery rolls the resume back to `Stopped`. The target stays on the
-        // record, because it is the environment being kept.
+        // recovery stops the partial worker and records a retryable error. The
+        // target stays on the record because the environment is being kept.
         {
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.harness_kind = profile.kind;
@@ -229,13 +248,61 @@ impl Controller {
                     &canonical_session,
                     discard_queued_prompts,
                 );
-                // Never retry in place: the rollback tears the target down and
-                // leaves the session `Stopped` with its verified checkpoint,
-                // which is what the fresh path resumes from. The managed
-                // checkout is still present and still owned by the session, so
-                // the rollback retires it exactly as a recreated one.
-                Err(self.rollback_failed_resume(session_id, &previous, true, error, executor)?)
+                Err(self.retain_failed_in_place_move(session_id, &previous, error)?)
             }
         }
+    }
+
+    /// The Move owns this environment; cleanup may stop its worker, never retire
+    /// its checkout or destroy the container. Error keeps ordinary recovery out.
+    pub(in crate::controller) fn retain_failed_in_place_move(
+        &mut self,
+        session_id: &str,
+        previous: &mj_core::state::SessionRecord,
+        error: anyhow::Error,
+    ) -> Result<anyhow::Error> {
+        let current = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("Move session missing")?;
+        ensure!(
+            current.target.is_some() && current.target == previous.target,
+            "retained Move target changed; refusing cleanup"
+        );
+        let backend = backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
+        let root = crate::targets::worker_root(&backend, session_id)?;
+        let target_mutex = crate::recovery_gate::worker_target_mutex(session_id);
+        let _guard = target_mutex
+            .lock()
+            .map_err(|_| anyhow::anyhow!("worker target ownership lock poisoned"))?;
+        let cleanup = super::super::execute_checked(
+            &crate::targets::CancellableProcessExecutor::with_timeout(
+                std::time::Duration::from_secs(15),
+            ),
+            crate::targets::command_on_locator(
+                &backend,
+                session_id,
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    crate::targets::stop_worker_daemon_script(&root),
+                ],
+                "stop failed in-place worker while retaining its environment",
+            )?,
+        );
+        let mut retained = previous.clone();
+        retained.state = SessionState::Error;
+        retained.updated_at = now();
+        retained.last_error = Some(format!("{error:#}; environment retained for Move retry"));
+        if let Err(cleanup_error) = &cleanup {
+            retained.last_error = Some(format!(
+                "{error:#}; stopping retained worker failed: {cleanup_error:#}"
+            ));
+        }
+        crate::database::save_resumed_session(&retained, None)?;
+        self.state.sessions.insert(session_id.to_owned(), retained);
+        cleanup.context("stop retained worker before retry")?;
+        Ok(error)
     }
 }

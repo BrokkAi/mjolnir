@@ -19,6 +19,7 @@ pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
         WizardStep::NewBundle => WizardControl::ProjectResults,
         WizardStep::Mounts => WizardControl::MountSource,
         WizardStep::Review => WizardControl::Submit,
+        WizardStep::MoveFiles => WizardControl::Next,
     }
 }
 
@@ -403,6 +404,7 @@ pub(crate) fn render_new_wizard(
                 .collect(),
             wizard.target,
         ),
+        WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
         WizardStep::Review => unreachable!("review was rendered above"),
         WizardStep::Mounts => unreachable!("mount input was rendered above"),
         WizardStep::NewBundle => unreachable!("bundle input was rendered above"),
@@ -1022,6 +1024,13 @@ pub(crate) fn render_review_wizard(
     if can_attach {
         buttons.push((WizardControl::Add, "Add directory…", true));
     }
+    if moving && !in_place_move {
+        buttons.push((
+            WizardControl::ChooseMoveFiles,
+            "Choose files…",
+            !preparing && preparation_error.is_none(),
+        ));
+    }
     buttons.push((
         WizardControl::Submit,
         submit_label,
@@ -1392,6 +1401,10 @@ pub(crate) fn render_resume_wizard(
     wizard: &ResumeWizard,
     surfaces: &mut FrameSurfaces,
 ) {
+    if wizard.step == WizardStep::MoveFiles {
+        move_files::render(frame, area, wizard, surfaces);
+        return;
+    }
     let mut form = wizard.form.borrow_mut();
     let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
@@ -1632,6 +1645,7 @@ pub(crate) fn render_resume_wizard(
         ),
         WizardStep::Bundle => unreachable!("resume does not select a bundle"),
         WizardStep::Review => unreachable!("review was rendered above"),
+        WizardStep::MoveFiles => unreachable!("Move files were rendered above"),
         WizardStep::Mounts => unreachable!("mount input was rendered above"),
         WizardStep::NewBundle => unreachable!("resume does not create bundles"),
         WizardStep::ProjectDirectory => unreachable!("resume does not select a project directory"),

@@ -849,7 +849,7 @@ fn default_max_size(
 /// The available column of `df -B1 -P` output, which is the fourth field of
 /// the row after the header. A long device name wraps in some `df`
 /// implementations, so the fields are counted from the end of the last row.
-fn available_bytes(report: &str) -> Option<u64> {
+pub(super) fn available_bytes(report: &str) -> Option<u64> {
     let row = report
         .lines()
         .filter(|line| !line.trim().is_empty())

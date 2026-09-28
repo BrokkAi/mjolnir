@@ -640,6 +640,10 @@ pub enum DaemonAction {
     ResumeSession(ResumeSessionRequest),
     PrepareMoveSession(MoveSelection),
     MoveSession(MoveSessionRequest),
+    MoveSources {
+        session_id: String,
+        cleanup_operation_id: Option<String>,
+    },
     DiscardSinceCheckpoint {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
@@ -731,6 +735,7 @@ pub enum DaemonReply {
     RegisteredSession(Box<RegisteredSession>),
     MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
+    MoveSources(Vec<mj_core::move_workspace::RetainedMoveSource>),
     Ordinal(u64),
     Text(String),
     OptionalSessionState(Option<SessionState>),
@@ -2079,6 +2084,23 @@ impl DaemonClient {
         {
             DaemonReply::MovePreparation(preparation) => Ok(*preparation),
             _ => bail!("daemon returned an unexpected move preparation reply"),
+        }
+    }
+
+    pub async fn move_sources(
+        &mut self,
+        session_id: String,
+        cleanup_operation_id: Option<String>,
+    ) -> Result<Vec<mj_core::move_workspace::RetainedMoveSource>> {
+        match self
+            .request(DaemonAction::MoveSources {
+                session_id,
+                cleanup_operation_id,
+            })
+            .await?
+        {
+            DaemonReply::MoveSources(sources) => Ok(sources),
+            reply => bail!("unexpected Move sources reply: {reply:?}"),
         }
     }
 

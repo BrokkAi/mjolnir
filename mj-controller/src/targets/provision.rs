@@ -15,6 +15,30 @@ pub fn provision_plan(
     image_user: Option<ImageUser>,
     container_workspace: Option<&Path>,
 ) -> Result<CommandPlan> {
+    provision_plan_named(
+        template,
+        session_id,
+        bundle,
+        additional_mounts,
+        image_user,
+        container_workspace,
+        &resource_name(session_id)?,
+    )
+}
+
+pub fn provision_plan_named(
+    template: &TargetTemplate,
+    session_id: &str,
+    bundle: &ProjectBundleSpec,
+    additional_mounts: &[AdditionalMount],
+    image_user: Option<ImageUser>,
+    container_workspace: Option<&Path>,
+    name: &str,
+) -> Result<CommandPlan> {
+    ensure!(
+        resource_name_belongs_to(name, session_id)?,
+        "invalid target resource generation"
+    );
     bundle.validate()?;
     let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
@@ -31,13 +55,14 @@ pub fn provision_plan(
     }
     if let TargetTemplate::SshDocker { ssh, container } = template {
         validate_ssh(ssh)?;
-        let mut plan = provision_plan(
+        let mut plan = provision_plan_named(
             &TargetTemplate::LocalDocker(container.clone()),
             session_id,
             bundle,
             additional_mounts,
             image_user,
             container_workspace,
+            name,
         )?;
         plan.commands = plan
             .commands
@@ -46,7 +71,6 @@ pub fn provision_plan(
             .collect();
         return Ok(plan);
     }
-    let name = resource_name(session_id)?;
     let mut commands = Vec::new();
     match template {
         TargetTemplate::LocalBare => {
@@ -56,7 +80,7 @@ pub fn provision_plan(
             validate_container_template(container)?;
             commands.push(podman_container_run(
                 container,
-                &name,
+                name,
                 session_id,
                 additional_mounts,
                 image_user,
@@ -66,19 +90,19 @@ pub fn provision_plan(
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
                     engine: "podman",
-                    container_id: &name,
+                    container_id: name,
                 })
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, |args| {
-                container_exec("podman", &name, args)
+                container_exec("podman", name, args)
             }));
         }
         TargetTemplate::LocalDocker(container) => {
             validate_container_template(container)?;
             commands.push(docker_container_run(
                 container,
-                &name,
+                name,
                 session_id,
                 additional_mounts,
                 &workspace,
@@ -86,12 +110,12 @@ pub fn provision_plan(
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
                     engine: "docker",
-                    container_id: &name,
+                    container_id: name,
                 })
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, |args| {
-                container_exec("docker", &name, args)
+                container_exec("docker", name, args)
             }));
         }
         TargetTemplate::AppleContainer(container) => {
@@ -105,7 +129,7 @@ pub fn provision_plan(
             commands.push(container_run(
                 "container",
                 container,
-                &name,
+                name,
                 session_id,
                 additional_mounts,
                 &workspace,
@@ -113,12 +137,12 @@ pub fn provision_plan(
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
                     engine: "container",
-                    container_id: &name,
+                    container_id: name,
                 })
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, |args| {
-                container_exec("container", &name, args)
+                container_exec("container", name, args)
             }));
         }
         TargetTemplate::AwsEc2(aws) => {
@@ -181,7 +205,7 @@ pub fn provision_plan(
             validate_container_template(container)?;
             commands.push(podman_container_run(
                 container,
-                &name,
+                name,
                 session_id,
                 additional_mounts,
                 image_user,
@@ -192,12 +216,12 @@ pub fn provision_plan(
                 install_git_plan(ExecutionBoundary::SshContainer {
                     engine: "podman",
                     ssh,
-                    container_id: &name,
+                    container_id: name,
                 })
                 .commands,
             );
             commands.extend(clone_commands(bundle, &workspace, |args| {
-                let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.clone()];
+                let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.to_owned()];
                 remote.extend(args);
                 ssh_command_owned(ssh, remote)
             }));

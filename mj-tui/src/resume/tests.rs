@@ -211,10 +211,13 @@ fn state_with(sessions: Vec<SessionRecord>) -> State {
 
 fn incomplete_move() -> MoveOperation {
     MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),

@@ -546,6 +546,14 @@ pub trait CommandExecutor {
     /// to the lifecycle until queue admission completes.
     fn reserve_move_destination(&self) {}
 
+    /// The durable Move owns this interruptible copy; daemon handoff may resume it.
+    fn begin_resumable_move_work(&self) -> Result<()> {
+        Ok(())
+    }
+    fn end_resumable_move_work(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn execute_with_stdin(
         &self,
         _command: &CommandSpec,
@@ -1849,11 +1857,38 @@ pub fn resource_name(session_id: &str) -> Result<String> {
     ))
 }
 
+/// Resource generations let a Move retain its source while provisioning the destination.
+pub fn move_resource_name(session_id: &str, operation_id: &str) -> Result<String> {
+    let digest = Sha256::digest(operation_id.as_bytes());
+    Ok(format!(
+        "{}-move-{}",
+        resource_name(session_id)?,
+        crate::hex::lower_hex(&digest[..8])
+    ))
+}
+
+pub fn resource_name_belongs_to(name: &str, session_id: &str) -> Result<bool> {
+    let base = resource_name(session_id)?;
+    Ok(name == base
+        || name
+            .strip_prefix(&format!("{base}-move-"))
+            .is_some_and(|suffix| {
+                suffix.len() == 16 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+            }))
+}
+
 pub fn podman_workspace_locator(
     template: &ContainerTemplate,
     session_id: &str,
 ) -> Result<PodmanWorkspaceLocator> {
-    let resource = format!("{}-workspace", resource_name(session_id)?);
+    podman_workspace_locator_named(template, &resource_name(session_id)?)
+}
+
+pub fn podman_workspace_locator_named(
+    template: &ContainerTemplate,
+    name: &str,
+) -> Result<PodmanWorkspaceLocator> {
+    let resource = format!("{name}-workspace");
     match &template.workspace_storage {
         PodmanWorkspaceStorage::PodmanVolume => {
             Ok(PodmanWorkspaceLocator::Volume { name: resource })

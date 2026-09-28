@@ -68,6 +68,8 @@ def run(lab):
             flags += ["--profile", profile_id]
         if selectors != "profile":
             flags += ["--target", target]
+        if selectors == "profile":
+            flags += ["--clear-resources"]  # The TUI's historical bare-host request.
         result = lab.command("move", "--session", session_id, *flags,
                              "--queue", queue, "--yes", "--json", timeout=90)
         outcome = json.loads(result.stdout)
@@ -104,6 +106,13 @@ def run(lab):
     survivor = pathlib.Path(before_swap["project_directory"]) / "in-place-survivor.txt"
     survivor_content = "survives an in-place harness swap\n" * 4096
     survivor.write_text(survivor_content)
+    ignored = checkout / "ignored-build-output"
+    excludes = pathlib.Path(lab.git_output(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], cwd=checkout).strip())
+    with excludes.open("a") as handle:
+        handle.write("\nignored-build-output\n")
+    ignored.write_bytes(b"warm build cache")
+    checkout_identity = checkout.stat().st_ino
+
     # The survivor is untracked, so the status the move must preserve now
     # includes it.
     expected_status = lab.git_output(["status", "--porcelain"], cwd=checkout)
@@ -113,6 +122,9 @@ def run(lab):
     after_swap = record()
     assert after_swap["target"] == swap_locator, (swap_locator, after_swap["target"])
     assert survivor.read_text() == survivor_content, "in-place move lost an untracked file"
+    assert checkout.stat().st_ino == checkout_identity, "profile switch recreated its checkout"
+    assert ignored.read_bytes() == b"warm build cache", "profile switch lost ignored build output"
+
     assert after_swap["native_session_id"] == before_swap["native_session_id"]
     ownership = json.loads((worker_root / "ownership.json").read_text())
     assert ownership.get("profile_id") == "fake", ownership
@@ -142,7 +154,10 @@ def run(lab):
     # Same selections are an idempotent no-op, without checkpointing again.
     unchanged = json.loads(lab.command("move", "--session", session_id, "--profile", "destination", "--yes", "--json").stdout)
     assert unchanged["outcome"] == "unchanged", unchanged
-    assert lab.request("POST", "/api/actions", {"action": "suspend", "session_id": session_id})[0] == 202
+    assert lab.request("POST", "/api/actions", {
+        "action": "suspend", "session_id": session_id,
+        "acknowledge_unpublished_work": True,
+    })[0] == 202
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("state") == "suspended", "final cleanup")
     client.quit()
     lab.stop_daemon()

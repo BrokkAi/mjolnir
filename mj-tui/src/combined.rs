@@ -1619,14 +1619,7 @@ fn render_transition_surface(
         .filter(|stages| !stages.is_empty())
         .unwrap_or_else(|| "waiting".to_owned());
     let started_at = operation
-        .map(|operation| {
-            operation
-                .active_stages
-                .values()
-                .copied()
-                .min()
-                .unwrap_or(operation.started_at_epoch_seconds)
-        })
+        .map(|operation| operation.started_at_epoch_seconds)
         .unwrap_or_else(|| {
             chrono::DateTime::parse_from_rfc3339(&session.updated_at)
                 .ok()

@@ -456,7 +456,7 @@ mod tests {
             harness_home: target_home.clone(),
             restore_repositories: false,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
             primary_repository_root: None,
         };
         let restore_path = temp.path().join("restore.json");

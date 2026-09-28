@@ -1153,8 +1153,14 @@ pub(crate) async fn run_server(
                             continue;
                         }
                     };
+                    if let ControllerAction::Move { request: move_request } = &request.action
+                        && let Err(error) = daemon_runtime.start_move_session(move_request.clone()) {
+                        if let Some(id) = &session_id { active_actions.remove(id); }
+                        let _ = request.reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
+                        continue;
+                    }
                     let ControllerRequest { action, reply } = request;
-                    let upgrade_work = match crate::upgrade::activity("web action") {
+                    let upgrade_work = match if matches!(&action, ControllerAction::Move { .. }) { Ok(None) } else { crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));

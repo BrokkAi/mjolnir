@@ -537,6 +537,25 @@ pub(super) async fn handle_action(
         DaemonAction::MoveSession(request) => {
             Ok(DaemonReply::MoveOutcome(state.move_session(request).await?))
         }
+        DaemonAction::MoveSources {
+            session_id,
+            cleanup_operation_id,
+        } => {
+            let sources = blocking(move || {
+                let _guard =
+                    crate::controller::move_session::MoveMutationGuard::reserve(&session_id)?;
+                if let Some(operation_id) = cleanup_operation_id {
+                    Controller::load()?.cleanup_retained_move_source(
+                        &session_id,
+                        &operation_id,
+                        &ProcessExecutor,
+                    )?;
+                }
+                crate::database::retained_move_sources(&session_id)
+            })
+            .await?;
+            Ok(DaemonReply::MoveSources(sources))
+        }
         DaemonAction::DiscardSinceCheckpoint {
             session_id,
             checkpoint,
@@ -590,6 +609,7 @@ pub(super) fn upgrade_request_activity(
     if matches!(
         action,
         DaemonAction::Ping
+            | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
