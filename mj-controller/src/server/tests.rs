@@ -4899,3 +4899,53 @@ async fn bundle_endpoint_rejects_conflicting_empty_or_oversized_source_sets() {
         assert!(bundles.try_recv().is_err());
     }
 }
+
+/// A quiet runtime produces no update that could incidentally release a dead
+/// stream. Disconnect and daemon shutdown must release it themselves.
+#[tokio::test]
+async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
+    for format in ["changes", "revision"] {
+        for shutdown in [false, true] {
+            let (snapshots, snapshot_rx) = watch::channel(ViewerSnapshot::default());
+            let (_, conversation_rx) = watch::channel(BTreeMap::new());
+            let options = test_options(
+                snapshot_rx,
+                conversation_rx,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+                mpsc::channel(1).0,
+            )
+            .with_test_credentials("123456", b"01234567890123456789012345678901");
+            let cancellation = options.shutdown.clone();
+            let app = router(options);
+            let cookie = login_cookie(&app).await;
+            let response = app
+                .oneshot(
+                    Request::get(format!("/api/events?format={format}"))
+                        .header(COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body();
+            tokio::time::timeout(Duration::from_secs(2), body.frame())
+                .await
+                .expect("stream starts")
+                .expect("initial frame")
+                .unwrap();
+            if shutdown {
+                cancellation.cancel();
+            } else {
+                drop(body);
+            }
+            tokio::time::timeout(Duration::from_secs(2), snapshots.closed())
+                .await
+                .expect("idle stream must release its snapshot without another publication");
+        }
+    }
+}

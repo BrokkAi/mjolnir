@@ -512,3 +512,134 @@ fn a_users_own_goal_resume_still_takes_over_from_automation() {
     let c = &relay.snapshot.continuation;
     assert!(c.suppressed && c.quota_suppressed);
 }
+
+fn handback_request(relay: &DurableRelay) -> RelayCommand {
+    let turn = relay.snapshot.turn_completion.as_ref().unwrap();
+    RelayCommand::HandbackReminder {
+        completed_command_id: turn.command_id.clone(),
+        completed_ordinal: turn.completed_ordinal,
+    }
+}
+
+#[test]
+fn handback_reminder_admission_is_durable_and_deduplicated() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "original-prompt", prompt("Write the report"));
+    completed(&mut relay, "original-prompt");
+    let request = handback_request(&relay);
+    let accepted = relay
+        .submit_command("handback-reminder-test", request.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        relay.snapshot.active_prompt.as_ref().unwrap().prompt,
+        vec![agent_client_protocol::schema::v1::ContentBlock::from(
+            mj_core::subagent::HANDBACK_REMINDER_TEXT.to_owned()
+        )]
+    );
+    assert!(
+        relay
+            .snapshot
+            .assessment_context
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .all(|message| message.text != mj_core::subagent::HANDBACK_REMINDER_TEXT)
+    );
+    assert_eq!(
+        relay.snapshot.continuation.user_command_id.as_deref(),
+        Some("original-prompt")
+    );
+    assert_eq!(
+        relay
+            .submit_command("handback-reminder-test", request.clone())
+            .unwrap()
+            .unwrap(),
+        accepted
+    );
+    drop(relay);
+    let mut relay = open(root.path());
+    assert_eq!(
+        relay
+            .submit_command("handback-reminder-test", request)
+            .unwrap()
+            .unwrap(),
+        accepted
+    );
+}
+
+#[test]
+fn handback_reminder_rejects_newer_input_even_after_queue_removal_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "original-prompt", prompt("Write the report"));
+    completed(&mut relay, "original-prompt");
+    let request = handback_request(&relay);
+    // Hold input behind a checkpoint so it can be removed before execution.
+    ready_checkpoint(&mut relay, "checkpoint-hold");
+    submit_relay(&mut relay, "newer-user-prompt", prompt("New instructions"));
+    submit_relay(
+        &mut relay,
+        "remove-newer-prompt",
+        RelayCommand::ClearQueuedPrompts,
+    );
+    submit_relay(
+        &mut relay,
+        "release-checkpoint",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "checkpoint-hold".into(),
+        },
+    );
+    drop(relay);
+    let mut relay = open(root.path());
+    assert!(mj_core::activity::can_submit(&relay.activity_facts()));
+    assert!(
+        relay
+            .submit_command("handback-reminder-stale", request)
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[test]
+fn handback_reminder_rejects_a_different_completed_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "original-prompt", prompt("Write the report"));
+    completed(&mut relay, "original-prompt");
+    let request = handback_request(&relay);
+    submit_relay(&mut relay, "newer-user-prompt", prompt("New instructions"));
+    completed(&mut relay, "newer-user-prompt");
+    assert!(
+        relay
+            .submit_command("handback-reminder-stale", request)
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[test]
+fn handback_reminder_rejects_a_newer_native_turn_after_it_settles() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "original-prompt", prompt("Write the report"));
+    completed(&mut relay, "original-prompt");
+    let request = handback_request(&relay);
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    assert!(
+        relay
+            .submit_command("handback-reminder-stale", request)
+            .unwrap()
+            .is_err()
+    );
+}

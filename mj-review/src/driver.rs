@@ -43,7 +43,7 @@ use super::verdict::{
 pub use mj_core::review::driver::*;
 
 /// What Bifrost's analysis is doing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Analysis {
     Running,
     Ready(String),
@@ -51,7 +51,7 @@ enum Analysis {
 }
 
 /// One turn review, from the capture that starts it to the action that ends it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnReviewDriver {
     seed: TurnReviewSeed,
     phase: TurnReviewPhase,

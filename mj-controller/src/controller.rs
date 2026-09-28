@@ -98,6 +98,7 @@ pub use resume::{
 };
 pub use reviewer::reviewer_stager;
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
+pub(crate) use worker_binary::prepare_local_managed_harness;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     worker_binary_prerequisite_for_arch,

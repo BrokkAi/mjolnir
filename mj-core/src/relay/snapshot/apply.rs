@@ -164,6 +164,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             command,
             created_at_ms,
         } => {
+            if command.prompt_blocks().is_some() {
+                snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
+            }
             match command {
                 RelayCommand::Steer {
                     active_prompt_id,
@@ -210,6 +213,21 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.attempts = *attempt;
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
+                }
+                RelayCommand::InstallPromptContext { text } => {
+                    match snapshot.pending_prompt_context.as_mut() {
+                        Some(context) if context.text != *text => {
+                            context.text.push_str("\n\n");
+                            context.text.push_str(text);
+                        }
+                        Some(_) => {}
+                        None => {
+                            snapshot.pending_prompt_context = Some(PendingPromptContext {
+                                text: text.clone(),
+                                attached_command_id: None,
+                            })
+                        }
+                    }
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
                     snapshot.assessment_context = Some((**context).clone());
@@ -301,6 +319,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     command: command.clone(),
                     accepted_ordinal: event.ordinal,
                     terminal_ordinal: None,
+                    outcome: None,
+                    failure: None,
                 },
             );
             snapshot.dispatches.insert(
@@ -366,6 +386,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             dispatch.state = RelayDispatchState::Pending;
             match &dispatch.command {
                 RelayCommand::Prompt { .. }
+                | RelayCommand::HandbackReminder { .. }
                 | RelayCommand::ContinueAuthorizedWork { .. }
                 | RelayCommand::ResumeAfterQuota { .. } => {
                     let index = snapshot
@@ -450,6 +471,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .get_mut(command_id)
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
+            snapshot
+                .handled_commands
+                .get_mut(command_id)
+                .expect("completed command ledger was just checked")
+                .outcome = Some(outcome.clone());
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
                     command_id: command_id.clone(),
@@ -482,6 +508,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             match (command, outcome) {
                 (
                     RelayCommand::Prompt { .. }
+                    | RelayCommand::HandbackReminder { .. }
                     | RelayCommand::ContinueAuthorizedWork { .. }
                     | RelayCommand::ResumeAfterQuota { .. },
                     RelayCommandOutcome::Prompt { .. },
@@ -581,7 +608,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.config.insert("mode".to_owned(), mode_id);
                 }
                 (
-                    RelayCommand::SeedAssessmentContext { .. },
+                    RelayCommand::SeedAssessmentContext { .. }
+                    | RelayCommand::InstallPromptContext { .. },
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
@@ -781,6 +809,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if !matches!(
                 handled.command,
                 RelayCommand::Prompt { .. }
+                    | RelayCommand::HandbackReminder { .. }
                     | RelayCommand::ContinueAuthorizedWork { .. }
                     | RelayCommand::ResumeAfterQuota { .. }
             ) {
@@ -881,6 +910,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .get_mut(command_id)
                 .ok_or_else(|| anyhow!("terminated command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
+            snapshot
+                .handled_commands
+                .get_mut(command_id)
+                .expect("terminated command ledger was just checked")
+                .failure = Some(message.clone());
             snapshot
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
@@ -1234,6 +1268,11 @@ fn terminalize_removed_prompts(
             .get_mut(command_id)
             .ok_or_else(|| anyhow!("removed command {command_id} is not in the ledger"))?
             .terminal_ordinal = Some(terminal_ordinal);
+        snapshot
+            .handled_commands
+            .get_mut(command_id)
+            .expect("removed command ledger was just checked")
+            .failure = Some("queued command was removed".into());
     }
     snapshot.queued_prompts.retain(|queued| {
         !removed_command_ids
@@ -1306,6 +1345,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         && let Some(prompt) = snapshot
             .dispatches
             .get(id)
+            .filter(|d| !matches!(d.command, RelayCommand::HandbackReminder { .. }))
             .and_then(|d| d.command.prompt_blocks())
         && let Some(context) = &mut snapshot.assessment_context
     {
@@ -1382,7 +1422,8 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             command,
             ..
         } => {
-            let automatic = crate::continuation::is_generated_prompt(command_id)
+            let automatic = matches!(command, RelayCommand::HandbackReminder { .. })
+                || crate::continuation::is_generated_prompt(command_id)
                 || crate::continuation::is_quota_goal_resume(command_id);
             if let Some(a) = &mut snapshot.assessment {
                 if let RelayCommand::SetQuotaRecovery { recovery, .. } = command {

@@ -509,6 +509,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
     let archive_path = directory.join("move-queue.hel.zip");
     let image = ContentBlock::Image(ImageContent::new("x".repeat(70 * 1024), "image/png"));
     let canonical = CanonicalSessionSnapshot {
+        command_ledger: None,
         assessment_state: None,
         event_frontier: 0,
         event_frontier_digest: mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into(),
@@ -2099,4 +2100,41 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
         "the recovered close tears the environment down: {}",
         worker_root.display()
     );
+}
+
+#[test]
+fn move_execution_hands_ownership_to_pending_queue_until_released() {
+    let session = "move-ownership-handoff";
+    let execution = MoveMutationGuard::reserve(session).unwrap();
+    super::set_move_queue_hold(session, true);
+    drop(execution);
+    assert!(move_owns_session(session));
+    assert!(super::move_has_pending_queue(session));
+    let retry = MoveMutationGuard::reserve(session).unwrap();
+    super::release_move_queue_hold(session);
+    assert!(move_owns_session(session), "retry still owns execution");
+    assert!(!super::move_has_pending_queue(session));
+    drop(retry);
+    assert!(!move_owns_session(session));
+}
+
+#[test]
+fn move_queue_handoff_never_exposes_unowned_session() {
+    let session = "move-ownership-concurrent-handoff";
+    let guard = MoveMutationGuard::reserve(session).unwrap();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..10_000 {
+            assert!(move_owns_session(session));
+        }
+    });
+    let mut guard = Some(guard);
+    for _ in 0..1000 {
+        super::set_move_queue_hold(session, true);
+        drop(guard.take());
+        guard = Some(MoveMutationGuard::reserve(session).unwrap());
+        super::release_move_queue_hold(session);
+    }
+    reader.join().unwrap();
+    drop(guard);
+    assert!(!move_owns_session(session));
 }

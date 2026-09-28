@@ -1024,72 +1024,88 @@ pub(super) async fn events(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(1);
     if query.format.as_deref() == Some("changes") {
         tokio::spawn(async move {
-            let mut feed = match viewer_feed::ViewerFeed::new() {
-                Ok(feed) => feed,
-                Err(error) => {
-                    tracing::error!(%error, "could not start browser publication stream");
-                    return;
-                }
-            };
-            loop {
-                let current = snapshots.borrow_and_update().clone();
-                let encoded = tokio::task::spawn_blocking(move || {
-                    let result = feed.encode(current);
-                    (feed, result)
-                })
-                .await;
-                let frames = match encoded {
-                    Ok((next, Ok(frames))) => {
-                        feed = next;
-                        frames
-                    }
-                    Ok((_, Err(error))) => {
-                        tracing::error!(%error, "could not encode browser publication");
-                        return;
-                    }
+            let publish = async {
+                let mut feed = match viewer_feed::ViewerFeed::new() {
+                    Ok(feed) => feed,
                     Err(error) => {
-                        tracing::error!(%error, "browser publication encoder failed");
+                        tracing::error!(%error, "could not start browser publication stream");
                         return;
                     }
                 };
-                for frame in frames {
-                    if tx
-                        .send(Ok(Event::default().event("runtime").data(frame)))
-                        .await
-                        .is_err()
-                    {
+                loop {
+                    let current = snapshots.borrow_and_update().clone();
+                    let encoded = tokio::task::spawn_blocking(move || {
+                        let result = feed.encode(current);
+                        (feed, result)
+                    })
+                    .await;
+                    let frames = match encoded {
+                        Ok((next, Ok(frames))) => {
+                            feed = next;
+                            frames
+                        }
+                        Ok((_, Err(error))) => {
+                            tracing::error!(%error, "could not encode browser publication");
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "browser publication encoder failed");
+                            return;
+                        }
+                    };
+                    for frame in frames {
+                        if tx
+                            .send(Ok(Event::default().event("runtime").data(frame)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if snapshots.changed().await.is_err() {
                         return;
                     }
                 }
-                if snapshots.changed().await.is_err() {
-                    return;
-                }
+            };
+            tokio::select! {
+                biased;
+                _ = state.shutdown.cancelled() => {}
+                _ = tx.closed() => {}
+                _ = publish => {}
             }
         });
         return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
     }
     tokio::spawn(async move {
-        let initial = snapshots.borrow().revision;
-        if tx
-            .send(Ok(Event::default()
-                .event("revision")
-                .data(initial.to_string())))
-            .await
-            .is_err()
-        {
-            return;
-        }
-        while snapshots.changed().await.is_ok() {
-            let revision = snapshots.borrow_and_update().revision;
+        let publish = async {
+            let initial = snapshots.borrow().revision;
             if tx
                 .send(Ok(Event::default()
                     .event("revision")
-                    .data(revision.to_string())))
+                    .data(initial.to_string())))
                 .await
                 .is_err()
             {
-                break;
+                return;
             }
+            while snapshots.changed().await.is_ok() {
+                let revision = snapshots.borrow_and_update().revision;
+                if tx
+                    .send(Ok(Event::default()
+                        .event("revision")
+                        .data(revision.to_string())))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = state.shutdown.cancelled() => {}
+            _ = tx.closed() => {}
+            _ = publish => {}
         }
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())

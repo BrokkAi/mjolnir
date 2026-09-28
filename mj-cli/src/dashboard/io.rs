@@ -39,12 +39,14 @@ use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
 use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
 use crate::pollers::{
-    LifecycleSuccess, LifecycleUpdate, WorkerRecordPersistence, WorkerRecordPersistenceOutcome,
+    DashboardLifecycleUpdate, LifecycleSuccess, WorkerRecordPersistence,
+    WorkerRecordPersistenceOutcome,
 };
 use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    RuntimeConfirmationMissing(String),
     SubagentOptions {
         id: u64,
         result: std::result::Result<mj_core::subagent::SubagentOptions, String>,
@@ -155,7 +157,6 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<RemotePreflightOutcome, String>,
     },
     RenameSession {
-        session_id: String,
         title: String,
         result: std::result::Result<String, String>,
     },
@@ -168,7 +169,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     ContainerSettings {
         session_id: String,
-        result: std::result::Result<Controller, String>,
+        result: std::result::Result<DashboardMetadata, String>,
     },
     TargetReadiness {
         generation: u64,
@@ -187,9 +188,8 @@ pub(crate) enum DashboardIoUpdate {
     },
     ConfigRename {
         what: String,
-        result: std::result::Result<Controller, String>,
+        result: std::result::Result<DashboardMetadata, String>,
     },
-    ConfigReloaded(std::result::Result<Controller, String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -344,6 +344,7 @@ pub(crate) enum DashboardIoUpdate {
 }
 
 pub(crate) struct ActiveLifecycleOperation {
+    pub(super) retirement: Option<super::attachment::ChatRetirement>,
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) kind: SessionOperationKind,
     pub(crate) retry_launch: Option<DashboardAction>,
@@ -388,28 +389,26 @@ pub(crate) struct ImportedDashboardSessionApply {
     harness: &'static str,
     native_session_id: String,
     session: SessionRecord,
-    bundle_id: String,
     bundle: ProjectBundle,
 }
 
 pub(crate) struct CreatedBundleUpdate {
-    config: Config,
     bundle_id: String,
+    bundle: ProjectBundle,
 }
 
 pub(crate) struct ResumeRepositoryPreflightApply {
-    pub(crate) config: Option<Config>,
     pub(crate) preflight: ResumeRepositorySourcePreflight,
 }
 
 pub(crate) struct LifecycleReload {
-    pub(crate) update: LifecycleUpdate,
+    pub(crate) update: DashboardLifecycleUpdate,
     pub(crate) operation: Option<ActiveLifecycleOperation>,
 }
 
 pub(crate) struct LifecycleReloaded {
     reload: LifecycleReload,
-    result: std::result::Result<Controller, String>,
+    result: std::result::Result<DashboardMetadata, String>,
 }
 
 impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOutcome {
@@ -432,6 +431,71 @@ impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOut
     }
 }
 
+/// Preferences absent from the runtime feed. A background completion cannot
+/// carry config or session records back into the dashboard's authoritative view.
+pub(crate) struct DashboardMetadata {
+    mount_history: BTreeMap<String, Vec<PathBuf>>,
+    container_sizes: BTreeMap<String, mj_core::state::HostContainerSize>,
+}
+
+impl From<Controller> for DashboardMetadata {
+    fn from(controller: Controller) -> Self {
+        Self {
+            mount_history: controller.state.mount_history,
+            container_sizes: controller.state.container_sizes,
+        }
+    }
+}
+
+impl DashboardMetadata {
+    fn apply(self, state: &mut State) {
+        state.mount_history = self.mount_history;
+        state.container_sizes = self.container_sizes;
+    }
+}
+
+/// Completed mutations wait for their referenced objects in the runtime feed.
+/// They never install the independent snapshots used to perform the mutation.
+pub(crate) struct PendingRuntimeUpdate {
+    pub(crate) update: DashboardIoUpdate,
+    pub(crate) deadline: std::time::Instant,
+}
+
+impl DashboardIoUpdate {
+    pub(crate) fn awaiting_runtime(&self, controller: &Controller) -> bool {
+        match self {
+            Self::CreatedBundle { result } => result.as_ref().as_ref().is_ok_and(|created| {
+                controller.config.bundles.get(&created.bundle_id) != Some(&created.bundle)
+            }),
+            Self::ImportedSessionApplied { result } => {
+                result.as_ref().as_ref().is_ok_and(|applied| {
+                    !controller.state.sessions.contains_key(&applied.session.id)
+                        || controller.config.bundles.get(&applied.session.bundle_id)
+                            != Some(&applied.bundle)
+                })
+            }
+            Self::CreateSession(update) => matches!(update.as_ref(),
+                DashboardCreateSessionUpdate::Registered(registered)
+                    if !controller.state.sessions.contains_key(&registered.session.id)),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn runtime_wait_expired(self) -> Self {
+        let error = "The operation was saved, but the runtime feed has not confirmed it. Reconnect to refresh the view before retrying".to_owned();
+        match self {
+            Self::CreatedBundle { .. } => Self::CreatedBundle {
+                result: Box::new(Err(error)),
+            },
+            Self::ImportedSessionApplied { .. } => Self::ImportedSessionApplied {
+                result: Box::new(Err(error)),
+            },
+            Self::CreateSession(_) => Self::RuntimeConfirmationMissing(error),
+            _ => unreachable!("only reference-dependent results wait for runtime state"),
+        }
+    }
+}
+
 impl DashboardContext {
     /// How a notice names a session: the title the session list shows, or
     /// the short id when the session has no title or its record is gone
@@ -440,17 +504,25 @@ impl DashboardContext {
         session_notice_name(&self.controller.state, session_id)
     }
 
-    fn replace_controller(&mut self, mut controller: Controller) {
-        super::read_receipts::preserve_read_positions(
-            &mut controller.state.sessions,
-            &self.controller.state.sessions,
-        );
-        self.controller = controller;
+    fn apply_controller_metadata(&mut self, metadata: DashboardMetadata) {
+        metadata.apply(&mut self.controller.state);
     }
 
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
+        if update.awaiting_runtime(&self.controller) {
+            self.dashboard
+                .set_notice("Saved; waiting for the runtime view…");
+            self.pending_runtime_updates.push(PendingRuntimeUpdate {
+                update,
+                deadline: std::time::Instant::now() + SAVE_ACK_TIMEOUT,
+            });
+            return;
+        }
         match update {
+            DashboardIoUpdate::RuntimeConfirmationMissing(error) => {
+                self.dashboard.set_failure_notice(error)
+            }
             DashboardIoUpdate::HelpSearchFinished { generation, result } => {
                 self.dashboard.apply_help_search_result(generation, result);
             }
@@ -603,58 +675,20 @@ impl DashboardContext {
                     (
                         WorkerRecordPersistence::TargetMissing {
                             session_id,
-                            detail,
-                            updated_at,
+                            detail: _,
+                            updated_at: _,
                         },
                         Ok(WorkerRecordPersistenceOutcome::TargetMissing(state)),
                     ) => {
-                        let applies = self.controller.state.sessions.get(&session_id).is_some_and(
-                            |session| {
-                                matches!(
-                                    session.state,
-                                    SessionState::Provisioning
-                                        | SessionState::Running
-                                        | SessionState::Disconnected
-                                        | SessionState::Error
-                                )
-                            },
-                        );
-                        if applies {
-                            let name = self.session_notice_name(&session_id);
-                            let notice = match state {
-                                SessionState::Error => {
-                                    let session = self
-                                        .controller
-                                        .state
-                                        .sessions
-                                        .get_mut(&session_id)
-                                        .expect("the record was just checked");
-                                    session.state = state;
-                                    session.last_error = Some(detail);
-                                    session.updated_at = updated_at;
-                                    format!(
-                                        "Session {} cannot reach its managed target; its last verified checkpoint is ready to resume",
-                                        name
-                                    )
-                                }
-                                // The daemon discards a lost session's record
-                                // rather than keeping a tombstone, so this
-                                // view of the store has to drop it too.
-                                SessionState::Lost => {
-                                    self.controller.state.sessions.remove(&session_id);
-                                    self.controller.state.subagents.remove(&session_id);
-                                    format!(
-                                        "Session {} was lost because its managed target no longer exists; its record was removed.",
-                                        name
-                                    )
-                                }
-                                _ => unreachable!("a missing target persisted as {state:?}"),
-                            };
-                            self.dashboard.set_state(self.controller.state.clone());
-                            self.drop_warm_chat_for(&session_id);
-                            self.refresh_poll_targets();
-                            self.dashboard.set_notice(notice);
-                        }
+                        let name = self.session_notice_name(&session_id);
+                        let notice = match state {
+                            SessionState::Error => format!(
+                                "Session {name} cannot reach its managed target; its last verified checkpoint is ready to resume"
+                            ),
+                            SessionState::Lost => format!("Session {name} lost its managed target"),
+                            _ => unreachable!("target-missing result is error or lost"),
+                        };
+                        self.dashboard.set_notice(notice);
                     }
                     (WorkerRecordPersistence::TargetMissing { session_id, .. }, Err(error)) => {
                         self.dashboard.set_notice(format!(
@@ -817,11 +851,8 @@ impl DashboardContext {
                 retry,
                 result,
             } => match *result {
-                Ok((config, recipe)) => {
-                    self.controller.config = config.clone();
-                    let action = self
-                        .dashboard
-                        .go_launch_action(workspace_id, config, recipe);
+                Ok((_config, recipe)) => {
+                    let action = self.dashboard.go_launch_action(workspace_id, recipe);
                     super::actions::start_session_launch(self, action);
                 }
                 Err(error) => {
@@ -905,17 +936,8 @@ impl DashboardContext {
                     ));
                 }
             }
-            DashboardIoUpdate::RenameSession {
-                session_id,
-                title,
-                result,
-            } => match result {
+            DashboardIoUpdate::RenameSession { title, result } => match result {
                 Ok(title) => {
-                    if let Some(session) = self.controller.state.sessions.get_mut(&session_id) {
-                        session.session_title_override = Some(title.clone());
-                        session.updated_at = chrono::Utc::now().to_rfc3339();
-                    }
-                    self.dashboard.set_state(self.controller.state.clone());
                     self.dashboard
                         .set_notice(format!("Renamed session to {title}"));
                 }
@@ -926,7 +948,7 @@ impl DashboardContext {
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
                 Ok(controller) => {
-                    self.replace_controller(controller);
+                    self.apply_controller_metadata(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
@@ -978,7 +1000,7 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ConfigRename { what, result } => match result {
                 Ok(controller) => {
-                    self.replace_controller(controller);
+                    self.apply_controller_metadata(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
@@ -990,22 +1012,6 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
-            DashboardIoUpdate::ConfigReloaded(result) => {
-                self.config_reload_in_flight = false;
-                match result {
-                    Ok(controller) => {
-                        self.replace_controller(controller);
-                        self.dashboard.set_config(self.controller.config.clone());
-                        self.dashboard.set_state(self.controller.state.clone());
-                        self.refresh_chat_context();
-                        self.refresh_poll_targets();
-                        self.refresh_quotas_if_profiles_changed();
-                    }
-                    Err(error) => self
-                        .dashboard
-                        .set_notice(format!("Could not reload configuration: {error}")),
-                }
-            }
             DashboardIoUpdate::WebAccess { generation, access } => {
                 if generation == self.web_request_generation {
                     self.dashboard.apply_web_access(access);
@@ -1105,12 +1111,9 @@ impl DashboardContext {
             },
             DashboardIoUpdate::SetupSaved { generation, result } => {
                 let result = result.map(Config::with_local_targets);
-                if let Ok(config) = &result {
-                    self.controller.config = config.clone();
-                    self.refresh_chat_context();
-                    self.request_quota_refresh();
-                    self.refresh_poll_targets();
-                }
+                // The acknowledgement closes the editor; only the runtime feed
+                // installs configuration, including edits from other clients.
+                let result = result.map(|_| self.controller.config.clone());
                 self.dashboard.setup_saved(generation, result);
             }
             DashboardIoUpdate::ReviewSettingsChoices {
@@ -1145,9 +1148,6 @@ impl DashboardContext {
                 Ok(config) => {
                     let style = config.spinner;
                     self.dashboard.finish_spinner_style_save();
-                    self.controller.config = config.clone();
-                    self.dashboard.set_config(config);
-                    self.refresh_chat_context();
                     let palette = self
                         .dashboard
                         .first_key_label(mj_tui::CommandId::Palette)
@@ -1195,7 +1195,6 @@ impl DashboardContext {
             }
             DashboardIoUpdate::CreatedBundle { result } => match *result {
                 Ok(created) => {
-                    self.controller.config = created.config;
                     let followup = self
                         .dashboard
                         .apply_created_bundle(self.controller.config.clone(), &created.bundle_id);
@@ -1213,16 +1212,6 @@ impl DashboardContext {
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
                 Ok(applied) => {
                     let session_id = applied.session.id.clone();
-                    self.controller
-                        .config
-                        .bundles
-                        .insert(applied.bundle_id, applied.bundle);
-                    self.controller
-                        .state
-                        .sessions
-                        .insert(session_id.clone(), applied.session);
-                    self.dashboard.set_config(self.controller.config.clone());
-                    self.dashboard.set_state(self.controller.state.clone());
                     self.resolve_project_sources();
                     self.refresh_poll_targets();
                     self.dashboard.set_notice(format!(
@@ -1377,49 +1366,43 @@ impl DashboardContext {
                     return;
                 }
                 match *result {
-                    Ok(applied) => {
-                        if let Some(config) = applied.config {
-                            self.controller.config = config.clone();
-                            self.dashboard.set_config(config);
+                    Ok(applied) => match applied.preflight {
+                        ResumeRepositorySourcePreflight::Ready(receipt) => {
+                            self.dashboard.finish_resume_repository_preflight();
+                            super::actions::start_preflighted_session_launch(
+                                self, *launch, receipt,
+                            );
                         }
-                        match applied.preflight {
-                            ResumeRepositorySourcePreflight::Ready(receipt) => {
-                                self.dashboard.finish_resume_repository_preflight();
-                                super::actions::start_preflighted_session_launch(
-                                    self, *launch, receipt,
+                        ResumeRepositorySourcePreflight::ConvertingRawCheckout {
+                            receipt,
+                            preview,
+                        } => {
+                            self.dashboard
+                                .show_raw_conversion_confirmation(*launch, receipt, *preview);
+                        }
+                        ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
+                            if submitted_repository_id.as_deref()
+                                == Some(mismatch.repository_id.as_str())
+                            {
+                                self.dashboard.apply_repository_origin_failure(
+                                    &mismatch.repository_id,
+                                    format!(
+                                        "That origin does not contain checkpoint base {}.",
+                                        mismatch.missing_commit
+                                    ),
+                                );
+                            } else {
+                                self.dashboard.show_repository_origin_dialog(
+                                    mismatch.session_id,
+                                    mismatch.repository_id,
+                                    mismatch.missing_commit,
+                                    mismatch.archived_origin,
+                                    mismatch.configured_origin,
+                                    *launch,
                                 );
                             }
-                            ResumeRepositorySourcePreflight::ConvertingRawCheckout {
-                                receipt,
-                                preview,
-                            } => {
-                                self.dashboard
-                                    .show_raw_conversion_confirmation(*launch, receipt, *preview);
-                            }
-                            ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) => {
-                                if submitted_repository_id.as_deref()
-                                    == Some(mismatch.repository_id.as_str())
-                                {
-                                    self.dashboard.apply_repository_origin_failure(
-                                        &mismatch.repository_id,
-                                        format!(
-                                            "That origin does not contain checkpoint base {}.",
-                                            mismatch.missing_commit
-                                        ),
-                                    );
-                                } else {
-                                    self.dashboard.show_repository_origin_dialog(
-                                        mismatch.session_id,
-                                        mismatch.repository_id,
-                                        mismatch.missing_commit,
-                                        mismatch.archived_origin,
-                                        mismatch.configured_origin,
-                                        *launch,
-                                    );
-                                }
-                            }
                         }
-                    }
+                    },
                     Err(error) => {
                         if let Some(repository_id) = submitted_repository_id {
                             self.dashboard
@@ -1476,18 +1459,21 @@ impl DashboardContext {
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
-                self.controller
-                    .state
-                    .sessions
-                    .insert(session_id.clone(), registered.session);
-                self.dashboard.set_state(self.controller.state.clone());
                 self.dashboard.select_active_session(&session_id);
                 self.resolve_project_sources();
-                self.dashboard.begin_session_operation(
-                    session_id.clone(),
-                    SessionOperationKind::Launching,
-                    None,
-                );
+                let still_launching = self
+                    .controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|session| session.state == SessionState::Provisioning);
+                if still_launching {
+                    self.dashboard.begin_session_operation(
+                        session_id.clone(),
+                        SessionOperationKind::Launching,
+                        None,
+                    );
+                }
                 // Anything typed while the launch was being prepared belongs to
                 // this session now: its composer becomes the session's standby,
                 // and each prompt already entered there goes to the daemon to
@@ -1508,15 +1494,18 @@ impl DashboardContext {
                 let notice_name = self.session_notice_name(&session_id);
                 self.dashboard
                     .set_notice(format!("Launching {notice_name}…"));
-                self.lifecycle_operations.insert(
-                    session_id,
-                    ActiveLifecycleOperation {
-                        cancelled: registered.cancelled,
-                        kind: SessionOperationKind::Launching,
-                        retry_launch: Some(registered.retry_launch),
-                        notice_name,
-                    },
-                );
+                if still_launching {
+                    self.lifecycle_operations.insert(
+                        session_id,
+                        ActiveLifecycleOperation {
+                            retirement: None,
+                            cancelled: registered.cancelled,
+                            kind: SessionOperationKind::Launching,
+                            retry_launch: Some(registered.retry_launch),
+                            notice_name,
+                        },
+                    );
+                }
             }
             DashboardCreateSessionUpdate::Failed {
                 error,
@@ -1532,6 +1521,16 @@ impl DashboardContext {
     fn apply_lifecycle_reloaded(&mut self, reloaded: LifecycleReloaded) {
         let LifecycleReload { update, operation } = reloaded.reload;
         let session_id = update.session_id;
+        if self
+            .lifecycle_operations
+            .get(&session_id)
+            .is_some_and(|current| !Arc::ptr_eq(&current.cancelled, &update.operation))
+        {
+            if let Err(error) = &update.result {
+                tracing::warn!(%session_id, %error, "superseded lifecycle reload failed");
+            }
+            return;
+        }
         // Taken before the reload: a destroy removes the record, and the
         // runtime snapshot may already have dropped it.
         let name = lifecycle_notice_name(
@@ -1549,15 +1548,22 @@ impl DashboardContext {
                 return;
             }
         };
-        self.replace_controller(loaded);
+        self.apply_controller_metadata(loaded);
         self.dashboard.set_state(self.controller.state.clone());
         self.resolve_project_sources();
         // A lifecycle may finish after the user changed tabs. Its durable
         // record still belongs in the global controller, but completion must
         // not move the visible selection or replace another workspace's chat.
         let focus_session = self.session_in_active_workspace(&session_id);
-        if update.result.is_ok() {
-            self.drop_warm_chat_for(&session_id);
+        let retirement = operation
+            .as_ref()
+            .and_then(|operation| operation.retirement.as_ref());
+        let owns_chat = retirement
+            .is_some_and(|retirement| retirement.is_current(&self.chats, &self.attachments));
+        if update.result.is_ok()
+            && let Some(retirement) = retirement
+        {
+            self.drop_warm_chat_for(retirement);
         }
         match update.result {
             Ok(LifecycleSuccess::Created) => {
@@ -1577,7 +1583,7 @@ impl DashboardContext {
                 // keeps `TAIL_SEED_ITEMS` and discards everything before it,
                 // so reading the whole projection was work proportional to
                 // history for a result that was thrown away.
-                if focus_session {
+                if focus_session && owns_chat {
                     self.request_transcript_tail_seed(&session_id);
                     self.open_chat_session(&session_id);
                 }
@@ -1586,7 +1592,7 @@ impl DashboardContext {
                 self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
-                if focus_session {
+                if focus_session && owns_chat {
                     self.request_transcript_tail_seed(&session_id);
                     self.open_chat_session(&session_id);
                 }
@@ -1703,6 +1709,97 @@ mod tests {
     use super::*;
     use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
     use mj_core::config::{HarnessKind, ProjectRepository};
+
+    #[test]
+    fn saved_bundle_waits_for_runtime_identity_without_installing_old_config() {
+        let completion = DashboardIoUpdate::CreatedBundle {
+            result: Box::new(Ok(CreatedBundleUpdate {
+                bundle_id: "created".into(),
+                bundle: ProjectBundle {
+                    primary_repo: "created".into(),
+                    repositories: vec![],
+                },
+            })),
+        };
+        let mut controller = Controller {
+            config: Config::default(),
+            state: State::default(),
+        };
+        assert!(completion.awaiting_runtime(&controller));
+        controller.config.theme = mj_core::config::UiTheme::Light;
+        controller.config.bundles.insert(
+            "created".into(),
+            ProjectBundle {
+                primary_repo: "created".into(),
+                repositories: vec![],
+            },
+        );
+        assert!(!completion.awaiting_runtime(&controller));
+        assert_eq!(controller.config.theme, mj_core::config::UiTheme::Light);
+        controller
+            .config
+            .bundles
+            .get_mut("created")
+            .unwrap()
+            .primary_repo = "replaced".into();
+        assert!(
+            completion.awaiting_runtime(&controller),
+            "the same id cannot authorize a different saved project"
+        );
+    }
+
+    #[test]
+    fn imported_session_followup_waits_for_both_runtime_record_and_bundle() {
+        let session = lifecycle_session("imported", "workspace", SessionState::Stopped);
+        let completion = DashboardIoUpdate::ImportedSessionApplied {
+            result: Box::new(Ok(ImportedDashboardSessionApply {
+                harness: "codex",
+                native_session_id: "native".into(),
+                session: session.clone(),
+                bundle: ProjectBundle {
+                    primary_repo: "project".into(),
+                    repositories: vec![],
+                },
+            })),
+        };
+        let mut controller = Controller {
+            config: Config::default(),
+            state: State::default(),
+        };
+        assert!(completion.awaiting_runtime(&controller));
+        let mut newer = session.clone();
+        newer.session_title_override = Some("newer runtime title".into());
+        controller.state.sessions.insert(newer.id.clone(), newer);
+        assert!(completion.awaiting_runtime(&controller));
+        controller.config.bundles.insert(
+            session.bundle_id,
+            ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![],
+            },
+        );
+        assert!(!completion.awaiting_runtime(&controller));
+        assert_eq!(
+            controller.state.sessions["imported"].listed_title(),
+            "newer runtime title"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_registration_does_not_offer_to_replay_accepted_creation() {
+        let completion = DashboardIoUpdate::CreateSession(Box::new(
+            DashboardCreateSessionUpdate::Registered(Box::new(RegisteredDashboardSession {
+                retry_launch: DashboardAction::None,
+                session: lifecycle_session("created", "workspace", SessionState::Provisioning),
+                remembered_container_size: None,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            })),
+        ));
+        assert!(matches!(
+            completion.runtime_wait_expired(),
+            DashboardIoUpdate::RuntimeConfirmationMissing(_)
+        ));
+    }
 
     #[test]
     fn notices_name_a_titled_session_by_its_title_and_others_by_short_id() {
@@ -2120,16 +2217,13 @@ mod tests {
 
     const LIFECYCLE_RELOAD_CHILD: &str = "MJ_TEST_LIFECYCLE_RELOAD_CHILD";
 
-    /// A completed lifecycle is the moment a freshly started container session
-    /// first appears, so the reload it schedules is exactly when another
-    /// workspace's live sessions would flood the pane. The reloaded controller
-    /// must carry this workspace's live sessions and the global stopped
-    /// history, and nothing else.
+    /// A load started before a runtime update must not resurrect old records
+    /// or remove a newer session when the lifecycle completion arrives.
     #[tokio::test]
-    async fn a_lifecycle_reload_keeps_sessions_from_all_workspaces() {
+    async fn a_lifecycle_reload_preserves_newer_runtime_records() {
         if crate::test_support::rerun_in_isolated_child(
             LIFECYCLE_RELOAD_CHILD,
-            "dashboard::io::tests::a_lifecycle_reload_keeps_sessions_from_all_workspaces",
+            "dashboard::io::tests::a_lifecycle_reload_preserves_newer_runtime_records",
         ) {
             return;
         }
@@ -2203,10 +2297,10 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
         spawn_lifecycle_reload(
             LifecycleReload {
-                update: LifecycleUpdate {
+                update: DashboardLifecycleUpdate {
                     session_id: "session-beta-live".into(),
                     result: Ok(LifecycleSuccess::Created),
-                    deferred_cleanup: false,
+                    operation: Arc::new(AtomicBool::new(false)),
                 },
                 operation: None,
             },
@@ -2221,15 +2315,20 @@ mod tests {
             panic!("the reload reports through LifecycleReloaded");
         };
         let loaded = reloaded.result.expect("the reload succeeds");
-        let ids = loaded.state.sessions.keys().collect::<BTreeSet<_>>();
+        let mut current = State::default();
+        current.sessions.insert(
+            "newer-session".into(),
+            lifecycle_session("newer-session", &beta.id, SessionState::Running),
+        );
+        loaded.apply(&mut current);
         assert_eq!(
-            ids,
-            BTreeSet::from([
-                &"session-beta-live".to_owned(),
-                &"session-alpha-live".to_owned(),
-                &"session-alpha-stopped".to_owned()
-            ]),
-            "the sidebar keeps all live sessions and stopped history"
+            current
+                .sessions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["newer-session"],
+            "a completed background load cannot replace newer runtime records"
         );
     }
 

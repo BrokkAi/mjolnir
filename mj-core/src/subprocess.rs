@@ -24,6 +24,72 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
+/// Own a child-created process group through all of its I/O and cleanup.
+/// The group can outlive its leader, so reaping the child does not disarm it.
+pub struct ProcessGroupGuard {
+    pid: Option<i32>,
+}
+
+impl ProcessGroupGuard {
+    pub fn new(pid: Option<u32>) -> Self {
+        Self {
+            pid: pid
+                .and_then(|pid| i32::try_from(pid).ok())
+                .filter(|pid| *pid > 1),
+        }
+    }
+
+    pub fn kill(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            terminate_process_group(pid, libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        let _ = self.pid;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// A process birth identity, shared with remote teardown's POSIX shell.
+/// Linux uses boot identity and kernel start ticks; other Unix hosts use ps's
+/// process start timestamp. A PID by itself is never a durable identity.
+pub const PROCESS_BIRTH_SCRIPT: &str = r#"mj_process_birth() {
+    if [ -r "/proc/$1/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+        mj_stat=$(cat "/proc/$1/stat") || return 1
+        mj_stat=${mj_stat##*) }
+        mj_ticks=$(printf '%s\n' "$mj_stat" | awk '{print $20}') || return 1
+        [ -n "$mj_ticks" ] || return 1
+        mj_boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
+        printf '%s:%s\n' "$mj_boot" "$mj_ticks"
+    else
+        LC_ALL=C ps -o lstart= -p "$1" | awk '{$1=$1; print}'
+    fi
+}
+"#;
+
+pub fn process_birth_identity(pid: u32) -> Result<String> {
+    let output = run_with_input(
+        Command::new("sh").args([
+            "-c",
+            &format!("{PROCESS_BIRTH_SCRIPT}\nmj_process_birth \"$1\""),
+            "mj-process-birth",
+            &pid.to_string(),
+        ]),
+        &[],
+    )?;
+    let identity = String::from_utf8(output.stdout)?.trim().to_owned();
+    anyhow::ensure!(
+        output.status.success() && !identity.is_empty(),
+        "process birth identity is unavailable for {pid}"
+    );
+    Ok(identity)
+}
+
 /// Capture a process with byte/time bounds, draining both pipes concurrently.
 /// Kill its process group before returning on overflow, timeout, or cancellation.
 pub async fn run_bounded(
@@ -40,16 +106,7 @@ pub async fn run_bounded(
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().context("start bounded subprocess")?;
-    struct Group(Option<u32>);
-    impl Drop for Group {
-        fn drop(&mut self) {
-            #[cfg(unix)]
-            if let Some(pid) = self.0 {
-                terminate_process_group(pid as i32, libc::SIGKILL);
-            }
-        }
-    }
-    let mut group = Group(child.id());
+    let group = ProcessGroupGuard::new(child.id());
     async fn read(mut pipe: impl tokio::io::AsyncRead + Unpin, max: usize) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         (&mut pipe)
@@ -75,7 +132,9 @@ pub async fn run_bounded(
     .await;
     match result {
         Ok(Ok(output)) => {
-            group.0 = None;
+            // Completed pipes do not authorize a background descendant to
+            // keep running after this bounded command releases ownership.
+            drop(group);
             Ok(output)
         }
         outcome => {
@@ -83,11 +142,12 @@ pub async fn run_bounded(
             if let Err(error) = child.start_kill() {
                 tracing::debug!(%error, "bounded subprocess already exited during termination");
             }
-            let reaped =
-                tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
-            if !matches!(reaped, Ok(Ok(_))) {
-                tracing::warn!("could not reap bounded subprocess after termination");
-            }
+            // The operation deadline stops execution, not cleanup ownership.
+            // Callers may remove working files as soon as this returns.
+            child
+                .wait()
+                .await
+                .context("reap terminated bounded subprocess")?;
             match outcome {
                 Ok(Err(error)) => Err(error),
                 _ => anyhow::bail!("subprocess timed out"),
@@ -434,6 +494,37 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_timeout_reaps_the_child_before_returning() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("child.pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; sleep 60 & wait", "reap-fixture"])
+            .arg(&pid_file);
+        let error =
+            super::run_bounded(&mut command, 100_000, std::time::Duration::from_millis(200))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "bounded subprocess must already be reaped"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn bounded_capture_drains_large_pipes_and_stops_on_overflow_or_timeout() {

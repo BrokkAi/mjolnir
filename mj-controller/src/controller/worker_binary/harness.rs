@@ -1,6 +1,329 @@
 use super::*;
 use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION};
 
+/// Reuse the worker's installer for controller-owned vendor services. The
+/// response carries private environment values and must never enter logs.
+pub(crate) async fn prepare_local_managed_harness(
+    harness: HarnessKind,
+    home: PathBuf,
+    environment: std::collections::BTreeMap<String, String>,
+) -> Result<(mj_core::worker_launch::PreparedHarnessInfo, File)> {
+    use futures::FutureExt;
+    let (reply, response) = tokio::sync::oneshot::channel();
+    // The owner retains staging through child completion even if this caller
+    // disappears. Panic and ordinary failure are both reported independently.
+    drop(tokio::spawn(async move {
+        let result = std::panic::AssertUnwindSafe(prepare_local_managed_harness_owned(
+            harness,
+            home,
+            environment,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "managed harness preparation owner panicked"
+            ))
+        });
+        if let Err(error) = &result {
+            tracing::warn!(%error, "managed harness preparation failed");
+        }
+        let _ = reply.send(result);
+    }));
+    response
+        .await
+        .context("managed harness preparation owner stopped")?
+}
+
+async fn prepare_local_managed_harness_owned(
+    harness: HarnessKind,
+    home: PathBuf,
+    environment: std::collections::BTreeMap<String, String>,
+) -> Result<(mj_core::worker_launch::PreparedHarnessInfo, File)> {
+    let (binary, staging, config_path) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let binary =
+            binary_select::materialize_worker_source(native_worker_binary_prerequisite()?)?;
+        let staging =
+            tempfile::tempdir().context("create private harness preparation directory")?;
+        let config_path = staging.path().join("launch.json");
+        let launch = WorkerLaunchConfig {
+            expected_runtime_identity: None,
+            goal_resume_request: None,
+            run_mode: Default::default(),
+            session_id: "vendor-service".into(),
+            subagents: Default::default(),
+            handback_tool: false,
+            review_capture: false,
+            target_environment: Default::default(),
+            seed_image_environment: false,
+            harness,
+            harness_home: home.clone(),
+            authentication_marker: None,
+            bridge_command: harness.cli_binary_name().into(),
+            bridge_args: Vec::new(),
+            harness_runtime: HarnessRuntimePolicy::Managed,
+            environment,
+            excluded_environment: Vec::new(),
+            cwd: home,
+            additional_directories: Vec::new(),
+            native_session_id: None,
+            project_memory: None,
+            execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+        };
+        launch.write(&config_path)?;
+        Ok((binary, staging, config_path))
+    })
+    .await
+    .context("prepare local harness configuration task failed")??;
+    // Keep rather than Drop: runtime teardown must not remove files under a
+    // process whose termination has not yet been confirmed.
+    let staging = staging.keep();
+    let mut child_reaped = false;
+    let prepared =
+        prepare_local_harness_with_worker(&binary, &config_path, &mut child_reaped).await;
+    if child_reaped {
+        tokio::fs::remove_dir_all(&staging)
+            .await
+            .context("remove completed harness preparation files")?;
+    } else {
+        tracing::warn!(path = %staging.display(), "retaining private harness preparation files because child exit was not confirmed");
+    }
+    prepared
+}
+
+async fn prepare_local_harness_with_worker(
+    binary: &Path,
+    config_path: &Path,
+    child_reaped: &mut bool,
+) -> Result<(mj_core::worker_launch::PreparedHarnessInfo, File)> {
+    let directory = config_path
+        .parent()
+        .context("harness preparation config has no directory")?;
+    let info_path = directory.join("runtime.json");
+    let ack_path = directory.join("runtime.ack");
+    let mut command = tokio::process::Command::new(binary);
+    command
+        .args(["worker", "prepare-harness", "--config"])
+        .arg(config_path)
+        .arg("--runtime-info")
+        .arg(&info_path)
+        .arg("--runtime-ack")
+        .arg(&ack_path);
+    let child = mj_core::subprocess::run_bounded(
+        &mut command,
+        1024 * 1024,
+        std::time::Duration::from_secs(300),
+    );
+    tokio::pin!(child);
+    let transfer = receive_prepared_harness(&info_path);
+    tokio::pin!(transfer);
+    let result = tokio::select! {
+        biased;
+        output = &mut child => {
+            let output = output.context("prepare local managed harness")?;
+            *child_reaped = true;
+            ensure!(output.status.success(), "managed harness preparation failed ({})", output.status);
+            anyhow::bail!("managed harness preparation exited before its runtime lease was transferred");
+        }
+        result = &mut transfer => result,
+    };
+    let ack = if result.is_ok() {
+        b"retained".as_slice()
+    } else {
+        b"aborted".as_slice()
+    };
+    let ack_result =
+        match tokio::task::spawn_blocking(move || mj_core::config::atomic_write(&ack_path, ack))
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!(
+                "acknowledge harness lease task failed: {error}"
+            )),
+        };
+    // Never abandon the process owner on a protocol/ACK error. Its bounded
+    // supervisor finishes termination before staging can be removed.
+    let output = child.await.context("finish managed harness preparation")?;
+    *child_reaped = true;
+    ack_result.context("acknowledge prepared harness lease")?;
+    let result = result?;
+    ensure!(
+        output.status.success(),
+        "managed harness preparation failed ({})",
+        output.status
+    );
+    Ok(result)
+}
+
+async fn receive_prepared_harness(
+    info_path: &Path,
+) -> Result<(mj_core::worker_launch::PreparedHarnessInfo, File)> {
+    use tokio::io::AsyncReadExt;
+    let file = loop {
+        match tokio::fs::File::open(info_path).await {
+            Ok(file) => break file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("read private harness preparation response"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    let mut body = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut body)
+        .await
+        .context("read private harness preparation response")?;
+    ensure!(
+        body.len() <= 1024 * 1024,
+        "managed harness preparation response exceeds size limit"
+    );
+    let prepared: mj_core::worker_launch::PreparedHarnessInfo = serde_json::from_slice(&body)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "invalid managed harness preparation response ({:?}, line {}, column {})",
+                error.classify(),
+                error.line(),
+                error.column()
+            )
+        })?;
+    ensure!(
+        prepared.version == mj_core::worker_launch::PreparedHarnessInfo::VERSION,
+        "unsupported managed harness preparation response version {}",
+        prepared.version
+    );
+    let lease_path = prepared.lease_path.clone();
+    let lease = tokio::task::spawn_blocking(move || -> Result<File> {
+        let lease = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .context("open prepared harness lease")?;
+        lease
+            .lock_shared()
+            .context("retain prepared harness lease")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = lease.metadata()?;
+            let named = std::fs::metadata(&lease_path)?;
+            ensure!(
+                held.dev() == named.dev() && held.ino() == named.ino(),
+                "prepared harness lease was replaced during transfer"
+            );
+        }
+        Ok(lease)
+    })
+    .await
+    .context("retain prepared harness lease task failed")??;
+    Ok((prepared, lease))
+}
+
+#[cfg(all(test, unix))]
+mod preparation_tests {
+    use super::*;
+
+    fn fake_worker(root: &Path, script: &str) -> PathBuf {
+        mj_core::test_hooks::install_fake_command(root, "worker", script);
+        root.join("worker")
+    }
+
+    #[tokio::test]
+    async fn kimi_preparation_drains_large_private_output_and_retains_the_runtime_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let lease_path = directory.path().join(".lease");
+        std::fs::write(&lease_path, []).unwrap();
+        let config = directory.path().join("launch.json");
+        let response = mj_core::worker_launch::PreparedHarnessInfo {
+            version: mj_core::worker_launch::PreparedHarnessInfo::VERSION,
+            command: directory.path().join("kimi"),
+            environment: std::collections::BTreeMap::from([("SECRET".into(), "x".repeat(100_000))]),
+            lease_path: lease_path.clone(),
+        };
+        std::fs::write(&config, serde_json::to_vec(&response).unwrap()).unwrap();
+        let binary = fake_worker(
+            directory.path(),
+            "#!/bin/sh\n[ \"$1 $2 $3\" = 'worker prepare-harness --config' ] || exit 2\ncat \"$4\" >&2\ncat \"$4\"\ncp \"$4\" \"$6.tmp\"\nmv \"$6.tmp\" \"$6\"\nwhile [ ! -e \"$8\" ]; do sleep 0.01; done\n[ \"$(cat \"$8\")\" = retained ] || exit 3\n",
+        );
+        let (prepared, lease) = prepare_local_harness_with_worker(&binary, &config, &mut false)
+            .await
+            .unwrap();
+        assert_eq!(prepared.environment["SECRET"].len(), 100_000);
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lease_path)
+            .unwrap();
+        assert!(contender.try_lock().is_err());
+        drop(lease);
+        // Concurrent process tests can fork while this descriptor is open.
+        // CLOEXEC closes their copies at exec, rather than at the parent's drop.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match contender.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("probe released runtime lease: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("runtime lease remained locked after intentional owners dropped and fork/exec copies should have closed");
+    }
+
+    #[tokio::test]
+    async fn kimi_preparation_never_includes_private_child_output_in_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = fake_worker(
+            directory.path(),
+            "#!/bin/sh\nprintf secret-token\nprintf secret-token >&2\nexit 3\n",
+        );
+        let error = prepare_local_harness_with_worker(
+            &binary,
+            &directory.path().join("config"),
+            &mut false,
+        )
+        .await
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains("secret-token"));
+        assert!(
+            error
+                .to_string()
+                .contains("managed harness preparation failed")
+        );
+    }
+    #[tokio::test]
+    async fn kimi_preparation_redacts_invalid_responses_and_rejects_old_empty_success() {
+        for (script, expected) in [
+            (
+                "#!/bin/sh\nprintf '\"secret-token\"' > \"$6\"\nwhile [ ! -e \"$8\" ]; do sleep 0.01; done\nexit 3\n",
+                "invalid managed harness preparation response",
+            ),
+            (
+                "#!/bin/sh\nexit 0\n",
+                "exited before its runtime lease was transferred",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let binary = fake_worker(directory.path(), script);
+            let mut reaped = false;
+            let error = prepare_local_harness_with_worker(
+                &binary,
+                &directory.path().join("config"),
+                &mut reaped,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                reaped,
+                "preparation failed before confirmed child exit: {error:#}"
+            );
+            assert!(!format!("{error:#}").contains("secret-token"));
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+}
+
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
 /// its parent.

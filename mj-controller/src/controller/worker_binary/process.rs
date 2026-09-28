@@ -108,7 +108,11 @@ pub(super) fn start_worker_command(
     );
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
-            CommandSpec::new("sh", ["-c", &detached_script])
+            // The worker this launches outlives the launch, so completion must
+            // not signal the process group it inherited from this shell.
+            let mut spec = CommandSpec::new("sh", ["-c", &detached_script]);
+            spec.detaches = true;
+            spec
         }
         targets::TargetLocator::LocalPodman { container_id, .. } => CommandSpec::new(
             "podman",

@@ -314,6 +314,9 @@ pub struct FileSourceRanges {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentToolRequest {
+    /// Stamped by the worker owner at durable admission, never trusted from MCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originating_command_id: Option<String>,
     pub request_id: String,
     pub created_at_ms: i64,
     pub action: SubagentToolAction,

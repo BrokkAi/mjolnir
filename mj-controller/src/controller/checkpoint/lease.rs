@@ -92,12 +92,18 @@ impl ControllerRelayLease {
 
     /// Abandon a checkpoint barrier this controller can no longer complete.
     ///
-    /// A relay barrier belongs to the connection that opened it and only a
-    /// disconnect cancels it (`cancel_checkpoint_barrier_on_disconnect`).
-    /// Completing it instead would advance the relay's recovery floor past
-    /// history that no verified checkpoint covers, so reclaim the connection
-    /// and drop it: the worker cancels the barrier and resumes dispatch.
+    /// A sealed Move/close barrier needs explicit release; disconnection must
+    /// preserve it for lifecycle recovery. Ordinary barriers remain owned by
+    /// their connection. Neither path advances the recovery floor.
     pub(in crate::controller) async fn cancel_abandoned_barrier(&mut self) -> Result<()> {
+        let snapshot = self.sync_snapshot().await?;
+        if let Some(barrier_command_id) = snapshot.operational.command_ledger_seal {
+            self.submit(
+                new_command_id("checkpoint-release")?,
+                RelayCommand::ReleaseCheckpoint { barrier_command_id },
+            )
+            .await?;
+        }
         let Self::Managed { handle, lease } = self else {
             // A standalone connection is dropped with this value, which the
             // worker sees as the same disconnect.
@@ -168,8 +174,8 @@ pub(in crate::controller) struct LatchedCheckpoint {
 /// ACP dispatch until something ends it. Every path out of one must therefore
 /// either [`LatchedCheckpoint::complete`] it or [`LatchedCheckpoint::abandon`]
 /// it; both consume the value so a new exit cannot quietly skip the choice.
-/// Close is the exception: it holds its lease to the end, so dropping that
-/// lease is what ends its barrier.
+/// A close keeps its lease through the durable Close and CompleteCheckpoint
+/// decisions. Losing the connection preserves its sealed cut for recovery.
 impl LatchedCheckpoint {
     /// Let the relay release the history that this installed archive covers.
     pub(super) async fn complete(mut self) -> Result<()> {

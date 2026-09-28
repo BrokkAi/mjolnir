@@ -217,7 +217,7 @@ pub struct ReviewJob {
 }
 
 /// Supplemental evidence that may not have been obtainable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupplementalContext {
     pub body: String,
     pub unavailable: bool,
@@ -642,7 +642,7 @@ pub fn supervisor_prompt(
 }
 
 /// A completed lane's report, as the supervisor receives it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LaneReport {
     pub id: String,
     pub label: String,

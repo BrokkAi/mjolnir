@@ -1,6 +1,10 @@
 //! Deferred child input uses the parent's existing durable request queue.
 
 use super::*;
+use mj_client::session::ViewError;
+
+const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
+const INPUT_POLL: Duration = Duration::from_millis(250);
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 impl ApiBackend {
@@ -32,15 +36,19 @@ impl ApiBackend {
         if let Some(ordinal) = prompt_acceptance(child, &command_id).await? {
             return Ok(ordinal);
         }
+        // Receipt reconciliation precedes readiness/deadline decisions: a
+        // recovered request may already have run even after its wait expired.
+        if let Some(handle) = self.session_handle(child.to_owned()).await?
+            && let Some(receipt) = handle.command_receipt(command_id.clone()).await?
+        {
+            return Ok(receipt.accepted_ordinal);
+        }
         let elapsed_ms = mj_core::clock::epoch_millis()
             .saturating_sub(request.created_at_ms)
             .max(0) as u64;
         let remaining = START_DEADLINE.saturating_sub(Duration::from_millis(elapsed_ms));
         let deadline = tokio::time::Instant::now() + remaining;
         loop {
-            let notified = self.starts_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
             ensure!(
                 !self.exports.close_is_requested(child),
                 "child session is closing; queued input was not delivered"
@@ -73,10 +81,7 @@ impl ApiBackend {
             match self.start_status(child.to_owned()).await? {
                 Some(StartStatus::Failed { message }) => bail!("child startup failed: {message}"),
                 Some(StartStatus::Pending) => {
-                    tokio::select! {
-                        () = &mut notified => {},
-                        () = tokio::time::sleep(START_POLL) => {},
-                    }
+                    tokio::time::sleep(INPUT_POLL).await;
                     continue;
                 }
                 _ => {}
@@ -143,8 +148,11 @@ impl ApiBackend {
                 !self.exports.close_is_requested(child),
                 "child session is closing; queued input was not delivered"
             );
+            if let Some(receipt) = handle.command_receipt(command_id.clone()).await? {
+                return Ok(receipt.accepted_ordinal);
+            }
             let result = handle
-                .submit(
+                .submit_durable(
                     command_id.clone(),
                     RelayCommand::Prompt {
                         prompt: vec![ContentBlock::Text(TextContent::new(message))],

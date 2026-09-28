@@ -5,7 +5,6 @@ import argparse
 import concurrent.futures
 import json
 from pathlib import Path
-import re
 import socket
 import sqlite3
 import subprocess
@@ -23,10 +22,6 @@ def main():
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
-    repo = Path(__file__).resolve().parents[2]
-    pins = (repo / "mj-core/src/harness_runtime.rs").read_text()
-    install = re.search(r'install_id: "(brokkai-codex-acp-[^"]+)"', pins).group(1)
-    reliability_lab.MANAGED_CODEX_INSTALL_ID = install
     lab = reliability_lab.Lab(args.mj, "delegation", 1171)
     try:
         lab.prepare(fake_acp_prompt_delay_ms=10000)
@@ -34,10 +29,6 @@ def main():
         script = bridge.read_text().replace(
             'session_id = "reliability-native"',
             'session_id = __import__("uuid").uuid4().hex',
-        )
-        script = script.replace(
-            "@brokkai/codex-acp 1.13.3",
-            "@brokkai/codex-acp " + install.split("-acp-")[1].split("_")[0],
         )
         options = [
             {

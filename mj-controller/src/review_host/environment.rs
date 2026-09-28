@@ -43,16 +43,24 @@ pub trait ReviewEnvironment: Send + Sync {
     /// controller's database.
     fn load_state(&self, session_id: &str) -> Result<TurnReviewState, String>;
 
+    /// Reconcile a primary handoff after its worker has collected command IDs.
+    /// Test environments without a materialized store return no receipt.
+    fn primary_prompt_accepted(
+        &self,
+        _session_id: &str,
+        _command_id: &str,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
     /// Records how far this session has been reviewed. Blocking: the host
     /// routes it through its ordered persistence lane rather than calling it
     /// on the Tokio task that owns review state.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
 
-    /// Clears the in-flight flag of every review a restart interrupted, and
-    /// reports whose they were. Baselines are deliberately left alone: the
-    /// interrupted review never advanced one, so the next review covers the
-    /// same change and nothing is lost.
-    fn clear_interrupted(&self) -> Result<Vec<String>, String>;
+    /// Lists durable review owners without changing their state. Startup
+    /// installs their prompt holds before the daemon accepts new commands.
+    fn recoverable_reviews(&self) -> Result<Vec<String>, String>;
 
     /// Waits until no background work holds this session, or until
     /// `deadline`. The automatic recovery copy a finished turn starts takes
@@ -151,8 +159,14 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))
     }
 
-    fn clear_interrupted(&self) -> Result<Vec<String>, String> {
-        crate::database::clear_interrupted_turn_reviews().map_err(|error| format!("{error:#}"))
+    fn primary_prompt_accepted(&self, session_id: &str, command_id: &str) -> Result<bool, String> {
+        crate::database::load_prompt_acceptance(session_id, command_id)
+            .map(|accepted| accepted.is_some())
+            .map_err(|error| format!("reconcile review handoff: {error:#}"))
+    }
+
+    fn recoverable_reviews(&self) -> Result<Vec<String>, String> {
+        crate::database::recoverable_turn_reviews().map_err(|error| format!("{error:#}"))
     }
 
     fn background_work_settled<'a>(

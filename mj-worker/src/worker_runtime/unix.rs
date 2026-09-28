@@ -485,17 +485,20 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // The reviewer shares this session's target and working directory and
     // nothing else. It stays idle until a controller asks for a second
     // opinion, so constructing it costs nothing.
-    let reviewer = Arc::new(ReviewerSidecar::new(ReviewerPlacement {
-        target_environment: config.target_environment.clone(),
-        worker_root: root.clone(),
-        session_id: config.session_id.clone(),
-        cwd: config.cwd.clone(),
-        additional_directories: config.additional_directories.clone(),
-        worker_executable: worker_executable.clone(),
-        harness_runtime: config.harness_runtime,
-        review_capture: config.review_capture,
-        untracked_at_start: untracked_at_start.clone(),
-    }));
+    let reviewer = Arc::new(ReviewerSidecar::new(
+        ReviewerPlacement {
+            target_environment: config.target_environment.clone(),
+            worker_root: root.clone(),
+            session_id: config.session_id.clone(),
+            cwd: config.cwd.clone(),
+            additional_directories: config.additional_directories.clone(),
+            worker_executable: worker_executable.clone(),
+            harness_runtime: config.harness_runtime,
+            review_capture: config.review_capture,
+            untracked_at_start: untracked_at_start.clone(),
+        },
+        relay.clone(),
+    ));
     // The review supervisor's dispatch tool talks to this worker over its own
     // socket inside the reviewer directory: an MCP server started by a harness
     // has no relay connection, and the dispatch is not session history.
@@ -508,7 +511,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             .then_some(mj_core::subagent::SubagentMcpRole::Child)
     });
     let (subagents, _subagent_socket_guard) = if subagent_role.is_some() {
-        let (endpoint, guard) = super::subagents::serve(&root)?;
+        let (endpoint, guard) = super::subagents::serve(&root, relay.clone())?;
         (Some(endpoint), Some(guard))
     } else {
         (None, None)
@@ -529,6 +532,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             Arc::new(Mutex::new(accepted_config)),
         )
     };
+    let shell_cleanup = user_shells.completion_tracker();
     let outcome = async {
         if let Some(request) = &config.goal_resume_request {
             let mut state = relay.lock().expect("relay lock poisoned");
@@ -588,7 +592,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             stall_policy: None,
         };
         super::record_startup_step(&root, "bridge-start");
-        let mut acp_task = tokio::spawn(acp::run(acp_spec, acp_commands_rx, acp_events_tx));
+        let acp_shutdown = tokio_util::sync::CancellationToken::new();
+        let mut acp_task = tokio::spawn(acp::run_with_shutdown(acp_spec, acp_commands_rx, acp_events_tx, acp_shutdown.clone()));
 
         let event_relay = relay.clone();
         let mut event_task = tokio::spawn(run_relay_coordinator_with_shells(
@@ -603,7 +608,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         let acp_join = loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted.context("accept worker proxy")?;
+                    let (stream, _) = match accepted {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            stop_failed_coordinator(&mut event_task).await;
+                            return stop_peer_and_return(&mut acp_task, &acp_shutdown, error.into(), "accept worker proxy").await;
+                        }
+                    };
                     let client_relay = relay.clone();
                     let client_dispatch_wake = dispatch_wake_tx.clone();
                     let client_credentials = credentials.clone();
@@ -633,29 +644,35 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                 fatal = fatal_rx.recv() => {
                     let error = fatal
                         .unwrap_or_else(|| anyhow::anyhow!("relay failure report was lost"));
-                    event_task.abort();
+                    stop_failed_coordinator(&mut event_task).await;
                     drop(acp_commands_tx);
-                    return abort_peer_and_return(
+                    return stop_peer_and_return(
                         &mut acp_task,
+                        &acp_shutdown,
                         error,
                         "relay durable state became unwritable",
                     ).await;
                 }
                 result = &mut event_task => {
                     match result {
-                        Ok(Ok(())) => break acp_task.await,
+                        Ok(Ok(())) => {
+                            acp_shutdown.cancel();
+                            break acp_task.await;
+                        }
                         Ok(Err(error)) => {
                             drop(acp_commands_tx);
-                            return abort_peer_and_return(
+                            return stop_peer_and_return(
                                 &mut acp_task,
+                                &acp_shutdown,
                                 error,
                                 "relay coordinator failed",
                             ).await;
                         }
                         Err(error) => {
                             drop(acp_commands_tx);
-                            return abort_peer_and_return(
+                            return stop_peer_and_return(
                                 &mut acp_task,
+                                &acp_shutdown,
                                 anyhow::anyhow!(error),
                                 "relay coordinator task stopped",
                             ).await;
@@ -705,6 +722,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         .await
     }
     .await;
+    shell_cleanup.close();
+    shell_cleanup.wait().await;
     reviewer.pause_all().await;
     drop(dispatch_socket);
     if let Some(task) = harness_gc {
@@ -715,18 +734,40 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
 
 /// Install or validate the managed harness named by a proposed launch config
 /// without starting, stopping, or otherwise touching the session worker.
-pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
+pub async fn prepare_managed_harness(config: WorkerLaunchConfig) -> Result<()> {
+    prepare_managed_harness_for_transfer(config, None).await
+}
+
+/// Install or validate the managed harness named by a proposed launch config.
+///
+/// The preparation owns the runtime lease for the whole call, so preparation
+/// and the supervisor that later uses the same runtime never overlap. When
+/// `transfer` names the private info and acknowledgement files, the lease is
+/// published and the receiving process must acquire it before this returns.
+pub async fn prepare_managed_harness_for_transfer(
+    mut config: WorkerLaunchConfig,
+    transfer: Option<(PathBuf, PathBuf)>,
+) -> Result<()> {
     let mut environment = config.target_environment.clone();
     environment.extend(config.environment);
     config.environment = environment;
-    if config.requires_harness_preparation() {
-        super::prepare_harness_launch(
-            config.harness,
-            config.harness_runtime,
-            config.execution_policy,
-            AcpSupervisorSpec::from(&config),
+    let prepared = if config.requires_harness_preparation() {
+        Some(
+            super::prepare_harness_launch(
+                config.harness,
+                config.harness_runtime,
+                config.execution_policy,
+                AcpSupervisorSpec::from(&config),
+            )
+            .await?,
         )
-        .await?;
+    } else {
+        None
+    };
+    match (prepared.as_ref(), transfer) {
+        (Some(prepared), Some((info, ack))) => prepared.transfer_runtime(info, ack).await?,
+        (None, Some(_)) => bail!("runtime transfer requires a managed harness"),
+        _ => {}
     }
     Ok(())
 }
@@ -1106,7 +1147,7 @@ pub(super) async fn serve_client_with_memory(
                     .await?;
                 continue;
             }
-            let wakes_dispatch = matches!(&envelope.request, RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. });
+            let wakes_dispatch = matches!(&envelope.request, RelayRequest::Submit { .. } | RelayRequest::SubmitDurable { .. } | RelayRequest::ReserveIdle { .. });
             let checkpoint_change = checkpoint_change(&envelope.request);
             let operation = envelope.request.method_name();
             let response = match handle_request(&relay, envelope).await {

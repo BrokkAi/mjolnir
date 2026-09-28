@@ -52,6 +52,7 @@ pub fn restore_checkpoint_with_native_state(
     // commands still queued, and nothing else. The transcript stays in the
     // archive; the controller already holds it as the durable projection.
     let mut seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: canonical_session.command_ledger.clone(),
         assessment_state: if spec.restore_native {
             canonical_session.assessment_state.clone()
         } else {
@@ -76,6 +77,17 @@ pub fn restore_checkpoint_with_native_state(
         native_session_unused,
     };
     if spec.discard_queued_prompts {
+        if let Some(value) = &mut seed.command_ledger {
+            let mut ledger =
+                mj_core::relay::CheckpointCommandLedger::decode(value, seed.event_frontier)?;
+            for queued in &seed.queued_prompts {
+                if let Some(receipt) = ledger.handled_commands.get_mut(&queued.command_id) {
+                    receipt.terminal_ordinal = Some(seed.event_frontier);
+                    receipt.outcome = Some(mj_core::relay::RelayCommandOutcome::Cancelled);
+                }
+            }
+            *value = serde_json::to_value(ledger)?;
+        }
         seed.queued_prompts.clear();
     }
     seed.validate()?;

@@ -586,16 +586,8 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         }
         HarnessKind::Kimi => {
             let mut config = KimiBackendConfig::from_home(&profile.home);
-            config.api_key = profile.environment.get("KIMI_API_KEY").cloned();
             if let Some(base_url) = profile.environment.get("KIMI_CODE_BASE_URL") {
                 config.base_url.clone_from(base_url);
-            }
-            if let Some(oauth_host) = profile
-                .environment
-                .get("KIMI_CODE_OAUTH_HOST")
-                .or_else(|| profile.environment.get("KIMI_OAUTH_HOST"))
-            {
-                config.oauth_host.clone_from(oauth_host);
             }
             if let Some(raw) = profile.environment.get("KIMI_CODE_CUSTOM_HEADERS") {
                 for line in raw.lines() {
@@ -607,7 +599,11 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
                     }
                 }
             }
-            config.build()
+            let auth = Arc::new(crate::kimi_auth::KimiAuth::new(
+                &profile.home,
+                profile.environment.clone(),
+            ));
+            config.build_with_token_provider(auth).map(Some)
         }
         HarnessKind::Muse => {
             let mut config = MetaClientConfig::from_home(&profile.home);
@@ -713,6 +709,58 @@ mod tests {
         let profile = provider_profile(home.path(), DEEPSEEK_CONFIG, &[]);
 
         assert!(backend_for_profile(&profile).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn kimi_utility_uses_profile_auth_endpoint_and_headers_without_a_runtime() {
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        use axum::{Json, Router};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/coding/v1/models",
+                    get(|headers: HeaderMap| async move {
+                        assert_eq!(headers["authorization"], "Bearer profile-key");
+                        assert_eq!(headers["x-msh-device-id"], "profile-device");
+                        assert_eq!(headers["x-profile-test"], "profile-header");
+                        Json(serde_json::json!({"data": [{"id": "kimi-k2.5"}]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("device_id"), "profile-device").unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Kimi,
+            home: home.path().to_path_buf(),
+            environment: BTreeMap::from([
+                ("KIMI_API_KEY".into(), "profile-key".into()),
+                (
+                    "KIMI_CODE_BASE_URL".into(),
+                    format!("http://{address}/coding/v1"),
+                ),
+                (
+                    "KIMI_CODE_CUSTOM_HEADERS".into(),
+                    "X-Profile-Test: profile-header".into(),
+                ),
+                ("PATH".into(), "/missing-kimi-runtime".into()),
+            ]),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let backend = backend_for_profile(&profile).unwrap().unwrap();
+        assert_eq!(backend.list_models().await.unwrap(), vec!["kimi-k2.5"]);
+        assert!(!home.path().join("credentials/kimi-code.json").exists());
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[test]

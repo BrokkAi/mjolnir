@@ -125,13 +125,14 @@ impl RelayClient {
             .await;
         };
         let requested = spec.clone();
+        let executor =
+            crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
+        let _cancel_preparation = executor.cancel_on_drop();
         let prepared = tokio::task::spawn_blocking(move || {
             // Lease before taking the permit: opening a master takes a
             // permit of its own.
-            let (spec, lease) = requested
-                .open_ssh_session(&BoundedProcessExecutor::new(SSH_MASTER_OPEN_TIMEOUT))?
-                .into_parts();
-            let permit = SshAdmission::acquire(&destination);
+            let (spec, lease) = requested.open_ssh_session(&executor)?.into_parts();
+            let permit = SshAdmission::acquire_unless(&destination, &|| executor.is_cancelled())?;
             Ok::<_, anyhow::Error>((spec, lease, permit))
         })
         .await;

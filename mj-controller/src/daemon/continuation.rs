@@ -381,9 +381,25 @@ pub(super) fn spawn(
 
 fn spawn_in(
     environment: Environment,
+    input: SessionManagerUpdates,
+    cancellation: CancellationToken,
+    classifier: Classifier,
+) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
+    spawn_with_gate(
+        environment,
+        input,
+        cancellation,
+        classifier,
+        crate::upgrade::gate().clone(),
+    )
+}
+
+fn spawn_with_gate(
+    environment: Environment,
     mut input: SessionManagerUpdates,
     cancellation: CancellationToken,
     classifier: Classifier,
+    gate: Arc<crate::upgrade::Gate>,
 ) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
     let (tx, rx) = coalesced_update_channel();
     let task = tokio::spawn(async move {
@@ -391,6 +407,8 @@ fn spawn_in(
         // Ended turns whose continuation waits for a background command,
         // agent or goal to stop moving the session on.
         let mut deferred = BTreeMap::<String, String>::new();
+        // A refused admission must not consume a completed-turn trigger.
+        let mut admission_deferred = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
@@ -398,7 +416,7 @@ fn spawn_in(
         let mut seed_jobs = JoinSet::new();
         let mut seed_after = BTreeMap::<String, std::time::Instant>::new();
         let mut assessed = BTreeMap::<String, u64>::new();
-        let (recheck_tx, mut recheck_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut rechecks = BTreeSet::<String>::new();
         let mut action_recheck = BTreeMap::<String, std::time::Instant>::new();
 
         let mut generation = 0_u64;
@@ -411,8 +429,12 @@ fn spawn_in(
                     loop {
                         tokio::select! {
                             update = input.recv() => return update,
-                            id = recheck_rx.recv() => {
-                                let id = id?;
+                            id = async {
+                                match rechecks.pop_first() {
+                                    Some(id) => id,
+                                    None => std::future::pending().await,
+                                }
+                            } => {
                                 if let Some(view) = latest.get(&id) {
                                     return Some(SessionManagerUpdate { session_id: id, view: view.clone() });
                                 }
@@ -425,14 +447,15 @@ fn spawn_in(
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
                     if let Some(snapshot) = view.snapshot.as_ref().filter(|s| unified(s) && s.operational.assessment_context.is_none())
-                        && view.connected && seed_after.get(&id).is_none_or(|at| *at <= std::time::Instant::now()) {
+                        && view.connected && seed_after.get(&id).is_none_or(|at| *at <= std::time::Instant::now())
+                        && let Ok(seed_work) = gate.enter_unless_draining("seed Jev authorization") {
                         seed_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(60));
                         let snapshot = snapshot.clone();
                         let control = environment.control.clone();
                         let session = id.clone();
                         seed_jobs.spawn(async move {
                             let result = async {
-                                let _work = crate::upgrade::activity_unless_draining("seed Jev authorization")?;
+                                let _work = seed_work;
                                 let expected = RelayCursor { ordinal: snapshot.operational.latest_ordinal, digest: snapshot.operational.latest_digest.clone() };
                                 let evidence = tokio::task::spawn_blocking(move || {
                                     crate::database::load_continuation_evidence(&snapshot.materialized.session_id, snapshot.materialized.applied_event_ordinal, &snapshot.materialized.applied_event_digest)
@@ -492,12 +515,14 @@ fn spawn_in(
                     // Whatever held a deferred continuation has stopped: ask
                     // again, since the conversation may have moved on.
                     let released = !new_completion && deferred.contains_key(&id) && eligible(&view);
-                    if (new_completion || released) && check_eligible(&view) && (environment.allowed)(&id) {
-                        deferred.remove(&id);
-                        let Ok(upgrade_work) = crate::upgrade::activity("automatic continuation") else {
+                    let admission_retry = admission_deferred.remove(&id).is_some_and(|key| key == completed);
+                    if (new_completion || released || admission_retry) && check_eligible(&view) && (environment.allowed)(&id) {
+                        let Ok(upgrade_work) = gate.enter_unless_draining("automatic continuation") else {
+                            admission_deferred.insert(id.clone(), completed);
                             publish(&tx, &environment, id, view, false);
                             continue;
                         };
+                        deferred.remove(&id);
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
                         let session = id.clone();
@@ -778,6 +803,11 @@ fn spawn_in(
                     }
                 }
                 _ = tick.tick() => {
+                    if !gate.is_draining() {
+                        for id in admission_deferred.keys() {
+                            rechecks.insert(id.clone());
+                        }
+                    }
                     let invalid: Vec<_> = pending
                         .keys()
                         .filter(|id| !(environment.allowed)(id))
@@ -802,7 +832,7 @@ fn spawn_in(
                         if !view.connected { continue; }
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
-                        let Ok(upgrade_work) = crate::upgrade::activity("quota continuation") else { continue };
+                        let Ok(upgrade_work) = gate.enter_unless_draining("quota continuation") else { continue };
                         let env = environment.clone(); let session = id.clone(); let current = view.clone();
                         let task_work = upgrade_work.clone();
                         let abort = jobs.spawn(async move {
@@ -821,12 +851,14 @@ fn spawn_in(
                             && action_recheck.get(id).is_none_or(|at| *at <= std::time::Instant::now()) {
                             action_recheck.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
                             assessed.remove(id);
-                            if recheck_tx.send(id.clone()).is_err() { break; }
+                            rechecks.insert(id.clone());
                         }
                     }
                     let live = (environment.live)();
                     seen.retain(|id, _| live.contains(id));
                     deferred.retain(|id, _| live.contains(id));
+                    admission_deferred.retain(|id, _| live.contains(id));
+                    rechecks.retain(|id| live.contains(id));
                     latest.retain(|id, _| live.contains(id));
                     retry_after.retain(|id, _| live.contains(id));
                     assessed.retain(|id, _| live.contains(id));

@@ -9,6 +9,14 @@ use mj_core::state::SessionState;
 use mj_tui::DashboardState;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
+/// Completion identity belongs to the UI operation that started the work.
+/// The daemon's lifecycle projection remains the authority for session state.
+pub(crate) struct DashboardLifecycleUpdate {
+    pub(crate) session_id: String,
+    pub(crate) result: std::result::Result<LifecycleSuccess, String>,
+    pub(crate) operation: Arc<AtomicBool>,
+}
+
 const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Applies one worker poll to the controller's records, the dashboard, and
 /// the open conversations. `persistence` is where the records it changes are

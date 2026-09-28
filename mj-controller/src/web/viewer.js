@@ -3896,6 +3896,9 @@ function showLogin() {
   cancelVoiceInput();
   snapshot = undefined;
   viewerState.install({ sessions: [] });
+  retireConversationRequest();
+  conversationGeneration += 1;
+  draftWriters.clear();
   currentSession = null;
   if (eventSource) {
     eventSource.close();
@@ -5425,42 +5428,76 @@ function renderAttachments() {
 
 const DRAFT_DEBOUNCE_MS = 400;
 let draftTimer = null;
-let draftSaving = false;
+let draftComposerBaseline = null;
+// A session owns its desired draft and one writer. Edits and clears arriving
+// during a PUT replace desired state; the writer drains the latest version.
+const draftWriters = new Map();
 
 function scheduleDraftSave() {
   if (draftTimer) clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, DRAFT_DEBOUNCE_MS);
 }
 
-async function saveDraft() {
+function saveDraft() {
+  if (draftTimer) clearTimeout(draftTimer);
   draftTimer = null;
-  if (!currentSession || draftSaving) return;
-  const sessionId = currentSession;
-  const draft = composerText();
-  draftSaving = true;
-  try {
-    await request(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-      method: 'PUT',
-      body: JSON.stringify({ draft }),
-    });
-  } catch {
-    // A draft that could not be stored is still in the composer, which is the
-    // copy that matters. Saying so on every keystroke would be noise.
-  } finally {
-    draftSaving = false;
+  if (!currentSession || draftComposerBaseline === composerGeneration) return Promise.resolve();
+  draftComposerBaseline = composerGeneration;
+  return queueDraftSave(currentSession, composerText());
+}
+
+function queueDraftSave(sessionId, draft) {
+  let writer = draftWriters.get(sessionId);
+  if (!writer) {
+    writer = { desired: draft, version: 0, task: null };
+    draftWriters.set(sessionId, writer);
   }
+  writer.desired = draft;
+  writer.version += 1;
+  if (writer.task) return writer.task;
+  writer.task = (async () => {
+    try {
+      for (;;) {
+        if (draftWriters.get(sessionId) !== writer) break;
+        const version = writer.version;
+        try {
+          await request(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
+            method: 'PUT',
+            body: JSON.stringify({ draft: writer.desired }),
+          });
+        } catch (error) {
+          if (currentSession === sessionId && draftWriters.get(sessionId) === writer) {
+            draftComposerBaseline = null;
+            document.querySelector('#conversation-error').textContent = `Draft was not saved: ${error.message}`;
+          }
+          // A newer edit gets its own attempt. An unchanged failure waits for
+          // the next explicit save instead of retrying without a state change.
+        }
+        if (version === writer.version) break;
+      }
+    } finally {
+      writer.task = null;
+    }
+  })();
+  return writer.task;
 }
 
 /// Put back what this viewer last typed here and did not send.
 async function restoreDraft(sessionId, generation) {
+  const revision = composerGeneration;
   try {
     const stored = await request(`/api/sessions/${encodeURIComponent(sessionId)}/client-state`);
     if (generation !== conversationGeneration) return;
     // Anything typed while the request was in flight belongs to the person,
     // not to the server.
-    if (stored.draft && !composerText()) {
-      setComposerText(stored.draft);
-      updateCommandPalette();
+    const local = draftWriters.get(sessionId);
+    const draft = local ? local.desired : stored.draft;
+    if (revision === composerGeneration) {
+      if (draft) {
+        setComposerText(draft);
+        updateCommandPalette();
+      }
+      draftComposerBaseline = composerGeneration;
     }
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
@@ -5472,16 +5509,20 @@ async function restoreDraft(sessionId, generation) {
 }
 
 let historyOpen = false;
+let historyRequest = null;
 
 /// Search this project's earlier prompts and offer them in the palette.
 async function searchHistory(query) {
   if (!currentSession) return;
-  const generation = conversationGeneration;
+  historyRequest?.controller.abort();
+  const operation = { generation: conversationGeneration, controller: new AbortController() };
+  historyRequest = operation;
   try {
     const found = await request(
       `/api/sessions/${encodeURIComponent(currentSession)}/history?q=${encodeURIComponent(query)}&scope=project`,
+      { signal: operation.controller.signal },
     );
-    if (generation !== conversationGeneration || !historyOpen) return;
+    if (historyRequest !== operation || operation.generation !== conversationGeneration || !historyOpen) return;
     paletteMatches = found.entries.map(text => ({
       insert: text,
       label: text.length > 80 ? `${text.slice(0, 79)}…` : text,
@@ -5514,7 +5555,11 @@ async function searchHistory(query) {
     );
     commandPalette.classList.remove('hidden');
   } catch (err) {
-    document.querySelector('#conversation-error').textContent = err.message;
+    if (historyRequest === operation && operation.generation === conversationGeneration && historyOpen) {
+      document.querySelector('#conversation-error').textContent = err.message;
+    }
+  } finally {
+    if (historyRequest === operation) historyRequest = null;
   }
 }
 
@@ -6108,8 +6153,14 @@ function renderEntries(entries, replace) {
 /// carries the generation it was issued in and drops itself if that generation
 /// has moved on.
 let conversationGeneration = 0;
-let conversationInFlight = false;
-let conversationPending = false;
+let conversationRequest = null;
+
+function retireConversationRequest() {
+  conversationRequest?.controller.abort();
+  conversationRequest = null;
+  historyRequest?.controller.abort();
+  historyRequest = null;
+}
 
 function clearConversationContents() {
   entryNodes.clear();
@@ -6132,7 +6183,7 @@ function syncConversationMode(session) {
   if (next === conversationMode) return;
   conversationMode = next;
   conversationGeneration += 1;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;
@@ -6187,12 +6238,16 @@ async function loadConversation(delta = false) {
   // Revisions arrive in bursts. One load runs at a time and remembers that
   // another was asked for, so a burst costs one extra fetch rather than one
   // fetch each.
-  if (conversationInFlight) {
-    conversationPending = true;
+  if (conversationRequest?.generation === conversationGeneration) {
+    conversationRequest.pending = true;
     return;
   }
-  conversationInFlight = true;
-  const generation = conversationGeneration;
+  conversationRequest?.controller.abort();
+  const operation = {
+    generation: conversationGeneration, controller: new AbortController(), pending: false,
+  };
+  conversationRequest = operation;
+  const generation = operation.generation;
   const sessionId = currentSession;
   try {
     const query = new URLSearchParams();
@@ -6203,6 +6258,7 @@ async function loadConversation(delta = false) {
     const suffix = query.toString() ? `?${query.toString()}` : '';
     const result = await request(
       `/api/conversations/${encodeURIComponent(sessionId)}${suffix}`,
+      { signal: operation.controller.signal },
     );
     const latest = sessionById(sessionId);
     if (
@@ -6219,6 +6275,7 @@ async function loadConversation(delta = false) {
       const through = cursor;
       await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
         method: 'POST',
+        signal: operation.controller.signal,
         body: JSON.stringify({ through }),
       });
       const latest = sessionById(sessionId);
@@ -6242,16 +6299,11 @@ async function loadConversation(delta = false) {
     }
     document.querySelector('#conversation-error').textContent = err.message;
   } finally {
-    conversationInFlight = false;
-    if (conversationPending) {
-      conversationPending = false;
-      const latest = sessionById(sessionId);
-      if (
-        currentSession === sessionId
-        && latest?.capabilities?.open
-        && !isTransitioningSession(latest)
-      ) {
-        loadConversation(generation === conversationGeneration);
+    // An old generation cannot consume a replacement's pending reload.
+    if (conversationRequest === operation) {
+      conversationRequest = null;
+      if (operation.pending && generation === conversationGeneration) {
+        loadConversation(true);
       }
     }
   }
@@ -6262,10 +6314,13 @@ async function openConversation(id) {
   cancelVoiceInput();
   const session = sessionById(id);
   if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
+  saveDraft();
+  setComposerText('');
+  draftComposerBaseline = composerGeneration;
   currentSession = id;
   conversationGeneration += 1;
   conversationMode = null;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;
@@ -6460,11 +6515,13 @@ subagentsButton.onclick = () => {
 /// Leaving has to clear the keyed nodes and the pending elicitation cards, or
 /// the next conversation opens on top of the last one's rows.
 function leaveConversation() {
+  saveDraft();
+  setComposerText('');
   cancelVoiceInput();
   currentSession = null;
   conversationMode = null;
   conversationGeneration += 1;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;

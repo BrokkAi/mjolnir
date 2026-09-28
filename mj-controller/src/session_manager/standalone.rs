@@ -62,6 +62,14 @@ impl StandaloneSession {
         self.client.reserve_idle(command_id).await
     }
 
+    pub async fn checkpoint_command_ledger(
+        &mut self,
+        cursor: &mj_core::relay::RelayCursor,
+        seal: bool,
+    ) -> Result<Option<serde_json::Value>> {
+        self.client.checkpoint_command_ledger(cursor, seal).await
+    }
+
     pub(super) async fn detach(self) -> Result<()> {
         self.client.detach().await
     }
@@ -329,6 +337,32 @@ impl StandaloneSession {
         command: RelayCommand,
     ) -> Result<u64> {
         self.client.submit(command_id, command).await
+    }
+
+    pub async fn submit_durable_accepted(
+        &mut self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> Result<u64> {
+        self.client.submit_durable(command_id, command).await
+    }
+
+    pub async fn command_receipt(
+        &mut self,
+        command_id: String,
+    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
+        self.client.command_receipt(command_id).await
+    }
+
+    pub async fn cancel_command_admission(
+        &mut self,
+        command_id: String,
+    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
+        self.client.cancel_command_admission(command_id).await
+    }
+
+    pub async fn release_command_receipt(&mut self, command_id: String) -> Result<()> {
+        self.client.release_command_receipt(command_id).await
     }
 
     pub async fn submit(&mut self, command_id: String, command: RelayCommand) -> Result<u64> {

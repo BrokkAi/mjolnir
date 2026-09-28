@@ -63,6 +63,16 @@ impl SubagentDispatch {
             .map(|(id, e)| (e.request.created_at_ms, id.clone()))
             .collect::<Vec<_>>();
         ordered.sort();
+        // Long waits and child startup cannot occupy the reserved control lane.
+        let mut executing = [0usize; 2];
+        let mut delivering = 0usize;
+        for entry in self.entries.values() {
+            match entry.phase {
+                Phase::Executing => executing[execution_lane(&entry.request)] += 1,
+                Phase::Delivering(_) => delivering += 1,
+                _ => {}
+            }
+        }
         let mut children = BTreeSet::new();
         let mut ready = Vec::new();
         for (_, id) in ordered {
@@ -70,19 +80,28 @@ impl SubagentDispatch {
             if matches!(entry.phase, Phase::Finished) {
                 continue;
             }
-            if let SubagentToolAction::SendInput {
-                child_session_id, ..
-            } = &entry.request.action
-                && !children.insert((id.0.clone(), child_session_id.clone()))
+            let ordered_child = match &entry.request.action {
+                SubagentToolAction::SendInput {
+                    child_session_id, ..
+                } => Some(child_session_id),
+                SubagentToolAction::Handback { .. } => Some(&id.0),
+                _ => None,
+            };
+            if let Some(child) = ordered_child
+                && !children.insert((id.0.clone(), child.clone()))
             {
                 continue;
             }
             match &entry.phase {
-                Phase::Pending(at) if *at <= now => {
+                Phase::Pending(at)
+                    if *at <= now && executing[execution_lane(&entry.request)] < 32 =>
+                {
+                    executing[execution_lane(&entry.request)] += 1;
                     entry.phase = Phase::Executing;
                     ready.push((id, Job::Execute(entry.request.clone())));
                 }
-                Phase::Delivery(result, at) if *at <= now => {
+                Phase::Delivery(result, at) if *at <= now && delivering < 32 => {
+                    delivering += 1;
                     let result = result.clone();
                     entry.phase = Phase::Delivering(result.clone());
                     ready.push((id, Job::Deliver(result)));
@@ -112,23 +131,24 @@ impl SubagentDispatch {
             }
         }
     }
-    pub fn failed_task(&mut self, id: &Identity, error: String) {
-        if let Some(entry) = self.entries.get_mut(id) {
+    pub fn failed_task(&mut self, id: &Identity) {
+        if let Some(entry) = self.entries.get(id) {
             if matches!(entry.phase, Phase::Delivering(_)) {
                 self.delivered(id, false);
             } else {
-                self.executed(
-                    id,
-                    SubagentToolResult {
-                        request_id: id.1.clone(),
-                        completed_at_ms: chrono::Utc::now().timestamp_millis(),
-                        is_error: true,
-                        message: error,
-                    },
-                );
+                // A task failure is not an effect result. Recover its durable
+                // phase on retry; never fabricate an answer after uncertain IO.
+                self.unaccepted(id);
             }
         }
     }
+}
+
+fn execution_lane(request: &SubagentToolRequest) -> usize {
+    usize::from(matches!(
+        request.action,
+        SubagentToolAction::InterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
+    ))
 }
 
 #[cfg(test)]
@@ -136,6 +156,7 @@ mod tests {
     use super::*;
     fn input(id: &str, child: &str, created_at_ms: i64) -> SubagentToolRequest {
         SubagentToolRequest {
+            originating_command_id: None,
             request_id: id.into(),
             created_at_ms,
             action: SubagentToolAction::SendInput {
@@ -251,5 +272,47 @@ mod tests {
         assert!(queue.ready(Instant::now()).is_empty());
         queue.observe("p", &[]);
         assert!(queue.entries.is_empty());
+    }
+    #[test]
+    fn saturated_execution_keeps_control_and_result_delivery_available() {
+        let mut queue = SubagentDispatch::default();
+        let requests = (0..100)
+            .map(|n| input(&format!("input-{n}"), &format!("child-{n}"), n))
+            .collect::<Vec<_>>();
+        queue.observe("parent", &requests);
+        let first = queue.ready(Instant::now());
+        assert_eq!(first.len(), 32);
+        assert!(queue.ready(Instant::now()).is_empty());
+        let mut requests = requests;
+        let mut interrupt = input("interrupt", "child-0", 101);
+        interrupt.action = SubagentToolAction::InterruptAgent {
+            child_session_id: "child-0".into(),
+        };
+        requests.push(interrupt);
+        queue.observe("parent", &requests);
+        let control = queue.ready(Instant::now());
+        assert_eq!(control.len(), 1);
+        assert_eq!(control[0].0.1, "interrupt");
+        queue.executed(&first[0].0, result(&first[0].0.1));
+        let next = queue.ready(Instant::now());
+        assert_eq!(next.len(), 2);
+        assert!(next.iter().any(|(_, job)| matches!(job, Job::Deliver(_))));
+    }
+
+    #[test]
+    fn failed_effect_task_retries_durable_execution_instead_of_inventing_result() {
+        let mut queue = SubagentDispatch::default();
+        queue.observe("parent", &[input("request", "child", 1)]);
+        let id = queue.ready(Instant::now()).pop().unwrap().0;
+        queue.failed_task(&id);
+        assert!(queue.ready(Instant::now()).is_empty());
+        assert!(matches!(
+            queue
+                .ready(Instant::now() + Duration::from_secs(2))
+                .pop()
+                .unwrap()
+                .1,
+            Job::Execute(_)
+        ));
     }
 }

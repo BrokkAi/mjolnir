@@ -355,6 +355,7 @@ fn codex_export_rebuilds_a_corrupt_scan_cache_and_records_verdicts() {
 #[test]
 fn prompt_detection_reads_the_materialized_transcript() {
     let mut snapshot = CanonicalSessionSnapshot {
+        command_ledger: None,
         assessment_state: None,
         event_frontier: 1,
         event_frontier_digest: "a".repeat(64),
@@ -1002,6 +1003,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 origin_override: None,
             }],
             canonical_session: CanonicalSessionSnapshot {
+                command_ledger: None,
                 assessment_state: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),

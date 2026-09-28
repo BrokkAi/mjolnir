@@ -454,19 +454,20 @@ impl DashboardContext {
         );
     }
 
-    /// Drops the warm chat when it belongs to `session_id`.
+    /// Retires the chat and attachments captured when the lifecycle began.
     ///
     /// Pause and destroy retire that session's actor. Resume starts a new one,
     /// often on a different profile. Keeping the old view would redraw a
     /// Closing/Closed snapshot and refuse prompts.
-    pub(crate) fn drop_warm_chat_for(&mut self, session_id: &str) {
-        if self.panes_opening(session_id).is_empty() {
-            for attachment in self.attachments.values_mut() {
-                attachment.retire(session_id);
-            }
-        } else {
-            self.defer_chat_open_for(session_id);
+    pub(super) fn drop_warm_chat_for(&mut self, retirement: &super::attachment::ChatRetirement) {
+        if !retirement.is_current(&self.chats, &self.attachments) {
+            return;
         }
+        let session_id = retirement.session_id();
+        retirement.retire_attachments(&mut self.attachments);
+        self.opening_chat_sessions
+            .retain(|_, session| session != session_id);
+        self.sync_opening_session();
         if self.chats.contains_key(session_id) {
             // A completed lifecycle retires the warm actor without passing
             // through the normal session-switch path. Preserve its latest

@@ -2024,3 +2024,40 @@ fn a_quick_reconnect_replaces_the_daemon_unavailable_notice() {
         Some("Could not save the layout.")
     );
 }
+
+#[tokio::test]
+async fn shutdown_persistence_bounds_a_silent_acknowledgement() {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+    let (saved, silent) = tokio::join!(
+        finish_shutdown_save("layout", deadline, async { Ok(()) }),
+        finish_shutdown_save("last workspace", deadline, std::future::pending()),
+    );
+    saved.unwrap();
+    let message = silent.unwrap_err().to_string();
+    assert!(message.contains("last workspace"));
+    assert!(message.contains("may still complete"));
+}
+
+#[tokio::test]
+async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach() {
+    let mut chats = BTreeMap::from([("session".into(), open_test_chat("session"))]);
+    let mut attachments = BTreeMap::new();
+    let captured = attachment::ChatRetirement::capture("session", &chats, &attachments);
+    assert!(captured.is_current(&chats, &attachments));
+    chats.insert("session".into(), open_test_chat("session"));
+    assert!(!captured.is_current(&chats, &attachments));
+
+    let captured = attachment::ChatRetirement::capture("session", &chats, &attachments);
+    let pane = populated_dashboard().browse_pane();
+    let attachment = attachments.entry(pane).or_default();
+    attachment.spawn(
+        "session",
+        Duration::from_secs(30),
+        std::future::pending::<Result<(), String>>(),
+        |_, _| {},
+    );
+    assert!(!captured.is_current(&chats, &attachments));
+    captured.retire_attachments(&mut attachments);
+    // Retiring an old operation leaves the new attachment selected and alive.
+    assert!(!attachments.get_mut(&pane).unwrap().select("session"));
+}

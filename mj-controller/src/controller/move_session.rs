@@ -10,49 +10,69 @@ use sha2::{Digest, Sha256};
 use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
 
-fn mutation_holds() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static HOLDS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
-        std::sync::OnceLock::new();
-    HOLDS.get_or_init(Default::default)
+/// Execution and retained queue admission are phases of one ownership record.
+#[derive(Clone, Copy)]
+enum MoveOwnership {
+    Executing,
+    ExecutingQueue,
+    PendingQueue,
+}
+
+fn move_ownership() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, MoveOwnership>>
+{
+    static OWNER: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, MoveOwnership>>,
+    > = std::sync::OnceLock::new();
+    OWNER.get_or_init(Default::default)
 }
 
 pub fn move_owns_session(session_id: &str) -> bool {
-    move_has_pending_queue(session_id)
-        || mutation_holds()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(session_id)
-}
-
-fn queue_holds() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static HOLDS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
-        std::sync::OnceLock::new();
-    HOLDS.get_or_init(Default::default)
+    move_ownership()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(session_id)
 }
 
 pub fn move_has_pending_queue(session_id: &str) -> bool {
-    queue_holds()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(session_id)
+    matches!(
+        move_ownership()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id),
+        Some(MoveOwnership::ExecutingQueue | MoveOwnership::PendingQueue)
+    )
 }
 
 pub fn release_move_queue_hold(session_id: &str) {
-    queue_holds()
+    set_move_queue_hold(session_id, false);
+}
+
+fn set_move_queue_hold(session_id: &str, pending: bool) {
+    let mut owner = move_ownership()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(session_id);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let next = match (owner.get(session_id), pending) {
+        (Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue), true) => {
+            Some(MoveOwnership::ExecutingQueue)
+        }
+        (Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue), false) => {
+            Some(MoveOwnership::Executing)
+        }
+        (_, true) => Some(MoveOwnership::PendingQueue),
+        (_, false) => None,
+    };
+    if let Some(next) = next {
+        owner.insert(session_id.to_owned(), next);
+    } else {
+        owner.remove(session_id);
+    }
 }
 
 pub fn restore_move_queue_hold(operation: &MoveOperation) {
-    let mut holds = queue_holds()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if operation.queue_admission_started && !operation.queue_admission_finished {
-        holds.insert(operation.selection.session_id.clone());
-    } else {
-        holds.remove(&operation.selection.session_id);
-    }
+    set_move_queue_hold(
+        &operation.selection.session_id,
+        operation.queue_admission_started && !operation.queue_admission_finished,
+    );
 }
 
 /// What a recovered, interrupted source stop tells the person.
@@ -126,23 +146,40 @@ pub struct MoveMutationGuard(String);
 
 impl MoveMutationGuard {
     pub fn reserve(session_id: &str) -> Result<Self> {
+        let mut owner = move_ownership()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ensure!(
-            mutation_holds()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(session_id.to_owned()),
+            !matches!(
+                owner.get(session_id),
+                Some(MoveOwnership::Executing | MoveOwnership::ExecutingQueue)
+            ),
             "session already has a move owner"
         );
+        let next = if owner.contains_key(session_id) {
+            MoveOwnership::ExecutingQueue
+        } else {
+            MoveOwnership::Executing
+        };
+        owner.insert(session_id.to_owned(), next);
         Ok(Self(session_id.to_owned()))
     }
 }
 
 impl Drop for MoveMutationGuard {
     fn drop(&mut self) {
-        mutation_holds()
+        let mut owner = move_ownership()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.0);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match owner.get(&self.0) {
+            Some(MoveOwnership::ExecutingQueue) => {
+                owner.insert(self.0.clone(), MoveOwnership::PendingQueue);
+            }
+            Some(MoveOwnership::Executing) => {
+                owner.remove(&self.0);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1024,7 +1061,7 @@ impl Controller {
                     session.resource_allocation = None;
                     session.container_cpus = None;
                     session.container_memory = None;
-                    crate::database::save_session(session)?;
+                    crate::database::save_resumed_session(session, None)?;
                 }
                 self.resume_session_controlled(
                     &id,

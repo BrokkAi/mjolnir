@@ -7,15 +7,36 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(test)]
+use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::{Instant, sleep_until};
 
 use mj_core::subagent::{MAX_WAIT_SECONDS, SubagentToolRequest, SubagentToolResult};
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 const SUBAGENT_QUEUE: &str = "subagents.json";
+
+const MAX_SOCKET_TASKS: usize = 96;
+const LONG_SOCKET_TASKS: usize = 32;
+const CONTROL_SOCKET_TASKS: usize = 32;
+const SOCKET_IO_DEADLINE: Duration = Duration::from_secs(2);
+
+struct SocketAdmission {
+    long: Arc<Semaphore>,
+    control: Arc<Semaphore>,
+}
+
+impl Default for SocketAdmission {
+    fn default() -> Self {
+        Self {
+            long: Arc::new(Semaphore::new(LONG_SOCKET_TASKS)),
+            control: Arc::new(Semaphore::new(CONTROL_SOCKET_TASKS)),
+        }
+    }
+}
 
 /// How long a socket call waits for the daemon's result before giving up and
 /// answering with the "still running" placeholder. The daemon bounds its
@@ -29,7 +50,7 @@ const SOCKET_WAIT_CEILING: Duration = Duration::from_secs(MAX_WAIT_SECONDS + 60)
 /// carries the daemon's result back here; past it, answering late helps nobody.
 const WORKER_WAIT_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueueState {
     #[serde(default)]
@@ -41,6 +62,8 @@ struct QueueState {
 #[derive(Clone)]
 pub struct SubagentEndpoint {
     path: PathBuf,
+    admission: Arc<SocketAdmission>,
+    relay: Option<Arc<Mutex<crate::relay::DurableRelay>>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
@@ -61,6 +84,8 @@ impl SubagentEndpoint {
         };
         Ok(Self {
             path,
+            admission: Arc::default(),
+            relay: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
         })
@@ -105,28 +130,39 @@ impl SubagentEndpoint {
         )
     }
 
-    pub fn enqueue(&self, request: SubagentToolRequest) -> Result<Option<SubagentToolResult>> {
+    pub fn enqueue(&self, mut request: SubagentToolRequest) -> Result<Option<SubagentToolResult>> {
+        // One owner selects the originating turn and keeps it selected until
+        // the request is durable; a later daemon never reconstructs this fact.
+        let relay = self
+            .relay
+            .as_ref()
+            .map(|relay| relay.lock().expect("relay lock poisoned"));
+        if let Some(relay) = &relay {
+            request.originating_command_id = relay.originating_command_id();
+        }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         if let Some(result) = state.results.get(&request.request_id) {
             return Ok(Some(result.clone()));
         }
-        state
-            .requests
+        let mut next = state.clone();
+        next.requests
             .entry(request.request_id.clone())
             .or_insert(request);
-        self.persist(&state)?;
+        self.persist(&next)?;
+        *state = next;
         Ok(None)
     }
 
     pub fn complete(&self, result: SubagentToolResult) -> Result<()> {
         let request_id = result.request_id.clone();
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
-        state.requests.remove(&request_id);
-        state.results.insert(request_id, result);
+        let mut next = state.clone();
+        next.requests.remove(&request_id);
+        next.results.insert(request_id, result);
         // Results are small but bound retained history so a long-lived parent does not
         // grow this control file forever.
-        while state.results.len() > 256 {
-            let Some(oldest) = state
+        while next.results.len() > 256 {
+            let Some(oldest) = next
                 .results
                 .values()
                 .min_by_key(|result| result.completed_at_ms)
@@ -134,9 +170,10 @@ impl SubagentEndpoint {
             else {
                 break;
             };
-            state.results.remove(&oldest);
+            next.results.remove(&oldest);
         }
-        self.persist(&state)?;
+        self.persist(&next)?;
+        *state = next;
         drop(state);
         self.completed.notify_waiters();
         Ok(())
@@ -156,10 +193,182 @@ mod tests {
 
     fn request(id: &str) -> SubagentToolRequest {
         SubagentToolRequest {
+            originating_command_id: None,
             request_id: id.into(),
             created_at_ms: 1,
             action: SubagentToolAction::ListAgents,
         }
+    }
+
+    #[test]
+    fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        let root = tempfile::tempdir().unwrap();
+        let relay = Arc::new(Mutex::new(
+            crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
+        ));
+        {
+            let mut owner = relay.lock().unwrap();
+            owner
+                .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                    config_options: vec![],
+                })
+                .unwrap();
+            submit_relay(&mut owner, "original-turn", prompt("first"));
+            owner.claim_pending_commands(true).unwrap();
+        }
+        let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        endpoint.relay = Some(relay.clone());
+        let mut report = request("handback-request");
+        report.action = SubagentToolAction::Handback {
+            message: "original report".into(),
+        };
+        report.originating_command_id = Some("untrusted-forged-turn".into());
+        endpoint.enqueue(report.clone()).unwrap();
+        {
+            let mut owner = relay.lock().unwrap();
+            owner
+                .record_command_completed(
+                    "original-turn",
+                    mj_core::relay::RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                        usage: None,
+                        diagnostic: None,
+                    },
+                )
+                .unwrap();
+            submit_relay(&mut owner, "replacement-turn", prompt("second"));
+            owner.claim_pending_commands(true).unwrap();
+        }
+        endpoint.enqueue(report).unwrap();
+        let pending = SubagentEndpoint::open(root.path()).unwrap().snapshot().0;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].originating_command_id.as_deref(),
+            Some("original-turn")
+        );
+    }
+
+    #[test]
+    fn failed_persistence_never_publishes_admission_or_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        let valid = endpoint.path.clone();
+        endpoint.path = root.path().to_path_buf(); // Atomic rename cannot replace a directory.
+        assert!(endpoint.enqueue(request("failed-admission")).is_err());
+        assert!(endpoint.snapshot().0.is_empty());
+        endpoint.path = valid;
+        endpoint.enqueue(request("accepted-request")).unwrap();
+        endpoint.path = root.path().to_path_buf();
+        assert!(endpoint.complete(done("accepted-request")).is_err());
+        let (pending, results) = endpoint.snapshot();
+        assert_eq!(pending.len(), 1);
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn saturated_wait_lane_rejects_before_queueing_and_keeps_interrupt_available() {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut clients = Vec::new();
+        for n in 0..LONG_SOCKET_TASKS {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let service = endpoint.clone();
+            tasks.spawn(async move { serve_one(server, service).await });
+            let mut wait = request(&format!("wait-{n}"));
+            wait.action = SubagentToolAction::WaitAgents {
+                child_session_ids: vec!["child".into()],
+                timeout_seconds: Some(60),
+                return_when: Default::default(),
+            };
+            let mut body = serde_json::to_vec(&wait).unwrap();
+            body.push(b'\n');
+            client.write_all(&body).await.unwrap();
+            clients.push(client);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while endpoint.snapshot().0.len() < LONG_SOCKET_TASKS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let service = endpoint.clone();
+        tasks.spawn(async move { serve_one(server, service).await });
+        let mut excess = request("excess-wait");
+        excess.action = SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["child".into()],
+            timeout_seconds: Some(60),
+            return_when: Default::default(),
+        };
+        let mut body = serde_json::to_vec(&excess).unwrap();
+        body.push(b'\n');
+        client.write_all(&body).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(client).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let refused: SocketReply = serde_json::from_str(&line).unwrap();
+        assert!(!refused.accepted);
+        assert!(refused.result.unwrap().is_error);
+        assert!(
+            !endpoint
+                .snapshot()
+                .0
+                .iter()
+                .any(|r| r.request_id == "excess-wait")
+        );
+
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let service = endpoint.clone();
+        tasks.spawn(async move { serve_one(server, service).await });
+        let mut interrupt = request("interrupt-request");
+        interrupt.action = SubagentToolAction::InterruptAgent {
+            child_session_id: "child".into(),
+        };
+        let mut body = serde_json::to_vec(&interrupt).unwrap();
+        body.push(b'\n');
+        client.write_all(&body).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !endpoint
+                .snapshot()
+                .0
+                .iter()
+                .any(|r| r.request_id == "interrupt-request")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        endpoint.complete(done("interrupt-request")).unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(client).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let completed: SocketReply = serde_json::from_str(&line).unwrap();
+        assert!(completed.accepted);
+        assert_eq!(completed.result, Some(done("interrupt-request")));
+        assert_eq!(endpoint.snapshot().0.len(), LONG_SOCKET_TASKS);
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(result) => result.unwrap(),
+                Err(error) => assert!(error.is_cancelled()),
+            }
+        }
+        drop(clients);
     }
 
     #[test]
@@ -260,7 +469,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_wait_the_daemon_never_answers_is_answered_here_at_the_callers_deadline() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        #[cfg(test)]
+        use tokio::io::AsyncBufReadExt;
+        use tokio::io::{AsyncWriteExt, BufReader};
 
         let directory = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
@@ -276,6 +487,7 @@ mod tests {
 
         let mut client = UnixStream::connect(&socket).await.unwrap();
         let request = SubagentToolRequest {
+            originating_command_id: None,
             request_id: "r-late".into(),
             created_at_ms: 1,
             action: SubagentToolAction::WaitAgents {
@@ -344,8 +556,12 @@ struct SocketReply {
     result: Option<SubagentToolResult>,
 }
 
-pub(super) fn serve(root: &Path) -> Result<(SubagentEndpoint, super::unix::SocketGuard)> {
-    let endpoint = SubagentEndpoint::open(root)?;
+pub(super) fn serve(
+    root: &Path,
+    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+) -> Result<(SubagentEndpoint, super::unix::SocketGuard)> {
+    let mut endpoint = SubagentEndpoint::open(root)?;
+    endpoint.relay = Some(relay);
     let path = root.join(SUBAGENT_SOCKET);
     let _ = std::fs::remove_file(&path);
     let listener = mj_core::local_sockets::bind_unix_listener(&path)
@@ -361,24 +577,31 @@ pub(super) fn serve(root: &Path) -> Result<(SubagentEndpoint, super::unix::Socke
     }
     let service = endpoint.clone();
     tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
         loop {
-            // A transient accept failure (EMFILE, ECONNABORTED) must not end
-            // the loop: dropping the listener would refuse every later tool
-            // call for the life of the worker.
-            let stream = match listener.accept().await {
-                Ok((stream, _)) => stream,
-                Err(error) => {
-                    tracing::warn!(error = %error, "sub-agent socket accept failed");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+            tokio::select! {
+                finished = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Some(Err(error)) = finished {
+                        tracing::error!(%error, "sub-agent socket task panicked");
+                    }
                 }
-            };
-            let service = service.clone();
-            tokio::spawn(async move {
-                if let Err(error) = serve_one(stream, service).await {
-                    tracing::warn!(error = %format!("{error:#}"), "sub-agent MCP dispatch failed");
+                accepted = listener.accept(), if tasks.len() < MAX_SOCKET_TASKS => {
+                    let stream = match accepted {
+                        Ok((stream, _)) => stream,
+                        Err(error) => {
+                            tracing::warn!(%error, "sub-agent socket accept failed");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
+                    let service = service.clone();
+                    tasks.spawn(async move {
+                        if let Err(error) = serve_one(stream, service).await {
+                            tracing::warn!(error = %format!("{error:#}"), "sub-agent MCP dispatch failed");
+                        }
+                    });
                 }
-            });
+            }
         }
     });
     Ok((endpoint, super::unix::SocketGuard(path)))
@@ -436,13 +659,31 @@ fn late_daemon_reply(
 async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .context("read sub-agent request")?;
+    let line = tokio::time::timeout(
+        SOCKET_IO_DEADLINE,
+        super::unix::read_bounded_line(&mut reader, mj_core::relay::RELAY_COMMAND_BYTE_BUDGET),
+    )
+    .await
+    .context("sub-agent request read timed out")??
+    .context("sub-agent request ended before a frame")?;
     let request: SubagentToolRequest =
-        serde_json::from_str(line.trim()).context("parse sub-agent request")?;
+        serde_json::from_str(&line).context("parse sub-agent request")?;
+    let lane = if matches!(
+        request.action,
+        mj_core::subagent::SubagentToolAction::WaitAgents { .. }
+            | mj_core::subagent::SubagentToolAction::Spawn { .. }
+    ) {
+        &endpoint.admission.long
+    } else {
+        &endpoint.admission.control
+    };
+    let Ok(_admission) = lane.clone().try_acquire_owned() else {
+        let body = SocketReply { accepted: false, result: Some(SubagentToolResult {
+            request_id: request.request_id, completed_at_ms: mj_core::clock::epoch_millis(),
+            is_error: true, message: "Sub-agent request was not accepted: this operation's queue is full; retry later.".into(),
+        }) };
+        return write_reply(&mut write, body).await;
+    };
     // Input acknowledges durable queue admission, not delivery. Keep it pending
     // for the daemon; wait/list_agents expose its eventual delivery result.
     // Other tools still return their completed result.
@@ -492,14 +733,29 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
             late_daemon_reply(&request_id, &children, started.elapsed().as_secs())
         })
     });
-    let mut body = serde_json::to_vec(&SocketReply {
-        accepted: true,
-        result,
-    })?;
+    write_reply(
+        &mut write,
+        SocketReply {
+            accepted: true,
+            result,
+        },
+    )
+    .await
+}
+
+async fn write_reply(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    reply: SocketReply,
+) -> Result<()> {
+    let mut body = serde_json::to_vec(&reply)?;
     body.push(b'\n');
-    write
-        .write_all(&body)
-        .await
-        .context("answer sub-agent request")?;
-    write.flush().await.context("flush sub-agent response")
+    tokio::time::timeout(SOCKET_IO_DEADLINE, async {
+        write
+            .write_all(&body)
+            .await
+            .context("answer sub-agent request")?;
+        write.flush().await.context("flush sub-agent response")
+    })
+    .await
+    .context("sub-agent response write timed out")?
 }

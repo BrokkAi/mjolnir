@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 58;
+const SCHEMA_VERSION: i64 = 63;
 
 mod session_move;
 pub use session_move::*;
@@ -68,6 +68,12 @@ mod mounts;
 pub use mounts::*;
 mod reviews;
 pub use reviews::*;
+mod startup;
+pub(crate) use startup::*;
+mod delegation;
+pub(crate) use delegation::*;
+mod worker_restart;
+pub(crate) use worker_restart::*;
 mod prompts;
 pub use prompts::*;
 mod values;

@@ -220,28 +220,58 @@ async fn slow_reviewer_does_not_delay_primary_or_another_role_at_the_bridge() {
     release.notify_one();
 }
 
-/// A session that has gone quiet must not leave a handle behind for ever:
-/// a long-lived daemon serves many sessions.
 #[tokio::test]
-async fn finished_sessions_are_forgotten() {
+async fn request_queue_refuses_overload_without_blocking_another_session() {
     let mut order = SessionRequestOrder::new();
-    for index in 0..8 {
-        order.dispatch(
-            ordering_request(&format!("session-{index}"), "only"),
-            |_| async {},
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while order.latest.values().any(|handle| !handle.is_finished()) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the request finished");
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = release.clone();
+    order.dispatch(ordering_request("slow", "first"), move |_| async move {
+        held.notified().await;
+    });
+    for _ in 1..32 {
+        order.dispatch(ordering_request("slow", "queued"), |_| async {});
     }
-    // The next dispatch prunes what has finished, so the map tracks live
-    // work rather than every session ever seen.
-    order.dispatch(ordering_request("session-last", "only"), |_| async {});
-    assert_eq!(order.latest.len(), 1);
+    let (reply, refused) = oneshot::channel();
+    let mut request = ordering_request("slow", "excess");
+    if let RemoteSessionRequest::Submit { reply: sender, .. } = &mut request {
+        *sender = reply;
+    }
+    order.dispatch(request, |_| async { panic!("refused request ran") });
+    let error = refused.await.unwrap().unwrap_err();
+    assert!(!error.unconfirmed);
+    assert!(error.message.contains("queue is full"));
+    let (done, finished) = oneshot::channel();
+    order.dispatch(ordering_request("other", "independent"), |_| async move {
+        done.send(()).unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(2), finished)
+        .await
+        .unwrap()
+        .unwrap();
+    release.notify_one();
+    order.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn dispatcher_drains_after_disconnect_and_releases_panicked_streams() {
+    let mut order = SessionRequestOrder::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = release.clone();
+    order.dispatch(ordering_request("one", "panics"), |_| async move {
+        held.notified().await;
+        panic!("request panic fixture");
+    });
+    let (done, finished) = oneshot::channel();
+    order.dispatch(ordering_request("one", "following"), |_| async move {
+        done.send(()).unwrap();
+    });
+    // Closing the bridge must not abandon already admitted mutations.
+    drop(order);
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), finished)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 /// A reviewer action reaches a remote controller daemon as JSON, so both
@@ -886,6 +916,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 queued_prompts: Vec::new(),
                 active_user_shells: Vec::new(),
                 active_agent_terminals: Vec::new(),
+                command_ledger_seal: None,
                 checkpoint_barrier: None,
                 checkpoint_ready: None,
                 last_acp_activity_at_ms: None,
@@ -949,6 +980,7 @@ fn a_new_subagent_request_publishes_without_a_transcript_change() {
         .expect("snapshot present")
         .subagent_requests
         .push(mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
             request_id: "req-1".to_owned(),
             created_at_ms: 1,
             action: mj_core::subagent::SubagentToolAction::ListAgents,
@@ -2080,6 +2112,177 @@ async fn released_connection_can_be_leased_again_immediately() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn full_leased_queue_refuses_excess_and_still_processes_release() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "full_leased_queue_refuses_excess_and_still_processes_release",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let mut pending = Vec::new();
+    for _ in 0..33 {
+        let (reply, response) = oneshot::channel();
+        actor
+            .commands
+            .send(ActorCommand::Submit {
+                durable: false,
+                queued_at: Instant::now(),
+                command_id: new_command_id("bounded-queue").unwrap(),
+                command: RelayCommand::Cancel,
+                admission: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        pending.push(response);
+    }
+    let refused = tokio::time::timeout(Duration::from_secs(5), pending.pop().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(!refused.unconfirmed);
+    assert!(refused.message.contains("queue is full"));
+    // Retirement and lease return still pass the saturated command queue.
+    actor.retirement.send_replace(true);
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(connection),
+        })
+        .unwrap();
+    for response in pending {
+        let refused = tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(!refused.unconfirmed);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn actor_durable_submission_retains_and_releases_its_receipt() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "actor_durable_submission_retains_and_releases_its_receipt",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let handle = ManagedSessionHandle {
+        session_id: LEASED_RELAY_SESSION.to_owned(),
+        commands: actor.commands.clone(),
+        releases: actor.releases.clone(),
+        view: actor._views.clone(),
+    };
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(connection),
+        })
+        .unwrap();
+    let command_id = new_command_id("durable").unwrap();
+    let first = handle
+        .submit_durable(command_id.clone(), RelayCommand::ClearQueuedPrompts)
+        .await
+        .unwrap();
+    let repeated = handle
+        .submit_durable(command_id.clone(), RelayCommand::ClearQueuedPrompts)
+        .await
+        .unwrap();
+    assert_eq!(first, repeated);
+    assert!(
+        handle
+            .command_receipt(command_id.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    handle
+        .release_command_receipt(command_id.clone())
+        .await
+        .unwrap();
+    // Release is idempotent, allowing a persisted cleanup step to retry.
+    handle.release_command_receipt(command_id).await.unwrap();
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn receipt_lookup_never_reports_absence_ahead_of_a_deferred_durable_submit() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "receipt_lookup_never_reports_absence_ahead_of_a_deferred_durable_submit",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (actor, lease_id, connection) = lease_a_live_actor().await;
+    let handle = ManagedSessionHandle {
+        session_id: LEASED_RELAY_SESSION.to_owned(),
+        commands: actor.commands.clone(),
+        releases: actor.releases.clone(),
+        view: actor._views.clone(),
+    };
+    let command_id = new_command_id("cancelled-durable-wait").unwrap();
+    let (reply, disconnected) = oneshot::channel();
+    actor
+        .commands
+        .send(ActorCommand::Submit {
+            durable: true,
+            queued_at: Instant::now(),
+            command_id: command_id.clone(),
+            command: RelayCommand::ClearQueuedPrompts,
+            admission: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    drop(disconnected);
+    // The command is queued, not accepted. A negative lookup here would let
+    // cancellation forget a command the actor could still deliver later.
+    let error = handle
+        .command_receipt(command_id.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("lifecycle operation"));
+    assert!(
+        handle
+            .release_command_receipt(command_id.clone())
+            .await
+            .is_err()
+    );
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(connection),
+        })
+        .unwrap();
+    // Returns have priority; all deferred commands settle before this lookup.
+    assert!(
+        handle
+            .command_receipt(command_id.clone())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    handle.release_command_receipt(command_id).await.unwrap();
+    actor.retirement.send_replace(true);
+}
+
+#[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
 ) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {
@@ -2087,6 +2290,7 @@ async fn submit_a_deferred_prompt(
     actor
         .commands
         .send(ActorCommand::Submit {
+            durable: false,
             queued_at: Instant::now(),
             command_id: new_command_id("prompt").unwrap(),
             command: RelayCommand::Prompt {
@@ -2457,6 +2661,7 @@ async fn delegation_bypasses_an_unconsumed_dashboard_and_observes_request_only_c
     );
     view.snapshot.as_mut().unwrap().subagent_requests.push(
         mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
             request_id: "spawn".into(),
             created_at_ms: 1,
             action: mj_core::subagent::SubagentToolAction::ListAgents,
@@ -2482,6 +2687,7 @@ async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
         let mut view = view_at_ordinal(n);
         view.snapshot.as_mut().unwrap().subagent_requests.push(
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: n.to_string(),
                 created_at_ms: 1,
                 action: mj_core::subagent::SubagentToolAction::ListAgents,
@@ -2498,6 +2704,7 @@ async fn delegation_coalesces_fairly_and_ignores_replaced_actor_publications() {
     let mut view = view_at_ordinal(2);
     view.snapshot.as_mut().unwrap().subagent_requests.push(
         mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
             request_id: "new-actor".into(),
             created_at_ms: 1,
             action: mj_core::subagent::SubagentToolAction::ListAgents,
@@ -2589,6 +2796,7 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     // The worker's request changes without a transcript event. No reader ever
     // consumes manager.updates and no web server or remote facade exists.
     let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
         request_id: "list-without-dashboard".into(),
         created_at_ms: chrono::Utc::now().timestamp_millis(),
         action: mj_core::subagent::SubagentToolAction::ListAgents,
@@ -2667,4 +2875,104 @@ async fn replacing_a_delegation_actor_revokes_its_queued_observation() {
     old.publish(&view_at_ordinal(2));
     current.publish(&view_at_ordinal(3));
     assert!(receiver.recv().await.unwrap().1.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completion() {
+    const CHILD: &str = "MJ_DURABLE_RESTART_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completion",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
+    record.target = Some(recovery_source_target());
+    record.state = mj_core::state::SessionState::Running;
+    crate::database::save_session(&record).unwrap();
+    let plan = WorkerRecoveryPlan {
+        source_target: recovery_source_target(),
+        target: None,
+        workspace: None,
+        liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart".into(),
+            commands: vec![CommandSpec::new("restart", std::iter::empty::<&str>())],
+        },
+    };
+    struct ProbeExecutor {
+        live: bool,
+        commands: Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for ProbeExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
+            self.commands.lock().unwrap().push(command.program.clone());
+            Ok(crate::targets::CommandOutput {
+                status: 0,
+                stdout: if self.live {
+                    b"alive\n".to_vec()
+                } else {
+                    b"dead\n".to_vec()
+                },
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let intent = crate::database::WorkerRestartIntent {
+        operation_id: "replacement".into(),
+        target: recovery_source_target(),
+        desired_build: "new-build".into(),
+    };
+    crate::database::begin_worker_restart(&record.id, &intent).unwrap();
+    for phase in [
+        None,
+        Some(crate::database::WorkerRestartPhase::Swapping),
+        Some(crate::database::WorkerRestartPhase::AwaitingReadiness),
+    ] {
+        if let Some(phase) = phase {
+            crate::database::advance_worker_restart(&record.id, &intent.operation_id, phase)
+                .unwrap();
+        }
+        let executor = ProbeExecutor {
+            live: true,
+            commands: Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+            WorkerRecoveryOutcome::Starting
+        );
+        assert_eq!(*executor.commands.lock().unwrap(), vec!["probe"]);
+    }
+    // An old attempt cannot erase a newer replacement's ownership.
+    crate::database::finish_worker_restart(&record.id, "previous-attempt").unwrap();
+    assert_eq!(
+        crate::database::load_worker_restart(&record.id).unwrap(),
+        Some(intent.clone())
+    );
+    let executor = ProbeExecutor {
+        live: false,
+        commands: Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        recover_worker_controlled(plan, true, Some(&record.id), &executor).unwrap(),
+        WorkerRecoveryOutcome::RestartedDead
+    );
+    assert_eq!(*executor.commands.lock().unwrap(), vec!["probe", "restart"]);
+    let mut stale = intent.clone();
+    stale.target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/another-worker"),
+    };
+    assert!(crate::database::begin_worker_restart(&record.id, &stale).is_err());
+    crate::database::finish_worker_restart(&record.id, &intent.operation_id).unwrap();
+    assert!(
+        crate::database::load_worker_restart(&record.id)
+            .unwrap()
+            .is_none()
+    );
 }

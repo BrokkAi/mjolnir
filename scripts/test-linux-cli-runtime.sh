@@ -39,7 +39,10 @@ fi
 
 target="${1:?usage: test-linux-cli-runtime.sh GNU_TARGET_TRIPLE}"
 runtime="${CONTAINER_RUNTIME:-docker}"
-binary_dir="$PWD/target/release-cli/$target/release"
+profile="${MJ_CLI_PROFILE:-release}"
+profile_dir="$profile"
+[[ "$profile" == dev ]] && profile_dir=debug
+binary_dir="$PWD/target/release-cli/$target/$profile_dir"
 [[ -f "$binary_dir/mj" ]] || { echo "Missing $binary_dir/mj" >&2; exit 1; }
 for distribution in rocky debian amazon; do
   case "$distribution" in

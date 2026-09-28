@@ -72,6 +72,10 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+// Parsed once per process, so the size of the largest subcommand's arguments
+// costs nothing; the variants' sizes differ by target because their platform
+// argument types do.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
