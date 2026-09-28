@@ -312,6 +312,11 @@ impl ActiveChat {
                         .set_notice(format!("Could not open {url}: {error}"));
                 }
             }
+            ChatAction::CopyLink(url) => {
+                let notice =
+                    format!("Copied {url} · only http and https links open in the browser");
+                return ChatEventOutcome::CopyText { text: url, notice };
+            }
             ChatAction::PasteFromClipboard => {
                 if self.paste_in_flight {
                     self.state.set_notice("Clipboard read already in progress…");

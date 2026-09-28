@@ -353,15 +353,13 @@ impl ChatState {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(url) = self.transcript_link_at(mouse.column, mouse.row)
         {
-            if is_web_url(&url) {
-                return ChatAction::OpenLink(url);
-            }
             // Agent text chooses these destinations; other schemes can start
             // arbitrary local handlers, so only web pages open on a click.
-            self.set_notice(format!(
-                "Only http and https links open from the transcript: {url}"
-            ));
-            return ChatAction::None;
+            return if is_web_url(&url) {
+                ChatAction::OpenLink(url)
+            } else {
+                ChatAction::CopyLink(url)
+            };
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.toggle_tool_at(mouse.column, mouse.row)

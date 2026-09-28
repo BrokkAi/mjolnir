@@ -77,9 +77,30 @@ struct ListState {
 #[derive(Debug, Default)]
 struct TableState {
     alignments: Vec<Alignment>,
-    rows: Vec<Vec<String>>,
-    row: Vec<String>,
-    cell: String,
+    rows: Vec<Vec<TableCell>>,
+    row: Vec<TableCell>,
+    cell: TableCell,
+}
+
+/// One table cell's styled text, laid out once the whole table is known.
+#[derive(Debug, Clone, Default)]
+struct TableCell {
+    spans: Vec<Span<'static>>,
+    /// Link spans, indexed into `spans`.
+    links: Vec<LinkSpan>,
+}
+
+impl TableCell {
+    fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    fn text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 }
 
 struct MarkdownWriter {
@@ -95,6 +116,9 @@ struct MarkdownWriter {
     link: Option<String>,
     /// Link spans of the line in progress, indexed into `spans`.
     line_links: Vec<LinkSpan>,
+    /// Consecutive text events not yet written. The parser can split one
+    /// run of text into several events, so URLs are found in the whole run.
+    pending_text: String,
 }
 
 impl MarkdownWriter {
@@ -110,34 +134,69 @@ impl MarkdownWriter {
             width: width.max(1),
             link: None,
             line_links: Vec::new(),
+            pending_text: String::new(),
         }
     }
 
-    /// Adds an inline span, recording it as link text inside a link.
+    /// Adds an inline span to the table cell or line in progress, recording
+    /// it as link text inside a link.
     fn push_span(&mut self, span: Span<'static>) {
+        let (spans, links) = match &mut self.table {
+            Some(table) => (&mut table.cell.spans, &mut table.cell.links),
+            None => (&mut self.spans, &mut self.line_links),
+        };
         if let Some(url) = &self.link {
-            self.line_links.push(LinkSpan {
-                span: self.spans.len(),
+            links.push(LinkSpan {
+                span: spans.len(),
                 url: url.clone(),
             });
         }
-        self.spans.push(span);
+        spans.push(span);
     }
 
-    fn push_text(&mut self, text: &str) {
-        if let Some(table) = &mut self.table {
-            table.cell.push_str(text);
+    fn push_text(&mut self, text: &str, style: Style) {
+        if self.table.is_some() {
+            // A table cell is one row of source text.
+            self.push_span(Span::styled(text.replace('\n', " "), style));
             return;
         }
         let mut parts = text.split('\n').peekable();
         while let Some(part) = parts.next() {
             if !part.is_empty() {
-                self.push_span(Span::styled(part.to_owned(), self.style));
+                self.push_span(Span::styled(part.to_owned(), style));
             }
             if parts.peek().is_some() {
                 self.finish_line();
             }
         }
+    }
+
+    /// Writes text, turning each URL written out in it into a link to itself.
+    /// Text that is already a link's label stays one link.
+    fn push_linkified(&mut self, text: &str, style: Style) {
+        if self.link.is_some() {
+            self.push_text(text, style);
+            return;
+        }
+        let mut finder = linkify::LinkFinder::new();
+        finder.kinds(&[linkify::LinkKind::Url]);
+        for part in finder.spans(text) {
+            if part.kind().is_some() {
+                self.link = Some(part.as_str().to_owned());
+                self.push_text(part.as_str(), style.add_modifier(Modifier::UNDERLINED));
+                self.link = None;
+            } else {
+                self.push_text(part.as_str(), style);
+            }
+        }
+    }
+
+    fn flush_text(&mut self) {
+        if self.pending_text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.pending_text);
+        self.push_linkified(&text, self.style);
     }
 
     fn finish_line(&mut self) {
@@ -212,15 +271,24 @@ impl MarkdownWriter {
         if !table.row.is_empty() {
             table.rows.push(std::mem::take(&mut table.row));
         }
-        let Some(header) = table.rows.first().cloned() else {
+        let Some(header) = table
+            .rows
+            .first()
+            .map(|row| row.iter().map(TableCell::text).collect::<Vec<_>>())
+        else {
             return;
         };
         let columns = table.alignments.len().max(header.len()).max(1);
         for row in &mut table.rows {
             row.truncate(columns);
-            row.resize(columns, String::new());
+            row.resize(columns, TableCell::default());
         }
         table.alignments.resize(columns, Alignment::None);
+        let texts = table
+            .rows
+            .iter()
+            .map(|row| row.iter().map(TableCell::text).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
 
         const CELL_PADDING: usize = 1;
         const COLUMN_GAP: usize = 2;
@@ -229,8 +297,7 @@ impl MarkdownWriter {
         let available = self.width.saturating_sub(reserved);
         let mut column_widths = (0..columns)
             .map(|column| {
-                table
-                    .rows
+                texts
                     .iter()
                     .map(|row| display_width(&row[column]))
                     .max()
@@ -251,7 +318,7 @@ impl MarkdownWriter {
             column_widths[column] -= 1;
         }
         let grid_fits = column_widths.iter().sum::<usize>() <= available;
-        let fragments_tokens = table.rows.iter().skip(1).any(|row| {
+        let fragments_tokens = texts.iter().skip(1).any(|row| {
             row.iter().zip(&column_widths).any(|(cell, width)| {
                 *width < 12
                     && cell
@@ -301,16 +368,23 @@ impl MarkdownWriter {
                         .filter(|label| !label.is_empty())
                         .cloned()
                         .unwrap_or_else(|| format!("Column {}", column + 1));
+                    let continuation_indent = display_width(&label) + 2;
+                    let mut spans = vec![Span::styled(
+                        format!("{label}: "),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )];
+                    spans.extend(value.spans);
                     self.lines.push(LogicalLine {
-                        line: Line::from(vec![
-                            Span::styled(
-                                format!("{label}: "),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::from(value),
-                        ]),
-                        continuation_indent: display_width(&label) + 2,
-                        links: Vec::new(),
+                        line: Line::from(spans),
+                        continuation_indent,
+                        links: value
+                            .links
+                            .into_iter()
+                            .map(|link| LinkSpan {
+                                span: link.span + 1,
+                                url: link.url,
+                            })
+                            .collect(),
                     });
                 }
             }
@@ -319,10 +393,10 @@ impl MarkdownWriter {
 
     fn render_table_row(
         &mut self,
-        row: &[String],
+        row: &[TableCell],
         column_widths: &[usize],
         alignments: &[Alignment],
-        style: Style,
+        emphasis: Style,
     ) {
         const CELL_PADDING: usize = 1;
         const COLUMN_GAP: usize = 2;
@@ -330,39 +404,55 @@ impl MarkdownWriter {
             .iter()
             .zip(column_widths)
             .map(|(cell, width)| {
-                wrap_styled_line(Line::from(cell.clone()), *width, 0)
-                    .into_iter()
-                    .map(|line| {
-                        line.spans
-                            .into_iter()
-                            .map(|span| span.content.into_owned())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
+                let spans = cell
+                    .spans
+                    .iter()
+                    .map(|span| Span::styled(span.content.clone(), span.style.patch(emphasis)))
+                    .collect::<Vec<_>>();
+                wrap_styled_line_with_sources(Line::from(spans), *width, 0)
             })
             .collect::<Vec<_>>();
-        let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+        let height = cells.iter().map(|(rows, _)| rows.len()).max().unwrap_or(1);
         for line_index in 0..height {
             let mut spans = Vec::new();
+            let mut links = Vec::new();
             for (column, width) in column_widths.iter().copied().enumerate() {
                 if column > 0 {
                     spans.push(Span::raw(" ".repeat(COLUMN_GAP)));
                 }
-                let value = cells[column].get(line_index).map_or("", String::as_str);
-                let remaining = width.saturating_sub(display_width(value));
+                let (rows, sources) = &cells[column];
+                let value = rows.get(line_index).cloned().unwrap_or_default();
+                let remaining = width.saturating_sub(value.width());
                 let (left, right) = match alignments[column] {
                     Alignment::Left | Alignment::None => (0, remaining),
                     Alignment::Center => (remaining / 2, remaining - remaining / 2),
                     Alignment::Right => (remaining, 0),
                 };
                 spans.push(Span::raw(" ".repeat(CELL_PADDING + left)));
-                spans.push(Span::styled(value.to_owned(), style));
+                let cell_sources = sources.get(line_index).map_or(&[][..], Vec::as_slice);
+                let mut offset = 0;
+                for span in value.spans {
+                    // Each wrapped span comes from one source span of the cell.
+                    let source = cell_sources.get(offset).copied().flatten();
+                    if let Some(link) = row[column]
+                        .links
+                        .iter()
+                        .find(|link| Some(link.span) == source)
+                    {
+                        links.push(LinkSpan {
+                            span: spans.len(),
+                            url: link.url.clone(),
+                        });
+                    }
+                    offset += display_width(&span.content);
+                    spans.push(span);
+                }
                 spans.push(Span::raw(" ".repeat(right + CELL_PADDING)));
             }
             self.lines.push(LogicalLine {
                 line: Line::from(spans),
                 continuation_indent: 0,
-                links: Vec::new(),
+                links,
             });
         }
     }
@@ -384,6 +474,11 @@ pub(super) fn markdown_lines(
     let mut style_stack = Vec::new();
 
     for event in parser {
+        if let Event::Text(text) = &event {
+            writer.pending_text.push_str(text);
+            continue;
+        }
+        writer.flush_text();
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {}
@@ -457,11 +552,7 @@ pub(super) fn markdown_lines(
                     writer.style = writer.style.add_modifier(Modifier::CROSSED_OUT);
                 }
                 Tag::Link { dest_url, .. } => {
-                    // Table cells are laid out as plain text, so a link there
-                    // has no span of its own to point at.
-                    if writer.table.is_none() {
-                        writer.link = Some(dest_url.into_string());
-                    }
+                    writer.link = Some(dest_url.into_string());
                     style_stack.push(writer.style);
                     writer.style = writer
                         .style
@@ -524,19 +615,14 @@ pub(super) fn markdown_lines(
                 }
                 _ => {}
             },
-            Event::Text(text) => writer.push_text(&text),
+            // Collected at the top of the loop.
+            Event::Text(_) => {}
             Event::Code(code) => {
-                if writer.table.is_some() {
-                    writer.push_text(&code);
-                } else {
-                    writer.push_span(Span::styled(
-                        code.into_string(),
-                        writer
-                            .style
-                            .fg(theme::palette().secondary)
-                            .patch(theme::raised()),
-                    ));
-                }
+                let style = writer
+                    .style
+                    .fg(theme::palette().secondary)
+                    .patch(theme::raised());
+                writer.push_linkified(&code, style);
             }
             Event::SoftBreak | Event::HardBreak => writer.finish_line(),
             Event::Rule => {
@@ -554,12 +640,15 @@ pub(super) fn markdown_lines(
             // The raw transcript mode still exposes it as sanitized source
             // when needed.
             Event::Html(_) | Event::InlineHtml(_) => {}
-            Event::FootnoteReference(reference) => writer.push_text(&format!("[{reference}]")),
+            Event::FootnoteReference(reference) => {
+                writer.push_text(&format!("[{reference}]"), writer.style);
+            }
             Event::TaskListMarker(checked) => {
-                writer.push_text(if checked { "[x] " } else { "[ ] " });
+                writer.push_text(if checked { "[x] " } else { "[ ] " }, writer.style);
             }
         }
     }
+    writer.flush_text();
     writer.finish()
 }
 

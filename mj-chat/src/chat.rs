@@ -250,6 +250,12 @@ pub enum ChatEventOutcome {
         reverse: bool,
     },
     OpenSubagents,
+    /// Put `text` on the clipboard and then show `notice`. The host owns the
+    /// clipboard, including the terminal clipboard used over SSH.
+    CopyText {
+        text: String,
+        notice: String,
+    },
     QuitDetach {
         last_seen_event_ordinal: u64,
     },
@@ -317,6 +323,8 @@ pub enum ChatAction {
     /// Open an http(s) link the user clicked in the transcript in the
     /// system's default browser.
     OpenLink(String),
+    /// Copy a clicked transcript link that does not open in a browser.
+    CopyLink(String),
     Attach {
         path: PathBuf,
         command: String,
