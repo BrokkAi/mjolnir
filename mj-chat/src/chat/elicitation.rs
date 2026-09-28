@@ -72,6 +72,10 @@ enum ElicitationControl {
     Submit,
     Skip,
     Cancel,
+    Previous,
+    Next,
+    GoBack,
+    SubmitAnyway,
 }
 
 /// A process-local copy of an unanswered form. The request is retained in the
@@ -91,6 +95,10 @@ pub struct ElicitationDraft {
     message_anchor: Option<(usize, usize)>,
     message_anchor_width: u16,
     focus_scroll: u16,
+    #[serde(default)]
+    current_question: Option<usize>,
+    #[serde(default)]
+    confirmed: BTreeSet<usize>,
 }
 
 impl ElicitationDraft {
@@ -115,6 +123,11 @@ pub(super) struct ElicitationDialog {
     /// The form is the sole focus and pointer authority for this modal.
     form: RefCell<Form<ElicitationControl>>,
     error: Option<String>,
+    /// Page navigation is independent of control focus; only an explicit
+    /// answer action confirms a page, and edits invalidate that confirmation.
+    current_question: usize,
+    confirmed: BTreeSet<usize>,
+    confirming_unanswered: bool,
     message_scroll: Cell<u16>,
     message_page_height: Cell<u16>,
     message_max_scroll: Cell<u16>,
@@ -161,29 +174,17 @@ impl ElicitationDialog {
                 }
             }
         }
-        let mut form = Form::new();
-        for (index, display) in display_fields.iter().copied().enumerate() {
-            form.declare(
-                ElicitationControl::Field(index),
-                display_control_kind(&request, &values, &option_cursors, display),
-            );
-        }
-        form.declare(ElicitationControl::Submit, ControlKind::Button);
-        form.declare(ElicitationControl::Skip, ControlKind::Button);
-        form.declare(ElicitationControl::Cancel, ControlKind::Button);
-        form.end_frame(if display_fields.is_empty() {
-            ElicitationControl::Submit
-        } else {
-            ElicitationControl::Field(0)
-        });
-        Self {
+        let mut dialog = Self {
             request,
             values,
             option_cursors,
             display_fields,
             active_custom_fields,
-            form: RefCell::new(form),
+            form: RefCell::new(Form::new()),
             error: None,
+            current_question: 0,
+            confirmed: BTreeSet::new(),
+            confirming_unanswered: false,
             message_scroll: Cell::new(0),
             message_page_height: Cell::new(0),
             message_max_scroll: Cell::new(0),
@@ -192,7 +193,9 @@ impl ElicitationDialog {
             message_anchor_width: Cell::new(0),
             rendered_area: Cell::new(None),
             focus_scroll: Cell::new(0),
-        }
+        };
+        dialog.reset_controls();
+        dialog
     }
 
     pub(super) fn request(&self) -> &ElicitationRequest {
@@ -202,24 +205,19 @@ impl ElicitationDialog {
     /// The natural height of the current question page, including its panel
     /// border, message, focused answer content, action row, and footer.
     ///
-    /// Ordinary elicitation messages retain the existing three-row allowance;
-    /// plan-review messages use their complete wrapped message height and are
-    /// capped by the caller to the space available on screen.
+    /// Prompts use their complete wrapped height, capped by the caller to
+    /// the available pane. Overflow scrolls independently of the controls.
     pub(super) fn natural_height(&self, width: u16) -> u16 {
         let content_width = width.saturating_sub(2).max(1);
         let focus_rows = focus_content(self).wrapped_height(content_width);
         let message_rows = u16::try_from(
-            Paragraph::new(self.request.message.as_str())
+            Paragraph::new(self.prompt_text())
                 .wrap(Wrap { trim: true })
                 .line_count(content_width),
         )
         .unwrap_or(u16::MAX)
         .max(1);
-        let message_rows = if self.is_plan_review() {
-            message_rows
-        } else {
-            message_rows.min(3)
-        };
+
         // Two border rows, one footer row, and the two action rows match the
         // full-size renderer. The renderer collapses actions to one row only
         // when the capped pane itself is exceptionally small.
@@ -240,6 +238,8 @@ impl ElicitationDialog {
             message_anchor: self.message_anchor.get(),
             message_anchor_width: self.message_anchor_width.get(),
             focus_scroll: self.focus_scroll.get(),
+            current_question: Some(self.current_question),
+            confirmed: self.confirmed.clone(),
         }
     }
 
@@ -254,17 +254,16 @@ impl ElicitationDialog {
         dialog.values = draft.values;
         dialog.option_cursors = draft.option_cursors;
         dialog.active_custom_fields = draft.active_custom_fields;
-        for (index, display) in dialog.display_fields.iter().copied().enumerate() {
-            dialog.form.borrow_mut().declare(
-                ElicitationControl::Field(index),
-                display_control_kind(
-                    &dialog.request,
-                    &dialog.values,
-                    &dialog.option_cursors,
-                    display,
-                ),
-            );
-        }
+        dialog.current_question = draft
+            .current_question
+            .unwrap_or(draft.focus)
+            .min(dialog.display_fields.len().saturating_sub(1));
+        dialog.confirmed = draft
+            .confirmed
+            .into_iter()
+            .filter(|index| *index < dialog.display_fields.len())
+            .collect();
+        dialog.reset_controls();
         dialog.focus_control(draft.focus.min(dialog.display_fields.len() + 2));
         dialog.message_scroll = Cell::new(draft.message_scroll);
         dialog.message_anchor = Cell::new(draft.message_anchor);
@@ -286,6 +285,7 @@ impl ElicitationDialog {
         }
         if let Some(FieldValue::Text(value)) = self.values.get_mut(field) {
             value.insert_str(&text);
+            self.confirmed.remove(&self.current_question);
             self.error = None;
         }
     }
@@ -302,26 +302,48 @@ impl ElicitationDialog {
     pub(super) fn handle_key_event(&mut self, key: KeyEvent) -> Option<ElicitationResponse> {
         let (code, modifiers) = super::normalize_key(key.code, key.modifiers);
         let key = KeyEvent::new_with_kind_and_state(code, modifiers, key.kind, key.state);
-        if self.is_plan_review() {
-            match code {
-                KeyCode::PageUp => {
-                    let page = isize::try_from(self.message_page_step()).unwrap_or(isize::MAX);
-                    self.scroll_message(-page);
-                    return None;
-                }
-                KeyCode::PageDown => {
-                    let page = isize::try_from(self.message_page_step()).unwrap_or(isize::MAX);
-                    self.scroll_message(page);
-                    return None;
-                }
-                _ => {}
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return None;
+        }
+        if key.kind == crossterm::event::KeyEventKind::Press {
+            if self.confirming_unanswered && code == KeyCode::Esc {
+                self.go_back();
+                return None;
             }
+            if !self.confirming_unanswered {
+                if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Left | KeyCode::Right)
+                {
+                    self.navigate(code == KeyCode::Right);
+                    return None;
+                }
+                if code == KeyCode::Enter
+                    && modifiers.is_empty()
+                    && matches!(
+                        self.form.borrow().focused(),
+                        Some(ElicitationControl::Field(_))
+                    )
+                {
+                    return self.answer_and_next();
+                }
+            }
+        }
+        match code {
+            KeyCode::PageUp => {
+                let page = isize::try_from(self.message_page_step()).unwrap_or(isize::MAX);
+                self.scroll_message(-page);
+                return None;
+            }
+            KeyCode::PageDown => {
+                let page = isize::try_from(self.message_page_step()).unwrap_or(isize::MAX);
+                self.scroll_message(page);
+                return None;
+            }
+            _ => {}
         }
         self.error = None;
         // Inline custom answers retain their parent question's focus. Text
         // editing and option navigation are distinct operations on that page.
-        if key.kind != crossterm::event::KeyEventKind::Release
-            && self.editable_field().is_some_and(|(_, custom)| custom)
+        if self.editable_field().is_some_and(|(_, custom)| custom)
             && !matches!(
                 code,
                 KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter | KeyCode::Esc
@@ -345,15 +367,25 @@ impl ElicitationDialog {
         interaction: Interaction<ElicitationControl>,
     ) -> Option<ElicitationResponse> {
         match interaction {
-            Interaction::Activate(ElicitationControl::Submit) => self.accept(),
+            Interaction::Activate(ElicitationControl::Submit) => self.answer_and_next(),
+            Interaction::Activate(ElicitationControl::Previous) => {
+                self.navigate(false);
+                None
+            }
+            Interaction::Activate(ElicitationControl::Next) => {
+                self.navigate(true);
+                None
+            }
+            Interaction::Activate(ElicitationControl::GoBack) => {
+                self.go_back();
+                None
+            }
+            Interaction::Activate(ElicitationControl::SubmitAnyway) => self.accept(),
             Interaction::Activate(ElicitationControl::Skip) => Some(ElicitationResponse::Decline),
             Interaction::Activate(ElicitationControl::Cancel) | Interaction::Cancel => {
                 Some(ElicitationResponse::Cancel)
             }
-            Interaction::Activate(ElicitationControl::Field(_)) => {
-                self.advance_focus();
-                None
-            }
+            Interaction::Activate(ElicitationControl::Field(_)) => self.answer_and_next(),
             Interaction::Toggle(ElicitationControl::Field(index)) => {
                 self.focus_control(index);
                 self.toggle_current();
@@ -404,11 +436,10 @@ impl ElicitationDialog {
         if result.consumed {
             return None;
         }
-        if !self.is_plan_review()
-            || !self
-                .message_area
-                .get()
-                .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
+        if !self
+            .message_area
+            .get()
+            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
         {
             return None;
         }
@@ -446,7 +477,7 @@ impl ElicitationDialog {
             Some(ElicitationControl::Submit) => self.display_fields.len(),
             Some(ElicitationControl::Skip) => self.display_fields.len() + 1,
             Some(ElicitationControl::Cancel) => self.display_fields.len() + 2,
-            None => 0,
+            _ => self.current_question,
         }
     }
 
@@ -458,12 +489,133 @@ impl ElicitationDialog {
             std::cmp::Ordering::Greater if index == field_count + 1 => ElicitationControl::Skip,
             _ => ElicitationControl::Cancel,
         };
+        if index < field_count && index != self.current_question {
+            self.current_question = index;
+            self.reset_page();
+        }
         self.form.borrow_mut().focus(control);
     }
 
-    fn advance_focus(&mut self) {
-        let event = crossterm::event::Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        self.form.borrow_mut().handle(&event);
+    fn actions(&self) -> Vec<(ElicitationControl, &'static str, bool)> {
+        if self.confirming_unanswered {
+            return vec![
+                (ElicitationControl::GoBack, "Go back", true),
+                (ElicitationControl::SubmitAnyway, "Submit anyway", true),
+            ];
+        }
+        let mut actions = vec![(
+            ElicitationControl::Submit,
+            if self.current_question + 1 < self.display_fields.len() {
+                "Answer and next"
+            } else {
+                "Submit all"
+            },
+            true,
+        )];
+        if self.display_fields.len() > 1 {
+            actions.push((
+                ElicitationControl::Previous,
+                "Previous",
+                self.current_question > 0,
+            ));
+            actions.push((
+                ElicitationControl::Next,
+                "Next",
+                self.current_question + 1 < self.display_fields.len(),
+            ));
+        }
+        actions.extend([
+            (ElicitationControl::Skip, "Skip", true),
+            (ElicitationControl::Cancel, "Cancel", true),
+        ]);
+        actions
+    }
+
+    fn reset_controls(&mut self) {
+        let mut form = Form::new();
+        let first = if self.confirming_unanswered {
+            ElicitationControl::GoBack
+        } else if let Some(display) = self.display_fields.get(self.current_question).copied() {
+            let id = ElicitationControl::Field(self.current_question);
+            form.declare(
+                id,
+                display_control_kind(&self.request, &self.values, &self.option_cursors, display),
+            );
+            id
+        } else {
+            ElicitationControl::Submit
+        };
+        for (id, _, enabled) in self.actions() {
+            form.declare_with_enabled(id, ControlKind::Button, enabled);
+        }
+        form.end_frame(first);
+        self.form = RefCell::new(form);
+    }
+
+    fn reset_page(&mut self) {
+        self.message_scroll.set(0);
+        self.message_anchor.set(None);
+        self.message_anchor_width.set(0);
+        self.focus_scroll.set(0);
+        self.reset_controls();
+    }
+
+    fn navigate(&mut self, forward: bool) {
+        let next = if forward {
+            (self.current_question + 1).min(self.display_fields.len().saturating_sub(1))
+        } else {
+            self.current_question.saturating_sub(1)
+        };
+        if next != self.current_question {
+            self.current_question = next;
+            self.error = None;
+            self.reset_page();
+        }
+    }
+
+    fn unanswered(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.display_fields.len()).filter(|index| !self.confirmed.contains(index))
+    }
+
+    fn go_back(&mut self) {
+        let first = self.unanswered().next();
+        self.confirming_unanswered = false;
+        self.current_question = first.unwrap_or(self.current_question);
+        self.reset_page();
+    }
+
+    fn prompt_text(&self) -> String {
+        if self.confirming_unanswered {
+            let mut text = format!(
+                "Submit with {} unanswered questions?\n\n",
+                self.unanswered().count()
+            );
+            for index in self.unanswered() {
+                text.push_str(&format!(
+                    "{}. {}\n",
+                    index + 1,
+                    self.request.fields[self.display_fields[index].field].title
+                ));
+            }
+            return text;
+        }
+        if !self.is_plan_review()
+            && let Some(display) = self.display_fields.get(self.current_question)
+        {
+            let field = &self.request.fields[display.field];
+            let mut text = field.title.clone();
+            if field.required {
+                text.push_str(" (required)");
+            }
+            if let Some(description) = &field.description {
+                text.push('\n');
+                text.push_str(description);
+            }
+            text.push_str("\n\n");
+            text.push_str(&self.request.message);
+            return text;
+        }
+        self.request.message.clone()
     }
 
     fn select_option(&mut self, selected: usize) {
@@ -479,7 +631,11 @@ impl ElicitationDialog {
         }
         self.option_cursors[display.field] = selected;
         if let FieldValue::Single(value) = &mut self.values[display.field] {
-            *value = (selected < option_count).then_some(selected);
+            let next = (selected < option_count).then_some(selected);
+            if *value != next {
+                self.confirmed.remove(&self.current_question);
+            }
+            *value = next;
             if let Some(custom) = display.custom {
                 if display.custom_option == Some(selected) || selected == option_count {
                     self.active_custom_fields.insert(custom);
@@ -512,7 +668,7 @@ impl ElicitationDialog {
         }
         let mut selected = Vec::new();
         let mut base = 0usize;
-        for line in self.request.message.split('\n') {
+        for line in self.prompt_text().split('\n') {
             let rows = wrapped_row_count(line, width);
             let last_row = base.saturating_add(rows.saturating_sub(1));
             if rows == 0 || base > range.end.row || last_row < range.start.row {
@@ -558,7 +714,7 @@ impl ElicitationDialog {
         // replacing it with whichever wrapped row happens to be at the top.
         if self.message_anchor_width.get() > 0 {
             self.message_anchor.set(Some(message_position_at_row(
-                &self.request.message,
+                &self.prompt_text(),
                 self.message_anchor_width.get(),
                 next,
             )));
@@ -573,6 +729,7 @@ impl ElicitationDialog {
         let Some(display) = self.display_fields.get(self.focus_index()).copied() else {
             return;
         };
+        self.confirmed.remove(&self.current_question);
         let value = &mut self.values[display.field];
         match value {
             FieldValue::Single(selected) => {
@@ -599,54 +756,114 @@ impl ElicitationDialog {
         let Some((field, custom)) = self.editable_field() else {
             return;
         };
-        if custom {
-            self.active_custom_fields.insert(field);
-        }
+        let activated = custom && self.active_custom_fields.insert(field);
         let Some(FieldValue::Text(value)) = self.values.get_mut(field) else {
             unreachable!("editable fields contain text values")
         };
+        let before = value.to_string();
         value.handle_key(key);
+        if activated || value.value() != before {
+            self.confirmed.remove(&self.current_question);
+        }
+    }
+
+    fn question_content(
+        &self,
+        display_index: usize,
+    ) -> Result<BTreeMap<String, ElicitationValue>, String> {
+        let display = self.display_fields[display_index];
+        let active_custom = display
+            .custom
+            .filter(|custom| self.active_custom_fields.contains(custom));
+        let indices = match (active_custom, display.custom_option) {
+            (Some(custom), Some(_)) => vec![display.field, custom],
+            (Some(custom), None) => vec![custom],
+            (None, _) => vec![display.field],
+        };
+        let mut content = BTreeMap::new();
+        for index in indices {
+            let field = &self.request.fields[index];
+            if let Some(value) = validated_value(field, &self.values[index])? {
+                content.insert(field.id.clone(), value);
+            }
+        }
+        if self.request.fields[display.field].required && content.is_empty() {
+            return Err(format!(
+                "{} is required",
+                self.request.fields[display.field].title
+            ));
+        }
+        Ok(content)
+    }
+
+    fn answer_and_next(&mut self) -> Option<ElicitationResponse> {
+        if !self.display_fields.is_empty() {
+            match self.question_content(self.current_question) {
+                Ok(content) => {
+                    if content.is_empty() {
+                        self.confirmed.remove(&self.current_question);
+                    } else {
+                        self.confirmed.insert(self.current_question);
+                    }
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    self.focus_control(self.current_question);
+                    return None;
+                }
+            }
+        }
+        if self.current_question + 1 < self.display_fields.len() {
+            self.navigate(true);
+            return None;
+        }
+        let missing = self
+            .unanswered()
+            .find(|index| self.request.fields[self.display_fields[*index].field].required);
+        if let Some(index) = missing {
+            self.focus_control(index);
+            self.error = Some(format!(
+                "{} is required",
+                self.request.fields[self.display_fields[index].field].title
+            ));
+            return None;
+        }
+        if self.unanswered().next().is_some() {
+            self.confirming_unanswered = true;
+            self.reset_page();
+            return None;
+        }
+        self.accept()
     }
 
     fn accept(&mut self) -> Option<ElicitationResponse> {
         let mut content = BTreeMap::new();
-        for (display_index, display) in self.display_fields.iter().copied().enumerate() {
-            let active_custom = display
-                .custom
-                .filter(|custom| self.active_custom_fields.contains(custom));
-            let field_indices = match (active_custom, display.custom_option) {
-                (Some(custom), Some(_)) => vec![display.field, custom],
-                (Some(custom), None) => vec![custom],
-                (None, _) => vec![display.field],
-            };
-            for field_index in field_indices {
-                let field = &self.request.fields[field_index];
-                let value = &self.values[field_index];
-                match validated_value(field, value) {
-                    Ok(Some(value)) => {
-                        content.insert(field.id.clone(), value);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        self.error = Some(error);
-                        self.focus_control(display_index);
-                        if field_index != display.field
-                            && let Some(option_count) =
-                                select_option_count(&self.request.fields[display.field])
-                        {
-                            self.option_cursors[display.field] =
-                                display.custom_option.unwrap_or(option_count);
-                        }
-                        return None;
-                    }
+        for index in self.confirmed.iter().copied() {
+            match self.question_content(index) {
+                Ok(answer) => content.extend(answer),
+                Err(error) => {
+                    self.error = Some(error);
+                    return None;
                 }
             }
+        }
+        if let Err(error) = self
+            .request
+            .validate_response(&ElicitationResponse::Accept {
+                content: content.clone(),
+            })
+        {
+            self.error = Some(error);
+            return None;
         }
         Some(ElicitationResponse::Accept { content })
     }
 
     fn editable_field(&self) -> Option<(usize, bool)> {
-        let display = self.display_fields.get(self.focus_index())?;
+        let Some(ElicitationControl::Field(index)) = self.form.borrow().focused() else {
+            return None;
+        };
+        let display = self.display_fields.get(index)?;
         if matches!(self.values[display.field], FieldValue::Text(_)) {
             return Some((display.field, false));
         }
@@ -857,7 +1074,7 @@ fn validated_value(
     let missing = || Err(format!("{} is required", field.title));
     let answered = match (&field.kind, value) {
         (ElicitationFieldKind::Text { .. }, FieldValue::Text(value)) => {
-            if value.is_empty() {
+            if value.value().trim().is_empty() {
                 return if field.required { missing() } else { Ok(None) };
             }
             ElicitationValue::String(value.to_string())
@@ -890,7 +1107,7 @@ fn validated_value(
             ElicitationValue::Boolean(*value)
         }
         (ElicitationFieldKind::Integer { .. }, FieldValue::Text(value)) => {
-            if value.is_empty() {
+            if value.value().trim().is_empty() {
                 return if field.required { missing() } else { Ok(None) };
             }
             ElicitationValue::Integer(
@@ -900,7 +1117,7 @@ fn validated_value(
             )
         }
         (ElicitationFieldKind::Number { .. }, FieldValue::Text(value)) => {
-            if value.is_empty() {
+            if value.value().trim().is_empty() {
                 return if field.required { missing() } else { Ok(None) };
             }
             ElicitationValue::Number(
@@ -940,16 +1157,31 @@ fn render_elicitation_at(
     // navigator and every neighboring pane remain untouched.
     frame.render_widget(Clear, area);
     dialog.rendered_area.set(Some(area));
-    let title = dialog.request.title.as_deref().unwrap_or("Agent question");
+    let title = if dialog.confirming_unanswered {
+        "Unanswered questions".to_owned()
+    } else if dialog.display_fields.is_empty() {
+        dialog
+            .request
+            .title
+            .clone()
+            .unwrap_or_else(|| "Agent question".into())
+    } else {
+        format!(
+            "Question {}/{} · {} unanswered",
+            dialog.current_question + 1,
+            dialog.display_fields.len(),
+            dialog.unanswered().count()
+        )
+    };
     let focus = focus_content(dialog);
-    let focused_field = dialog.focus_index();
+    let focused_field = dialog.current_question;
     let inner = {
         let mut form = dialog.form.borrow_mut();
         form.begin_frame();
         let title_line = crate::modal::dismissible_modal_title(
             &mut form,
             area,
-            title,
+            &title,
             theme::title(focused),
             true,
         );
@@ -989,8 +1221,9 @@ fn render_elicitation_body(
     focused_field: usize,
 ) {
     let natural_focus_height = focus.wrapped_height(inner.width);
+    let prompt = dialog.prompt_text();
     let natural_message_height = u16::try_from(
-        Paragraph::new(dialog.request.message.as_str())
+        Paragraph::new(prompt.as_str())
             .wrap(Wrap { trim: true })
             .line_count(inner.width),
     )
@@ -1005,20 +1238,22 @@ fn render_elicitation_body(
     let button_rows = if inner.height <= 4 { 1 } else { 2 };
     let buttons_height = inner.height.saturating_sub(footer_height).min(button_rows);
     let body_height = inner.height.saturating_sub(footer_height + buttons_height);
-    let (message_height, focus_height) = if dialog.is_plan_review() {
+    let (message_height, focus_height) = if dialog.confirming_unanswered {
+        (body_height, 0)
+    } else if dialog.is_plan_review() {
         let focus_height = natural_focus_height
             .min(body_height.saturating_sub(1).max(1))
             .min(body_height);
         (body_height.saturating_sub(focus_height), focus_height)
     } else {
-        // The pane height budget already counts the message rows and the field
-        // rows, so the message takes only the rows it uses, up to its usual
-        // three. What is left goes to the field, which needs its pinned title
-        // as well as the control the title names: a bare checkbox or option
-        // does not say what is being answered.
+        let minimum_answer = natural_focus_height.min(2);
         let message_height = natural_message_height
-            .min(3)
-            .min(body_height.saturating_sub(natural_focus_height.min(2)));
+            .min(
+                body_height
+                    .saturating_sub(minimum_answer)
+                    .max(body_height / 2),
+            )
+            .min(body_height.saturating_sub(1));
         (message_height, body_height.saturating_sub(message_height))
     };
     let constraints = [
@@ -1031,15 +1266,15 @@ fn render_elicitation_body(
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(inner);
-    let message = Paragraph::new(dialog.request.message.as_str()).wrap(Wrap { trim: true });
+    let message = Paragraph::new(prompt.as_str()).wrap(Wrap { trim: true });
     let total_lines = u16::try_from(message.line_count(chunks[0].width)).unwrap_or(u16::MAX);
     let maximum_scroll = total_lines.saturating_sub(chunks[0].height);
     let anchored_scroll = (dialog.message_anchor_width.get() != chunks[0].width)
         .then(|| dialog.message_anchor.get())
         .flatten()
         .map(|(line, row)| {
-            let source = dialog.request.message.split('\n').nth(line).unwrap_or("");
-            wrapped_prefix_rows(&dialog.request.message, chunks[0].width, line).saturating_add(
+            let source = prompt.split('\n').nth(line).unwrap_or("");
+            wrapped_prefix_rows(&prompt, chunks[0].width, line).saturating_add(
                 u16::try_from(wrapped_row_for_grapheme_offset(
                     source,
                     usize::from(chunks[0].width),
@@ -1054,7 +1289,7 @@ fn render_elicitation_body(
     dialog.message_scroll.set(message_scroll);
     if dialog.message_anchor.get().is_none() {
         dialog.message_anchor.set(Some(message_position_at_row(
-            &dialog.request.message,
+            &prompt,
             chunks[0].width,
             usize::from(message_scroll),
         )));
@@ -1096,43 +1331,23 @@ fn render_elicitation_body(
     let field_index = focused_field.min(dialog.display_fields.len().saturating_sub(1));
     {
         let mut form = dialog.form.borrow_mut();
-        for (index, display) in dialog.display_fields.iter().copied().enumerate() {
-            let field_area = if index == focused_field {
-                focus_area
-            } else {
-                Rect::default()
-            };
+        if !dialog.confirming_unanswered
+            && let Some(display) = dialog.display_fields.get(focused_field).copied()
+        {
             form.register(
-                ElicitationControl::Field(index),
+                ElicitationControl::Field(focused_field),
                 display_control_kind(
                     &dialog.request,
                     &dialog.values,
                     &dialog.option_cursors,
                     display,
                 ),
-                field_area,
+                focus_area,
                 true,
             );
         }
-        form.register(
-            ElicitationControl::Submit,
-            ControlKind::Button,
-            chunks[2],
-            true,
-        );
-        form.register(
-            ElicitationControl::Skip,
-            ControlKind::Button,
-            chunks[2],
-            true,
-        );
-        form.register(
-            ElicitationControl::Cancel,
-            ControlKind::Button,
-            chunks[2],
-            true,
-        );
     }
+
     let focus_rows = u16::try_from(
         Paragraph::new(focus.lines.clone())
             .wrap(Wrap { trim: false })
@@ -1169,7 +1384,9 @@ fn render_elicitation_body(
             .min(focus_max_scroll);
     }
     dialog.focus_scroll.set(focus_scroll);
-    if let Some(display) = dialog.display_fields.get(focused_field).copied() {
+    if !dialog.confirming_unanswered
+        && let Some(display) = dialog.display_fields.get(focused_field).copied()
+    {
         let id = ElicitationControl::Field(field_index);
         let mut form = dialog.form.borrow_mut();
         if select_option_count(&dialog.request.fields[display.field]).is_some() {
@@ -1184,7 +1401,13 @@ fn render_elicitation_body(
                 id,
             );
         } else {
-            render_focus(frame, focus_area, &focus, focus_scroll, focused);
+            render_focus(
+                frame,
+                focus_area,
+                &focus,
+                focus_scroll,
+                focused && form.is_focused(id),
+            );
         }
         if let Some((line, _)) = focus.text_cursor {
             let prefix = Paragraph::new(focus.lines[..usize::from(line)].to_vec())
@@ -1225,32 +1448,32 @@ fn render_elicitation_body(
         } else if let FieldValue::Boolean(_) = dialog.values[display.field] {
             // The title and description label this boolean too: clicking
             // any of them toggles the same control as clicking its mark.
-            form.register(id, ControlKind::Checkbox, chunks[1], true);
+            let area = if dialog.is_plan_review() {
+                chunks[1]
+            } else {
+                chunks[0].union(chunks[1])
+            };
+            form.register(id, ControlKind::Checkbox, area, true);
         }
     } else {
         render_focus(frame, focus_area, &focus, focus_scroll, focused);
     }
     {
         let mut form = dialog.form.borrow_mut();
-        ButtonRow::render(
-            frame,
-            chunks[2],
-            &[
-                (ElicitationControl::Submit, "Submit", true),
-                (ElicitationControl::Skip, "Skip", true),
-                (ElicitationControl::Cancel, "Cancel", true),
-            ],
-            &mut form,
-        );
-        form.end_frame(ElicitationControl::Field(0));
+        ButtonRow::render(frame, chunks[2], &dialog.actions(), &mut form);
+        form.end_frame(if dialog.confirming_unanswered {
+            ElicitationControl::GoBack
+        } else {
+            ElicitationControl::Field(dialog.current_question)
+        });
     }
-    let scroll_help = if dialog.is_plan_review() && maximum_scroll > 0 {
+    let scroll_help = if maximum_scroll > 0 {
         let start = message_scroll.saturating_add(1);
         let end = message_scroll
             .saturating_add(chunks[0].height)
             .min(total_lines);
         Some(format!(
-            "Plan {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Tab fields/buttons · ↑/↓ choose · Enter continue"
+            "Text {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions"
         ))
     } else {
         None
@@ -1259,8 +1482,10 @@ fn render_elicitation_body(
         error.to_owned()
     } else if let Some(scroll_help) = scroll_help {
         scroll_help
+    } else if dialog.confirming_unanswered {
+        "Enter confirm · Esc go back".to_owned()
     } else {
-        "Tab fields/buttons · ↑/↓ choose · Space toggle · Enter continue · Esc cancel".to_owned()
+        "Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions".to_owned()
     };
     frame.render_widget(
         Paragraph::new(if focused {
@@ -1326,8 +1551,13 @@ impl FocusContent<'_> {
 }
 
 fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
-    let focus = dialog.focus_index();
-    let Some(display) = dialog.display_fields.get(focus).copied() else {
+    let focus = dialog.current_question;
+    let Some(display) = dialog
+        .display_fields
+        .get(focus)
+        .copied()
+        .filter(|_| !dialog.confirming_unanswered)
+    else {
         let label = match focus.saturating_sub(dialog.display_fields.len()) {
             0 => "Submit these answers",
             1 => "Skip this question and let the agent continue",
@@ -1355,7 +1585,9 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
         ),
     ]);
     let mut lines = Vec::new();
-    if let Some(description) = &field.description {
+    if dialog.is_plan_review()
+        && let Some(description) = &field.description
+    {
         lines.push(Line::styled(
             description.as_str(),
             Style::default().fg(theme::palette().text),
@@ -1492,7 +1724,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     }
     let focused_row = focused_row.or_else(|| text_cursor.map(|(line, _)| usize::from(line)));
     FocusContent {
-        title: Some(title),
+        title: dialog.is_plan_review().then_some(title),
         lines,
         text_cursor,
         focused_row,

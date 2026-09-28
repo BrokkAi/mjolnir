@@ -2728,6 +2728,7 @@ replaceChildren(...kids) {
   this.children = kids;
 },
 addEventListener() {},
+setAttribute(name, value) { this[name] = value; },
 querySelectorAll(selector) {
   const found = [];
   const visit = node => {

@@ -198,7 +198,7 @@ fn smallest_question_pane_keeps_other_and_its_draft_visible() {
     );
     assert!(text.contains("Submit"), "submit is hidden: {text}");
     assert!(
-        text.contains("Tab fields/buttons"),
+        text.contains("PgUp/PgDn"),
         "the footer hints are hidden: {text}"
     );
 }
@@ -600,7 +600,6 @@ fn revise_edits_feedback_inline_and_submits_it_with_the_action() {
     assert!(revise.contains("1/1"));
 
     dialog.paste("add a regression test");
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -624,8 +623,6 @@ fn leaving_revise_keeps_its_draft_out_of_the_answer() {
     dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
     dialog.paste("stale revision");
     dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -660,8 +657,6 @@ fn selecting_an_option_returns_its_wire_value() {
         true,
     ));
     dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -700,7 +695,6 @@ fn first_single_select_option_is_the_visible_and_submitted_default() {
     assert!(initial.contains("● Thin callers"));
     assert!(initial.contains("○ Dynamic matrix"));
 
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -722,7 +716,7 @@ fn paired_custom_answers_share_their_question_page() {
     assert!(first.contains("○ Other"));
     assert!(!first.contains("1/6"));
 
-    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
     let second = rendered(&dialog);
     assert!(second.contains("2/3"));
     assert!(second.contains("Question 2"));
@@ -736,8 +730,6 @@ fn custom_answer_uses_the_adapter_field_instead_of_the_stale_selection() {
     for character in "custom answer".chars() {
         dialog.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
     }
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -755,8 +747,6 @@ fn choosing_an_option_after_typing_other_omits_the_custom_draft() {
     dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
     dialog.paste("custom draft");
     dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -775,8 +765,6 @@ fn toggling_a_multi_select_option_deactivates_other() {
     dialog.paste("custom draft");
     dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
     dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
-    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-
     assert_eq!(
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Some(ElicitationResponse::Accept {
@@ -795,7 +783,7 @@ fn dangling_custom_metadata_remains_a_standalone_page() {
     let mut dialog = ElicitationDialog::new(request);
 
     assert_eq!(dialog.display_fields.len(), 2);
-    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
     assert!(rendered(&dialog).contains("2/2"));
     assert!(rendered(&dialog).contains("Other"));
 }
@@ -886,7 +874,7 @@ fn component_form() -> ElicitationRequest {
 #[test]
 fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
     let mut dialog = ElicitationDialog::new(component_form());
-    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
     assert_eq!(dialog.focus_index(), 1);
 
     let width = 78;
@@ -900,7 +888,7 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
             text.contains("☐ No"),
             "boolean control missing at height {height}:\n{text}"
         );
-        assert!(text.contains("Submit"), "actions missing:\n{text}");
+        assert!(text.contains("Answer and next"), "actions missing:\n{text}");
     }
 }
 
@@ -920,7 +908,7 @@ fn compact_question_keeps_validation_errors_and_the_labeled_control_visible() {
     assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
     let text = buffer_text(&rendered_in_pane(&dialog, 78, 5));
     assert!(
-        text.contains("1/1  Architecture"),
+        text.contains("Architecture") && text.contains("1/1"),
         "field title missing:\n{text}"
     );
     assert!(
@@ -1013,5 +1001,257 @@ fn dismiss_glyph_returns_the_same_cancel_response_as_escape() {
     assert_eq!(
         escaped.handle_key(KeyCode::Esc, KeyModifiers::NONE),
         Some(ElicitationResponse::Cancel)
+    );
+}
+
+#[test]
+fn answering_advances_one_question_and_only_sends_confirmed_answers() {
+    let mut dialog = ElicitationDialog::new(paired_request(3, false));
+    assert_eq!(dialog.unanswered().count(), 3);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert_eq!(dialog.current_question, 1);
+    assert_eq!(dialog.unanswered().count(), 2);
+    dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert_eq!(dialog.current_question, 2);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([
+                (
+                    "question_0".into(),
+                    ElicitationValue::String("alpha".into())
+                ),
+                ("question_1".into(), ElicitationValue::String("beta".into())),
+                (
+                    "question_2".into(),
+                    ElicitationValue::String("alpha".into())
+                ),
+            ])
+        })
+    );
+}
+
+#[test]
+fn navigating_past_defaults_requires_a_separate_deliberate_partial_submission() {
+    let mut dialog = ElicitationDialog::new(paired_request(3, false));
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    let warning = rendered(&dialog);
+    assert!(warning.contains("2 unanswered"));
+    assert!(warning.contains("Question 1"));
+    assert!(warning.contains("Question 2"));
+    // Enter on the default warning action goes back, never submits.
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert_eq!(dialog.current_question, 0);
+    assert!(!dialog.confirming_unanswered);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([(
+                "question_2".into(),
+                ElicitationValue::String("alpha".into())
+            )])
+        })
+    );
+}
+
+#[test]
+fn escape_from_the_warning_returns_to_the_first_unanswered_question() {
+    let mut dialog = ElicitationDialog::new(paired_request(2, false));
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE), None);
+    assert_eq!(dialog.current_question, 0);
+    assert!(!dialog.confirming_unanswered);
+}
+
+#[test]
+fn editing_a_confirmed_answer_requires_confirmation_again() {
+    let mut dialog = ElicitationDialog::new(paired_request(2, false));
+    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Left, KeyModifiers::ALT);
+    assert_eq!(dialog.unanswered().count(), 1);
+    dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(dialog.unanswered().count(), 2);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert!(dialog.confirming_unanswered);
+}
+
+#[test]
+fn required_unconfirmed_defaults_return_to_the_required_question() {
+    let mut request = paired_request(2, false);
+    request.fields[0].required = true;
+    let mut dialog = ElicitationDialog::new(request);
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert_eq!(dialog.current_question, 0);
+    assert_eq!(dialog.error.as_deref(), Some("Question 1 is required"));
+    assert!(!dialog.confirming_unanswered);
+}
+
+#[test]
+fn false_is_an_answer_but_optional_whitespace_is_not() {
+    let mut dialog = ElicitationDialog::new(request(
+        ElicitationFieldKind::Boolean { default: None },
+        true,
+    ));
+    assert!(rendered(&dialog).contains("Space toggle"));
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([("question_0".into(), ElicitationValue::Boolean(false))])
+        })
+    );
+    let mut request = paired_request(1, false);
+    request.fields = vec![request.fields[1].clone()];
+    let mut dialog = ElicitationDialog::new(request);
+    dialog.paste("   ");
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert!(dialog.confirming_unanswered);
+}
+
+#[test]
+fn empty_forms_still_submit_and_button_focus_keeps_the_question_visible() {
+    let mut empty = paired_request(0, false);
+    empty.message = "Continue?".into();
+    let mut dialog = ElicitationDialog::new(empty);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::new()
+        })
+    );
+    let mut dialog = ElicitationDialog::new(paired_request(2, false));
+    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    let screen = rendered(&dialog);
+    assert!(screen.contains("Question 1"));
+    assert!(screen.contains("Alpha"));
+    assert_eq!(dialog.current_question, 0);
+}
+
+#[test]
+fn upgrade_drafts_preserve_confirmation_and_old_drafts_start_unconfirmed() {
+    let request = paired_request(3, false);
+    let mut dialog = ElicitationDialog::new(request.clone());
+    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
+    dialog.paste("custom text");
+    dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let encoded = serde_json::to_value(dialog.draft()).unwrap();
+    let restored = ElicitationDialog::from_draft(
+        request.clone(),
+        serde_json::from_value(encoded.clone()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored.current_question, 1);
+    assert_eq!(restored.confirmed, BTreeSet::from([0]));
+    let mut old = encoded;
+    old.as_object_mut().unwrap().remove("confirmed");
+    old.as_object_mut().unwrap().remove("current_question");
+    let mut restored =
+        ElicitationDialog::from_draft(request, serde_json::from_value(old).unwrap()).unwrap();
+    assert_eq!(restored.unanswered().count(), 3);
+    restored.handle_key(KeyCode::Left, KeyModifiers::ALT);
+    assert!(rendered(&restored).contains("custom text"));
+}
+
+fn click_question_button(
+    dialog: &mut ElicitationDialog,
+    label: &str,
+) -> Option<ElicitationResponse> {
+    let buffer = rendered_in_pane(dialog, 110, 22);
+    let (column, row) = (0..buffer.area.height)
+        .find_map(|row| {
+            let line = buffer_row(&buffer, row, 0, buffer.area.width);
+            line.find(label)
+                .map(|byte| (line[..byte].chars().count() as u16, row))
+        })
+        .expect("button rendered");
+    let mut response = None;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        response = dialog.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    response
+}
+
+#[test]
+fn mouse_navigation_and_submission_share_the_keyboard_confirmation_rules() {
+    let mut dialog = ElicitationDialog::new(paired_request(2, false));
+    assert_eq!(click_question_button(&mut dialog, "Next"), None);
+    assert_eq!(click_question_button(&mut dialog, "Submit all"), None);
+    assert!(dialog.confirming_unanswered);
+    assert_eq!(
+        click_question_button(&mut dialog, "Submit anyway"),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([(
+                "question_1".into(),
+                ElicitationValue::String("alpha".into())
+            )])
+        })
+    );
+}
+
+#[test]
+fn multiline_question_text_wraps_scrolls_and_survives_resize() {
+    let mut request = paired_request(1, false);
+    request.fields[0].title = format!(
+        "How should we handle JPEG support given that our existing linearization differs?\n{}\nFinal authored line",
+        (0..100)
+            .map(|index| format!("detail{index:03}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut dialog = ElicitationDialog::new(request);
+    let first = buffer_text(&rendered_in_pane(&dialog, 48, 16));
+    assert!(first.contains("How should we handle JPEG"));
+    assert!(first.contains("existing linearization"));
+    assert!(first.contains("Submit all"));
+    dialog.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+    let before = rendered_in_pane(&dialog, 48, 16);
+    let area = dialog.message_area().unwrap();
+    let top = buffer_row(&before, area.y, area.x, area.right());
+    let anchor = top.split_whitespace().next().unwrap();
+    let after = rendered_in_pane(&dialog, 64, 16);
+    let area = dialog.message_area().unwrap();
+    assert!(buffer_row(&after, area.y, area.x, area.right()).contains(anchor));
+    dialog.scroll_message(isize::MAX);
+    let last = buffer_text(&rendered_in_pane(&dialog, 48, 16));
+    assert!(last.contains("Final authored line"), "{last}");
+    assert!(last.contains("Submit all"));
+}
+
+#[test]
+fn warning_buttons_do_not_edit_the_custom_answer_behind_them() {
+    let mut dialog = ElicitationDialog::new(paired_request(2, false));
+    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
+    dialog.paste("custom answer");
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    assert!(dialog.confirming_unanswered);
+    dialog.paste("accidental paste");
+    dialog.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
+    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(
+        dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([(
+                "question_1__other".into(),
+                ElicitationValue::String("custom answer".into())
+            )])
+        })
     );
 }
