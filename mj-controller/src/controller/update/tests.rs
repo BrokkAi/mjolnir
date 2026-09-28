@@ -114,7 +114,7 @@ fn managed_install_methods_provide_their_own_update_commands() {
     );
     assert_eq!(
         InstallMethod::Homebrew.update_command().as_deref(),
-        Some("brew upgrade mjolnir")
+        Some("brew upgrade --formula brokkai/tap/mjolnir")
     );
     assert_eq!(
         InstallMethod::Cargo { voice_worker: true }
@@ -332,7 +332,7 @@ fn managed_update_notice_names_channel_version_and_command() {
         )
         .as_deref(),
         Some(
-            "mj 2.5.0 is available through Homebrew; current version is 2.4.0. Run: brew upgrade mjolnir"
+            "mj 2.5.0 is available through Homebrew; current version is 2.4.0. Run: brew upgrade --formula brokkai/tap/mjolnir"
         )
     );
     assert_eq!(
@@ -371,7 +371,7 @@ fn delegated_upgrades_run_the_package_managers_own_commands() {
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(brew_args, ["upgrade", "mjolnir"]);
+    assert_eq!(brew_args, ["upgrade", "--formula", "brokkai/tap/mjolnir"]);
 }
 
 #[test]

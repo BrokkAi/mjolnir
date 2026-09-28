@@ -43,13 +43,23 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 
 Re-run the installer to update or repair an installation. Its checksum cache avoids downloading an unchanged archive again.
 
+## Homebrew
+
+```sh
+brew tap brokkai/tap
+brew trust brokkai/tap
+brew install --formula brokkai/tap/mjolnir
+```
+
+Name the formula in full. A bare `brew install mjolnir` installs an unrelated, deprecated Homebrew cask of the same name instead of `mj`. Recent Homebrew versions refuse to load formulae from a tap until you trust it; that is what `brew trust` does. The formula installs the same release bundle into Homebrew's `libexec` and puts only `mj` on `PATH`.
+
 ## Keeping Mjolnir current
 
 On every interactive startup, before starting the daemon, `mj` asks the channel it was installed from whether a newer release exists. If one does, mj says what it found and asks `Upgrade now? [Y/n]` before changing anything. Answering `y` runs the upgrade for your install method and restarts mj into the new version:
 
 - Release installer installs: mj downloads the release archive, verifies its SHA-256 sidecar, updates the CLI and all bundled helper binaries, and restarts mj.
 - npm installs: mj runs `npm install -g @brokkai/mjolnir@latest` so npm keeps ownership of `node_modules`. `npx` runs are ephemeral, so mj only prints the command.
-- Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade mjolnir`.
+- Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade --formula brokkai/tap/mjolnir` (the bare name `mjolnir` is an unrelated Homebrew cask).
 - Cargo installs: mj prints `cargo install --locked brokk-mjolnir` and leaves the rebuild to you.
 
 The check contacts the channel's own endpoint — GitHub Releases, the npm registry, or the Homebrew tap on GitHub — and it is skipped entirely for non-interactive commands, debug builds, or when `MJOLNIR_NO_UPDATE_CHECK` is set. Set that variable to disable automatic update checks altogether.
