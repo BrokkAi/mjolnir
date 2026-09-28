@@ -378,6 +378,7 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    upgrade_work: Arc<Mutex<Option<crate::upgrade::Work>>>,
     phase: LifecyclePhase,
     operation_id: String,
     create_control: Option<CreateSessionControl>,

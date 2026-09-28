@@ -198,10 +198,13 @@ fn bare_preflight_config() -> Config {
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: true,
             session_id: "session-1".into(),
             profile_id: Some("destination-profile".into()),

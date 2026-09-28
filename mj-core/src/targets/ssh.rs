@@ -592,7 +592,7 @@ pub fn posix_quote(value: &str) -> String {
 }
 
 pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
-    let expected_name = resource_name(session_id)?;
+    validate_session_id(session_id)?;
     match locator {
         TargetLocator::LocalBare { worker_root } => {
             let path = Path::new(worker_root);
@@ -635,15 +635,18 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
                         "refusing cleanup: a borrowed container cannot be owned by the borrowing session"
                     );
                 }
-                let owner_name = resource_name(owner)?;
-                if container_id != &owner_name && !is_runtime_container_id(container_id) {
+                if !resource_name_belongs_to(container_id, owner)?
+                    && !is_runtime_container_id(container_id)
+                {
                     bail!(
                         "refusing cleanup: borrowed container locator is neither the owning session's generated name nor an immutable runtime ID"
                     );
                 }
             }
             None => {
-                if container_id != &expected_name && !is_runtime_container_id(container_id) {
+                if !resource_name_belongs_to(container_id, session_id)?
+                    && !is_runtime_container_id(container_id)
+                {
                     bail!(
                         "refusing cleanup: container locator is neither the generated name nor an immutable runtime ID"
                     );

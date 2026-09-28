@@ -271,6 +271,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             state,
         };
         let selection = MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session_id.clone(),
             profile_id: Some("codex".into()),
@@ -279,6 +280,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            workspace_transfer: None,
+            handoff: None,
             in_place: false,
             source_checkpoint_only: false,
             operation_id: format!("move-recovery-terminal-{prefix}"),
@@ -344,6 +347,7 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
         },
     };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: "0123456789abcdef0123456789abcdef".into(),
         profile_id: Some("codex".into()),
@@ -398,6 +402,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown target",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -410,6 +415,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown profile",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("missing-profile".into()),
@@ -422,6 +428,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "invalid resource allocation",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -482,6 +489,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         .unwrap()
         .block_on(controller.prepare_move_session_controlled(
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
                 profile_id: Some("codex".into()),
@@ -629,6 +637,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
 
     let mut controller = Controller { config, state };
     let selection = MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: MOVE_QUEUE_SESSION_ID.into(),
         profile_id: Some("codex".into()),
@@ -641,6 +650,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
@@ -767,6 +778,9 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
     let state = State {
         sessions: [(session_id.into(), session.clone())].into_iter().collect(),
         ..State::default()
@@ -782,6 +796,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         state: state.clone(),
     };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
         profile_id: Some("codex".into()),
@@ -867,6 +882,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     source.additional_mounts = Vec::new();
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: source.id.clone(),
         profile_id: Some("codex".into()),
@@ -892,6 +908,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different target template",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 target_template_id: Some("ssh-bare".into()),
                 ..baseline.clone()
             },
@@ -902,6 +919,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different attached mounts",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 additional_mounts: another_mount,
                 ..baseline.clone()
             },
@@ -912,6 +930,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different resource allocation",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 resource_allocation: another_allocation,
                 ..baseline.clone()
             },
@@ -922,6 +941,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "clearing absent resources is a no-op",
             mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: true,
                 ..baseline.clone()
             },
@@ -966,12 +986,15 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
 }
 
 #[cfg(unix)]
-fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
+pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
+            workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session.id.clone(),
             profile_id: Some("destination".into()),
@@ -1138,6 +1161,19 @@ struct GitWithPodmanPreflightExecutor {
 }
 
 impl CommandExecutor for GitWithPodmanPreflightExecutor {
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        assert!(command.purpose.contains("Move workspace"));
+        let request = serde_json::from_reader(input)?;
+        Ok(CommandOutput {
+            status: 0,
+            stdout: serde_json::to_vec(&mj_worker::move_workspace::execute(request)?)?,
+            stderr: Vec::new(),
+        })
+    }
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         if command.program == "git" {
             return crate::controller::test_support::FixtureRemoteExecutor {
@@ -1145,7 +1181,9 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
             }
             .execute(command);
         }
-        assert_eq!(command.program, "podman", "unexpected {}", command.program);
+        if command.program != "podman" {
+            return ProcessExecutor.execute(command);
+        }
         let stdout: &[u8] = if command.args.iter().any(|argument| argument == "--version") {
             b"podman version 5.4.2\n"
         } else {
@@ -1180,6 +1218,9 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
     let state = State {
         sessions: [(session_id.into(), session)].into_iter().collect(),
         ..State::default()
@@ -1187,6 +1228,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
         profile_id: Some("codex".into()),
@@ -1318,15 +1360,32 @@ impl CommandExecutor for RecordingProcessExecutor {
         {
             anyhow::bail!("{} failed in this test", command.purpose);
         }
+        if command.purpose == "restore target checkpoint" {
+            let spec = command.args.last().expect("restore spec path");
+            mj_worker::checkpoint::restore_from_spec_file(Path::new(spec))?;
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
         ProcessExecutor.execute(command)
     }
 
     fn execute_with_stdin(
         &self,
         command: &CommandSpec,
-        input: &mut (dyn io::Read + Send),
+        mut input: &mut (dyn io::Read + Send),
     ) -> Result<CommandOutput> {
         self.record(command);
+        if command.purpose == "export target checkpoint" {
+            let checkpoint = mj_worker::checkpoint::export_from_spec_reader(&mut input)?;
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: serde_json::to_vec(&checkpoint)?,
+                stderr: Vec::new(),
+            });
+        }
         ProcessExecutor.execute_with_stdin(command, input)
     }
 
@@ -1408,6 +1467,20 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
     ] {
         fs::create_dir_all(path).unwrap();
     }
+    let git = crate::controller::test_support::test_git;
+    git(&checkout, &["init", "-b", "main"]);
+    git(&checkout, &["config", "user.email", "move@example.invalid"]);
+    git(&checkout, &["config", "user.name", "Move test"]);
+    git(&checkout, &["commit", "--allow-empty", "-m", "fixture"]);
+    git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+    );
     // `stage_profile` copies an allowlist per harness kind, so the file that
     // tells the two profiles apart has to be one of those names.
     for (home, owner) in [(&source_home, "source"), (&destination_home, "destination")] {
@@ -1526,6 +1599,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
 #[cfg(unix)]
 fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),
         profile_id: Some(destination_profile.into()),
@@ -1535,6 +1609,8 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
     };
     let source = &controller.state.sessions[LATCH_RELAY_SESSION];
     MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: true,
         source_checkpoint_only: false,
         operation_id: "move-in-place".into(),
@@ -2261,4 +2337,61 @@ fn move_queue_handoff_never_exposes_unowned_session() {
     reader.join().unwrap();
     drop(guard);
     assert!(!move_owns_session(session));
+}
+
+#[cfg(unix)]
+#[test]
+fn in_place_move_with_oversized_file_exports_only_session_handoff() {
+    let name = test_name("in_place_move_with_oversized_file_exports_only_session_handoff");
+    if std::env::var_os("MJ_MOVE_LARGE_IN_PLACE_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_LARGE_IN_PLACE_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    fs::File::create(fixture.checkout.join("large-build-output"))
+        .unwrap()
+        .set_len(9 * 1024 * 1024 * 1024)
+        .unwrap();
+    fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .checkpoint = None;
+    crate::database::save_session(&fixture.controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    crate::database::save_move_operation(&operation).unwrap();
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(
+        &mut fixture.controller,
+        &mut operation,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap();
+    assert!(fixture.checkout.join("large-build-output").exists());
+    let handoff = operation.handoff.as_ref().unwrap();
+    assert!(fs::metadata(&handoff.archive_path).unwrap().len() < 1024 * 1024);
+    let verified = mj_checkpoint::archive::verify_archive_streaming(&handoff.archive_path).unwrap();
+    assert!(
+        verified
+            .manifest
+            .payloads
+            .iter()
+            .filter(|payload| payload.path.starts_with("repositories/"))
+            .all(|payload| payload.size < 1024)
+    );
+    assert!(
+        fixture.controller.state.sessions[LATCH_RELAY_SESSION]
+            .checkpoint
+            .is_none()
+    );
 }

@@ -83,10 +83,12 @@ impl RuntimeState {
         Ok(preparation)
     }
 
-    pub async fn move_session(
-        self: &Arc<Self>,
-        request: MoveSessionRequest,
-    ) -> Result<MoveOutcome> {
+    /// Reserve lifecycle ownership before a web request is acknowledged.
+    pub(crate) fn start_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<()> {
+        self.admit_move_session(request).map(|_| ())
+    }
+
+    fn admit_move_session(self: &Arc<Self>, request: MoveSessionRequest) -> Result<LifecycleWatch> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -133,6 +135,17 @@ impl RuntimeState {
             selection.profile_id.clone().unwrap_or_default(),
             selection.target_template_id.clone().unwrap_or_default(),
         );
+        Ok(result)
+    }
+
+    pub async fn move_session(
+        self: &Arc<Self>,
+        request: MoveSessionRequest,
+    ) -> Result<MoveOutcome> {
+        let selection = request.preparation.selection.clone();
+        let operation_id = request.preparation.operation_id.clone();
+        let session_id = selection.session_id.clone();
+        let result = self.admit_move_session(request)?;
         let channel = result.clone();
         let result = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&channel);
@@ -215,7 +228,9 @@ impl RuntimeState {
             tokio::spawn(async move {
                 let channel = result.clone();
                 match Self::wait_lifecycle_result(result).await {
-                    Ok(DaemonLifecycleResult::Move(outcome)) if outcome.outcome != "completed" => {
+                    Ok(DaemonLifecycleResult::Move(outcome))
+                        if !matches!(outcome.outcome.as_str(), "completed" | "interrupted") =>
+                    {
                         state.push_notice(
                             &id,
                             outcome

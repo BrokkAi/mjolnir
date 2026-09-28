@@ -1579,7 +1579,7 @@ pub(crate) fn ensure_no_symlink_ancestors(root: &Path, relative: &Path) -> Resul
     Ok(())
 }
 
-fn validate_symlink_target(link_path: &Path, target: &Path) -> Result<()> {
+pub fn validate_symlink_target(link_path: &Path, target: &Path) -> Result<()> {
     ensure!(
         !target.is_absolute(),
         "symlink '{}' has an absolute target",

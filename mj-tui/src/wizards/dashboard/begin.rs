@@ -118,6 +118,7 @@ impl DashboardState {
             .position(|target_id| target_id == &session.target_template_id)
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.display_title().to_owned(),
@@ -180,6 +181,7 @@ impl DashboardState {
             .and_then(|wanted| self.config.targets.keys().position(|id| id == wanted))
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            files: Default::default(),
             session_id: wiki_id,
             source: ResumeSource::Archive,
             title,
@@ -240,6 +242,7 @@ impl DashboardState {
             .position(|target_id| target_id == &session.target_template_id)
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.display_title().to_owned(),
@@ -310,6 +313,7 @@ impl DashboardState {
             return;
         };
         self.mode = Mode::Resume(ResumeWizard {
+            files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
             title: session.display_title().to_owned(),

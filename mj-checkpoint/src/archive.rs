@@ -1686,7 +1686,7 @@ fn is_credentials_json(component: &str) -> bool {
 /// A path is secret-like when any component is. A component that is not a
 /// plain name (`..`, a root, a prefix) cannot be interpreted, so it counts as
 /// secret-like and every caller refuses it.
-pub(crate) fn is_secret_like_path(path: &Path) -> bool {
+pub fn is_secret_like_path(path: &Path) -> bool {
     path.components().any(|component| match component {
         Component::Normal(component) => is_secret_like_component(&component.to_string_lossy()),
         _ => true,
@@ -1817,6 +1817,7 @@ pub use git::{
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
     diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
     remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
+    validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

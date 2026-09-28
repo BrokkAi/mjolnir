@@ -13,6 +13,8 @@ pub enum ResumeQueueDisposition {
 #[serde(deny_unknown_fields)]
 pub struct MoveSelection {
     #[serde(default)]
+    pub workspace: crate::move_workspace::WorkspaceSelection,
+    #[serde(default)]
     pub clear_resource_allocation: bool,
     pub session_id: String,
     pub profile_id: Option<String>,
@@ -141,6 +143,8 @@ fn format_conversion_bytes(bytes: u64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::move_workspace::WorkspaceAssessment>,
     #[serde(default)]
     pub source_unavailable: bool,
     /// The destination is the source target: only the harness is replaced;
@@ -197,6 +201,11 @@ pub enum MovePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveOperation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_transfer: Option<crate::move_workspace::WorkspaceTransfer>,
+    /// Move-owned session state, never a portable workspace checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<CheckpointMetadata>,
     /// Keep the source harness stopped across recovery until destination restoration.
     #[serde(default)]
     pub source_checkpoint_only: bool,
@@ -231,8 +240,16 @@ pub struct MoveOperation {
 }
 
 impl MoveOperation {
+    pub fn retains_source_environment(&self) -> bool {
+        self.in_place || self.workspace_transfer.is_some()
+    }
+    pub fn restore_artifact(&self) -> Option<&CheckpointMetadata> {
+        self.handoff.as_ref().or(self.checkpoint.as_ref())
+    }
+
     pub fn retains_checkpoint(&self) -> bool {
-        !matches!(self.phase, MovePhase::Completed | MovePhase::Cancelled)
+        (self.handoff.is_some() && self.phase == MovePhase::Cancelled)
+            || !matches!(self.phase, MovePhase::Completed | MovePhase::Cancelled)
             || (self.queue_admission_started && !self.queue_admission_finished)
     }
 

@@ -2,6 +2,7 @@
 mod picker;
 mod projects;
 use projects::{ProjectPicker, ProjectTab};
+mod move_files;
 mod render;
 mod subagents;
 pub(crate) use picker::*;
@@ -59,6 +60,7 @@ pub(crate) enum WizardStep {
     Bundle,
     ProjectDirectory,
     Review,
+    MoveFiles,
     Mounts,
     NewBundle,
 }
@@ -97,6 +99,10 @@ pub(crate) enum WizardControl {
     SubagentEffort,
     SubagentRetry,
     DiscardQueue,
+    ChooseMoveFiles,
+    MoveFile(usize),
+    ExpandMoveFile(usize),
+    MoveOtherFiles,
     Cancel,
     Back,
     Next,
@@ -410,6 +416,7 @@ pub(crate) enum ResumeSource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeWizard {
+    pub(crate) files: move_files::MoveFilePicker,
     /// The Mjolnir session being resumed or moved, or, for an archive, the
     /// SessionWiki id being restored. `source` says which.
     pub(crate) session_id: String,
@@ -451,6 +458,7 @@ pub(crate) struct ResumeWizard {
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
+            && self.files == other.files
             && self.source == other.source
             && self.title == other.title
             && self.workspace_id == other.workspace_id

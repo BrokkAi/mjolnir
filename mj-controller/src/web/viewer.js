@@ -3300,6 +3300,11 @@ function freshMoveDraft(session) {
     committing: false,
     acknowledge: false,
     queue: recovery?.queue || 'discard',
+    filePage: false,
+    filesReviewed: false,
+    fileExpanded: new Set(),
+    showOtherFiles: false,
+    workspaceSelection: { exclusions: [], acknowledge_large_transfer: false },
   };
 }
 
@@ -3323,6 +3328,91 @@ function moveQueueItemText(item) {
   }
 }
 
+function moveFileKey(path) { return JSON.stringify([path.repository, path.path]); }
+function movePathContains(parent, child) {
+  return parent.repository === child.repository && (parent.path === child.path || child.path.startsWith(`${parent.path}/`));
+}
+function moveFileIncluded(draft, path) {
+  return !draft.workspaceSelection.exclusions.some(excluded => movePathContains(excluded, path));
+}
+function moveBytes(bytes) {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+function moveSelectedBytes(draft, assessment) {
+  return (assessment.required_bytes || 0) + assessment.files.reduce((sum, file) => sum + (moveFileIncluded(draft, file.location) ? file.bytes : 0), 0);
+}
+function moveStorageProblems(draft) {
+  const assessment = draft.preparation?.workspace;
+  if (!assessment) return [];
+  const bytes = moveSelectedBytes(draft, assessment);
+  return (assessment.storage || []).filter(storage => bytes * storage.copies + 64 * 1024 * 1024 > storage.available_bytes)
+    .map(storage => `${storage.location} needs approximately ${moveBytes(bytes * storage.copies + 64 * 1024 * 1024)} free; ${moveBytes(storage.available_bytes)} available. Choose fewer files or free space.`);
+}
+
+function renderMoveFiles(draft) {
+  const assessment = draft.preparation.workspace;
+  const all = assessment.required_bytes + assessment.files.reduce((sum, file) => sum + file.bytes, 0);
+  const selected = moveSelectedBytes(draft, assessment);
+  moveProgress.textContent = 'Choose files to transfer';
+  moveStep.append(el('h3', '', 'Choose files to transfer'));
+  moveStep.append(el('p', '', `Transfer: ${moveBytes(selected)} · Leave behind: ${moveBytes(all - selected)}`));
+  moveStep.append(el('p', 'dim', `Tracked history and edits: ${moveBytes(assessment.required_bytes)} (always included). Ignored files: ${assessment.ignored_files} (${moveBytes(assessment.ignored_bytes)}).`));
+  moveStep.append(el('p', draft.workspaceSelection.exclusions.length ? 'move-warning' : 'dim', draft.workspaceSelection.exclusions.length
+    ? 'Excluded files remain in the stopped source until you explicitly clean it up.'
+    : 'All eligible files are included. Continue accepts this transfer.'));
+  let hiddenBytes = 0;
+  const draw = (nodes, depth) => {
+    nodes.forEach((node, index) => {
+      if (!draft.showOtherFiles && (node.bytes < 1e8 || index >= 8)) { hiddenBytes += node.bytes; return; }
+      const row = el('div', 'row');
+      row.style.paddingInlineStart = `${depth * 1.25}rem`;
+      const label = el('label', 'field-inline');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      const files = assessment.files.filter(file => movePathContains(node.location, file.location));
+      const count = files.filter(file => moveFileIncluded(draft, file.location)).length;
+      checkbox.checked = count === files.length;
+      checkbox.indeterminate = count > 0 && count < files.length;
+      checkbox.onchange = () => {
+        const include = checkbox.checked;
+        draft.workspaceSelection.exclusions = assessment.files.filter(file => movePathContains(node.location, file.location)
+          ? !include : !moveFileIncluded(draft, file.location)).map(file => file.location);
+        draft.workspaceSelection.acknowledge_large_transfer = false;
+        renderMoveForm();
+      };
+      label.append(checkbox, el('span', '', `${node.location.repository}/${node.location.path}${node.children.length ? '/' : ''} — ${moveBytes(node.bytes)}`));
+      row.append(label);
+      const key = moveFileKey(node.location);
+      if (node.children.length) {
+        const expand = el('button', '', draft.fileExpanded.has(key) ? 'Collapse' : 'Expand');
+        expand.type = 'button';
+        expand.setAttribute('aria-expanded', String(draft.fileExpanded.has(key)));
+        expand.onclick = () => {
+          if (!draft.fileExpanded.delete(key)) draft.fileExpanded.add(key);
+          renderMoveForm();
+        };
+        row.append(expand);
+      }
+      moveStep.append(row);
+      if (draft.fileExpanded.has(key)) draw(node.children, depth + 1);
+    });
+  };
+  draw(assessment.roots || [], 0);
+  if (hiddenBytes || draft.showOtherFiles) {
+    const other = el('button', '', draft.showOtherFiles ? 'Group smaller files' : `Other files — ${moveBytes(hiddenBytes)} · Expand`);
+    other.type = 'button';
+    other.onclick = () => { draft.showOtherFiles = !draft.showOtherFiles; renderMoveForm(); };
+    moveStep.append(other);
+  }
+  for (const blocker of [...(assessment.blockers || []), ...moveStorageProblems(draft)]) moveStep.append(el('p', 'error', blocker));
+  moveNextButton.textContent = 'Continue';
+  moveNextButton.disabled = draft.preparing || draft.committing || (assessment.blockers.length > 0 || moveStorageProblems(draft).length > 0);
+  moveBackButton.disabled = draft.preparing || draft.committing;
+}
+
 function renderMoveForm() {
   if (!moveStep || route.name !== 'move') return;
   const session = sessionById(route.sessionId);
@@ -3333,12 +3423,15 @@ function renderMoveForm() {
   const preparation = draft.preparation;
   moveProgress.textContent = preparation ? 'Review the destination and confirm the interruption.' : 'Choose a compatible destination. The source is not changed during preparation.';
   moveStep.replaceChildren();
+  if (preparation?.workspace && draft.filePage) { renderMoveFiles(draft); return; }
 
   if (!preparation) {
     moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
     const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
       if (draft.queueLocked) return;
       draft.profileId = value;
+      draft.filesReviewed = false;
+      draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
     });
     moveStep.append(profilePicker);
@@ -3350,6 +3443,8 @@ function renderMoveForm() {
     const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
       if (draft.queueLocked) return;
       draft.targetId = value;
+      draft.filesReviewed = false;
+      draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
     });
     if (draft.queueLocked) {
@@ -3366,6 +3461,8 @@ function renderMoveForm() {
     clearResourcesInput.disabled = draft.queueLocked;
     clearResourcesInput.onchange = () => {
       draft.clearResourceAllocation = clearResourcesInput.checked;
+      draft.filesReviewed = false;
+      draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
     };
     clearResources.append(clearResourcesInput, el('span', '', 'Clear inherited resource sizing and use destination defaults'));
@@ -3386,6 +3483,14 @@ function renderMoveForm() {
     moveStep.append(el('p', 'dim', preparation.in_place
       ? 'Only the harness and profile are replaced; the environment and workspace are kept.'
       : 'The session is restored into a fresh environment.'));
+    if (preparation.workspace) {
+      moveStep.append(el('p', '', `Workspace transfer: ${moveBytes(moveSelectedBytes(draft, preparation.workspace))}`));
+      const choose = el('button', '', 'Choose files…');
+      choose.type = 'button';
+      choose.onclick = () => { draft.filePage = true; renderMoveForm(); };
+      moveStep.append(choose);
+      for (const blocker of preparation.workspace.blockers || []) moveStep.append(el('p', 'error', blocker));
+    }
     if (preparation.source_unavailable) {
       moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
     }
@@ -3441,7 +3546,8 @@ function renderMoveForm() {
     moveNextButton.textContent = 'Confirm move';
   }
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || (preparation?.active === true && !draft.acknowledge);
+  moveNextButton.disabled = busy || (preparation?.active === true && !draft.acknowledge)
+    || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
   for (const input of moveStep.querySelectorAll('input, select, button')) input.disabled = busy;
 }
@@ -3460,6 +3566,7 @@ async function prepareMove() {
     draft.preparation = await request('/api/moves/prepare', {
       method: 'POST',
       body: JSON.stringify({
+        workspace: draft.workspaceSelection,
         session_id: draft.sessionId,
         profile_id: draft.profileId || null,
         target_template_id: draft.targetId || null,
@@ -3468,6 +3575,11 @@ async function prepareMove() {
         resource_allocation: draft.destinationResourceAllocation,
       }),
     });
+    if (draft.preparation.workspace && !draft.filesReviewed) {
+      const assessment = draft.preparation.workspace;
+      draft.fileExpanded = new Set((assessment.initially_expanded || []).map(moveFileKey));
+      draft.filePage = assessment.required_bytes + assessment.files.reduce((sum, file) => sum + file.bytes, 0) >= 1e9;
+    }
   } catch (error) {
     moveError.textContent = error.message;
   } finally {
@@ -3507,6 +3619,17 @@ async function commitMove() {
 
 async function advanceMove() {
   if (!moveDraft?.preparation) return prepareMove();
+  if (moveDraft.filePage) {
+    moveDraft.workspaceSelection.acknowledge_large_transfer = true;
+    moveDraft.filesReviewed = true;
+    moveDraft.filePage = false;
+    return prepareMove();
+  }
+  if (moveDraft.preparation.workspace && JSON.stringify(moveDraft.workspaceSelection) !== JSON.stringify(moveDraft.preparation.selection.workspace)) {
+    moveDraft.filePage = true;
+    renderMoveForm();
+    return;
+  }
   return commitMove();
 }
 
@@ -6718,6 +6841,7 @@ newForm.onsubmit = async event => {
 
 moveBackButton.onclick = () => {
   if (!moveDraft) return;
+  if (moveDraft.filePage) { moveDraft.filePage = false; renderMoveForm(); return; }
   if (moveDraft.preparation) {
     moveDraft.preparation = null;
     moveDraft.acknowledge = false;

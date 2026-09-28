@@ -55,9 +55,11 @@ impl Controller {
             .target
             .as_ref()
             .context("an in-place harness replacement has no target to replace it in")?;
-        let checkpoint = previous
-            .checkpoint
+        let move_operation = crate::database::load_move_operation(session_id)?;
+        let checkpoint = move_operation
             .as_ref()
+            .and_then(|op| op.handoff.as_ref())
+            .or(previous.checkpoint.as_ref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
         let profile = self

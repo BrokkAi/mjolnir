@@ -3,6 +3,60 @@
 use super::*;
 use mj_core::state::MoveOperation;
 
+pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
+    let operation = operation.clone();
+    submit_database_write("retain_move_source", move |connection| {
+        let transfer = operation
+            .workspace_transfer
+            .as_ref()
+            .context("Move transfer missing")?;
+        connection.execute(
+            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(operation_id) DO NOTHING",
+            params![operation.operation_id, operation.selection.session_id,
+                serde_json::to_string(&transfer.source)?, serde_json::to_string(&operation.selection.workspace.exclusions)?, operation.created_at],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn retained_move_sources(
+    session_id: &str,
+) -> Result<Vec<mj_core::move_workspace::RetainedMoveSource>> {
+    let connection = open_reader(&database_path())?;
+    let mut query = connection.prepare("SELECT operation_id, source_json, exclusions_json, created_at FROM retained_move_sources WHERE session_id=?1 ORDER BY created_at")?;
+    let rows = query.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (operation_id, source, exclusions, created_at) = row?;
+        Ok(mj_core::move_workspace::RetainedMoveSource {
+            operation_id,
+            session_id: session_id.into(),
+            source: serde_json::from_str(&source)?,
+            exclusions: serde_json::from_str(&exclusions)?,
+            created_at,
+        })
+    })
+    .collect()
+}
+
+pub fn forget_retained_move_source(operation_id: &str) -> Result<()> {
+    let operation_id = operation_id.to_owned();
+    submit_database_write("forget_retained_move_source", move |connection| {
+        connection.execute(
+            "DELETE FROM retained_move_sources WHERE operation_id=?1",
+            [operation_id],
+        )?;
+        Ok(())
+    })
+}
+
 pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
     submit_database_write("save_move_operation", move |connection| {
@@ -107,8 +161,7 @@ pub fn move_checkpoint_is_retained(path: &Path) -> Result<bool> {
     Ok(load_move_operations()?.iter().any(|operation| {
         operation.retains_checkpoint()
             && operation
-                .checkpoint
-                .as_ref()
+                .restore_artifact()
                 .is_some_and(|checkpoint| checkpoint.archive_path == path)
     }))
 }
@@ -139,8 +192,7 @@ pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result
     for operation in load_move_operations_with(connection)? {
         if operation.retains_checkpoint()
             || operation
-                .checkpoint
-                .as_ref()
+                .restore_artifact()
                 .is_some_and(|checkpoint| checkpoint.archive_path.exists())
         {
             continue;
@@ -208,10 +260,13 @@ mod tests {
 
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
+            workspace_transfer: None,
+            handoff: None,
             in_place: false,
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
+                workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session.id.clone(),
                 profile_id: Some("destination".into()),

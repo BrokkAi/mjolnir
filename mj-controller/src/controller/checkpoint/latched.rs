@@ -53,6 +53,34 @@ impl Controller {
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
     ) -> Result<LatchedCheckpoint> {
+        let layout = self.session_export_layout(session_id, executor)?;
+        self.checkpoint_session_latched_with_layout(
+            session_id,
+            executor,
+            manager,
+            exclusivity,
+            export_policy,
+            recovery_copy,
+            requested_operation_id,
+            layout,
+        )
+        .await
+    }
+
+    /// Capture an explicitly supplied repository layout using the unchanged
+    /// checkpoint protocol. The caller owns the resulting artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: Option<&SessionManagerControl>,
+        exclusivity: LatchExclusivity,
+        export_policy: CheckpointExportPolicy,
+        recovery_copy: bool,
+        requested_operation_id: Option<&str>,
+        layout: SessionExportLayout,
+    ) -> Result<LatchedCheckpoint> {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
             && !operation.queue_admission_finished
@@ -70,7 +98,6 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         session.validate_configuration(&self.config)?;
-        let layout = self.session_export_layout(session_id, executor)?;
         let backend = layout.backend.clone();
         let profile = self
             .config

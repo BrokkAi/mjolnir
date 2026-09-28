@@ -69,6 +69,7 @@ impl DashboardState {
             }
             WizardStep::Bundle => unreachable!("resume does not select a bundle"),
             WizardStep::Review => unreachable!("review input is handled before picker navigation"),
+            WizardStep::MoveFiles => unreachable!("Move file input is handled separately"),
             WizardStep::Mounts => unreachable!("mount input is handled before picker navigation"),
             WizardStep::NewBundle => unreachable!("resume does not create bundles"),
             WizardStep::ProjectDirectory => {
@@ -77,7 +78,7 @@ impl DashboardState {
         }
     }
 
-    fn start_move_preparation(
+    pub(in crate::wizards) fn start_move_preparation(
         &mut self,
         mut wizard: ResumeWizard,
         profile_id: String,
@@ -95,6 +96,7 @@ impl DashboardState {
         wizard.preparing = true;
         wizard.preparation_error = None;
         let action = DashboardAction::MoveSession {
+            workspace_selection: wizard.files.selection.clone(),
             session_id: wizard.session_id.clone(),
             profile_id,
             target_template_id,
@@ -126,7 +128,7 @@ impl DashboardState {
 
     pub(in crate::wizards) fn preflight_resume_session_action(
         &mut self,
-        wizard: ResumeWizard,
+        mut wizard: ResumeWizard,
         profile_id: String,
     ) -> DashboardAction {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
@@ -140,7 +142,23 @@ impl DashboardState {
                 return self.start_move_preparation(wizard, profile_id);
             }
             let selection = &wizard.preparation.as_ref().unwrap().selection;
+            if wizard
+                .preparation
+                .as_ref()
+                .unwrap()
+                .workspace
+                .as_ref()
+                .is_some_and(|assessment| {
+                    wizard.files.selection != selection.workspace
+                        || selection.workspace.validate(assessment).is_err()
+                })
+            {
+                wizard.step = WizardStep::MoveFiles;
+                self.mode = Mode::Resume(wizard);
+                return DashboardAction::None;
+            }
             let action = DashboardAction::MoveSession {
+                workspace_selection: selection.workspace.clone(),
                 session_id: selection.session_id.clone(),
                 profile_id: selection.profile_id.clone().unwrap(),
                 target_template_id: selection.target_template_id.clone().unwrap(),
@@ -272,6 +290,17 @@ impl DashboardState {
             return false;
         }
         wizard.resource_allocation = preparation.selection.resource_allocation.clone();
+        if let Some(assessment) = &preparation.workspace
+            && !wizard.files.reviewed
+        {
+            wizard.files.expanded = assessment.initially_expanded.clone();
+            if mj_core::move_workspace::WorkspaceSelection::default().included_bytes(assessment)
+                >= mj_core::move_workspace::LARGE_TRANSFER_BYTES
+            {
+                wizard.step = WizardStep::MoveFiles;
+                wizard.form.get_mut().focus(WizardControl::Next);
+            }
+        }
         wizard.preparation = Some(preparation);
         wizard.preparing = false;
         wizard.preparation_error = None;

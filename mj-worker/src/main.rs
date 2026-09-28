@@ -41,6 +41,9 @@ struct WorkerArgs {
 
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
+    /// Move-only inventory and disk-backed workspace transfer utilities.
+    #[command(hide = true)]
+    MoveWorkspace,
     /// Discover profile model choices without submitting a prompt.
     DiscoverConfig {
         #[arg(long)]
@@ -429,6 +432,11 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::AcpSupervisor { spec } => {
             run_acp_supervisor(AcpSupervisorSpec::read(&spec)?).await
+        }
+        WorkerCommand::MoveWorkspace => {
+            let command = serde_json::from_reader(std::io::stdin().lock())?;
+            println!("{}", mj_worker::move_workspace::execute(command)?);
+            Ok(())
         }
         WorkerCommand::ExportCheckpoint { spec } => {
             let checkpoint = mj_worker::checkpoint::export_from_spec_file(&spec)?;

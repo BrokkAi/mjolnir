@@ -26,6 +26,7 @@ pub mod jev;
 pub mod local_git;
 pub mod local_sockets;
 pub mod login_environment;
+pub mod move_workspace;
 pub mod native_agent;
 pub mod path_completion;
 pub mod path_input;

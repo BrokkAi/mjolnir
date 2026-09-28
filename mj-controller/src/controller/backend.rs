@@ -973,14 +973,16 @@ fn wait_for_ssh_ready(
     }
 }
 
-pub(super) fn locator_after_provision(
+pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,
     session_id: &str,
     first_output: Option<&CommandOutput>,
     executor: &(impl CommandExecutor + Sync),
+    name: &str,
 ) -> Result<TargetLocator> {
-    let generated = targets::resource_name(session_id)?;
+    let generated = name.to_owned();
+
     Ok(match canonical {
         TargetTemplate::LocalBare => TargetLocator::LocalBare {
             worker_root: data_dir().join("workers").join(session_id),
@@ -992,9 +994,9 @@ pub(super) fn locator_after_provision(
             TargetLocator::LocalPodman {
                 borrowed_from: None,
                 container_id: generated,
-                workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
-                    container, session_id,
-                )?),
+                workspace_storage: PodmanWorkspaceLocator::from(
+                    targets::podman_workspace_locator_named(container, name)?,
+                ),
             }
         }
         TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
@@ -1018,9 +1020,9 @@ pub(super) fn locator_after_provision(
                 borrowed_from: None,
                 host: ssh.host.clone(),
                 container_id: generated,
-                workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
-                    container, session_id,
-                )?),
+                workspace_storage: PodmanWorkspaceLocator::from(
+                    targets::podman_workspace_locator_named(container, name)?,
+                ),
             }
         }
         TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {

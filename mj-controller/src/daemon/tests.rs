@@ -322,6 +322,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
             create_control: None,
@@ -347,6 +348,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
             create_control: None,
@@ -1887,6 +1889,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "closing-operation".into(),
             create_control: None,
@@ -4811,6 +4814,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "current".into(),
             create_control: None,
@@ -4978,10 +4982,13 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     );
     crate::database::save_session(&session).unwrap();
     let operation = mj_core::state::MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         source_checkpoint_only: false,
         in_place: false,
         operation_id: "retained-move".into(),
         selection: MoveSelection {
+            workspace: Default::default(),
             session_id: session.id.clone(),
             profile_id: Some(session.last_profile.clone()),
             target_template_id: Some(session.target_template_id.clone()),
@@ -5280,4 +5287,57 @@ async fn replayed_child_close_cannot_stop_or_mark_a_resumed_incarnation() {
         Some(current.as_str())
     );
     assert!(!state.owner().lifecycle.contains_key(child_id));
+}
+
+#[tokio::test]
+async fn move_copy_releases_admission_and_control_transition_reacquires_it() {
+    let state = test_runtime_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let result = state
+        .start_or_join_lifecycle("move-copy-admission".into(), LifecycleKind::Move, {
+            let release = release.clone();
+            let started = started.clone();
+            move |state, session_id, _| async move {
+                let executor = DaemonStageReportingExecutor::new(
+                    crate::targets::ProcessExecutor,
+                    state.clone(),
+                    session_id.clone(),
+                );
+                assert!(
+                    state.owner().lifecycle[&session_id]
+                        .upgrade_work
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                );
+                executor.begin_resumable_move_work()?;
+                assert!(
+                    state.owner().lifecycle[&session_id]
+                        .upgrade_work
+                        .lock()
+                        .unwrap()
+                        .is_none()
+                );
+                started.notify_one();
+                release.notified().await;
+                executor.end_resumable_move_work()?;
+                assert!(
+                    state.owner().lifecycle[&session_id]
+                        .upgrade_work
+                        .lock()
+                        .unwrap()
+                        .is_some()
+                );
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    started.notified().await;
+    assert!(
+        state.owner().lifecycle["move-copy-admission"].is_running(),
+        "copy must keep lifecycle ownership while yielding upgrade admission"
+    );
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(result).await.unwrap();
 }

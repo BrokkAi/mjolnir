@@ -1183,11 +1183,65 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        self.resume_session_with_origin(
+            session_id,
+            profile_id,
+            target_id,
+            options,
+            repository_preflight,
+            None,
+            executor,
+        )
+        .await
+    }
+
+    pub(in crate::controller) async fn resume_session_for_move(
+        &mut self,
+        operation: &mj_core::state::MoveOperation,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<MaterializedSession> {
+        self.resume_session_with_origin(
+            &operation.selection.session_id,
+            operation
+                .selection
+                .profile_id
+                .as_deref()
+                .context("Move profile missing")?,
+            operation
+                .selection
+                .target_template_id
+                .as_deref()
+                .context("Move target missing")?,
+            SessionResumeOptions {
+                additional_mounts: operation.selection.additional_mounts.clone(),
+                resource_allocation: operation.selection.resource_allocation.clone(),
+                discard_queue: true,
+            },
+            None,
+            Some(operation),
+            executor,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_session_with_origin(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_id: &str,
+        options: SessionResumeOptions,
+        repository_preflight: Option<ResumeRepositorySourceReceipt>,
+        move_operation: Option<&mj_core::state::MoveOperation>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<MaterializedSession> {
+        let transferring_workspace = move_operation.is_some();
         if let Some(operation) = crate::database::load_move_operation(session_id)? {
             ensure!(
-                !(operation.in_place
-                    && operation.phase != mj_core::state::MovePhase::Completed
-                    && operation.recovery_session.is_some()),
+                transferring_workspace
+                    || !((operation.in_place || operation.workspace_transfer.is_some())
+                        && operation.phase != mj_core::state::MovePhase::Completed
+                        && operation.recovery_session.is_some()),
                 "a profile switch retains this environment; retry Move instead of recreating it with Resume"
             );
         }
@@ -1202,15 +1256,16 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        if !matches!(
+        if !(matches!(
             previous.state,
             SessionState::Stopped | SessionState::Lost | SessionState::Error
-        ) {
+        ) || (transferring_workspace && previous.state == SessionState::Closing))
+        {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
-        let checkpoint = previous
-            .checkpoint
-            .as_ref()
+        let checkpoint = move_operation
+            .and_then(|op| op.handoff.as_ref())
+            .or(previous.checkpoint.as_ref())
             .context("session has no checkpoint")?;
         // A receipt for an isolated destination says nothing about a host
         // checkout. Explicit moves to raw execution must check that source.
@@ -1220,10 +1275,11 @@ impl Controller {
                 .targets
                 .get(target_id)
                 .is_some_and(mj_core::config::is_bare_project_target);
-        if moving_to_raw
-            || !repository_preflight.as_ref().is_some_and(|receipt| {
-                self.repository_source_receipt_is_current(session_id, receipt)
-            })
+        if !transferring_workspace
+            && (moving_to_raw
+                || !repository_preflight.as_ref().is_some_and(|receipt| {
+                    self.repository_source_receipt_is_current(session_id, receipt)
+                }))
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
@@ -1277,6 +1333,7 @@ impl Controller {
         // other isolated resume clones what its stored archive already names.
         if !mj_core::config::is_bare_project_target(&target_template)
             && plan != ResumePlan::RawToWorkspace
+            && !transferring_workspace
         {
             super::network_git::bundle_from_manifest(archive_manifest)?;
         }
@@ -1311,7 +1368,8 @@ impl Controller {
         targets::validate_additional_mounts(&additional_mounts)?;
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
-        if previous.state == SessionState::Error
+        if !transferring_workspace
+            && previous.state == SessionState::Error
             && let Some(locator) = &previous.target
         {
             let backend = backend_locator(locator, &previous, &self.config)?;
@@ -1527,7 +1585,7 @@ impl Controller {
         let result = async {
             if let Some(worktree) = previous.managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
-                if recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
+                if !transferring_workspace && recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
                     if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
                         mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
                             &archive_path, &worktree.worktree_root, &SystemGit,
@@ -1560,7 +1618,9 @@ impl Controller {
                         PrimaryCheckoutRequirement::Any,
                     )?;
                 }
-                if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
+                if transferring_workspace {
+                    // Move installs its separately verified Git/file transfer below.
+                } else if conversion.worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
                     mj_checkpoint::checkpoint::restore_single_repository_into_checkout(
                         &archive_path, &conversion.worktree.worktree_root, &SystemGit,
                     )?;
@@ -1580,6 +1640,7 @@ impl Controller {
             if let Some(conversion) = conversion
                 .as_ref()
                 .and_then(ResumeConversion::raw_to_workspace)
+                && !transferring_workspace
             {
                 let destination = PathBuf::from(
                     previous
@@ -1661,10 +1722,13 @@ impl Controller {
                     None
                 }
             };
-            let restore_repositories = (resumed_project_directory.is_none()
+            if transferring_workspace {
+                self.restore_move_workspace(session_id, executor)?;
+            }
+            let restore_repositories = !transferring_workspace && ((resumed_project_directory.is_none()
                 && conversion.is_none())
                 || plan == ResumePlan::RawToWorkspace
-                || (recreated_managed_worktree && plan == ResumePlan::InPlace);
+                || (recreated_managed_worktree && plan == ResumePlan::InPlace));
             // A conversion restores the archive it just wrote, not the raw one
             // the session was stopped with.
             let restored_archive = conversion_checkpoint_written
@@ -1692,6 +1756,7 @@ impl Controller {
                     worker_root_reset: WorkerRootReset::FreshTarget,
                     retire_after_ready: conversion
                         .as_ref()
+                        .filter(|_| !transferring_workspace)
                         .and_then(ResumeConversion::raw_to_workspace)
                         .and_then(|plan| plan.retire.as_ref()),
                 },
@@ -1732,6 +1797,9 @@ impl Controller {
                     &canonical_session,
                     discard_queued_prompts,
                 );
+                if let Some(operation) = move_operation {
+                    return Err(self.rollback_move_destination(operation, error, executor)?);
+                }
                 Err(self.rollback_failed_resume(
                     session_id,
                     &previous,

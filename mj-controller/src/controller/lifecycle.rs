@@ -132,6 +132,13 @@ impl Controller {
     ) -> Result<bool> {
         self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
             .await?;
+        if disposition == SourceTargetDisposition::RetainForInPlaceSwap
+            || operation.workspace_transfer.is_some()
+        {
+            self.seal_move_handoff(session_id, executor, manager, operation, preparation)
+                .await?;
+            return Ok(false);
+        }
         self.suspend_session_controlled_with_manager(
             session_id,
             executor,

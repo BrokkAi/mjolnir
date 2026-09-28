@@ -5015,3 +5015,48 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
         "a child must never remove the borrowed container: {script}"
     );
 }
+
+#[test]
+fn move_destination_generations_have_independent_container_and_volume_ownership() {
+    let container = ContainerTemplate {
+        image: "test:latest".into(),
+        pull_policy: ImagePullPolicy::Auto,
+        extra_run_args: Vec::new(),
+        workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
+        build_cache: None,
+    };
+    let source_name = resource_name(SESSION).unwrap();
+    let destination_name = move_resource_name(SESSION, "move-one").unwrap();
+    let source_storage = podman_workspace_locator(&container, SESSION).unwrap();
+    let destination_storage =
+        podman_workspace_locator_named(&container, &destination_name).unwrap();
+    assert_ne!(source_storage, destination_storage);
+    let plan = provision_plan_named(
+        &TargetTemplate::LocalPodman(container),
+        SESSION,
+        &bundle(),
+        &[],
+        None,
+        None,
+        &destination_name,
+    )
+    .unwrap();
+    assert!(plan.commands[0].args.contains(&destination_name));
+    assert!(!plan.commands[0].args.contains(&source_name));
+    let locator = TargetLocator::LocalPodman {
+        container_id: destination_name.clone(),
+        workspace_storage: destination_storage,
+        borrowed_from: None,
+    };
+    verify_locator(&locator, SESSION).unwrap();
+    assert!(verify_locator(&locator, "other-session").is_err());
+    let cleanup = retire_move_target_plan(&locator, SESSION).unwrap();
+    assert!(
+        cleanup
+            .commands
+            .iter()
+            .all(|command| command.stage != Some(ProvisionStage::CleaningCache))
+    );
+    assert!(cleanup.commands[0].args.contains(&destination_name));
+    assert!(!cleanup.commands[0].args.contains(&source_name));
+}
