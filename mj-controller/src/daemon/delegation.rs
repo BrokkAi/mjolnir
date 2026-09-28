@@ -232,16 +232,10 @@ async fn complete_child(
         return Ok(ChildCompletion::Settled);
     }
     if relation.noticed_turn != Some(outcome.completed_ordinal) {
-        let title = {
-            let controller = state
-                .controller
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            controller.state.sessions.get(&child_id).map_or_else(
-                || relation.task_name.clone(),
-                |s| s.listed_title().to_owned(),
-            )
-        };
+        let title = state.session_record(&child_id).map_or_else(
+            || relation.task_name.clone(),
+            |session| session.listed_title().to_owned(),
+        );
         let reminded = backend
             .remind_subagent_to_hand_back(
                 &child_id,

@@ -389,48 +389,29 @@ pub(super) fn review_views(
 pub(super) type ViewerMoveRecoveries =
     std::collections::BTreeMap<String, crate::server::ViewerMoveRecovery>;
 
-/// Refresh durable Move records away from the phone event loop. A Move can
-/// finish after its initiating request disconnects, so active lifecycle views
-/// alone are not enough to render Retry move or Resume with previous settings.
-pub(super) fn request_move_recovery_reload(
-    completed: &tokio::sync::mpsc::UnboundedSender<Result<ViewerMoveRecoveries, String>>,
-    in_flight: &mut bool,
-    jobs: &mut tokio::task::JoinSet<()>,
-) {
-    if *in_flight {
-        return;
-    }
-    *in_flight = true;
-    let completed = completed.clone();
-    jobs.spawn(async move {
-        let result = match tokio::task::spawn_blocking(|| {
-            crate::database::load_move_operations()
-                .map(|operations| {
-                    operations
-                        .into_iter()
-                        .filter_map(|operation| {
-                            crate::server::ViewerMoveRecovery::from_operation(&operation)
-                                .map(|recovery| (operation.selection.session_id.clone(), recovery))
-                        })
-                        .collect()
-                })
-                .map_err(|error| format!("{error:#}"))
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(format!("move recovery projection task failed: {error}")),
-        };
-        let _ = completed.send(result);
-    });
-}
-
+#[cfg(test)]
 pub(super) fn viewer_snapshot(
     controller: &Controller,
     workspaces: &[mj_core::workspace::WorkspaceRecord],
     quotas: &std::collections::BTreeMap<String, ProfileQuota>,
     views: &PhoneSessionViews<'_>,
     revision: u64,
+) -> ViewerSnapshot {
+    viewer_snapshot_selected(controller, workspaces, quotas, views, revision, None)
+}
+
+pub(super) struct ViewerRecordSelection<'a> {
+    pub(super) ids: &'a std::collections::BTreeSet<String>,
+    pub(super) children: &'a crate::server::ViewerChildren,
+}
+
+pub(super) fn viewer_snapshot_selected(
+    controller: &Controller,
+    workspaces: &[mj_core::workspace::WorkspaceRecord],
+    quotas: &std::collections::BTreeMap<String, ProfileQuota>,
+    views: &PhoneSessionViews<'_>,
+    revision: u64,
+    selection: Option<ViewerRecordSelection<'_>>,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
         native_agents,
@@ -448,8 +429,19 @@ pub(super) fn viewer_snapshot(
         capacity,
         launch_failures,
     } = views;
-    let mut snapshot =
-        ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision);
+    let mut snapshot = match selection {
+        Some(selection) => ViewerSnapshot::from_config_records(
+            &controller.config,
+            &controller.state,
+            revision,
+            selection
+                .ids
+                .iter()
+                .filter_map(|id| controller.state.sessions.get(id)),
+            selection.children,
+        ),
+        None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
+    };
     snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces
         .iter()
@@ -495,7 +487,13 @@ pub(super) fn viewer_snapshot(
             has_error: quota.error.is_some(),
         });
     }
-    for session in &mut snapshot.sessions {
+    let session_ids = snapshot.sessions.0.keys().cloned().collect::<Vec<_>>();
+    for session_id in session_ids {
+        let session = snapshot
+            .sessions
+            .0
+            .get_mut(&session_id)
+            .expect("selected session");
         session.move_recovery = move_recoveries.get(&session.id).cloned();
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, controller)
@@ -786,24 +784,4 @@ pub(super) async fn load_materialized_activity(
     })
     .await
     .context("materialized activity startup task failed")?
-}
-
-/// Load retained native identities off the control loop, including stopped owners.
-pub(super) async fn load_native_agents(
-    owners: Vec<String>,
-) -> Result<std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>> {
-    tokio::task::spawn_blocking(move || {
-        owners
-            .into_iter()
-            .map(|owner| {
-                let agents = crate::database::load_native_agent_summaries(&owner)?
-                    .into_iter()
-                    .map(|summary| summary.agent)
-                    .collect();
-                Ok((owner, agents))
-            })
-            .collect()
-    })
-    .await
-    .context("load native subagent identities")?
 }

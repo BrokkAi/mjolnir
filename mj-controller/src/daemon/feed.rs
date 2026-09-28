@@ -82,6 +82,19 @@ impl RuntimeHistory {
 }
 
 impl RuntimeState {
+    pub(crate) fn runtime_publication(&self) -> Result<RuntimeProjection> {
+        self.capture_runtime()?;
+        Ok(self
+            .feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshots
+            .back()
+            .expect("captured projection")
+            .1
+            .clone())
+    }
+
     fn capture_runtime(&self) -> Result<RuntimeCursor> {
         // History serialization never holds the operational owner. Only immutable
         // roots and the bounded active-operation projection cross that lock.
@@ -93,7 +106,7 @@ impl RuntimeState {
             (
                 RuntimeProjection {
                     revision: self.revisions.current(),
-                    records: controller.state.sessions.clone(),
+                    records: owner.projected_records(),
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
                     moves: owner

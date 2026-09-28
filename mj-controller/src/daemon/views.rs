@@ -242,17 +242,45 @@ impl RuntimeState {
         Vec<RuntimeLifecycleView>,
     ) {
         let controller_owner = self.owner();
-        let controller = controller_owner.controller();
         let operations = Self::active_lifecycles_with(&controller_owner);
-        let mut records = controller.state.sessions.clone();
-        for id in &controller_owner.close_requested {
-            if let Some(record) = records.get_mut(id)
-                && record.state != SessionState::Stopped
-            {
-                record.state = SessionState::Closing;
-            }
+        (controller_owner.projected_records(), operations)
+    }
+
+    pub(crate) fn worker_controller_projection(&self) -> Controller {
+        self.owner().pollable_worker_inputs().controller()
+    }
+
+    pub(crate) fn controller_projection(&self) -> Controller {
+        let owner = self.owner();
+        let mut state = owner.controller().state.clone();
+        state.sessions = owner.projected_records();
+        Controller {
+            config: owner.controller().config.clone(),
+            state,
         }
-        (records, operations)
+    }
+
+    pub(crate) fn active_controller_projection(&self) -> Controller {
+        let owner = self.owner();
+        Controller {
+            config: owner.controller().config.clone(),
+            state: mj_core::state::State {
+                sessions: owner
+                    .indexes
+                    .active
+                    .keys()
+                    .filter_map(|id| {
+                        owner
+                            .controller()
+                            .state
+                            .sessions
+                            .get(id)
+                            .map(|record| (id.clone(), record.clone()))
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        }
     }
 
     pub fn cancel_lifecycle_if_active(&self, session_id: &str) {

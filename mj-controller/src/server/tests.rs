@@ -1287,6 +1287,39 @@ fn run_viewer_script(name: &str, script: &str) {
 }
 
 #[test]
+fn browser_runtime_deltas_are_atomic_and_do_not_visit_history() {
+    let source = viewer_source("class ViewerRuntimeState", "const viewerState =");
+    let checks = r#"
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+for (const count of [100, 10000, 100000]) {
+  let visits = 0;
+  const state = new ViewerRuntimeState(row => { visits++; return row.live; }, row => { visits++; return !row.live; }, () => 0);
+  const rows = Array.from({length: count}, (_, id) => ({id: String(id), workspace_id:'w', live:false}));
+  rows.push({id:'active', workspace_id:'w', live:true});
+  state.apply({kind:'snapshot', cursor:{incarnation:'a',sequence:1}, snapshot:{sessions:rows}});
+  const histories = state.resume('w');
+  visits = 0;
+  const frame = {kind:'delta', from:{incarnation:'a',sequence:1}, cursor:{incarnation:'a',sequence:2}, metadata:{revision:2}, sessions:[['active',{id:'active',workspace_id:'w',live:true,title:'changed'}]]};
+  assert(state.apply(frame), 'delta was not accepted');
+  assert(visits <= 4, 'a live update visited history');
+  assert(state.resume('w') === histories, 'unchanged history was rebuilt');
+  assert(!state.apply(frame), 'duplicate delta was reapplied');
+  const previous = state.rows.get('active');
+  let refused = false;
+  try { state.apply({...frame, from:{incarnation:'other',sequence:2}, cursor:{incarnation:'other',sequence:3}, sessions:[['active',null]]}); } catch (_) { refused = true; }
+  assert(refused && state.rows.get('active') === previous, 'a gap partly applied');
+  state.apply({kind:'delta', from:frame.cursor, cursor:{incarnation:'a',sequence:3}, metadata:{}, sessions:[['active',null]]});
+  assert(!state.rows.has('active') && !state.live.has('w'), 'deleted membership survived');
+  state.apply({kind:'reset_required'});
+  assert(state.cursor === null, 'reset retained the cursor');
+  state.apply({kind:'snapshot', cursor:{incarnation:'b',sequence:1}, snapshot:{sessions:[]}});
+  assert(state.rows.size === 0, 'replacement retained old history');
+}
+"#;
+    run_viewer_script("runtime-deltas", &format!("{source}\n{checks}"));
+}
+
+#[test]
 fn web_upgrade_waits_for_readiness_and_retries_only_explicit_refusals() {
     let source = viewer_source(
         "async function upgradeAwareFetch",
@@ -1402,11 +1435,16 @@ if (requests.length !== 3 || requests[2].body.prefix !== '/work/repos/')
 
 #[test]
 fn web_configuration_repair_action_explains_missing_entries_without_a_request() {
-    let source = viewer_source("async function runSessionAction(", "sessions.onclick");
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function sessionById(", "function sessionInWorkspace("),
+        viewer_source("async function runSessionAction(", "sessions.onclick")
+    );
     let setup = r#"
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
 const snapshot = { sessions: [{ id: 'broken', configuration_issue: 'Restore bundle project in config.toml' }] };
+const viewerState = { rows: new Map(snapshot.sessions.map(row => [row.id, row])) };
 const errorNode = { textContent: '' };
 "#;
     let checks = r#"
@@ -1489,9 +1527,10 @@ if (sessionActivityLabel(session, 121000) !== 'Provider unavailable · retrying 
 #[test]
 fn embedded_viewer_lists_current_workspace_histories_and_retained_move_recovery() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         viewer_source("function isSubagentSession(", "function liveSessions("),
         viewer_source("function isResumeSession(", "const resumeDrafts ="),
+        viewer_source("class ViewerRuntimeState", "const viewerState ="),
     );
     let setup = r#"
 const snapshot = {
@@ -1509,6 +1548,8 @@ function sessionActivityMs() { return 0; }
 function epochMs() { return null; }
 "#;
     let checks = r#"
+const viewerState = new ViewerRuntimeState(() => false, row => !isSubagentSession(row) && isResumeSession(row), resumeActivityMs);
+viewerState.install(snapshot);
 const ids = workspace => resumeSessions(workspace).map(session => session.id).sort();
 if (JSON.stringify(ids("workspace-a")) !== JSON.stringify(["history-a", "move-a"])) {
   throw new Error(`workspace A histories or recoveries were wrong: ${JSON.stringify(ids("workspace-a"))}`);
@@ -1526,7 +1567,11 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 
 #[test]
 fn embedded_viewer_lists_no_sub_agent_among_live_sessions() {
-    let source = viewer_source("function isSubagentSession(", "/// Sessions grouped by");
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function isSubagentSession(", "/// Sessions grouped by"),
+        viewer_source("class ViewerRuntimeState", "const viewerState =")
+    );
     let setup = r#"
 const route = {};
 const snapshot = {
@@ -1540,6 +1585,9 @@ function selectedWorkspaceId() { return "workspace-a"; }
 function isDashboardSession() { return true; }
 "#;
     let checks = r#"
+const viewerState = new ViewerRuntimeState(row => !isSubagentSession(row) && isDashboardSession(row), () => false, () => 0);
+viewerState.install(snapshot);
+const sessionById = id => viewerState.rows.get(id);
 const ids = liveSessions().map(session => session.id);
 if (JSON.stringify(ids) !== JSON.stringify(["parent"])) {
   throw new Error(`live sessions listed a sub-agent: ${JSON.stringify(ids)}`);
@@ -1586,7 +1634,11 @@ if (sent.path !== "/api/actions" || sent.body.workspace_id !== "workspace-b") {
 
 #[test]
 fn embedded_viewer_warns_before_stopping_an_active_session() {
-    let source = viewer_source("async function runSessionAction", "sessions.onclick =");
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function sessionById(", "function sessionInWorkspace("),
+        viewer_source("async function runSessionAction", "sessions.onclick =")
+    );
     let setup = r#"
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
@@ -1597,6 +1649,7 @@ const snapshot = {
   ],
 };
 const questions = [];
+const viewerState = { rows: new Map(snapshot.sessions.map(row => [row.id, row])) };
 function confirm(question) { questions.push(question); return false; }
 function navigate() {}
 "#;

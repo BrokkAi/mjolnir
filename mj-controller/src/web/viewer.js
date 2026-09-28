@@ -295,13 +295,13 @@ function navigate(next) {
 function selectedWorkspaceId() {
   const workspaces = snapshot?.workspaces || [];
   if (route.subagentParentId) {
-    return snapshot?.sessions.find(session => session.id === route.subagentParentId)?.workspace_id;
+    return sessionById(route.subagentParentId)?.workspace_id;
   }
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
   if (route.name === 'conversation') {
-    const session = snapshot?.sessions.find(s => s.id === route.sessionId);
+    const session = sessionById(route.sessionId);
     if (session?.workspace_id) return session.workspace_id;
   }
 
@@ -335,9 +335,9 @@ function applyRoute() {
   // A conversation route only means a conversation while that session still
   // has one. Otherwise it is a stale link, and the dashboard is the answer.
   if (route.name === 'conversation') {
-    const session = snapshot.sessions.find(s => s.id === route.sessionId);
+    const session = sessionById(route.sessionId);
     const virtualParent = route.subagentParentId
-      ? snapshot.sessions.find(s => s.id === route.subagentParentId)
+      ? sessionById(route.subagentParentId)
       : null;
     if (!session
       || (route.subagentParentId && !virtualParent?.subagent_session_ids?.includes(session.id))
@@ -352,7 +352,7 @@ function applyRoute() {
   }
 
   if (route.name === 'move') {
-    const session = snapshot.sessions.find(s => s.id === route.sessionId);
+    const session = sessionById(route.sessionId);
     if (!session?.capabilities?.move_session
       && session?.operation?.kind !== 'move'
       && !session?.move_recovery?.checkpoint_retained) {
@@ -466,7 +466,7 @@ function renderLaunchFailures() {
 function renderWorkspaces() {
   const selected = selectedWorkspaceId();
   if (route.subagentParentId) {
-    const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
+    const parent = sessionById(route.subagentParentId);
     const tab = el('div', 'tab virtual-workspace');
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-selected', 'true');
@@ -594,20 +594,9 @@ function seedDashboardOrders(data) {
   if (dashboardOrderSeeded) return;
   dashboardOrderSeeded = true;
   const workspaceIds = new Set((data.workspaces || []).map(workspace => workspace.id));
-  for (const session of data.sessions || []) {
-    if (session.workspace_id) workspaceIds.add(session.workspace_id);
-  }
-  for (const workspaceId of workspaceIds) {
-    const workspaceLive = (data.sessions || []).filter(session =>
-      session.workspace_id === workspaceId && isDashboardSession(session),
-    );
-    orderState(workspaceId, workspaceLive);
-  }
-  // Snapshots predating workspaces still have a single implicit workspace.
-  if (!(data.workspaces || []).length) {
-    orderState('', (data.sessions || []).filter(session =>
-      isDashboardSession(session),
-    ));
+  for (const workspace of viewerState.workspaces.keys()) workspaceIds.add(workspace);
+  for (const workspace of workspaceIds) {
+    orderState(workspace, [...(viewerState.live.get(workspace)?.values() || [])]);
   }
 }
 
@@ -659,17 +648,10 @@ function isSubagentSession(session) {
 
 function liveSessions() {
   if (route.subagentParentId) {
-    const parent = snapshot.sessions.find(session => session.id === route.subagentParentId);
-    const children = new Set(parent?.subagent_session_ids || []);
-    return (snapshot.sessions || []).filter(session => children.has(session.id));
+    const parent = sessionById(route.subagentParentId);
+    return (parent?.subagent_session_ids || []).map(sessionById).filter(Boolean);
   }
-  const workspaceId = selectedWorkspaceId();
-  return (snapshot.sessions || []).filter(
-    session =>
-      session.workspace_id === workspaceId &&
-      !isSubagentSession(session) &&
-      isDashboardSession(session),
-  );
+  return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
 /// Sessions grouped by the controller's projected project identity.
@@ -699,7 +681,7 @@ function renderSessions() {
   if (openSessionMenuId && !groups.some(group => group.sessions.some(session => session.id === openSessionMenuId))) {
     closeSessionMenu();
   }
-  const parent = snapshot.sessions.find(s => s.id === route.subagentParentId);
+  const parent = sessionById(route.subagentParentId);
   const nativeGroups = renderNativeSubagents(parent);
   if (!groups.length && !nativeGroups.length) {
     sessions.replaceChildren(el(
@@ -1147,7 +1129,7 @@ function updateSessionClocks() {
     // all controls stay put while a clock advances.
     card._activity.textContent = sessionActivityLabel(card._session);
   }
-  const selected = snapshot?.sessions.find(session => session.id === currentSession);
+  const selected = sessionById(currentSession);
   if (isTransitioningSession(selected)) {
     conversationTransitionStage.textContent = sessionActivityLabel(selected);
   }
@@ -1224,7 +1206,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !snapshot?.sessions.some(session => session.id === card.dataset.sessionId && session.workspace_id === selectedWorkspaceId()) ||
+        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -1886,7 +1868,7 @@ function selectProjectRepository(selectedSource) {
 }
 
 function recentProjectIds() {
-  return new Set(snapshot.sessions.filter(session => session.workspace_id === newDraft.workspaceId).map(session => session.bundle_id));
+  return new Set([...(viewerState.workspaces.get(newDraft.workspaceId)?.values() || [])].map(session => session.bundle_id));
 }
 
 function scheduleProjectDiscovery(picker) {
@@ -2432,13 +2414,7 @@ function resumeActivityMs(session) {
 }
 
 function resumeSessions(workspaceId = selectedWorkspaceId()) {
-  return (snapshot?.sessions || [])
-    .filter(session =>
-      session.workspace_id === workspaceId
-      && !isSubagentSession(session)
-      && isResumeSession(session))
-    .sort((left, right) =>
-      resumeActivityMs(right) - resumeActivityMs(left) || left.id.localeCompare(right.id));
+  return viewerState.resume(workspaceId);
 }
 
 const resumeDrafts = new Map();
@@ -3278,8 +3254,7 @@ function renderResumeDetail() {
     renderWikiDetail(route.wikiId);
     return;
   }
-  const session = snapshot.sessions.find(item =>
-    item.id === route.sessionId && item.workspace_id === route.workspaceId);
+  const session = sessionInWorkspace(route.sessionId, route.workspaceId);
   if (!session) {
     resumeDetail?.replaceChildren(el('p', 'dim', 'This session is no longer available. Return to the session list.'));
     return;
@@ -3349,7 +3324,7 @@ function moveQueueItemText(item) {
 
 function renderMoveForm() {
   if (!moveStep || route.name !== 'move') return;
-  const session = snapshot.sessions.find(item => item.id === route.sessionId);
+  const session = sessionById(route.sessionId);
   if (!session) return;
   const recoveryTarget = session.move_recovery?.destination_target_template_id;
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
@@ -3784,19 +3759,129 @@ async function runRefresh(target, errorNode) {
 // Data
 // ---------------------------------------------------------------------------
 
+class ViewerRuntimeState {
+  constructor(isLive, isResume, activityAt) {
+    this.isLive = isLive;
+    this.isResume = isResume;
+    this.activityAt = activityAt;
+    this.rows = new Map();
+    this.workspaces = new Map();
+    this.live = new Map();
+    this.resumable = new Map();
+    this.sortedResume = new Map();
+    this.cursor = null;
+    this.metadata = undefined;
+  }
+
+  update(id, row) {
+    const previous = this.rows.get(id);
+    const remove = groups => {
+      const members = groups.get(previous.workspace_id);
+      members?.delete(id);
+      if (members && !members.size) groups.delete(previous.workspace_id);
+    };
+    if (previous) {
+      remove(this.workspaces);
+      remove(this.live);
+      remove(this.resumable);
+      if (this.isResume(previous)) this.sortedResume.delete(previous.workspace_id);
+    }
+    this.rows.delete(id);
+    if (!row) return;
+    this.rows.set(id, row);
+    const add = groups => {
+      if (!groups.has(row.workspace_id)) groups.set(row.workspace_id, new Map());
+      groups.get(row.workspace_id).set(id, row);
+    };
+    add(this.workspaces);
+    if (this.isLive(row)) add(this.live);
+    if (this.isResume(row)) {
+      add(this.resumable);
+      this.sortedResume.delete(row.workspace_id);
+    }
+  }
+
+  install(value, cursor = null) {
+    this.rows.clear();
+    this.workspaces.clear();
+    this.live.clear();
+    this.resumable.clear();
+    this.sortedResume.clear();
+    for (const row of value.sessions || []) this.update(row.id, row);
+    this.metadata = { ...value };
+    delete this.metadata.sessions;
+    this.cursor = cursor;
+  }
+
+  apply(frame) {
+    const same = (a, b) => a && b && a.incarnation === b.incarnation && a.sequence === b.sequence;
+    if (frame.kind === 'reset_required') {
+      this.cursor = null;
+      return false;
+    }
+    if (frame.kind === 'snapshot') {
+      this.install(frame.snapshot, frame.cursor);
+      return true;
+    }
+    if (frame.kind !== 'delta') throw new Error('Unknown runtime publication');
+    if (same(this.cursor, frame.cursor)) return false;
+    if (!same(this.cursor, frame.from)
+      || frame.cursor.incarnation !== frame.from.incarnation
+      || frame.cursor.sequence <= frame.from.sequence) throw new Error('Runtime cursor gap');
+    if (!Array.isArray(frame.sessions) || frame.sessions.some(([id, row]) => row && row.id !== id)) {
+      throw new Error('Invalid runtime session changes');
+    }
+    for (const [id, row] of frame.sessions) this.update(id, row);
+    this.metadata = { ...frame.metadata };
+    delete this.metadata.sessions;
+    this.cursor = frame.cursor;
+    return true;
+  }
+
+  resume(workspace) {
+    if (!this.sortedResume.has(workspace)) {
+      this.sortedResume.set(workspace, [...(this.resumable.get(workspace)?.values() || [])]
+        .sort((a, b) => this.activityAt(b) - this.activityAt(a) || a.id.localeCompare(b.id)));
+    }
+    return this.sortedResume.get(workspace);
+  }
+}
+
+const viewerState = new ViewerRuntimeState(
+  session => !isSubagentSession(session) && isDashboardSession(session),
+  session => !isSubagentSession(session) && isResumeSession(session),
+  resumeActivityMs,
+);
+
+function sessionById(id) { return viewerState.rows.get(id); }
+function sessionInWorkspace(id, workspace) {
+  const session = sessionById(id);
+  return session?.workspace_id === workspace ? session : undefined;
+}
+
 function startEvents() {
   if (eventSource) eventSource.close();
-  eventSource = new EventSource('/api/events');
+  eventSource = new EventSource('/api/events?format=changes');
+  const source = eventSource;
   eventSource.addEventListener('open', () => setConnection('online'));
-  eventSource.addEventListener('revision', () => {
+  eventSource.addEventListener('runtime', event => {
+    if (eventSource !== source) return;
     setConnection('online');
-    refresh().then(ok => {
-      if (!ok || !currentSession) return;
-      const session = snapshot?.sessions.find(item => item.id === currentSession);
+    try {
+      if (!viewerState.apply(JSON.parse(event.data))) return;
+      presentSnapshot();
+      if (!currentSession) return;
+      const session = sessionById(currentSession);
       if (session?.capabilities?.open && !isTransitioningSession(session)) {
         loadConversation(true);
       }
-    });
+    } catch (error) {
+      console.error('Runtime stream requires a new snapshot', error);
+      setConnection('reconnecting');
+      source.close();
+      eventSource = undefined;
+      setTimeout(() => { if (!eventSource && !signedOut) startEvents(); }, 250);
+    }
   });
   // The browser reconnects a stream on its own; saying so is what stops the
   // page looking current while it is not.
@@ -3810,6 +3895,7 @@ function showLogin() {
   signedOut = true;
   cancelVoiceInput();
   snapshot = undefined;
+  viewerState.install({ sessions: [] });
   currentSession = null;
   if (eventSource) {
     eventSource.close();
@@ -3839,7 +3925,7 @@ function showLogin() {
 // snapshot observes the operation or its final result, including reconnects.
 function reconcileLifecycleActions() {
   for (const [key, pending] of pendingLifecycleActions) {
-    const session = snapshot.sessions.find(item => item.id === pending.id);
+    const session = sessionById(pending.id);
     const running = session?.operation || session?.lifecycle === 'suspending';
     const finished = !session || (pending.action === 'suspend' && session.lifecycle === 'suspended')
       || (session.launch_error && session.launch_error !== pending.previousError)
@@ -3882,36 +3968,44 @@ function confirmSessionDestruction(session) {
   });
 }
 
+function presentSnapshot() {
+  snapshot = viewerState.metadata;
+  signedOut = false;
+  snapshotReceivedAtMs = Date.now();
+  reconcileLifecycleActions();
+  seedDashboardOrders(snapshot);
+  renderMenuVersion();
+  login.classList.add('hidden');
+  app.classList.remove('hidden');
+  menuButton.classList.remove('hidden');
+  if (currentSession) {
+    const session = sessionById(currentSession);
+    if (!session
+      || (!session.capabilities?.open
+        && !isTransitioningSession(session)
+        && !isLoadingConversationSession(session))) {
+      navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+      return true;
+    }
+    syncConversationMode(session);
+    renderQueue(session);
+    renderElicitations(session);
+    renderTurnReview(session);
+    renderAttachments();
+    renderConversationHeader(session);
+  }
+  renderRoute();
+  if (!eventSource) startEvents();
+  return true;
+}
+
 async function refresh() {
   try {
-    snapshot = await request('/api/snapshot');
-    signedOut = false;
-    snapshotReceivedAtMs = Date.now();
-    reconcileLifecycleActions();
-    seedDashboardOrders(snapshot);
-    renderMenuVersion();
-    login.classList.add('hidden');
-    app.classList.remove('hidden');
-    menuButton.classList.remove('hidden');
-    if (currentSession) {
-      const session = snapshot.sessions.find(x => x.id === currentSession);
-      if (!session
-        || (!session.capabilities?.open
-          && !isTransitioningSession(session)
-          && !isLoadingConversationSession(session))) {
-        navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
-        return true;
-      }
-      syncConversationMode(session);
-      renderQueue(session);
-      renderElicitations(session);
-      renderTurnReview(session);
-      renderAttachments();
-      renderConversationHeader(session);
-    }
-    renderRoute();
-    if (!eventSource) startEvents();
-    return true;
+    const value = await request('/api/snapshot');
+    if (eventSource) eventSource.close();
+    eventSource = undefined;
+    viewerState.install(value);
+    return presentSnapshot();
   } catch (e) {
     if (e.message === 'unauthorized') showLogin();
     return false;
@@ -4079,7 +4173,7 @@ async function stopBackgroundTask(taskId) {
     return true;
   } catch (error) {
     pendingActions.delete(key);
-    const latest = snapshot?.sessions.find(item => item.id === session.id);
+    const latest = sessionById(session.id);
     if (latest?.background_tasks?.some(item => item.id === task.id)) {
       backgroundTaskErrors.set(key, error.message);
       if (currentSession === session.id) renderQueue(latest);
@@ -4494,7 +4588,7 @@ async function submitElicitation(sessionId, elicitationId, response) {
   if (sentElicitations.has(key)) return;
   sentElicitations.add(key);
   const rerender = () => {
-    const session = snapshot?.sessions.find(x => x.id === sessionId);
+    const session = sessionById(sessionId);
     if (session && sessionId === currentSession) renderElicitations(session);
   };
   rerender();
@@ -5142,7 +5236,7 @@ function pumpImageUploads() {
 }
 
 async function attachImageFiles(files) {
-  const session = snapshot?.sessions.find(x => x.id === currentSession);
+  const session = sessionById(currentSession);
   if (!currentSession || !session?.prompt_images_supported || !files.length) return;
   const sessionId = currentSession;
   const remaining = MAX_PROMPT_IMAGES - promptImages.length;
@@ -5196,7 +5290,7 @@ function renderAttachments() {
   // The draft the daemon keeps is text. An attachment lives in this browser
   // only, and a photograph that quietly disappears on reload is worse than one
   // somebody was told about.
-  const session = snapshot?.sessions.find(x => x.id === currentSession);
+  const session = sessionById(currentSession);
   attachImage.hidden = !session?.prompt_images_supported;
   attachments.replaceChildren();
   if (promptImages.length) {
@@ -5344,7 +5438,7 @@ async function searchHistory(query) {
 // the bug.
 
 function activeSession() {
-  return snapshot?.sessions.find(session => session.id === currentSession);
+  return sessionById(currentSession);
 }
 
 function configOption(key) {
@@ -5991,7 +6085,7 @@ function renderConversationTransition(session) {
 
 async function loadConversation(delta = false) {
   if (!currentSession) return;
-  const current = snapshot?.sessions.find(session => session.id === currentSession);
+  const current = sessionById(currentSession);
   if (!current?.capabilities?.open || isTransitioningSession(current)) {
     if (isTransitioningSession(current) || isLoadingConversationSession(current)) {
       renderConversationTransition(current);
@@ -6018,7 +6112,7 @@ async function loadConversation(delta = false) {
     const result = await request(
       `/api/conversations/${encodeURIComponent(sessionId)}${suffix}`,
     );
-    const latest = snapshot?.sessions.find(session => session.id === sessionId);
+    const latest = sessionById(sessionId);
     if (
       generation !== conversationGeneration
       || !latest?.capabilities?.open
@@ -6035,7 +6129,7 @@ async function loadConversation(delta = false) {
         method: 'POST',
         body: JSON.stringify({ through }),
       });
-      const latest = snapshot?.sessions.find(session => session.id === sessionId);
+      const latest = sessionById(sessionId);
       if (
         generation !== conversationGeneration
         || !latest?.capabilities?.open
@@ -6044,7 +6138,7 @@ async function loadConversation(delta = false) {
       acknowledged = through;
     }
   } catch (err) {
-    const latest = snapshot?.sessions.find(session => session.id === sessionId);
+    const latest = sessionById(sessionId);
     if (
       generation !== conversationGeneration
       || !latest?.capabilities?.open
@@ -6059,7 +6153,7 @@ async function loadConversation(delta = false) {
     conversationInFlight = false;
     if (conversationPending) {
       conversationPending = false;
-      const latest = snapshot?.sessions.find(session => session.id === sessionId);
+      const latest = sessionById(sessionId);
       if (
         currentSession === sessionId
         && latest?.capabilities?.open
@@ -6074,7 +6168,7 @@ async function loadConversation(delta = false) {
 async function openConversation(id) {
   if (currentSession === id) return;
   cancelVoiceInput();
-  const session = snapshot?.sessions.find(x => x.id === id);
+  const session = sessionById(id);
   if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
   currentSession = id;
   conversationGeneration += 1;
@@ -6169,7 +6263,7 @@ async function submitTurnControl(session, command) {
     failedTurnControls.set(session.id, { message: error.message, activePromptId: command.data?.active_prompt_id });
   } finally {
     pendingTurnControls.delete(session.id);
-    if (currentSession === session.id) renderTurnControl(snapshot.sessions.find(s => s.id === session.id) || session);
+    if (currentSession === session.id) renderTurnControl(sessionById(session.id) || session);
   }
 }
 
@@ -6210,7 +6304,7 @@ function renderConversationHeader(session) {
   renderPromptSettings(session);
   const children = session?.subagent_session_ids || [];
   const native = session?.native_subagents || [];
-  const working = children.filter(id => snapshot.sessions.some(s => s.id === id && s.chat_phase === 'running')).length
+  const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   subagentsButton.textContent = `Subagents · ${working} working`;
   subagentsButton.title = `${children.length + native.length} retained agents`;
@@ -6463,7 +6557,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   delete actionExtra.workspace_id;
   delete actionExtra.isCurrent;
   if (dataset.action === 'repair-config') {
-    const session = snapshot?.sessions.find(item => item.id === dataset.id);
+    const session = sessionById(dataset.id);
     errorNode.textContent = session?.configuration_issue || 'Configuration is repaired. Retry opening the session.';
     return true;
   }
@@ -6472,7 +6566,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     return true;
   }
   if (dataset.action === 'move') {
-    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const session = sessionById(dataset.id);
     if (!session) return false;
     closeSessionMenu();
     navigate({
@@ -6483,11 +6577,11 @@ async function runSessionAction(dataset, errorNode, extra) {
     return true;
   }
   if (dataset.action === 'suspend') {
-    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const session = sessionById(dataset.id);
     // A suspend stops the sub-agents without a checkpoint. Only the ones
     // still at their task lose anything; an idle one has handed back.
     const workingChildren = (session?.subagent_session_ids || [])
-      .map(id => snapshot.sessions.find(item => item.id === id))
+      .map(id => sessionById(id))
       .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
       .length;
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
@@ -6498,14 +6592,14 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (!confirm(question)) return false;
   }
   if (dataset.action === 'destroy') {
-    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const session = sessionById(dataset.id);
     const choice = await confirmSessionDestruction(session);
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
-    const session = snapshot.sessions.find(x => x.id === dataset.id);
+    const session = sessionById(dataset.id);
     const title = prompt('New session name', session?.title || '');
     if (title === null || !title.trim()) return;
     body.title = title.trim();
@@ -6525,7 +6619,7 @@ async function runSessionAction(dataset, errorNode, extra) {
   pendingActions.add(key);
   const lifecycle = ['suspend', 'destroy'].includes(dataset.action);
   if (lifecycle) {
-    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const session = sessionById(dataset.id);
     pendingLifecycleActions.set(key, { id: dataset.id, action: dataset.action, previousError: session?.launch_error, observed: false });
   }
   renderRoute();
@@ -6592,8 +6686,7 @@ resumeDetail.onclick = async e => {
     await restoreWikiSession(target.dataset.id);
     return;
   }
-  const session = snapshot?.sessions.find(item =>
-    item.id === target.dataset.id && item.workspace_id === route.workspaceId);
+  const session = sessionInWorkspace(target.dataset.id, route.workspaceId);
   if (!session) return;
   if (target.dataset.action === 'move') {
     navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });
@@ -6681,7 +6774,7 @@ feedScroll.addEventListener('scroll', () => {
 });
 
 cancelTurnButton.onclick = async () => {
-  const session = snapshot.sessions.find(s => s.id === currentSession);
+  const session = sessionById(currentSession);
   const control = turnControlState(session);
   if (control.pending || control.uncertain) return;
   if (control.command) await submitTurnControl(session, control.command);
@@ -6697,7 +6790,7 @@ conversationTransitionCancel.onclick = async () => {
       conversationTransitionError,
     );
   } finally {
-    const session = snapshot?.sessions.find(item => item.id === id);
+    const session = sessionById(id);
     if (session && currentSession === id) renderConversationHeader(session);
   }
 };
@@ -6720,7 +6813,7 @@ promptText.addEventListener('paste', e => {
     .filter(Boolean);
   if (files.length) {
     e.preventDefault();
-    const session = snapshot?.sessions.find(x => x.id === currentSession);
+    const session = sessionById(currentSession);
     if (session?.prompt_images_supported) attachImageFiles(files);
     else
       document.querySelector('#conversation-error').textContent =
@@ -6747,7 +6840,7 @@ promptText.addEventListener('drop', e => {
     file.type.startsWith('image/'),
   );
   if (files.length) {
-    const session = snapshot?.sessions.find(x => x.id === currentSession);
+    const session = sessionById(currentSession);
     if (session?.prompt_images_supported) attachImageFiles(files);
     else
       document.querySelector('#conversation-error').textContent =
@@ -6905,7 +6998,7 @@ function reconnect() {
   presentationKey = null;
   refresh().then(ok => {
     if (ok) setConnection('online');
-    const session = snapshot?.sessions.find(item => item.id === currentSession);
+    const session = sessionById(currentSession);
     if (ok && session?.capabilities?.open && !isTransitioningSession(session)) {
       loadConversation(false);
     }

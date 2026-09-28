@@ -48,6 +48,11 @@ pub(super) struct ProjectSourceResolved {
 pub(super) struct PhoneProjectSources {
     pub(super) entries: std::collections::BTreeMap<String, ProjectSourceEntry>,
     pub(super) jobs: tokio::task::JoinSet<ProjectSourceResolved>,
+    records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    relations: mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    config: Option<Config>,
+    pending: std::collections::BTreeSet<String>,
+    retries: std::collections::BTreeSet<(Instant, String)>,
 }
 
 impl PhoneProjectSources {
@@ -55,31 +60,64 @@ impl PhoneProjectSources {
         let state = &controller.state;
         let own_identity =
             |session: &SessionRecord| state.project_identity_session(session).id == session.id;
-        self.entries.retain(|id, entry| {
-            let keep = state.sessions.get(id).is_some_and(|session| {
-                own_identity(session)
-                    && session.project_directory.is_some()
-                    && entry.key == ProjectSourceKey::of(session, &controller.config)
-            });
-            if !keep {
-                entry.cancelled.store(true, Ordering::Release);
-            }
-            keep
-        });
-        for session in state.sessions.values() {
-            if self.jobs.len() >= 8 {
-                break;
-            }
-            if !own_identity(session)
-                || session.project_directory.is_none()
-                || self.entries.get(&session.id).is_some_and(|entry| {
-                    entry
-                        .retry_at
-                        .is_none_or(|deadline| Instant::now() < deadline)
-                })
-            {
+        let mut changed = self
+            .records
+            .changes(&state.sessions)
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        changed.extend(
+            self.relations
+                .changes(&state.subagents)
+                .map(|(id, _)| id.clone()),
+        );
+        if self.config.as_ref() != Some(&controller.config) {
+            changed.extend(state.sessions.keys().cloned());
+        }
+        for id in changed {
+            let key = state
+                .sessions
+                .get(&id)
+                .filter(|session| own_identity(session) && session.project_directory.is_some())
+                .map(|session| ProjectSourceKey::of(session, &controller.config));
+            if key.is_some() && self.entries.get(&id).map(|entry| &entry.key) == key.as_ref() {
                 continue;
             }
+            if let Some(entry) = self.entries.remove(&id) {
+                entry.cancelled.store(true, Ordering::Release);
+                if let Some(deadline) = entry.retry_at {
+                    self.retries.remove(&(deadline, id.clone()));
+                }
+            }
+            self.pending.remove(&id);
+            if key.is_some() {
+                self.pending.insert(id);
+            }
+        }
+        self.records = state.sessions.clone();
+        self.relations = state.subagents.clone();
+        self.config = Some(controller.config.clone());
+        let now = Instant::now();
+        while self
+            .retries
+            .first()
+            .is_some_and(|(deadline, _)| *deadline <= now)
+        {
+            let (deadline, id) = self.retries.pop_first().expect("due retry");
+            if self
+                .entries
+                .get(&id)
+                .is_some_and(|entry| entry.retry_at == Some(deadline))
+            {
+                self.pending.insert(id);
+            }
+        }
+        while self.jobs.len() < 8 {
+            let Some(id) = self.pending.pop_first() else {
+                break;
+            };
+            let Some(session) = state.sessions.get(&id) else {
+                continue;
+            };
             let key = ProjectSourceKey::of(session, &controller.config);
             let cancelled = Arc::new(AtomicBool::new(false));
             let last_error = self
@@ -141,9 +179,22 @@ impl PhoneProjectSources {
                     tracing::warn!(session_id = %resolved.session_id, %error, "could not resolve web project source");
                 }
                 entry.last_error = Some(error);
-                entry.retry_at = Some(Instant::now() + Duration::from_secs(30));
+                let deadline = Instant::now() + Duration::from_secs(30);
+                entry.retry_at = Some(deadline);
+                self.retries.insert((deadline, resolved.session_id));
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn retry_now(&mut self, id: &str) {
+        let entry = self.entries.get_mut(id).expect("retry entry");
+        if let Some(deadline) = entry.retry_at {
+            self.retries.remove(&(deadline, id.to_owned()));
+        }
+        let deadline = Instant::now();
+        entry.retry_at = Some(deadline);
+        self.retries.insert((deadline, id.to_owned()));
     }
 
     /// The resolved source of `session`, read from its project identity

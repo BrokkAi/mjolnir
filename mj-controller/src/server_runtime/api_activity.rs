@@ -1,6 +1,5 @@
 //! Record the UI's activity facts without doing database work on its loop,
 //! and without letting a recording failure stop the server.
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::database::ApiActivityState;
@@ -18,32 +17,19 @@ pub(super) async fn record_activity_stream(
     record: impl FnMut(Vec<(String, ApiActivityState)>, i64) -> Result<()> + Send + 'static,
 ) -> Result<()> {
     let record = Arc::new(Mutex::new(record));
-    let mut recorded = BTreeMap::<String, ApiActivityState>::new();
+    let mut recorded = crate::server::ViewerSessions::default();
     let mut last_failure: Option<String> = None;
     loop {
-        let current = {
-            let snapshot = snapshots.borrow_and_update();
-            snapshot
-                .sessions
-                .iter()
-                .map(|session| {
-                    (
-                        session.id.clone(),
-                        ApiActivityState {
-                            state: session.state.clone(),
-                            details: session.activity_details.clone(),
-                            is_idle: session.is_idle,
-                            waiting_for_input: !session.pending_elicitations.is_empty(),
-                            capacity_retry: session.capacity_retry.is_some(),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
-        let changed = current
-            .iter()
-            .filter(|(id, activity)| recorded.get(*id) != Some(*activity))
-            .map(|(id, activity)| (id.clone(), activity.clone()))
+        let current = snapshots.borrow_and_update().sessions.clone();
+        let changed = recorded
+            .0
+            .changes(&current.0)
+            .filter_map(|(id, row)| {
+                let row = row?;
+                let activity = activity_of(row);
+                (recorded.0.get(id).map(activity_of).as_ref() != Some(&activity))
+                    .then(|| (id.clone(), activity))
+            })
             .collect::<Vec<_>>();
         if changed.is_empty() {
             recorded = current;
@@ -88,6 +74,16 @@ pub(super) async fn record_activity_stream(
         if snapshots.changed().await.is_err() {
             return Ok(());
         }
+    }
+}
+
+fn activity_of(session: &crate::server::ViewerSession) -> ApiActivityState {
+    ApiActivityState {
+        state: session.state.clone(),
+        details: session.activity_details.clone(),
+        is_idle: session.is_idle,
+        waiting_for_input: !session.pending_elicitations.is_empty(),
+        capacity_retry: session.capacity_retry.is_some(),
     }
 }
 

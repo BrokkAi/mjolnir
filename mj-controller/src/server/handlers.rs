@@ -1011,9 +1011,63 @@ pub(super) async fn prompt_history(
     .map(Json)
 }
 
-pub(super) async fn events(State(state): State<ServerState>) -> impl IntoResponse {
+#[derive(Default, Deserialize)]
+pub(super) struct EventsQuery {
+    format: Option<String>,
+}
+
+pub(super) async fn events(
+    State(state): State<ServerState>,
+    Query(query): Query<EventsQuery>,
+) -> impl IntoResponse {
     let mut snapshots = state.snapshot_rx.clone();
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(8);
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(1);
+    if query.format.as_deref() == Some("changes") {
+        tokio::spawn(async move {
+            let mut feed = match viewer_feed::ViewerFeed::new() {
+                Ok(feed) => feed,
+                Err(error) => {
+                    tracing::error!(%error, "could not start browser publication stream");
+                    return;
+                }
+            };
+            loop {
+                let current = snapshots.borrow_and_update().clone();
+                let encoded = tokio::task::spawn_blocking(move || {
+                    let result = feed.encode(current);
+                    (feed, result)
+                })
+                .await;
+                let frames = match encoded {
+                    Ok((next, Ok(frames))) => {
+                        feed = next;
+                        frames
+                    }
+                    Ok((_, Err(error))) => {
+                        tracing::error!(%error, "could not encode browser publication");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "browser publication encoder failed");
+                        return;
+                    }
+                };
+                for frame in frames {
+                    if tx
+                        .send(Ok(Event::default().event("runtime").data(frame)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if snapshots.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+        return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+    }
     tokio::spawn(async move {
         let initial = snapshots.borrow().revision;
         if tx

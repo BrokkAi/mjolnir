@@ -1,5 +1,15 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static VIEWER_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_viewer_row_visits() -> usize {
+    VIEWER_ROW_VISITS.with(|visits| visits.replace(0))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
@@ -18,7 +28,7 @@ pub struct ViewerSnapshot {
     pub server_version: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<ViewerWorkspace>,
-    pub sessions: Vec<ViewerSession>,
+    pub sessions: ViewerSessions,
     pub profiles: Vec<ViewerProfile>,
     pub targets: Vec<ViewerTarget>,
     pub bundles: Vec<ViewerBundle>,
@@ -34,6 +44,70 @@ pub struct ViewerSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_failures: Vec<ViewerLaunchFailure>,
 }
+
+/// The public wire shape remains an array; in-process publications share rows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "Vec<ViewerSession>", into = "Vec<ViewerSession>")]
+pub struct ViewerSessions(pub(crate) mj_core::snapshot_map::SnapshotMap<String, ViewerSession>);
+
+impl ViewerSessions {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ViewerSession> + ExactSizeIterator {
+        self.0.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn push(&mut self, session: ViewerSession) {
+        self.0.insert(session.id.clone(), session);
+    }
+}
+
+impl From<Vec<ViewerSession>> for ViewerSessions {
+    fn from(rows: Vec<ViewerSession>) -> Self {
+        rows.into_iter().collect()
+    }
+}
+
+impl From<ViewerSessions> for Vec<ViewerSession> {
+    fn from(rows: ViewerSessions) -> Self {
+        rows.0.into_values().collect()
+    }
+}
+
+impl FromIterator<ViewerSession> for ViewerSessions {
+    fn from_iter<T: IntoIterator<Item = ViewerSession>>(rows: T) -> Self {
+        Self(rows.into_iter().map(|row| (row.id.clone(), row)).collect())
+    }
+}
+
+impl IntoIterator for ViewerSessions {
+    type Item = ViewerSession;
+    type IntoIter = std::vec::IntoIter<ViewerSession>;
+    fn into_iter(self) -> Self::IntoIter {
+        Vec::from(self).into_iter()
+    }
+}
+
+impl std::ops::Index<usize> for ViewerSessions {
+    type Output = ViewerSession;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.iter().nth(index).expect("viewer row index")
+    }
+}
+
+impl std::ops::IndexMut<usize> for ViewerSessions {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        let id = self.0.keys().nth(index).expect("viewer row index").clone();
+        self.0.get_mut(&id).expect("viewer row exists")
+    }
+}
+
+pub(crate) type ViewerChildren =
+    mj_core::snapshot_map::SnapshotMap<String, mj_core::snapshot_map::SnapshotMap<String, ()>>;
 
 /// Carries the launch failure's reason so a client can show why a session
 /// never came up. The reason is the provisioning error chain, the same text
@@ -59,10 +133,27 @@ impl ViewerSnapshot {
     /// homes/environment, SSH hosts/keys, container environment, AWS details,
     /// concrete resource locators, native session IDs, or raw error strings.
     pub fn from_config_state(config: &Config, state: &AppState, revision: u64) -> Self {
-        let sessions = state
-            .sessions
-            .values()
+        let mut children = ViewerChildren::new();
+        for relation in state.subagents.values() {
+            children
+                .entry(relation.parent_session_id.clone())
+                .or_insert_with(Default::default)
+                .insert(relation.child_session_id.clone(), ());
+        }
+        Self::from_config_records(config, state, revision, state.sessions.values(), &children)
+    }
+
+    pub(crate) fn from_config_records<'a>(
+        config: &Config,
+        state: &AppState,
+        revision: u64,
+        records: impl Iterator<Item = &'a mj_core::state::SessionRecord>,
+        children: &ViewerChildren,
+    ) -> Self {
+        let sessions = records
             .map(|session| {
+                #[cfg(test)]
+                VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
                 let incompatible = config
                     .targets
                     .keys()
@@ -78,12 +169,10 @@ impl ViewerSnapshot {
                 let project = state.project_identity_session(session);
                 let source = project.project_source(config);
                 let subagent = state.subagents.get(&session.id);
-                let subagent_session_ids = state
-                    .subagents
-                    .values()
-                    .filter(|child| child.parent_session_id == session.id)
-                    .map(|child| child.child_session_id.clone())
-                    .collect();
+                let subagent_session_ids = children
+                    .get(&session.id)
+                    .map(|children| children.keys().cloned().collect())
+                    .unwrap_or_default();
                 ViewerSession {
                     subagents: session.subagents.clone().unwrap_or_default(),
                     checkout: session.checkout.clone(),

@@ -26,20 +26,23 @@ pub(crate) async fn run_server(
     let mut pending_elicitations = std::collections::BTreeMap::new();
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
-    let mut native_agents =
-        load_native_agents(controller.state.sessions.keys().cloned().collect()).await?;
+    let mut native_agents = std::collections::BTreeMap::new();
     let mut materialized_activity = load_materialized_activity(&controller).await?;
     let mut project_sources = PhoneProjectSources::default();
-    let (records, lifecycles) = daemon_runtime.session_projection();
-    controller.state.sessions = records;
-    let mut operations = lifecycles
+    let mut move_recoveries = ViewerMoveRecoveries::new();
+    let mut publication = publication::ViewerPublication::default();
+    let initial = daemon_runtime.runtime_publication()?;
+    publication.observe_runtime(&initial, &mut native_agents, &mut move_recoveries);
+    controller.state.sessions = initial.records;
+    controller.state.subagents = initial.subagents;
+    controller.state.last_subagent_policy = initial.metadata.last_subagent_policy;
+    controller.config = initial.metadata.config;
+    let mut operations = initial
+        .metadata
+        .lifecycles
         .iter()
         .map(|view| (view.session_id.clone(), viewer_operation(view)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut move_recoveries = ViewerMoveRecoveries::new();
-    let (move_recovery_tx, mut move_recovery_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<ViewerMoveRecoveries, String>>();
-    let mut move_recovery_load_in_flight = false;
     let mut launch_failures = Vec::new();
     // What the capacity poller last said, per probe target. The projection is
     // built from this on every publish rather than being accumulated, so a
@@ -48,7 +51,7 @@ pub(crate) async fn run_server(
         std::collections::BTreeMap::new();
     let (capacity_targets_tx, capacity_triggers_tx, mut capacity_updates_rx) =
         crate::pollers::spawn_dashboard_capacity_poller();
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(viewer_snapshot(
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
         &quotas,
@@ -87,7 +90,11 @@ pub(crate) async fn run_server(
         updates: mut worker_updates_rx,
         shutdown: worker_shutdown,
     } = worker;
-    publish_capacity_targets(&controller, &capacity_targets_tx, &mut capacity_state);
+    publish_capacity_targets(
+        &daemon_runtime.active_controller_projection(),
+        &capacity_targets_tx,
+        &mut capacity_state,
+    );
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
@@ -206,9 +213,6 @@ pub(crate) async fn run_server(
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
-        let mut move_recovery_jobs = tokio::task::JoinSet::new();
-        let mut native_agent_jobs = tokio::task::JoinSet::new();
-        let mut native_agents_dirty = true;
         let mut background_task_stop_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_open = true;
         let mut controller_reload_in_flight = false;
@@ -232,15 +236,17 @@ pub(crate) async fn run_server(
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
         let mut failure: Option<anyhow::Error> = None;
-        request_move_recovery_reload(
-            &move_recovery_tx,
-            &mut move_recovery_load_in_flight,
-            &mut move_recovery_jobs,
-        );
         macro_rules! publish_snapshot {
-            ($revision:expr) => {
-                let (records, lifecycles) = daemon_runtime.session_projection();
-                controller.state.sessions = records;
+            ($control:lifetime, $revision:expr) => {
+                let runtime = match daemon_runtime.runtime_publication() {
+                    Ok(runtime) => runtime,
+                    Err(error) => { failure = Some(error); break $control; }
+                };
+                publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
+                controller.state.sessions = runtime.records;
+                controller.state.subagents = runtime.subagents;
+                controller.state.last_subagent_policy = runtime.metadata.last_subagent_policy;
+                controller.config = runtime.metadata.config;
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
                         && session.last_error.is_none()
@@ -248,10 +254,10 @@ pub(crate) async fn run_server(
                         session.last_error = Some(error.clone());
                     }
                 }
-                operations = lifecycles.iter()
+                operations = runtime.metadata.lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
-                let snapshot = viewer_snapshot(
+                let snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
                     &quotas,
@@ -278,12 +284,13 @@ pub(crate) async fn run_server(
                 }
             };
         }
-        loop {
-            if native_agents_dirty && native_agent_jobs.is_empty() {
-                native_agents_dirty = false;
-                native_agent_jobs.spawn(load_native_agents(
-                    controller.state.sessions.keys().cloned().collect(),
-                ));
+        'control: loop {
+            if std::mem::take(&mut publication.inputs_changed) {
+                request_controller_reload(
+                    &mut controller_reload_in_flight,
+                    &mut controller_reload_requested,
+                    &controller_reload_tx,
+                );
             }
             project_sources.synchronize(&controller);
             tokio::select! {
@@ -335,27 +342,12 @@ pub(crate) async fn run_server(
                         tracing::error!(%error, "background-task stop task failed unexpectedly");
                     }
                 }
-                move_reloaded = move_recovery_rx.recv() => {
-                    let Some(result) = move_reloaded else {
-                        failure = feed_stopped(
-                            termination.is_cancelled(),
-                            "the Move recovery projection stopped while the phone server was running",
-                        );
-                        break;
-                    };
-                    move_recovery_load_in_flight = false;
-                    match result {
-                        Ok(recoveries) => {
-                            move_recoveries = recoveries;
-                            revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!(revision);
-                        }
-                        Err(error) => tracing::warn!(%error, "could not refresh Move recovery projection"),
-                    }
-                }
                 resolved = project_sources.jobs.join_next(), if !project_sources.jobs.is_empty() => {
                     match resolved {
-                        Some(Ok(resolved)) => project_sources.complete(resolved),
+                        Some(Ok(resolved)) => {
+                            publication.project_changed(resolved.session_id.clone());
+                            project_sources.complete(resolved);
+                        }
                         Some(Err(error)) => {
                             failure = Some(anyhow::anyhow!("web project source task failed: {error}"));
                             break;
@@ -363,10 +355,9 @@ pub(crate) async fn run_server(
                         None => unreachable!("project source jobs were not empty"),
                     }
                     revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!(revision);
+                    publish_snapshot!('control, revision);
                 }
                 changed = daemon_revisions.changed() => {
-                    native_agents_dirty = true;
                     if changed.is_err() {
                         failure = feed_stopped(
                             termination.is_cancelled(),
@@ -376,12 +367,7 @@ pub(crate) async fn run_server(
                     }
                     daemon_revisions.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!(revision);
-                    request_controller_reload(
-                        &mut controller_reload_in_flight,
-                        &mut controller_reload_requested,
-                        &controller_reload_tx,
-                    );
+                    publish_snapshot!('control, revision);
                 }
                 changed = workspace_updates.changed() => {
                     if changed.is_err() {
@@ -393,7 +379,7 @@ pub(crate) async fn run_server(
                     }
                     workspace_updates.borrow_and_update();
                     revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!(revision);
+                    publish_snapshot!('control, revision);
                 }
                 update = capacity_updates_rx.recv() => {
                     let Some(update) = update else {
@@ -419,13 +405,13 @@ pub(crate) async fn run_server(
                         }
                     }
                     revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!(revision);
+                    publish_snapshot!('control, revision);
                 }
                 changed = quota_updates.changed() => {
                     if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
                     quotas = quota_updates.borrow_and_update().clone();
                     revision = daemon_runtime.allocate_revision();
-                    publish_snapshot!(revision);
+                    publish_snapshot!('control, revision);
                 }
                 projected = conversation_projection_rx.recv() => {
                     let Some(projected) = projected else {
@@ -451,18 +437,20 @@ pub(crate) async fn run_server(
                     if let Some((session_id, _key, transcript)) =
                         conversation_projections.finish(projected, session_active)
                     {
+                        publication.dirty.insert(session_id.clone());
                         conversations.insert(session_id, transcript);
                         revision = daemon_runtime.allocate_revision();
                         conversation_tx.send_replace(conversations.clone());
-                        publish_snapshot!(revision);
+                        publish_snapshot!('control, revision);
                     } else if !session_active && conversations.remove(&session_id).is_some() {
+                        publication.dirty.insert(session_id.clone());
                         // Controller reload normally removes inactive rows
                         // first, but this also covers a worker result racing
                         // that reload and keeps the viewer from seeing a
                         // conversation for a dead session.
                         revision = daemon_runtime.allocate_revision();
                         conversation_tx.send_replace(conversations.clone());
-                        publish_snapshot!(revision);
+                        publish_snapshot!('control, revision);
                     }
                     // SessionManagerUpdates has a synchronous pending fast
                     // path. Yield after each completion so a hot stream of
@@ -470,11 +458,11 @@ pub(crate) async fn run_server(
                     tokio::task::yield_now().await;
                 }
                 update = worker_updates_rx.recv() => {
-                    native_agents_dirty = true;
                     let Some(update) = update else {
                         failure = feed_stopped(termination.is_cancelled(), "the session manager stopped; the phone server can no longer follow sessions");
                         break;
                     };
+                    publication.dirty.insert(update.session_id.clone());
                     apply_worker_record_update(&mut controller, &update);
                     if let Some(snapshot) = update.view.snapshot {
                         if snapshot.operational.native_session_is_ready()
@@ -531,7 +519,7 @@ pub(crate) async fn run_server(
                         );
                         revision = daemon_runtime.allocate_revision();
                         conversation_tx.send_replace(conversations.clone());
-                        publish_snapshot!(revision);
+                        publish_snapshot!('control, revision);
                     }
                     // The session update receiver can return pending entries
                     // without touching Tokio's budgeted receive operation.
@@ -802,7 +790,7 @@ pub(crate) async fn run_server(
                             // acknowledged it as available to the browser.
                             controller_reload_invalidated |= controller_reload_in_flight;
                             revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!(revision);
+                            publish_snapshot!('control, revision);
                             request_daemon_controller_reload(
                                 daemon_runtime.clone(),
                                 "new bundle publication",
@@ -981,24 +969,6 @@ pub(crate) async fn run_server(
                         tracing::warn!(%error, "move preparation task failed");
                     }
                 }
-                result = native_agent_jobs.join_next(), if !native_agent_jobs.is_empty() => {
-                    match result {
-                        Some(Ok(Ok(agents))) => {
-                            native_agents = agents;
-                            revision = daemon_runtime.allocate_revision();
-                            publish_snapshot!(revision);
-                        }
-                        Some(Ok(Err(error))) => tracing::error!(%error, "could not refresh native subagent identities"),
-                        Some(Err(error)) => tracing::error!(%error, "native subagent refresh task failed"),
-                        None => {}
-                    }
-                }
-                move_recovery_job = move_recovery_jobs.join_next(), if !move_recovery_jobs.is_empty() => {
-                    if let Some(Err(error)) = move_recovery_job {
-                        move_recovery_load_in_flight = false;
-                        tracing::warn!(%error, "Move recovery projection task failed");
-                    }
-                }
                 receipt = receipt_rx.recv() => {
                     let Some(ReadReceiptRequest { client_id, session_id, through, reply }) = receipt else {
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering read receipts");
@@ -1084,7 +1054,7 @@ pub(crate) async fn run_server(
                                     }
                                 }
                                 revision = daemon_runtime.allocate_revision();
-                                publish_snapshot!(revision);
+                                publish_snapshot!('control, revision);
                             }
                             let outcome = match (known, accepted) {
                                 (_, true) => ActionOutcome::accepted(),
@@ -1309,7 +1279,7 @@ pub(crate) async fn run_server(
                     };
                     if publication.is_ok() {
                         revision = daemon_runtime.allocate_revision();
-                        publish_snapshot!(revision);
+                        publish_snapshot!('control, revision);
                         request_daemon_controller_reload(
                             daemon_runtime.clone(),
                             "new session publication",
@@ -1379,7 +1349,7 @@ pub(crate) async fn run_server(
                             result.as_ref().err().map(|failure| failure.detail.clone()),
                         );
                         revision = daemon_runtime.allocate_revision();
-                        publish_snapshot!(revision);
+                        publish_snapshot!('control, revision);
                     }
                     if let Err(failure) = &result {
                         tracing::warn!(
@@ -1410,11 +1380,6 @@ pub(crate) async fn run_server(
                         &mut controller_reload_requested,
                         &controller_reload_tx,
                     );
-                    request_move_recovery_reload(
-                        &move_recovery_tx,
-                        &mut move_recovery_load_in_flight,
-                        &mut move_recovery_jobs,
-                    );
                     request_daemon_controller_reload(
                         daemon_runtime.clone(),
                         "phone action completion",
@@ -1442,7 +1407,8 @@ pub(crate) async fn run_server(
                         continue;
                     }
                     match result {
-                        Ok(mut reloaded) => {
+                        Ok(_) => {
+                            let mut reloaded = daemon_runtime.controller_projection();
                             for (session_id, error) in &pending_action_errors {
                                 if let Some(session) = reloaded.state.sessions.get_mut(session_id)
                                     && session.last_error.is_none()
@@ -1454,7 +1420,7 @@ pub(crate) async fn run_server(
                             quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
 
                             publish_capacity_targets(
-                                &controller,
+                                &daemon_runtime.active_controller_projection(),
                                 &capacity_targets_tx,
                                 &mut capacity_state,
                             );
@@ -1473,11 +1439,6 @@ pub(crate) async fn run_server(
                             materialized_activity.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });
-                            request_move_recovery_reload(
-                                &move_recovery_tx,
-                                &mut move_recovery_load_in_flight,
-                                &mut move_recovery_jobs,
-                            );
                             conversations.retain(|id, _| {
                                 controller.state.sessions.get(id).is_some_and(|session| session.state.is_active())
                             });
@@ -1493,7 +1454,7 @@ pub(crate) async fn run_server(
                             }
                             revision = daemon_runtime.allocate_revision();
                             conversation_tx.send_replace(conversations.clone());
-                            publish_snapshot!(revision);
+                            publish_snapshot!('control, revision);
                         }
                         Err(error) => {
                             tracing::warn!(%error, "completed phone operation could not reload controller state");
@@ -1519,8 +1480,6 @@ pub(crate) async fn run_server(
         // Preparation tasks may be inspecting an archive or probing a target;
         // abort and drain them before the HTTP server's channels disappear.
         move_preparation_jobs.shutdown().await;
-        native_agent_jobs.shutdown().await;
-        move_recovery_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();
         for control in action_cancellations.values() {

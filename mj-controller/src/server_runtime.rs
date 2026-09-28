@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 pub(crate) mod api;
 mod api_activity;
 pub(crate) mod profile_catalog;
+mod publication;
 
 use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
 use mj_core::refusal::Refusal;
@@ -39,9 +40,8 @@ use crate::daemon::{
     CreateSessionControl, CreateSessionRequest, ResumeSessionRequest, RuntimeState,
 };
 use crate::pollers::{
-    QUOTA_STALE_AFTER, QuotaRefreshBatch, apply_worker_record_update,
-    projected_queued_prompts, queued_prompt_projection, quota_refresh_profiles,
-
+    QUOTA_STALE_AFTER, QuotaRefreshBatch, apply_worker_record_update, projected_queued_prompts,
+    queued_prompt_projection, quota_refresh_profiles,
 };
 
 #[derive(Debug, Clone)]

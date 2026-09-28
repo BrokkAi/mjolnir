@@ -10,11 +10,15 @@ pub(super) struct PollableWorkerInputs {
 }
 
 impl PollableWorkerInputs {
-    pub(super) fn prepare(&self) -> Vec<crate::session_manager::RelaySessionTarget> {
-        let controller = Controller {
+    pub(super) fn controller(&self) -> Controller {
+        Controller {
             config: self.config.clone(),
             state: self.records.clone(),
-        };
+        }
+    }
+
+    pub(super) fn prepare(&self) -> Vec<crate::session_manager::RelaySessionTarget> {
+        let controller = self.controller();
         self.ids
             .iter()
             .filter_map(|id| {
@@ -48,6 +52,19 @@ enum StoreState {
 }
 
 impl RuntimeStateOwner {
+    pub(super) fn projected_records(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, SessionRecord> {
+        let mut records = self.controller.state.sessions.clone();
+        for id in &self.close_requested {
+            if let Some(record) = records.get_mut(id)
+                && record.state != SessionState::Stopped
+            {
+                record.state = SessionState::Closing;
+            }
+        }
+        records
+    }
     pub(super) fn committed(&self) -> Option<&crate::database::CommittedState> {
         match &self.store {
             StoreState::Current(committed) => Some(committed),

@@ -84,11 +84,7 @@ impl Policy {
         policy
     }
     pub fn sync(&mut self, force: bool) {
-        let controller = self
-            .state
-            .controller
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let controller = self.state.worker_controller_projection();
         self.catalog.sync(&controller.config);
         self.credentials
             .handle()
@@ -111,16 +107,11 @@ impl Policy {
         }
     }
     pub fn observe(&mut self, id: &str, observation: &DelegationObservation) {
-        if let Some(signal) = &observation.credential_signal {
-            let controller = self
-                .state
-                .controller
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(session) = controller.state.sessions.get(id) {
-                self.signals
-                    .observe(id, &session.last_profile, signal.clone());
-            }
+        if let Some(signal) = &observation.credential_signal
+            && let Some(session) = self.state.session_record(id)
+        {
+            self.signals
+                .observe(id, &session.last_profile, signal.clone());
         }
     }
     pub fn quota(&mut self, update: QuotaUpdate) {
@@ -144,11 +135,8 @@ impl Policy {
         while let Some(result) = self.credentials.try_result() {
             log_credential_sync_actions(&result);
             let notice = {
-                let controller = self
-                    .state
-                    .controller
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let owner = self.state.owner();
+                let controller = owner.controller();
                 let profile = controller.config.profiles.get(&result.profile_id);
                 if let Some(profile) = profile {
                     self.rejected

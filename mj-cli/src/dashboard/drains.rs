@@ -299,7 +299,6 @@ impl DashboardContext {
             .set_native_agent_snapshot(update.native_agents);
         self.dashboard.set_move_snapshot(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
-        self.controller_changed = true;
     }
 
     pub(crate) fn apply_runtime_lifecycles(

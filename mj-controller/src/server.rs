@@ -388,6 +388,7 @@ pub async fn run_server_on_listener(
     .with_context(|| format!("serve web viewer on {bind}"))
 }
 
+mod viewer_feed;
 mod viewer_types;
 pub use viewer_types::*;
 mod actions;

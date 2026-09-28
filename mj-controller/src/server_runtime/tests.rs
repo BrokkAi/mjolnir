@@ -12,6 +12,78 @@ use mj_core::config::{
 use mj_core::state::SessionState;
 
 #[test]
+fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
+    for count in [100, 10_000, 100_000] {
+        let mut controller = controller_with_profiles(&[]);
+        for index in 0..count {
+            let id = format!("history-{index:06}");
+            let mut record = phone_session(&id, 0);
+            record.state = SessionState::Stopped;
+            controller.state.sessions.insert(id, record);
+        }
+        let sources = PhoneProjectSources::default();
+        let views = PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &sources,
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        };
+        let mut publisher = publication::ViewerPublication::default();
+        let held = publisher.snapshot(&controller, &[], &Default::default(), &views, 1);
+        crate::server::take_viewer_row_visits();
+        publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
+        assert_eq!(crate::server::take_viewer_row_visits(), 0);
+        publisher.dirty.insert("history-000000".into());
+        publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        assert_eq!(crate::server::take_viewer_row_visits(), 1);
+        controller
+            .state
+            .sessions
+            .get_mut("history-000000")
+            .unwrap()
+            .session_title_override = Some("Changed".into());
+        let changed = publisher.snapshot(&controller, &[], &Default::default(), &views, 4);
+        assert_eq!(crate::server::take_viewer_row_visits(), 1);
+        assert_eq!(changed.sessions.0["history-000000"].title, "Changed");
+        assert_ne!(held.sessions.0["history-000000"].title, "Changed");
+        controller.state.sessions.remove("history-000000");
+        let removed = publisher.snapshot(&controller, &[], &Default::default(), &views, 5);
+        assert_eq!(crate::server::take_viewer_row_visits(), 0);
+        assert_eq!(removed.sessions.len(), count - 1);
+        if count == 100 {
+            assert!(serde_json::to_value(&removed).unwrap()["sessions"].is_array());
+        }
+    }
+}
+
+#[test]
+fn dependency_refresh_remains_pending_until_the_web_loop_schedules_it() {
+    let mut publisher = publication::ViewerPublication::default();
+    let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+    runtime
+        .records
+        .insert("new".into(), phone_session("new", 0));
+    let mut native = Default::default();
+    let mut moves = Default::default();
+    publisher.observe_runtime(&runtime, &mut native, &mut moves);
+    assert!(publisher.inputs_changed);
+    publisher.observe_runtime(&runtime, &mut native, &mut moves);
+    assert!(std::mem::take(&mut publisher.inputs_changed));
+    publisher.observe_runtime(&runtime, &mut native, &mut moves);
+    assert!(!publisher.inputs_changed);
+}
+
+#[test]
 fn viewer_config_options_publish_current_advertised_values() {
     let make_options = |model, effort| {
         vec![
@@ -905,7 +977,7 @@ async fn phone_projects_warn_once_for_a_repeated_failure() {
         assert!(resolved.result.is_err());
         sources.complete(resolved);
         // Retry at once rather than after 30 seconds.
-        sources.entries.get_mut("gone").unwrap().retry_at = Some(Instant::now());
+        sources.retry_now("gone");
     }
     let warnings = log
         .at_or_above(tracing::Level::WARN)

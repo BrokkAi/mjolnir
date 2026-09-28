@@ -26,7 +26,7 @@ interface; do not implement a second delegation scheduler.
 - [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; pollability work-count coverage passes at 100, 10,000, and 100,000 historical sessions; remaining consumer scaling coverage is pending).
 - [ ] Integrate ordered persistence receipts and lifecycle ownership (committed publication integrated; lifecycle phases explicit; remaining late-effect and worker-incarnation audit pending).
 - [ ] Replace daemon reloads and poller scans with maintained projections (pollable workers maintained in memory; historical runtime snapshot projections remain).
-- [ ] Implement cursor-based incremental TUI and web feeds (daemon cursor protocol and keyed TUI consumers implemented; browser projection and SSE conversion remain).
+- [x] Implement cursor-based incremental TUI and web feeds (daemon cursor protocol, keyed TUI consumers, shared web rows, browser indexes, and bounded SSE deltas implemented; transport-size audit remains below).
 - [ ] Remove obsolete caches, validate scaling, upgrade, and recovery behavior.
 - [ ] Complete required Cargo checks and commit validated checkpoints.
 
@@ -348,3 +348,58 @@ waits for a changed observation rather than staying in the retry set. Protocol
 and all four store-divergence tests. Clippy and formatting checks pass. The full
 workspace suite passed at 98960791; final full validation remains due after the
 remaining web/ownership work. No live daemon was launched or upgraded.
+
+Checkpoint note (2026-09-27): bf0dce4c commits the daemon/TUI incremental feed.
+The current web checkpoint is unvalidated. ViewerSessions retains a persistent
+map internally and serializes the existing public array shape. ViewerPublication
+projects dirty records plus genuine project-identity dependents, retains unchanged
+rows, and observes the daemon's shared move/native projections directly. Repeated
+native-owner/move reload jobs are removed. Project discovery now schedules changed
+keys and due retries; API activity recording diffs shared public rows. Credential
+and capacity input construction uses the daemon's worker/active indexes.
+
+The browser opts into `/api/events?format=changes`, whose stream establishes a
+snapshot cursor and sends keyed deltas. It holds one coalesced watch baseline,
+uses a one-item outgoing channel, and resets explicitly for deltas above 16 MiB.
+Encoding runs off the web control loop. The legacy revision-only stream remains
+for existing clients. Browser state keeps keyed rows, workspace/live/resumable
+membership, and a cached sorted history list; individual lookups no longer scan
+history. New tests cover shared rows and browser duplicate/gap/replacement handling
+at 100, 10,000, and 100,000 rows.
+
+Review items for this uncommitted checkpoint: keep dependency refresh pending
+until the web loop schedules it (observe_runtime must not erase an earlier dirty
+signal); refresh a completed background Controller reload from current owner
+records before pruning live observations; run and repair existing sliced-JS test
+fixtures that now need the keyed lookup helpers. Full controller validation and
+Clippy are running. Worker-incarnation ownership, string-driven move target
+ownership, remaining TUI record-change scans, and the existing 8 MiB internal
+snapshot frame limit still need the final audit. Do not describe the plan as done.
+
+Integration note (2026-09-27): At the user's request, fetched and merged master
+through a3d4f61f into hel2 as 13f0a95c before further testing. Interrupted the
+previous isolated full-suite run; it is not a completed validation result.
+Preserved the in-progress web checkpoint in a named stash and restored it after
+the merge. The new daemon-owned delegation service remains the only scheduler.
+Its former controller-mutex reads now use the state owner, point session reads,
+and the maintained worker projection for credential targets. Web credential,
+quota, and delegation ownership stays removed as on master. Merge integration
+checks are in progress; no live instance has been started or upgraded.
+
+Validation note after master integration (2026-09-27): `cargo check --all-targets`
+and `cargo clippy --all-targets -- -D warnings` pass. The new full isolated run
+has passed 1,895 controller tests and 835 TUI tests, including the web scaling,
+cursor, and corrected JavaScript fixture tests. The scheduler's state-owner
+adaptation required one Clippy formatting simplification; no behavioral change.
+The remaining workspace and isolated integration tests are still running.
+The pending web dependency latch, fresh-owner reload, and consistent bootstrap
+publication review items listed above are resolved. Remaining ownership and
+historical-work audits are still open; this is a checkpoint, not plan completion.
+
+Validated web/integration checkpoint (2026-09-27): The full isolated `cargo test`
+run completed successfully after merging master, including worker and CLI tests,
+all daemon startup, terminal PTY, and store-divergence regressions. Clippy,
+formatting, JavaScript syntax, and diff whitespace checks pass. Runtime tests
+used MJ_INSTANCE=state-owner-1172 with separate config/data directories throughout.
+No live daemon was launched or upgraded. The saved pre-merge stash can be removed
+once this checkpoint is committed; all its changes were restored and reconciled.
