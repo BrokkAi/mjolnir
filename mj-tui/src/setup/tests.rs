@@ -3137,3 +3137,35 @@ fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
         Value::Null
     );
 }
+
+#[test]
+fn unsupported_cache_host_does_not_show_a_pending_managed_policy() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    let (_, preview_key) = dialog.build_cache_page().unwrap();
+    dialog.build_cache_preview = Some(BuildCachePreviewState {
+        key: preview_key,
+        result: BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            directory: None,
+            max_size: None,
+            target_max_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        }))),
+    });
+    dialog.prepare();
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(text.contains("requires a Linux host"), "{text}");
+    assert!(!text.contains("Pending application"), "{text}");
+    assert!(!text.contains("Mj-managed mbx"), "{text}");
+}
