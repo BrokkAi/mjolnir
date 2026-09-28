@@ -35,7 +35,7 @@ impl DashboardState {
         if let Some(mut mode) = self.go.take()
             && let Some(id) = mode.workspace_id.clone()
         {
-            mode.last_session_id = self.selected_session_id.clone();
+            mode.last_session_id = self.selected_session_id().map(str::to_owned);
             self.go_workspaces.insert(id, mode);
         }
         self.go = workspace_id.and_then(|id| self.go_workspaces.get(id).cloned());

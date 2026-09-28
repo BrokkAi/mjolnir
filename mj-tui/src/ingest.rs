@@ -640,15 +640,16 @@ impl DashboardState {
         }
         state.sessions = rows;
         self.state = state;
-        let before = self.pane_sessions.len();
-        self.pane_sessions
-            .retain(|_, id| self.state.sessions.contains_key(id));
-        if before != self.pane_sessions.len() {
+        if self
+            .navigation
+            .retain_sessions(|id| self.state.sessions.contains_key(id))
+        {
             self.reconcile_pins();
             self.mark_layout_modified();
         }
         self.apply_operation_projection();
         for (id, record) in changed {
+            self.release_finished_conversation(&id);
             if let Some(record) = record {
                 self.session_details
                     .entry(id)
@@ -855,8 +856,25 @@ impl DashboardState {
         {
             self.state.sessions.remove(session_id);
         }
+        self.release_finished_conversation(session_id);
         self.rebuild_resume_rows();
         self.clamp_selections();
+    }
+
+    /// A lifecycle ending releases its pane and therefore its selection in
+    /// the same transition. A manually selected historical row may still be
+    /// inspected without trying to attach to a stopped worker.
+    fn release_finished_conversation(&mut self, session_id: &str) {
+        if (self.pane_session_is_suspended(session_id)
+            || !self.state.sessions.contains_key(session_id))
+            && let Some(pane) = self.pane_for_session(session_id)
+        {
+            if pane != self.browse_pane() && self.state.sessions.contains_key(session_id) {
+                self.release_suspended_pane(pane, session_id);
+            } else {
+                self.set_pane_session(pane, None);
+            }
+        }
     }
 
     pub fn session_operation_kind(&self, session_id: &str) -> Option<SessionOperationKind> {

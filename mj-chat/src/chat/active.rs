@@ -137,6 +137,11 @@ enum ChatIoUpdate {
     ReviewerStarted(std::result::Result<(), String>),
     /// A sentence about a reviewer form answer, for the conversation.
     ReviewerNotice(String),
+    /// The system browser could not be started for a clicked link.
+    LinkOpenFailed {
+        url: String,
+        error: String,
+    },
     /// A page of the reviewer's own relay events.
     ReviewerEvents {
         result: std::result::Result<Vec<mj_core::relay::RelayEvent>, String>,
@@ -339,6 +344,10 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
             revision,
             result,
         } => chat.apply_diffstats(&tool_call_id, revision, result),
+        ChatIoUpdate::LinkOpenFailed { url, error } => {
+            tracing::warn!(%url, %error, "browser launch for a transcript link failed");
+            chat.set_notice(format!("Could not open {url}: {error}"));
+        }
         // Reviewer updates are handled where the session handle is, because
         // acting on one starts more reviewer work.
         ChatIoUpdate::ReviewerPrepared { .. }

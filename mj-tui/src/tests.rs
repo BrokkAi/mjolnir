@@ -662,6 +662,7 @@ fn ctrl_n_and_ctrl_p_move_the_focused_list() {
         },
         BTreeMap::new(),
     );
+    dashboard.select_active_session("session-0");
 
     assert_eq!(dashboard.selected_visible_index(), Some(0));
     dashboard.handle_key(ctrl_key('n'));
@@ -696,7 +697,7 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
             (session.id.clone(), session)
         })
         .collect();
-    DashboardState::new(
+    let mut dashboard = DashboardState::new(
         config(),
         State {
             last_subagent_policy: Default::default(),
@@ -707,7 +708,9 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
             container_sizes: BTreeMap::new(),
         },
         BTreeMap::new(),
-    )
+    );
+    dashboard.select_active_session("session-0");
+    dashboard
 }
 
 fn session_row_indices(dashboard: &DashboardState) -> Vec<usize> {
@@ -775,8 +778,8 @@ fn every_project_starts_expanded_and_collapsing_one_leaves_the_others() {
     );
 }
 
-/// A session that becomes history must be removed from the live list and
-/// the selection must land on a real remaining row.
+/// A session that becomes history releases the conversation and selection
+/// together; only deliberate navigation selects a remaining row.
 #[test]
 fn the_selection_survives_the_list_changing_under_it() {
     let mut dashboard = dashboard_with_live_sessions(3, 3);
@@ -792,11 +795,10 @@ fn the_selection_survives_the_list_changing_under_it() {
     let mut state = dashboard.state.clone();
     state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
     dashboard.set_state(state);
-    assert_eq!(
-        dashboard.selected_session().unwrap().id,
-        "session-0",
-        "history is excluded and selection clamps to the first live row"
-    );
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert_eq!(dashboard.current_session_id(), None);
+    dashboard.handle_key(key(KeyCode::Down));
+    assert_eq!(dashboard.selected_session_id(), Some("session-0"));
 }
 
 /// Each numbered project answers only for itself, so several can be
@@ -923,9 +925,7 @@ fn a_starting_session_can_be_renamed() {
             None,
         );
         if from_prompt {
-            // The launch leaves the conversation pane empty until the attach
-            // finishes, with the keyboard in the composer.
-            dashboard.pane_sessions.clear();
+            // The pane is assigned immediately, before its chat attaches.
             dashboard.focus_prompt();
         } else {
             dashboard.focus_sessions();
@@ -1199,7 +1199,10 @@ fn selecting_a_session_stops_the_launch_standby_from_capturing() {
     });
     dashboard.handle_key(key(KeyCode::Char('h')));
 
-    dashboard.selected_session_id = Some("session-other".into());
+    let mut other = running_session();
+    other.id = "session-other".into();
+    dashboard.state.sessions.insert(other.id.clone(), other);
+    dashboard.select_active_session("session-other");
 
     assert!(dashboard.has_launch_standby());
     assert!(!dashboard.launch_standby_capturing());
@@ -1880,6 +1883,7 @@ fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
         .state
         .sessions
         .insert(remote_history.id.clone(), remote_history);
+    dashboard.select_active_session("live");
     dashboard.clamp_selections();
 
     assert_eq!(
@@ -1908,7 +1912,7 @@ fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
     let mut config = dashboard.config.clone();
     config.advanced.show_stopped_sessions = false;
     dashboard.set_config(config);
-    assert_eq!(dashboard.selected_session_id(), Some("live"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
     assert!(dashboard.state.sessions.contains_key("session-1"));
 }
 
@@ -2238,6 +2242,7 @@ fn the_tab_ring_visits_every_pane_and_keeps_the_session_selection() {
         },
         BTreeMap::new(),
     );
+    dashboard.select_active_session("session-0");
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
 
     assert_eq!(dashboard.focus, Focus::Sessions);
@@ -2295,6 +2300,7 @@ fn keyboard_selection_stops_at_the_active_panes_ends_instead_of_wrapping() {
         },
         BTreeMap::new(),
     );
+    dashboard.select_active_session("session-0");
 
     assert_eq!(dashboard.selected_visible_index(), Some(0));
     dashboard.handle_key(key(KeyCode::Up));
@@ -2394,6 +2400,7 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
         },
         BTreeMap::new(),
     );
+    dashboard.select_active_session("session-0");
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -2779,7 +2786,7 @@ fn a_finished_launch_opens_the_session_a_refresh_displaced() {
         .remove("session-2")
         .expect("the launching session");
     dashboard.set_state(refreshed.clone());
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), None);
     refreshed.sessions.insert(launching.id.clone(), launching);
     dashboard.set_state(refreshed);
 
@@ -2858,7 +2865,7 @@ fn a_split_shows_its_session_in_the_new_pane_and_takes_the_focus() {
     assert_eq!(dashboard.pane_session(first), Some("session-1"));
     assert_eq!(dashboard.pane_for_session("session-1"), Some(first));
     // Focusing a pane moves the Sessions highlight onto what it shows.
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
     dashboard.focus_pane(first);
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 }
@@ -2983,7 +2990,7 @@ fn a_split_with_no_room_is_refused_and_changes_nothing() {
 
     assert!(refused.is_none());
     assert_eq!(dashboard.focused_pane(), before);
-    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.navigation.layout().pane_count(), 1);
     assert_eq!(
         dashboard.notice().as_deref(),
         Some(crate::SPLIT_REFUSED_NOTICE)
@@ -3062,9 +3069,9 @@ fn a_session_installs_into_the_pane_that_asked_and_leaves_any_other() {
     assert_eq!(dashboard.pane_for_session("session-1"), Some(second));
 }
 
-/// Closing a pin preserves the independent list cursor.
+/// Closing the active pin selects the remaining active conversation.
 #[test]
-fn closing_a_pane_preserves_the_list_cursor() {
+fn closing_a_pane_selects_the_remaining_active_conversation() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
@@ -3075,7 +3082,7 @@ fn closing_a_pane_preserves_the_list_cursor() {
     dashboard.select_active_session("session-1");
     assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-1"));
     assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
 /// A stored arrangement that names one session in two panes is not a layout
@@ -3118,15 +3125,15 @@ fn the_pane_keys_split_beside_the_conversation_and_close_a_pin() {
     let browse = dashboard.split_conversation_pane(pane, direction).unwrap();
     assert_eq!(dashboard.focused_pane(), browse);
     assert_eq!(dashboard.pane_session(browse), None);
-    assert_eq!(dashboard.pin_id("session-1"), Some(0));
+    assert_eq!(dashboard.pin_id("session-2"), Some(0));
     dashboard.focus_pane(first);
     assert_eq!(
         chord(&mut dashboard, CommandId::ClosePane),
         DashboardAction::ClosePane { pane: first }
     );
-    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-1"));
+    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-2"));
     assert_eq!(dashboard.browse_pane(), browse);
-    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.navigation.layout().pane_count(), 1);
 }
 
 #[test]
@@ -3164,7 +3171,7 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
         DashboardAction::ClosePane { pane: first }
     );
     assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
 /// The last-pane key returns the keyboard to the pane it came from, and says
@@ -3451,9 +3458,9 @@ fn closing_an_unfocused_pane_leaves_the_keyboard_where_it_was() {
     let closed = dashboard.close_pane(first);
 
     assert_eq!(closed.as_deref(), Some("session-1"));
-    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.navigation.layout().pane_count(), 1);
     assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
     assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
@@ -3482,7 +3489,7 @@ fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
         DashboardAction::ConversationPanesChanged { focus_moved: true }
     );
     assert_eq!(dashboard.focused_pane(), first);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.selected_session_id(), None);
 }
 
 /// A split key pressed with nothing selected still splits; the new pane is
@@ -3491,8 +3498,9 @@ fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
 #[test]
 fn a_split_key_with_no_selection_asks_for_an_empty_pane() {
     let mut dashboard = dashboard_with_two_sessions();
-    dashboard.state.sessions.clear();
-    dashboard.clamp_selections();
+    let mut state = dashboard.state.clone();
+    state.sessions.clear();
+    dashboard.set_state(state);
     dashboard.focus_prompt();
 
     assert_eq!(dashboard.selected_session_id(), None);
@@ -3524,7 +3532,7 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
 
     assert_eq!(restored.focused_pane(), second);
     assert_eq!(restored.current_session_id(), Some("session-2"));
-    assert_eq!(restored.selected_session_id(), Some("session-1"));
+    assert_eq!(restored.selected_session_id(), Some("session-2"));
 }
 
 /// Three live sessions in the default workspace and one in `other`: `asks`
@@ -4082,7 +4090,7 @@ fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
     assert_eq!(ids(&dashboard), ["quiet"]);
-    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+    assert_eq!(dashboard.selected_session_id(), None);
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
         lines.iter().any(|line| line.contains("Sessions · /qui")),
@@ -4111,15 +4119,15 @@ fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
     assert_eq!(ids(&dashboard), ["quiet"]);
     assert_eq!(dashboard.selected_session_id(), Some("quiet"));
 
-    // A query nothing matches says so instead of showing an empty pane.
+    // A query nothing matches retains the active row with an explanation.
     dashboard.handle_key(key(KeyCode::Char('/')));
     for character in "zzz".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
-    assert!(ids(&dashboard).is_empty());
+    assert_eq!(ids(&dashboard), ["quiet"]);
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
-        lines.iter().any(|line| line.contains("No sessions match")),
+        lines.iter().any(|line| line.contains("Outside filter")),
         "{lines:#?}"
     );
 
@@ -4262,7 +4270,7 @@ fn the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone
             .into_iter()
             .map(|session| session.id.clone())
             .collect::<Vec<_>>(),
-        ["beta"]
+        ["alpha", "beta"]
     );
     assert_eq!(
         dashboard.selected_session_id(),
@@ -4791,6 +4799,7 @@ fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
 fn the_monochrome_theme_draws_every_surface_without_colors() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
+    dashboard.select_active_session("asks");
     let mut config = dashboard.config.clone();
     config.theme = mj_core::config::UiTheme::Mono;
     dashboard.set_config(config);

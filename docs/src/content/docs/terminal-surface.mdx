@@ -186,12 +186,21 @@ Between 60 and 79 columns, such as a phone over SSH, there is no room for a side
 
 ## Conversation panes
 
-One pane is labeled **Browse**. Moving through the Sessions list immediately
-shows an unpinned session there, regardless of which pane you last typed in.
-Selecting a pinned session highlights its existing pane instead; Browse keeps
-its previous conversation. Enter or double-click enters the selected session's
-composer. Pinning keeps a session visible; all sessions keep running whether
-or not a pane shows them.
+The **>** marker in Sessions identifies the active conversation. Clicking a
+conversation or navigating between panes moves the marker to that session.
+Selecting a session in the list activates its existing pinned pane, or opens
+it in the pane labeled **Browse** if it is not pinned. Other pinned
+conversations stay in place.
+
+List navigation keeps the keyboard in the list; Enter or double-click enters
+the selected session's composer. An active empty pane has no selected session.
+While a conversation loads, its pane shows its own loading or error state.
+All sessions keep running whether or not a pane shows them.
+
+Filtering Sessions keeps the active session visible with an **Outside filter**
+label when it does not match. Selecting another session removes that exception
+for the previous row. Filtering and background status changes do not switch
+the active conversation.
 
 Click **◇** in a session row or Browse header to pin. Choose **Pin and browse
 right/down** to keep that session in place and create a new Browse beside it,
@@ -213,8 +222,8 @@ or 8 rows, without changing the arrangement.
 Use `prefix+h/j/k/l` to focus left/down/up/right and
 `prefix+shift+h/j/k/l` to swap with a neighbor. With the mouse, focus one pane,
 then right-click another and choose **Swap with focused pane**. Swaps carry the
-pin or Browse role with the pane and preserve the grid's geometry. Focusing a
-pane does not change the list cursor or the browsing destination.
+pin or Browse role with the pane and preserve the grid's geometry. Activating a
+pane selects its session in the list; the Browse location stays unchanged.
 
 `prefix+x` or a pane's **×** closes a pinned or empty view without stopping its
 session. Browse is required and cannot be closed; use swaps to move it.
@@ -224,9 +233,10 @@ layout. Browsing a session outside the zoomed pane reveals the full layout.
 palette offers these operations and individual directional resize commands.
 
 The layout, Browse location, pinned sessions, empty slots, pin badges, and
-active pane are saved per workspace and restored after restart. The list
-cursor, keyboard focus, and pin colors are separate visual signals; lifecycle
-status indicators retain their own meanings.
+active pane are saved per workspace and restored after restart. The Sessions
+marker is restored from that pane's conversation. Keyboard focus indicates
+whether keys navigate the list or edit the composer; pin colors connect pinned
+rows to their panes. Lifecycle status indicators retain their own meanings.
 
 ## Prefix key
 

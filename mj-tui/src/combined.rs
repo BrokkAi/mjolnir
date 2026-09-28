@@ -566,7 +566,8 @@ fn render_combined_themed(
     // The band has to hold the tallest composer the panes want, because every
     // pane's prompt is carved out of the one band.
     let desired_prompt = dashboard
-        .pane_sessions
+        .navigation
+        .sessions()
         .iter()
         .filter(|(pane, _)| **pane != focused_pane)
         .filter_map(|(pane, session_id)| {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::ChatAction;
 use crate::chat::test_support::{
     agent_message_item, agent_transcript_item, drawn_transcript, drawn_transcript_selecting, key,
     line_text, mouse_in, queued, snapshot, transcript_text,
@@ -3970,5 +3971,255 @@ fn a_tool_that_ends_after_its_turn_was_interrupted_is_not_shown_as_done() {
     assert!(
         labels.contains(&"Tool · ended after interrupt") && labels.contains(&"Tool · done"),
         "{labels:#?}"
+    );
+}
+
+fn click_text_action(chat: &mut ChatState, rows: &[String], text: &str) -> ChatAction {
+    let (row, line, offset) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|offset| (row, line, offset)))
+        .unwrap_or_else(|| panic!("missing {text:?} in {rows:#?}"));
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(display_width(&line[..offset])).unwrap(),
+        row: u16::try_from(row).unwrap(),
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clicking_link_text_opens_that_links_destination() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "See [the report](https://example.com/one) and [the notes](https://example.com/two)."
+            .to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "notes"),
+        ChatAction::OpenLink("https://example.com/two".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "report"),
+        ChatAction::OpenLink("https://example.com/one".to_owned())
+    );
+    assert_eq!(click_text_action(&mut chat, &rows, "See"), ChatAction::None);
+}
+
+#[test]
+fn links_with_the_same_text_open_their_own_destinations() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "First [issue](https://example.com/a)\n\nSecond [issue](https://example.com/b)".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+    let second = rows
+        .iter()
+        .position(|row| row.contains("Second"))
+        .expect("second paragraph is drawn");
+    let line = &rows[second];
+    let offset = line.find("issue").unwrap();
+    let action = chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(display_width(&line[..offset])).unwrap(),
+        row: u16::try_from(second).unwrap(),
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        action,
+        ChatAction::OpenLink("https://example.com/b".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "issue"),
+        ChatAction::OpenLink("https://example.com/a".to_owned())
+    );
+}
+
+#[test]
+fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "Please read [the open upstream report about integer division](https://example.com/issue) today."
+            .to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 28, 16);
+    let division_row = rows
+        .iter()
+        .position(|row| row.contains("division"))
+        .expect("link text is drawn");
+    assert!(
+        !rows[division_row].contains("Please"),
+        "the link must wrap for this test: {rows:#?}"
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "division"),
+        ChatAction::OpenLink("https://example.com/issue".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "today"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn clicking_a_non_web_link_copies_it_instead_of_opening_it() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "Run [this helper](file:///tmp/helper.sh) now.".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "helper"),
+        ChatAction::CopyLink("file:///tmp/helper.sh".to_owned())
+    );
+}
+
+#[test]
+fn a_line_that_is_only_a_link_opens_from_every_wrapped_row() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "[alpha bravo charlie delta echo foxtrot golf](https://example.com/only)".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 20, 16);
+    let expected = ChatAction::OpenLink("https://example.com/only".to_owned());
+
+    for word in ["alpha", "echo", "golf"] {
+        assert_eq!(
+            click_text_action(&mut chat, &rows, word),
+            expected,
+            "{rows:#?}"
+        );
+    }
+}
+
+fn agent_rows(text: &str, width: u16) -> (ChatState, Vec<String>) {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::Agent, text.to_owned()));
+    let rows = drawn_transcript(&mut chat, width, 24);
+    (chat, rows)
+}
+
+fn opens(url: &str) -> ChatAction {
+    ChatAction::OpenLink(url.to_owned())
+}
+
+#[test]
+fn a_plain_url_opens_without_its_trailing_punctuation() {
+    let (mut chat, rows) = agent_rows(
+        "The report is at https://example.com/some_path/report. Also (see https://example.com/x).",
+        100,
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "some_path"),
+        opens("https://example.com/some_path/report")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "example.com/x"),
+        opens("https://example.com/x")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "report is"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn a_colon_in_ordinary_text_is_not_a_link() {
+    let (mut chat, rows) = agent_rows("Note: nothing to open here.", 80);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "Note"),
+        ChatAction::None
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "nothing"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn a_url_inside_a_link_label_opens_the_links_destination() {
+    let (mut chat, rows) = agent_rows("[https://example.com/label](https://example.com/dest)", 80);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "label"),
+        opens("https://example.com/dest")
+    );
+}
+
+#[test]
+fn urls_in_code_open_from_the_transcript() {
+    let (mut chat, rows) = agent_rows(
+        "Run `curl https://example.com/inline` or:\n\n```\nGET https://example.com/block\n```",
+        80,
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "example.com/inline"),
+        opens("https://example.com/inline")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "example.com/block"),
+        opens("https://example.com/block")
+    );
+    assert_eq!(click_text_action(&mut chat, &rows, "GET"), ChatAction::None);
+}
+
+#[test]
+fn links_in_table_cells_open_their_destinations() {
+    let table = "| Issue | Status |\n| --- | --- |\n| [first bug](https://example.com/1) | open |\n| see https://example.com/2 | closed |";
+    let (mut chat, rows) = agent_rows(table, 80);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("first bug") && row.contains("open")),
+        "the table draws as a grid at this width: {rows:#?}"
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "first bug"),
+        opens("https://example.com/1")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "example.com/2"),
+        opens("https://example.com/2")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "closed"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn links_in_a_table_too_narrow_for_a_grid_still_open() {
+    let table = "| Issue | Notes |\n| --- | --- |\n| [first bug](https://example.com/1) | a long description that cannot fit a narrow grid |";
+    let (mut chat, rows) = agent_rows(table, 30);
+    assert!(
+        rows.iter().any(|row| row.contains("Issue: first bug")),
+        "the table falls back to labelled rows at this width: {rows:#?}"
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "first bug"),
+        opens("https://example.com/1")
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "Issue"),
+        ChatAction::None
     );
 }

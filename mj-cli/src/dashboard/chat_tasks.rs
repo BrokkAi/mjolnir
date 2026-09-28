@@ -129,6 +129,11 @@ impl DashboardContext {
                 };
                 self.open_subagents(parent_id);
             }
+            mj_chat::chat::ChatEventOutcome::CopyText { text, notice } => {
+                if let Err(error) = self.copy_text(&text, &notice) {
+                    tracing::warn!(error = %format!("{error:#}"), "copying chat text failed");
+                }
+            }
             mj_chat::chat::ChatEventOutcome::QuitDetach { .. } => {
                 self.request_shutdown();
             }

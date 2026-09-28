@@ -120,12 +120,7 @@ impl DashboardState {
         if matches!(self.mode, Mode::Help(_)) {
             return self.handle_help_key(key);
         }
-        let before = self.selected_session_id.clone();
-        let action = self.handle_dashboard_key(key);
-        if before != self.selected_session_id {
-            self.request_selected_browse();
-        }
-        action
+        self.handle_dashboard_key(key)
     }
 
     pub(crate) fn text_input_focused(&self) -> bool {
@@ -182,11 +177,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         let before = self.dialog_layer_key();
-        let selected_before = self.selected_session_id.clone();
         let action = self.handle_mouse_inner(mouse);
-        if selected_before != self.selected_session_id {
-            self.request_selected_browse();
-        }
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) && before != self.dialog_layer_key()
         {
             self.modal_click_transition = Some((mouse.column, mouse.row, now));
@@ -354,8 +345,8 @@ impl DashboardState {
                 .ordered_sessions()
                 .get(index)
                 .map(|session| session.id.clone());
-            if clicked.is_some() && self.selected_session_id != clicked {
-                self.selected_session_id = clicked;
+            if let Some(clicked) = clicked {
+                self.select_active_session(&clicked);
             }
         } else {
             self.set_selection_for(focus, index);

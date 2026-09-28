@@ -128,13 +128,9 @@ pub(crate) fn attention_level(
 
 impl DashboardState {
     pub(crate) fn command_session_id(&self) -> Option<&str> {
-        self.command_session_override.as_deref().or_else(|| {
-            if self.focus == Focus::Prompt {
-                self.current_session_id()
-            } else {
-                self.selected_session_id()
-            }
-        })
+        self.command_session_override
+            .as_deref()
+            .or(self.selected_session_id())
     }
 
     pub(crate) fn command_session(&self) -> Option<&SessionRecord> {
@@ -218,7 +214,7 @@ impl DashboardState {
     /// highlight. `None` when nothing is selected or the selection is not on
     /// screen.
     pub(crate) fn selected_visible_index(&self) -> Option<usize> {
-        let selected = self.selected_session_id.as_deref()?;
+        let selected = self.selected_session_id()?;
         let sessions = self.ordered_sessions();
         self.visible_session_indices()
             .into_iter()
@@ -231,14 +227,31 @@ impl DashboardState {
     /// visible regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
-        let sessions = self.ordered_sessions_unfiltered();
+        let mut sessions = self.ordered_sessions_unfiltered();
+        let selected = self.selected_session_id();
+        if let Some(active) = selected.and_then(|id| self.state.sessions.get(id))
+            && !sessions.iter().any(|session| session.id == active.id)
+        {
+            sessions.insert(0, active);
+        }
         let Some(filter) = self.sessions_filter.as_ref() else {
             return sessions;
         };
         sessions
             .into_iter()
-            .filter(|session| self.session_matches_filter(session, filter))
+            .filter(|session| {
+                Some(session.id.as_str()) == selected
+                    || self.session_matches_filter(session, filter)
+            })
             .collect()
+    }
+
+    pub(crate) fn session_outside_filter(&self, session: &SessionRecord) -> bool {
+        Some(session.id.as_str()) == self.selected_session_id()
+            && self
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|filter| !self.session_matches_filter(session, filter))
     }
 
     /// Whether one session survives the Sessions pane filter: its state is
@@ -296,12 +309,16 @@ impl DashboardState {
     /// filter is in force. A shortened list that does not say it is shortened
     /// reads as the whole truth.
     pub(crate) fn sessions_hidden_count(&self) -> usize {
-        if self.sessions_filter.is_none() {
+        let Some(filter) = &self.sessions_filter else {
             return 0;
-        }
+        };
         self.ordered_sessions_unfiltered()
-            .len()
-            .saturating_sub(self.ordered_sessions().len())
+            .into_iter()
+            .filter(|session| {
+                Some(session.id.as_str()) != self.selected_session_id()
+                    && !self.session_matches_filter(session, filter)
+            })
+            .count()
     }
 
     /// Answers a key for the Sessions filter, or `None` when the filter does
@@ -782,8 +799,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         let position = self
-            .selected_session_id
-            .as_deref()
+            .selected_session_id()
             .and_then(|selected| queue.iter().position(|entry| entry.session_id == selected));
         let target = match position {
             Some(position) => {
@@ -815,7 +831,6 @@ impl DashboardState {
                 .workspace_views
                 .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
-                    selected_session_id: None,
                     sessions_scroll: 0,
                     targets_scroll: 0,
                     quota_scroll: 0,
@@ -826,7 +841,6 @@ impl DashboardState {
                     collapsed_project_keys: BTreeSet::new(),
                     focus: Focus::Prompt,
                 });
-            view.selected_session_id = Some(session_id.to_owned());
             view.focus = Focus::Prompt;
             self.navigation_session = Some(session_id.to_owned());
             return DashboardAction::SelectWorkspace {
@@ -1085,8 +1099,10 @@ impl DashboardState {
                     .get(index)
                     .and_then(|session| sessions.get(*session))
                     .map(|session| session.id.clone());
-                if self.selected_session_id != next {
-                    self.selected_session_id = next;
+                if let Some(next) = next
+                    && self.selected_session_id() != Some(next.as_str())
+                {
+                    self.select_active_session(&next);
                     true
                 } else {
                     false
@@ -1131,6 +1147,10 @@ impl DashboardState {
             self.set_selection_for(focus, 0);
             return;
         }
+        if focus == Focus::Sessions && self.selected_visible_index().is_none() {
+            self.set_selection_for(focus, if delta < 0 { len - 1 } else { 0 });
+            return;
+        }
         let mut index = self.selection_for(focus).min(len.saturating_sub(1));
         let previous = index;
         move_index(&mut index, len, delta);
@@ -1147,59 +1167,9 @@ impl DashboardState {
         }
     }
 
-    /// Whether the state letter, rather than the end of the session itself, is
-    /// what took the selected row off screen.
-    ///
-    /// The surface opens whatever the selection names, and opening a
-    /// conversation reads its answer. A state letter that re-pointed the
-    /// selection at the first row it admits would therefore read that answer,
-    /// and `d` admits exactly the sessions holding an unread answer: it would
-    /// hide the row it had just found. The state letters narrow the list and
-    /// leave the selection on the session the person chose, with no row
-    /// highlighted while they hide it. A typed query selects on names, which
-    /// opening a conversation cannot change, so it still carries the selection
-    /// to what it finds.
-    fn selection_is_hidden_by_state(&self) -> bool {
-        let Some(state) = self
-            .sessions_filter
-            .as_ref()
-            .and_then(|filter| filter.state)
-        else {
-            return false;
-        };
-        let Some(selected) = self.selected_session_id.as_deref() else {
-            return false;
-        };
-        self.ordered_sessions_unfiltered()
-            .into_iter()
-            .any(|session| session.id == selected)
-            && !state.admits(self.attention_level(selected))
-    }
-
+    /// Clamp auxiliary list positions. Session selection belongs to navigation
+    /// and is never reassigned by row filtering or refresh.
     pub(crate) fn clamp_selections(&mut self) {
-        // The selection is anchored by id, so it survives the list changing
-        // under it; it only moves when the session it named stopped being on
-        // screen.
-        let sessions = self.ordered_sessions();
-        let visible = self
-            .visible_session_indices()
-            .into_iter()
-            .filter_map(|index| sessions.get(index).map(|session| session.id.clone()))
-            .collect::<Vec<_>>();
-        if !self
-            .selected_session_id
-            .as_ref()
-            .is_some_and(|id| visible.contains(id))
-            && !self.selection_is_hidden_by_state()
-        {
-            let displaced = self.selected_session_id.take();
-            self.selected_session_id = visible.into_iter().next();
-            if let Some(displaced) = displaced
-                && self.selected_session_id.as_ref() != Some(&displaced)
-            {
-                self.displaced_selection = Some((displaced, self.selected_session_id.clone()));
-            }
-        }
         let project_keys = self.project_keys();
         self.collapsed_project_keys
             .retain(|key| project_keys.contains(key));

@@ -444,12 +444,12 @@ fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
             "{symbols:?}: {working:?}"
         );
 
-        // Nothing is blocked, so the one session is held back, and a wide
-        // pane has room to say so before the chip.
+        // Nothing is blocked, but the active row remains visible outside
+        // the filter and must not be counted as hidden.
         dashboard.handle_key(key(KeyCode::Char('b')));
         let blocked = title(&mut dashboard, 240);
         assert!(
-            blocked.contains(&format!(" Sessions · blocked · 1 hidden{chip}")),
+            blocked.contains(&format!(" Sessions · blocked{chip}")),
             "{symbols:?}: {blocked:?}"
         );
 
@@ -880,6 +880,8 @@ fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_card
         container_sizes: BTreeMap::new(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    let first = dashboard.ordered_sessions()[0].id.clone();
+    dashboard.select_active_session(&first);
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
     terminal
@@ -905,6 +907,7 @@ fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_card
         theme::palette().selection,
         "the selected session is distinguished from the surrounding project"
     );
+
     assert_eq!(
         buffer[(
             cell_column(&lines[second_y as usize], "Second session"),
@@ -1017,6 +1020,8 @@ fn project_groups_have_one_blank_row_between_them() {
         container_sizes: BTreeMap::new(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
+    let first = dashboard.ordered_sessions()[0].id.clone();
+    dashboard.select_active_session(&first);
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
 
     terminal
@@ -2550,7 +2555,7 @@ fn the_minimized_list_scrolls_to_keep_the_selection_visible() {
     let mut dashboard = minimized_sessions_dashboard(12, 1);
 
     // Selecting the first session keeps the window at the start.
-    dashboard.selected_session_id = Some("session-00".into());
+    dashboard.select_active_session("session-00");
     let rows = minimized_content_rows(&mut dashboard, 120, 20);
     assert!(
         rows.iter().any(|line| line.contains("proj00")),
@@ -2562,7 +2567,7 @@ fn the_minimized_list_scrolls_to_keep_the_selection_visible() {
     );
 
     // Selecting the last session scrolls it into view and the first out.
-    dashboard.selected_session_id = Some("session-11".into());
+    dashboard.select_active_session("session-11");
     let rows = minimized_content_rows(&mut dashboard, 120, 20);
     assert!(
         rows.iter().any(|line| line.contains("proj11")),
@@ -3945,6 +3950,9 @@ fn only_focused_pane_draws_caret_without_shifting_table_columns() {
         },
         BTreeMap::new(),
     );
+
+    let first = dashboard.ordered_sessions()[0].id.clone();
+    dashboard.select_active_session(&first);
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -4624,7 +4632,7 @@ fn two_panes_draw_two_conversation_panels_at_the_rectangles_the_layout_reports()
     let lines = drawn(&mut dashboard, 160, 44);
 
     let band = dashboard.conversation_area.expect("the conversation band");
-    let expected = dashboard.conversation_layout.panes(band);
+    let expected = dashboard.navigation.layout().panes(band);
     assert_eq!(expected.len(), 2);
     for pane in &expected {
         let (transcript, prompt) = dashboard.pane_bands(pane.id).expect("the pane drew");

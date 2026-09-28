@@ -41,6 +41,8 @@ unicode-segmentation = "1"
 # Measures display width without the temporary `Line` that `Line::width()`
 # needs; transcript wrapping calls this once per grapheme.
 unicode-width = "0.2"
+linkify = "0.11"
+webbrowser = "1.2"
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.

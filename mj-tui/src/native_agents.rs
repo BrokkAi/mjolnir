@@ -280,7 +280,7 @@ impl DashboardState {
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 let parent = pane.agent.parent_view_id();
                 self.subagent_parent_id = self.subagent_parent_for(&parent);
-                self.selected_session_id = Some(parent.clone());
+                self.select_active_session(&parent);
                 return Some(DashboardAction::Open { session_id: parent });
             }
             KeyCode::Right | KeyCode::Enter if has_children => {

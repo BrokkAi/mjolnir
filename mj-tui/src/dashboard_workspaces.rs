@@ -34,7 +34,7 @@ impl DashboardState {
             return;
         }
         self.subagent_parent_id = Some(parent_id.clone());
-        self.selected_session_id = self
+        let child = self
             .managed_child_ids(&parent_id)
             .into_iter()
             .next()
@@ -44,6 +44,9 @@ impl DashboardState {
                     .and_then(|ids| ids.first().cloned())
             });
         self.set_current_session(None);
+        if let Some(child) = child {
+            self.select_active_session(&child);
+        }
         self.focus = Focus::Sessions;
         self.clamp_selections();
     }
@@ -53,8 +56,7 @@ impl DashboardState {
             return;
         };
         self.subagent_parent_id = self.subagent_parent_for(&parent_id);
-        self.selected_session_id = Some(parent_id);
-        self.set_current_session(None);
+        self.select_active_session(&parent_id);
         self.clamp_selections();
     }
 
@@ -92,11 +94,11 @@ impl DashboardState {
                     == Some(SessionOperationKind::Suspending);
                 let shown = [
                     self.subagent_parent_id.as_deref(),
-                    self.selected_session_id.as_deref(),
+                    self.selected_session_id(),
                 ]
                 .into_iter()
                 .flatten()
-                .chain(self.pane_sessions.values().map(String::as_str))
+                .chain(self.navigation.sessions().values().map(String::as_str))
                 .any(|id| id == child.id);
                 suspending.then(|| SubagentStoppedBySuspend {
                     session_id: child.id.clone(),
@@ -131,8 +133,7 @@ impl DashboardState {
                 continue;
             }
             self.subagent_parent_id = self.subagent_parent_for(&parent_id);
-            self.selected_session_id = Some(parent_id.clone());
-            self.set_current_session(None);
+            self.select_active_session(&parent_id);
             self.clamp_selections();
             let titles = children
                 .iter()
@@ -202,7 +203,6 @@ impl DashboardState {
         self.opening_session = None;
         if let Some(workspace_id) = workspace_id {
             if let Some(view) = self.workspace_views.get(&workspace_id).cloned() {
-                self.selected_session_id = view.selected_session_id;
                 self.sessions_scroll.set(view.sessions_scroll);
                 self.targets_scroll.set(view.targets_scroll);
                 self.quota_scroll.set(view.quota_scroll);
@@ -213,10 +213,6 @@ impl DashboardState {
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
-                self.selected_session_id = self
-                    .go
-                    .as_ref()
-                    .and_then(|mode| mode.last_session_id.clone());
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
@@ -224,11 +220,17 @@ impl DashboardState {
                 self.quota_index = 0;
                 self.pane_sizes = PaneSizes::default();
                 self.reset_conversation_layout();
+                if let Some(session) = self
+                    .go
+                    .as_ref()
+                    .and_then(|mode| mode.last_session_id.clone())
+                {
+                    self.select_active_session(&session);
+                }
                 self.collapsed_project_keys.clear();
                 self.focus = Focus::Sessions;
             }
         } else {
-            self.selected_session_id = None;
             self.sessions_scroll.set(0);
             self.targets_scroll.set(0);
             self.quota_scroll.set(0);
@@ -238,6 +240,13 @@ impl DashboardState {
             self.reset_conversation_layout();
             self.collapsed_project_keys.clear();
             self.focus = Focus::Sessions;
+        }
+        if let Some(session) = self.navigation_session.clone()
+            && self.state.sessions.get(&session).is_some_and(|record| {
+                Some(record.workspace_id.as_str()) == self.active_workspace_id()
+            })
+        {
+            self.select_active_session(&session);
         }
         self.clamp_selections();
         if workspace_focused {
@@ -258,7 +267,6 @@ impl DashboardState {
         self.workspace_views
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
-                selected_session_id: None,
                 sessions_scroll: 0,
                 targets_scroll: 0,
                 quota_scroll: 0,
@@ -287,16 +295,18 @@ impl DashboardState {
         self.subagent_workspace_close_area = None;
     }
 
-    /// Moves the Sessions selection onto `session_id` without changing focus.
+    /// Select a conversation immediately, retaining the current keyboard focus.
+    /// Pinned sessions stay in their pane; other sessions replace Browse.
     pub fn select_active_session(&mut self, session_id: &str) {
-        if self
-            .ordered_sessions()
-            .iter()
-            .any(|session| session.id == session_id)
-            && self.selected_session_id.as_deref() != Some(session_id)
-        {
-            self.selected_session_id = Some(session_id.to_owned());
+        if !self.state.sessions.contains_key(session_id) {
+            return;
         }
+        let pane = self
+            .pane_for_session(session_id)
+            .unwrap_or(self.browse_pane());
+        self.reveal_pane(pane);
+        self.set_pane_session(pane, Some(session_id));
+        self.focus_pane(pane);
     }
 
     /// Open the newly created session in the ordinary composer.
@@ -306,27 +316,13 @@ impl DashboardState {
     /// must not move the selection or the keyboard, or the next session
     /// command would act on a session the user did not choose.
     pub fn finish_new_session(&mut self, session_id: &str) {
-        // A refresh that briefly lacked the launching session moved the
-        // selection to the first row (the clamp does that); nobody chose that
-        // row, so it does not keep the new session closed (R4-11).
-        let displaced_by_refresh =
-            self.displaced_selection
-                .as_ref()
-                .is_some_and(|(displaced, stand_in)| {
-                    displaced == session_id && *stand_in == self.selected_session_id
-                });
-        if displaced_by_refresh {
-            self.displaced_selection = None;
-        } else if self
-            .selected_session_id
-            .as_deref()
+        if self
+            .selected_session_id()
             .is_some_and(|selected| selected != session_id)
         {
             return;
         }
         self.select_active_session(session_id);
-        self.focus_pane(self.browse_pane());
-        self.request_selected_browse();
         self.focus_prompt();
     }
 

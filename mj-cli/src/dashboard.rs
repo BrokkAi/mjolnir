@@ -883,7 +883,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             // The Sessions pane is a list of conversations, not a list of
             // things to go and open, so the transcript follows its selection.
-            context.follow_selected_session();
+            context.reconcile_conversation_attachments();
             context.refresh_go_context();
             context.refresh_git_status();
             context
@@ -1082,6 +1082,7 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>()
         {
+            self.save_question_draft(&session_id);
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
         }
@@ -1156,9 +1157,6 @@ impl DashboardContext {
         self.save_question_draft(session_id);
         self.cancel_chat_open_in(pane);
         self.dashboard.set_pane_session(pane, None);
-        if self.dashboard.selected_session_id() == Some(session_id) {
-            self.open_chat_session_into(self.dashboard.browse_pane(), session_id);
-        }
         self.retire_chats_outside_the_layout();
         self.save_active_workspace_layout();
     }
@@ -1301,10 +1299,8 @@ impl DashboardContext {
         if let Some(session) = self.dashboard.take_navigation_session() {
             self.open_chat_session(&session);
             self.dashboard.focus_prompt();
-        } else if self.dashboard.pane_sessions().is_empty() {
-            self.dashboard.request_selected_browse();
         }
-        self.follow_selected_session();
+        self.reconcile_conversation_attachments();
     }
 
     pub(crate) fn session_in_active_workspace(&self, session_id: &str) -> bool {
