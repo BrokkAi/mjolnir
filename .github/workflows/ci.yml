@@ -227,7 +227,7 @@ jobs:
     - name: Check portable worker boundary
       run: cargo clippy --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker -- -D warnings
     - name: Build portable worker
-      run: cargo build --release --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
+      run: cargo build --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
 
   desktop-native:
     name: Desktop shell (${{ matrix.target }})
@@ -251,12 +251,11 @@ jobs:
         lane: desktop-${{ matrix.target }}
         build-paths: |
           target/debug
-          target/release
           target/${{ matrix.target }}
     - name: Run desktop Clippy lints
       run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
     - name: Build desktop application
-      run: cargo build --release --locked -p brokk-mj-desktop
+      run: cargo build --locked -p brokk-mj-desktop
     - name: Run desktop tests
       if: runner.os == 'macOS'
       run: cargo test --locked -p brokk-mj-desktop
@@ -404,9 +403,15 @@ jobs:
         with:
           lane: compatibility-${{ matrix.target }}
           build-paths: target/release-cli
+      # The glibc floor and ELF checks do not depend on optimization, so CI
+      # builds the dev profile; release.yml builds the shipped release binary.
       - name: Build and verify glibc 2.28 CLI
+        env:
+          MJ_CLI_PROFILE: dev
         run: bash scripts/build-linux-cli.sh ${{ matrix.target }}
       - name: Test CLI on older Linux distributions through tmux
+        env:
+          MJ_CLI_PROFILE: dev
         run: bash scripts/test-linux-cli-runtime.sh ${{ matrix.target }}
 
   web-viewer:
