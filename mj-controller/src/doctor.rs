@@ -237,6 +237,8 @@ fn build_cache_checks(
             let title = format!("Build cache on {}", host.host);
             let targets = host.targets.join(", ");
             match host.status {
+                crate::controller::DoctorHostMbxStatus::Unsupported(reason) =>
+                    DoctorCheck::unsupported(id, title, reason),
                 crate::controller::DoctorHostMbxStatus::Absent => DoctorCheck::ready(
                     id,
                     title,
