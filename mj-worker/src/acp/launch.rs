@@ -8,6 +8,27 @@ pub struct SubagentMcpSocket {
     pub role: mj_core::subagent::SubagentMcpRole,
 }
 
+/// Approval ownership is resolved from the worker root before harness launch.
+/// This is local state, not an extension of the persisted reviewer wire format.
+#[derive(Debug, Clone)]
+pub struct ReviewerMcpServer {
+    server: mj_core::worker_launch::ReviewMcpServer,
+    auto_approve: bool,
+}
+
+impl ReviewerMcpServer {
+    pub fn new(
+        server: mj_core::worker_launch::ReviewMcpServer,
+        worker_root: &std::path::Path,
+    ) -> Self {
+        let auto_approve = server.is_review_dispatch(&worker_root.join("hel"));
+        Self {
+            server,
+            auto_approve,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     pub runtime_constraint: Option<(mj_core::harness_runtime::RuntimeIdentity, String)>,
@@ -24,7 +45,7 @@ pub struct LaunchSpec {
     /// Extra stdio MCP servers this session gets, beyond project memory. A
     /// turn review's reviewing agents get Bifrost this way; the primary
     /// session gets none.
-    pub extra_mcp_servers: Vec<mj_core::worker_launch::ReviewMcpServer>,
+    pub extra_mcp_servers: Vec<ReviewerMcpServer>,
     /// Delegation policy independently controls native tool suppression.
     pub subagent_policy: mj_core::subagent::SubagentPolicy,
     /// Private Mjolnir socket: parent delegation or child handback.
@@ -97,13 +118,15 @@ pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     if spec.harness == HarnessKind::Claude {
         args.push("--native-notes".into());
     }
-    vec![McpServer::Stdio(
+    vec![McpServer::Stdio(approve_owned_mcp(
+        spec,
         McpServerStdio::new("mj-memory", spec.command.clone()).args(args),
-    )]
+    ))]
 }
 
 pub(super) fn session_request_meta(
     spec: &LaunchSpec,
+    include_project_memory: bool,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     if spec.harness == HarnessKind::Codex {
         let asking = spec
@@ -169,6 +192,34 @@ pub(super) fn session_request_meta(
             serde_json::json!(["Agent", "Task"]),
         );
     }
+    if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
+        let mut allowed = Vec::new();
+        if include_project_memory {
+            for server in project_memory_mcp(spec) {
+                if let McpServer::Stdio(server) = server {
+                    allowed.push(format!("mcp__{}__*", server.name));
+                }
+            }
+        }
+        if let Some(socket) = &spec.subagent_mcp_socket {
+            allowed.extend(
+                socket
+                    .role
+                    .tool_names()
+                    .iter()
+                    .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
+            );
+        }
+        allowed.extend(
+            spec.extra_mcp_servers
+                .iter()
+                .filter(|server| server.auto_approve)
+                .map(|server| format!("mcp__{}__*", server.server.name)),
+        );
+        if !allowed.is_empty() {
+            options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
+        }
+    }
     claude_code.insert("options".to_owned(), serde_json::Value::Object(options));
     Some(serde_json::Map::from_iter([(
         "claudeCode".to_owned(),
@@ -185,11 +236,15 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     {
         spec.extra_mcp_servers
             .iter()
-            .map(|server| {
-                McpServer::Stdio(
-                    McpServerStdio::new(server.name.clone(), server.command.clone())
-                        .args(server.args.clone()),
-                )
+            .map(|entry| {
+                let server = &entry.server;
+                let registration = McpServerStdio::new(server.name.clone(), server.command.clone())
+                    .args(server.args.clone());
+                McpServer::Stdio(if entry.auto_approve {
+                    approve_owned_mcp(spec, registration)
+                } else {
+                    registration
+                })
             })
             .collect()
     } else {
@@ -199,7 +254,8 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
         && let Some(socket) = &spec.subagent_mcp_socket
     {
         let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
-        servers.push(McpServer::Stdio(
+        servers.push(McpServer::Stdio(approve_owned_mcp(
+            spec,
             McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(vec![
                 "worker".into(),
                 "subagent-mcp".into(),
@@ -212,9 +268,23 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
                 "--role".into(),
                 socket.role.id().to_owned(),
             ]),
-        ));
+        )));
     }
     servers
+}
+
+/// Only owned registrations opt in; yolo and other harnesses stay unchanged.
+fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdio {
+    if spec.harness == HarnessKind::Codex
+        && spec.execution_policy == ExecutionPolicy::ConfiguredApprovals
+    {
+        server.meta(serde_json::Map::from_iter([(
+            "codex".into(),
+            serde_json::json!({"defaultToolsApprovalMode": "approve"}),
+        )]))
+    } else {
+        server
+    }
 }
 
 fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
@@ -231,7 +301,7 @@ pub(super) fn new_session_request(
 ) -> NewSessionRequest {
     let request = NewSessionRequest::new(spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
-        .meta(session_request_meta(spec));
+        .meta(session_request_meta(spec, include_project_memory));
     request.mcp_servers(session_mcp(spec, include_project_memory))
 }
 
@@ -244,7 +314,7 @@ pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> 
         // it was not given (#1085). Replay filtering belongs to the notification
         // handler; omitting memory here removes its tools after restart.
         .mcp_servers(session_mcp(spec, true))
-        .meta(session_request_meta(spec))
+        .meta(session_request_meta(spec, true))
 }
 
 pub(super) fn resume_session_request(
@@ -254,7 +324,7 @@ pub(super) fn resume_session_request(
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
         .mcp_servers(session_mcp(spec, true))
-        .meta(session_request_meta(spec))
+        .meta(session_request_meta(spec, true))
 }
 
 /// Settings captured from the old native conversation before retiring it.

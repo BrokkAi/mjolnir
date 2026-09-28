@@ -313,6 +313,19 @@ pub struct ReviewMcpServer {
     pub args: Vec<String>,
 }
 
+impl ReviewMcpServer {
+    /// Recognize our private dispatcher by its executable and invocation, not
+    /// just its name. Keep the existing wire shape: older workers reject new
+    /// fields, and saved registrations must work after a worker upgrade.
+    #[must_use]
+    pub fn is_review_dispatch(&self, worker_executable: &Path) -> bool {
+        self.name == crate::review::mcp::REVIEW_MCP_SERVER_NAME
+            && self.command == worker_executable
+            && self.args.first().is_some_and(|arg| arg == "worker")
+            && self.args.get(1).is_some_and(|arg| arg == "review-mcp")
+    }
+}
+
 /// How a harness learns about a reviewing agent's MCP servers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewMcpDelivery {
@@ -467,6 +480,27 @@ pub struct ProfileConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_review_dispatch_keeps_its_wire_shape_and_requires_our_executable() {
+        let saved = serde_json::json!({
+            "name": "mj-review", "command": "/worker/hel",
+            "args": ["worker", "review-mcp", "--socket", "/worker/reviewer/review-dispatch.sock", "--generation", "1"]
+        });
+        let server: ReviewMcpServer = serde_json::from_value(saved.clone()).unwrap();
+        assert!(server.is_review_dispatch(Path::new("/worker/hel")));
+        assert_eq!(serde_json::to_value(&server).unwrap(), saved);
+        assert!(!server.is_review_dispatch(Path::new("/another/hel")));
+        let mut other = server.clone();
+        other.command = "/third-party/analyzer".into();
+        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
+        other = server.clone();
+        other.args[1] = "other-mcp".into();
+        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
+        other = server;
+        other.name = "mj-third-party".into();
+        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
+    }
 
     fn launch_json() -> serde_json::Value {
         serde_json::json!({
