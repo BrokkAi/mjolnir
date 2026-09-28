@@ -3436,6 +3436,50 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
 }
 
 #[test]
+fn bare_profile_switch_submits_the_resolved_preparation() {
+    let mut session = running_session();
+    session.target_template_id = "bare".into();
+    session.project_directory = Some(PathBuf::from("/work/project"));
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config.targets.clear();
+    dashboard
+        .config
+        .targets
+        .insert("bare".into(), TargetTemplate::LocalBare);
+    dashboard.focus_sessions();
+    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    let DashboardAction::MoveSession {
+        clear_resource_allocation: true,
+        preparation_request_id: Some(request_id),
+        ..
+    } = ready_key(&mut dashboard, key(KeyCode::Enter))
+    else {
+        panic!("one bare target should prepare directly after profile selection");
+    };
+    let mut preparation = move_preparation();
+    preparation.selection.target_template_id = Some("bare".into());
+    preparation.selection.clear_resource_allocation = false;
+    preparation.in_place = true;
+    assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(
+            action,
+            DashboardAction::MoveSession {
+                clear_resource_allocation: false,
+                preparation_request_id: None,
+                ..
+            }
+        ),
+        "{action:?}"
+    );
+    assert_eq!(
+        dashboard.take_move_preparation("session-1"),
+        Some(preparation)
+    );
+}
+
+#[test]
 fn failed_move_preparation_stays_visible_and_retry_requests_preparation() {
     let mut dashboard = dashboard_with_session(running_session());
     let request_id = open_move_review(&mut dashboard);

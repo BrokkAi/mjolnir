@@ -139,17 +139,14 @@ impl DashboardState {
             if wizard.preparation.is_none() {
                 return self.start_move_preparation(wizard, profile_id);
             }
-            let clear_resource_allocation = matches!(
-                self.config.targets.get(&target_template_id),
-                Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
-            );
+            let selection = &wizard.preparation.as_ref().unwrap().selection;
             let action = DashboardAction::MoveSession {
-                session_id: wizard.session_id.clone(),
-                profile_id,
-                target_template_id,
-                additional_mounts: mounts,
-                resource_allocation: wizard.resource_allocation.clone(),
-                clear_resource_allocation,
+                session_id: selection.session_id.clone(),
+                profile_id: selection.profile_id.clone().unwrap(),
+                target_template_id: selection.target_template_id.clone().unwrap(),
+                additional_mounts: selection.additional_mounts.clone().unwrap_or_default(),
+                resource_allocation: selection.resource_allocation.clone(),
+                clear_resource_allocation: selection.clear_resource_allocation,
                 preparation_request_id: None,
                 queue: Some(if wizard.discard_queue {
                     ResumeQueueDisposition::Discard

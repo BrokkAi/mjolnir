@@ -553,6 +553,20 @@ impl Controller {
         };
         let remote_archive = format!("{worker_root}/restore.hel.zip");
         let remote_spec = format!("{worker_root}/restore-spec.json");
+        use mj_checkpoint::checkpoint::QueueRestorePolicy;
+        let move_admission =
+            crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
+                operation.phase == mj_core::state::MovePhase::ResumingDestination
+                    && !operation.queue_admission_started
+                    && operation.queue == mj_core::state::ResumeQueueDisposition::Start
+            });
+        let queue_policy = if move_admission || (!native_continuity && replay_queue) {
+            QueueRestorePolicy::Defer
+        } else if discard_queued_prompts {
+            QueueRestorePolicy::Discard
+        } else {
+            QueueRestorePolicy::Restore
+        };
         let restore = CheckpointRestoreSpec {
             archive_path: restore_archive_path(
                 &backend,
@@ -579,7 +593,7 @@ impl Controller {
                 .then(|| resumed_project_directory.clone())
                 .flatten()
                 .map(|directory| target_path(&directory.to_string_lossy())),
-            discard_queued_prompts,
+            queue_policy,
         };
         // Prepare the worker root before the worker binary is installed:
         // a surviving daemon still holds the old binary open, and the
@@ -1169,6 +1183,14 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        if let Some(operation) = crate::database::load_move_operation(session_id)? {
+            ensure!(
+                !(operation.in_place
+                    && operation.phase != mj_core::state::MovePhase::Completed
+                    && operation.recovery_session.is_some()),
+                "a profile switch retains this environment; retry Move instead of recreating it with Resume"
+            );
+        }
         let SessionResumeOptions {
             additional_mounts,
             resource_allocation,
