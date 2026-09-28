@@ -111,6 +111,13 @@ pub struct CommandSpec {
     /// already exists, so a later failure owes that target's teardown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub creates_target: bool,
+    /// This command deliberately leaves a process running after it exits: it
+    /// starts a detached worker, whose lifetime belongs to the session rather
+    /// than to the launch. The executor still gives the command its own
+    /// process group, and cancellation still signals that group, but the
+    /// successful completion of a launch must not kill what it launched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detaches: bool,
     /// The SSH destination this command opens a connection to, when it does.
     /// Tagged commands pass through [`SshAdmission`] so the daemon never
     /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
@@ -150,6 +157,7 @@ impl CommandSpec {
             stage: None,
             parallel_group: None,
             creates_target: false,
+            detaches: false,
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
@@ -731,7 +739,8 @@ fn stream_command_with_stdin(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-    let group = crate::subprocess::ProcessGroupGuard::new(Some(child.id()));
+    let group =
+        (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
     let stdin = child
         .stdin
         .take()
@@ -970,7 +979,8 @@ impl CancellableProcessExecutor {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-        let group = crate::subprocess::ProcessGroupGuard::new(Some(child.id()));
+        let group = (!command.detaches)
+            .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let mut stdout = child.stdout.take().context("command stdout missing")?;
         let mut stderr = child.stderr.take().context("command stderr missing")?;
         let stdout_reader = std::thread::spawn(move || {
