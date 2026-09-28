@@ -1,5 +1,8 @@
 //! One cancellable attachment per selection; failed requests require a retry.
 
+use mj_chat::chat::{ActiveChat, ChatInstance};
+use mj_tui::tile_layout::PaneId;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -14,7 +17,70 @@ pub(super) struct SessionAttachment {
     task: Option<JoinHandle<()>>,
 }
 
+/// Resources that existed when a lifecycle operation was admitted. The
+/// completion can retire these identities, never a subsequent attachment.
+pub(super) struct ChatRetirement {
+    session_id: String,
+    chat: Option<ChatInstance>,
+    attachments: BTreeMap<PaneId, u64>,
+}
+
+impl ChatRetirement {
+    pub(super) fn capture(
+        session_id: &str,
+        chats: &BTreeMap<String, ActiveChat>,
+        attachments: &BTreeMap<PaneId, SessionAttachment>,
+    ) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            chat: chats.get(session_id).map(ActiveChat::instance),
+            attachments: attachments
+                .iter()
+                .filter_map(|(pane, attachment)| {
+                    attachment
+                        .identity(session_id)
+                        .map(|generation| (*pane, generation))
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn is_current(
+        &self,
+        chats: &BTreeMap<String, ActiveChat>,
+        attachments: &BTreeMap<PaneId, SessionAttachment>,
+    ) -> bool {
+        chats.get(&self.session_id).is_none_or(|chat| {
+            self.chat
+                .as_ref()
+                .is_some_and(|instance| chat.is_instance(instance))
+        }) && attachments.iter().all(|(pane, attachment)| {
+            attachment
+                .identity(&self.session_id)
+                .is_none_or(|generation| self.attachments.get(pane) == Some(&generation))
+        })
+    }
+
+    pub(super) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(super) fn retire_attachments(&self, attachments: &mut BTreeMap<PaneId, SessionAttachment>) {
+        for (pane, generation) in &self.attachments {
+            if let Some(attachment) = attachments.get_mut(pane)
+                && attachment.accepts(*generation, Some(&self.session_id))
+            {
+                attachment.retire(&self.session_id);
+            }
+        }
+    }
+}
+
 impl SessionAttachment {
+    fn identity(&self, session_id: &str) -> Option<u64> {
+        (self.selection.as_deref() == Some(session_id)).then_some(self.generation)
+    }
+
     /// Observe selection even when its chat is already warm. Failed/cancelled
     /// opens stay observed so render/feed ticks cannot retry them indefinitely.
     pub(super) fn select(&mut self, session: &str) -> bool {

@@ -890,10 +890,7 @@ pub(crate) async fn apply_dashboard_action(
                         &replacement,
                         &executor,
                     )?;
-                    Ok(ResumeRepositoryPreflightApply {
-                        config: Some(controller.config),
-                        preflight,
-                    })
+                    Ok(ResumeRepositoryPreflightApply { preflight })
                 },
                 move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
                     generation,
@@ -1418,7 +1415,6 @@ pub(crate) fn start_resume_repository_preflight(
             let executor = CancellableProcessExecutor::new(cancelled);
             let controller = Controller::load()?;
             Ok(ResumeRepositoryPreflightApply {
-                config: None,
                 preflight: controller.preflight_resume_repository_sources(
                     &session_id,
                     &target_id,
@@ -1674,6 +1670,11 @@ impl DashboardContext {
         self.lifecycle_operations.insert(
             session_id.to_owned(),
             crate::dashboard::io::ActiveLifecycleOperation {
+                retirement: Some(super::attachment::ChatRetirement::capture(
+                    session_id,
+                    &self.chats,
+                    &self.attachments,
+                )),
                 cancelled: cancelled.clone(),
                 kind,
                 retry_launch: None,

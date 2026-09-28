@@ -1451,6 +1451,7 @@ async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
         "still drafting".into(),
         Notices::default(),
     );
+    let original_instance = chat.instance();
     chat.session_open = false;
     chat.finish_session_reconnect(Err("session session-resumed is not managed".into()));
 
@@ -1465,6 +1466,10 @@ async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     })
     .await
     .expect("the active runtime record restarted the session handoff");
+    assert!(
+        !chat.is_instance(&original_instance),
+        "a reattached actor retires the previous view identity"
+    );
 
     assert_eq!(chat.draft(), "still drafting");
     assert!(chat.state.notice().is_none());

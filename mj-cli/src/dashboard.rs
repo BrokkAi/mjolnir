@@ -66,12 +66,13 @@ use crate::import::{
     PendingDashboardImport, spawn_dashboard_import,
 };
 use crate::pollers::{
-    CapacityPollUpdate, Feed, LifecycleUpdate, QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget,
-    ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker, WorkerPollTarget,
-    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
-    quota_refresh_profiles, refresh_dashboard_poll_targets, remote_dashboard_worker_targets,
-    session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
-    spawn_quota_refresher, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
+    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, QuotaRefreshBatch, QuotaUpdate,
+    ResourcePollTarget, ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker,
+    WorkerPollTarget, apply_worker_poll_update, complete_manual_quota_refresh,
+    projected_queued_prompts, quota_refresh_profiles, refresh_dashboard_poll_targets,
+    remote_dashboard_worker_targets, session_target_is_pollable, spawn_dashboard_capacity_poller,
+    spawn_dashboard_resource_poller, spawn_quota_refresher, spawn_remote_dashboard_worker_poller,
+    spawn_worker_diagnosis,
 };
 use crate::session_presentation::{
     apply_lifecycle_display, apply_session_activity, lifecycle_kind,
@@ -217,6 +218,23 @@ fn shutdown_wait_notice(blockers: &[String]) -> Option<String> {
     }
 }
 
+/// Bound acknowledgements, not the daemon's accepted mutation. A timeout must
+/// report uncertain durability and must not replay the mutation.
+async fn finish_shutdown_save(
+    label: &str,
+    deadline: tokio::time::Instant,
+    save: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    tokio::time::timeout_at(deadline, save)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "The daemon did not acknowledge {label} before exit; the save may still complete"
+            )
+        })?
+        .with_context(|| format!("Could not save {label} before exit"))
+}
+
 pub(crate) struct ActiveDashboardImport {
     task_id: u64,
     pub(crate) cancelled: Arc<AtomicBool>,
@@ -335,7 +353,7 @@ pub(crate) struct DashboardContext {
     /// is on screen so a subsequently opened chat starts in the right state.
     runtime_review_views: BTreeMap<String, mj_controller::review_host::RuntimeReviewView>,
     runtime_config: Feed<watch::Receiver<Config>>,
-    config_reload_in_flight: bool,
+    pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
     remote_lifecycle_sessions: BTreeSet<String>,
     remote_lifecycle_operations: BTreeMap<String, String>,
     runtime_state_revision: u64,
@@ -343,8 +361,8 @@ pub(crate) struct DashboardContext {
     worker_shutdown: Option<SessionManagerShutdown>,
     worker_diagnoses: WorkerDiagnosisTracker,
 
-    pub(crate) lifecycle_updates_tx: UnboundedSender<LifecycleUpdate>,
-    lifecycle: Feed<UnboundedReceiver<LifecycleUpdate>>,
+    pub(crate) lifecycle_updates_tx: UnboundedSender<DashboardLifecycleUpdate>,
+    lifecycle: Feed<UnboundedReceiver<DashboardLifecycleUpdate>>,
     pub(crate) lifecycle_operations: BTreeMap<String, ActiveLifecycleOperation>,
 
     resource_targets_tx: watch::Sender<Vec<ResourcePollTarget>>,
@@ -892,27 +910,35 @@ pub(crate) async fn run_dashboard_for_workspace(
     for (id, error) in &context.read_receipts.failures {
         eprintln!("Could not save read status for {}: {error}", short_id(id));
     }
-    if let Err(error) = context.pane_size_persistence.finish().await {
-        tracing::warn!(%error, "workspace pane-size final flush failed");
-        eprintln!("{error:#}");
-    }
-    if let Err(error) = context.layout_persistence.finish().await {
-        tracing::warn!(%error, "workspace layout final flush failed");
-        eprintln!("{error:#}");
-    }
-    // The next `mj` opens the most recently opened workspace. A tab switch
-    // does not count as opening, so mark the workspace shown at exit, or the
-    // restart would return to the one this dashboard started in.
-    if let Some(workspace_id) = context.dashboard.active_workspace_id().map(str::to_owned) {
-        match crate::daemon::connect_existing().await {
-            Ok(mut daemon) => {
-                if let Err(error) = daemon.touch_workspace(workspace_id).await {
-                    tracing::warn!(%error, "could not record the workspace shown at exit");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "daemon unavailable to record the workspace shown at exit");
-            }
+    // All final persistence shares one budget; independent saves run together.
+    let deadline = tokio::time::Instant::now() + io::SAVE_ACK_TIMEOUT;
+    let workspace_id = context.dashboard.active_workspace_id().map(str::to_owned);
+    let last_workspace = async {
+        if let Some(workspace_id) = workspace_id {
+            crate::daemon::connect_existing()
+                .await?
+                .touch_workspace(workspace_id)
+                .await?;
+        }
+        Ok(())
+    };
+    let (panes, layout, workspace) = tokio::join!(
+        finish_shutdown_save(
+            "workspace pane sizes",
+            deadline,
+            context.pane_size_persistence.finish()
+        ),
+        finish_shutdown_save(
+            "workspace layout",
+            deadline,
+            context.layout_persistence.finish()
+        ),
+        finish_shutdown_save("last workspace", deadline, last_workspace),
+    );
+    for result in [panes, layout, workspace] {
+        if let Err(error) = result {
+            tracing::warn!(%error, "dashboard final persistence was not confirmed");
+            eprintln!("{error:#}");
         }
     }
     if let Some(shutdown) = context.worker_shutdown.take() {
@@ -998,18 +1024,6 @@ impl DashboardContext {
             self.opening_chat_sessions.remove(&pane);
             if let Some(attachment) = self.attachments.get_mut(&pane) {
                 attachment.cancel();
-            }
-        }
-        self.sync_opening_session();
-    }
-
-    /// Give up the attach a pane is running for `session_id` in a way that
-    /// allows one fresh attempt once whatever owns the session is done.
-    fn defer_chat_open_for(&mut self, session_id: &str) {
-        for pane in self.panes_opening(session_id) {
-            self.opening_chat_sessions.remove(&pane);
-            if let Some(attachment) = self.attachments.get_mut(&pane) {
-                attachment.defer();
             }
         }
         self.sync_opening_session();
@@ -1531,7 +1545,7 @@ impl DashboardContext {
         let runtime_config_rx = remote_worker.config;
         worker_targets_tx.send_replace(remote_dashboard_worker_targets(&controller));
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
-            tokio::sync::mpsc::unbounded_channel::<LifecycleUpdate>();
+            tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
         let (resource_targets_tx, resource_triggers_tx, resource_updates_rx) =
@@ -1617,7 +1631,7 @@ impl DashboardContext {
             reported_notice_id,
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
-            config_reload_in_flight: false,
+            pending_runtime_updates: Vec::new(),
             remote_lifecycle_sessions: BTreeSet::new(),
             remote_lifecycle_operations: BTreeMap::new(),
             runtime_state_revision: 0,

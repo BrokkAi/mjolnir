@@ -737,7 +737,7 @@ pub(crate) struct LifecycleOperationRequest {
     pub(crate) session_id: String,
     pub(crate) kind: SessionOperationKind,
     pub(crate) cancelled: Arc<AtomicBool>,
-    pub(crate) updates: UnboundedSender<LifecycleUpdate>,
+    pub(crate) updates: UnboundedSender<DashboardLifecycleUpdate>,
 }
 
 /// Runs one session lifecycle operation on a blocking task.
@@ -767,16 +767,16 @@ pub(crate) fn spawn_lifecycle_operation(
     tokio::task::spawn_blocking(move || {
         let result = (|| -> Result<LifecycleSuccess> {
             let mut controller = Controller::load()?;
-            work(&mut controller, cancelled)
+            work(&mut controller, cancelled.clone())
         })()
         .map_err(|error| format!("{error:#}"));
         report(
             "session lifecycle operation",
             &updates,
-            LifecycleUpdate {
+            DashboardLifecycleUpdate {
                 session_id,
                 result,
-                deferred_cleanup: false,
+                operation: cancelled.clone(),
             },
         );
         drop(guard);
@@ -884,7 +884,10 @@ pub(crate) fn spawn_lifecycle_reload(
             Ok(controller)
         },
         move |result| {
-            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded { reload, result }))
+            DashboardIoUpdate::LifecycleReloaded(Box::new(LifecycleReloaded {
+                reload,
+                result: result.map(DashboardMetadata::from),
+            }))
         },
     );
 }
@@ -908,11 +911,7 @@ pub(crate) fn spawn_dashboard_rename(
                 .set_session_title(renamed_session_id, requested_title)
                 .await
         },
-        move |result| DashboardIoUpdate::RenameSession {
-            session_id,
-            title,
-            result,
-        },
+        move |result| DashboardIoUpdate::RenameSession { title, result },
     );
 }
 
@@ -990,7 +989,10 @@ pub(crate) fn spawn_config_rename(
             .await
             .context("configuration reload task panicked")?
         },
-        move |result| DashboardIoUpdate::ConfigRename { what, result },
+        move |result| DashboardIoUpdate::ConfigRename {
+            what,
+            result: result.map(DashboardMetadata::from),
+        },
     );
 }
 
@@ -1048,7 +1050,10 @@ pub(crate) fn spawn_dashboard_container_settings(
             )?;
             Ok(controller)
         },
-        move |result| DashboardIoUpdate::ContainerSettings { session_id, result },
+        move |result| DashboardIoUpdate::ContainerSettings {
+            session_id,
+            result: result.map(DashboardMetadata::from),
+        },
     );
 }
 
@@ -1150,7 +1155,12 @@ pub(crate) fn spawn_create_bundle(
             // apply) is not clobbered by a stale UI-time config snapshot.
             let created = mj_controller::controller::create_bundle_from_sources(&sources)?;
             Ok(CreatedBundleUpdate {
-                config: created.config,
+                bundle: created
+                    .config
+                    .bundles
+                    .get(&created.bundle_id)
+                    .cloned()
+                    .context("created project is missing its configuration")?,
                 bundle_id: created.bundle_id,
             })
         },
@@ -1202,9 +1212,8 @@ pub(crate) fn spawn_imported_session_apply(
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
-                bundle_id: session.bundle_id.clone(),
-                bundle,
                 session,
+                bundle,
             })
         },
         |result| DashboardIoUpdate::ImportedSessionApplied {
@@ -1252,7 +1261,7 @@ pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
-    lifecycle_updates: UnboundedSender<LifecycleUpdate>,
+    lifecycle_updates: UnboundedSender<DashboardLifecycleUpdate>,
     tracker: CriticalOperationTracker,
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1382,10 +1391,10 @@ pub(crate) fn spawn_dashboard_create_session(
         report(
             "creating session",
             &lifecycle_updates,
-            LifecycleUpdate {
+            DashboardLifecycleUpdate {
                 session_id,
                 result,
-                deferred_cleanup: false,
+                operation: cancelled.clone(),
             },
         );
         drop(guard);
@@ -1502,7 +1511,7 @@ pub(crate) fn spawn_dashboard_restore_session(
     request: mj_client::daemon::WikiRestoreRequest,
     retry_launch: DashboardAction,
     updates: UnboundedSender<DashboardIoUpdate>,
-    lifecycle_updates: UnboundedSender<LifecycleUpdate>,
+    lifecycle_updates: UnboundedSender<DashboardLifecycleUpdate>,
     tracker: CriticalOperationTracker,
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1555,10 +1564,10 @@ pub(crate) fn spawn_dashboard_restore_session(
         report(
             "restoring archived session",
             &lifecycle_updates,
-            LifecycleUpdate {
+            DashboardLifecycleUpdate {
                 session_id,
                 result,
-                deferred_cleanup: false,
+                operation: cancelled.clone(),
             },
         );
         drop(guard);
