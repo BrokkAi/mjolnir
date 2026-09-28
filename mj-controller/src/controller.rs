@@ -668,6 +668,11 @@ impl Controller {
             // of mounting, so neither has an overlay to lose.
             _ => return None,
         };
+        if matches!(target, TargetTemplate::LocalDocker { .. })
+            && let Ok(Some(_)) = targets::local_docker_vm_share(executor)
+        {
+            return Some("Docker VM file share (cannot back an overlay)".to_owned());
+        }
         let filesystem = targets::probe_filesystem_types(
             ssh.as_ref(),
             std::slice::from_ref(&source.to_path_buf()),

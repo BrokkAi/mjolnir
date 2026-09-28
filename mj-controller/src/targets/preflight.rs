@@ -125,6 +125,41 @@ pub fn verify_ssh_docker(
     })
 }
 
+/// Why the local Docker daemon cannot overlay host directories, or `None`
+/// when it runs on this Linux host and sees them directly.
+///
+/// On macOS every Docker daemon (Docker Desktop, Colima, OrbStack) runs in a
+/// Linux VM, as Docker Desktop also does on Linux. The VM reaches host
+/// directories through a file share (virtiofs, gRPC FUSE, sshfs, 9p) that
+/// cannot back an overlay lower layer, and the local volume driver may not
+/// see them at their host path at all (#1152). Bind mounts are translated
+/// through the share, so these daemons still get read-only attachments.
+pub fn local_docker_vm_share(executor: &impl CommandExecutor) -> Result<Option<&'static str>> {
+    const REASON: &str = "Docker runs in a VM that reaches host directories through a file share";
+    if !cfg!(target_os = "linux") {
+        return Ok(Some(REASON));
+    }
+    let command = CommandSpec::new(
+        "docker",
+        ["version", "--format", "{{.Server.Platform.Name}}"],
+    )
+    .purpose("identify the Docker daemon platform")
+    .stage(ProvisionStage::Provisioning);
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "{} failed with status {}: {}",
+        command.purpose,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let platform = String::from_utf8_lossy(&output.stdout);
+    Ok(platform
+        .trim()
+        .starts_with("Docker Desktop")
+        .then_some(REASON))
+}
+
 /// How the launch options, the session wizard, doctor and Setup say that a
 /// local container engine's command is not on this host.
 pub fn engine_not_installed(engine: &str) -> String {

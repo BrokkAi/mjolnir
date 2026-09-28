@@ -3,9 +3,13 @@
 This is the operational contract for hosts that run Mjolnir Docker targets.
 Mjolnir drives the Docker CLI and requires it to reach a Linux Docker daemon.
 For Docker on this machine, attached source directories must be visible inside the
-Docker daemon's filesystem. Colima on macOS supports this through its shared
-home directory. OverlayFS writable storage lives in Docker-managed volumes
-inside the Linux VM, not in the macOS cache. For Docker on an SSH machine, attached sources
+Docker daemon's filesystem. On Linux with a native daemon, copy-on-write
+attachments use OverlayFS, and the writable storage lives in Docker-managed
+volumes. On macOS, every Docker daemon (Docker Desktop, Colima, OrbStack) runs
+in a Linux VM that reaches host directories through a file share, as Docker
+Desktop also does on Linux. A file share cannot back an overlay, so on these
+daemons copy-on-write attachments mount read-only, and Mjolnir reports each one
+when the session starts. The directory must still be shared with the VM. For Docker on an SSH machine, attached sources
 are on the configured SSH host. The controller uses the Docker CLI and does not
 install Docker locally for an SSH target.
 
@@ -125,12 +129,16 @@ mj doctor --json --smoke
 ```
 
 The regular check verifies the daemon and each configured image. The smoke
-check creates its temporary lower directory under the user's shared home on
-macOS, or in the host temporary directory on Linux. It then attaches it through
-the managed OverlayFS path, writes through the container view, confirms that the lower directory did not change, and removes the
-container, overlay volume, and backing volume. Source directories outside
-Colima's shared locations must be shared in Colima's configuration before they
-can be attached. Resolve every `fixable` result before launching a session.
+check creates its temporary source directory under the user's shared home on
+macOS, or in the host temporary directory on Linux. With a native Linux daemon
+it attaches the directory through the managed OverlayFS path, writes through
+the container view, confirms that the source directory did not change, and
+removes the container, overlay volume, and backing volume. With a VM-hosted
+daemon it attaches the directory read-only, as sessions there do, and confirms
+the container can read it but not write to it. A failed smoke test is
+`fixable`, so `mj doctor --smoke` exits non-zero. Source directories outside
+the VM's shared locations must be shared in Docker Desktop's or Colima's
+configuration before they can be attached. Resolve every `fixable` result before launching a session.
 
 ## Git clone cache and recovery
 

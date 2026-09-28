@@ -165,6 +165,16 @@ impl CommandExecutor for FakeExecutor {
     }
 }
 
+/// The commands a Docker smoke test ran, without the daemon-platform query
+/// that decides between the overlay and the read-only attachment.
+fn without_platform_query(commands: &[CommandSpec]) -> Vec<CommandSpec> {
+    commands
+        .iter()
+        .filter(|command| command.purpose != "identify the Docker daemon platform")
+        .cloned()
+        .collect()
+}
+
 struct RuntimeProbeExecutor {
     commands: RefCell<Vec<CommandSpec>>,
     outputs: RefCell<Vec<CommandOutput>>,
@@ -1107,19 +1117,26 @@ fn docker_smoke_test_exercises_the_managed_overlay_attachment_path() {
     )
     .unwrap();
 
-    let commands = executor.commands.borrow();
+    let commands = without_platform_query(&executor.commands.borrow());
     assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].program, "sh");
-    assert!(commands[0].args[1].contains("docker volume create"));
-    assert!(commands[0].args[1].contains("type=overlay"));
     assert_eq!(commands[1].program, "docker");
     assert_eq!(commands[1].args[0], "exec");
-    assert_eq!(commands[2].program, "sh");
-    assert!(commands[2].args[1].contains("docker volume rm --force"));
+    if cfg!(target_os = "linux") {
+        // A Docker daemon on this Linux host gets the copy-on-write overlay.
+        assert_eq!(commands[0].program, "sh");
+        assert!(commands[0].args[1].contains("docker volume create"));
+        assert!(commands[0].args[1].contains("type=overlay"));
+        assert_eq!(commands[2].program, "sh");
+        assert!(commands[2].args[1].contains("docker volume rm --force"));
+    } else {
+        // Elsewhere Docker runs in a VM, which only gets read-only attachments.
+        assert!(!commands[0].args.join(" ").contains("type=overlay"));
+        assert!(commands[1].args.last().unwrap().contains("! printf"));
+    }
     assert!(
         String::from_utf8(output)
             .unwrap()
-            .contains("writable OverlayFS attachment")
+            .contains("host directory attachment")
     );
 }
 
@@ -1367,12 +1384,13 @@ fn dialog_configures_every_usable_runtime_as_a_normal_target() {
         .map(|command| command.args[0].clone())
         .collect::<Vec<_>>();
     assert_eq!(smoke, ["run", "exec", "rm"]);
-    let commands = executor.commands.borrow();
+    let commands = without_platform_query(&executor.commands.borrow());
     assert!(commands.len() >= 6);
-    assert_eq!(commands[3].program, "sh");
     assert_eq!(commands[4].program, "docker");
-    assert_eq!(commands[5].program, "sh");
-    drop(commands);
+    if cfg!(target_os = "linux") {
+        assert_eq!(commands[3].program, "sh");
+        assert_eq!(commands[5].program, "sh");
+    }
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Podman target using"), "{output}");
     assert!(output.contains("Docker target using"), "{output}");
