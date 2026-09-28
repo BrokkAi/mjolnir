@@ -5082,10 +5082,10 @@ async fn api_startup_persists_the_entire_ordered_followup_before_acknowledging()
     assert_eq!(
         commands,
         [
-            "api-test:model",
-            "api-test:effort",
-            "api-test:fast-mode",
-            "api-test:prompt"
+            "api-test-model",
+            "api-test-effort",
+            "api-test-fast-mode",
+            "api-test-prompt"
         ]
     );
     assert!(
