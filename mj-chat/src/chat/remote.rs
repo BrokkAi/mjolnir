@@ -1428,8 +1428,44 @@ mod tests {
         ));
     }
 
+    /// Installing an image writes the session's attachment store under the
+    /// data directory, so the image test runs alone with a directory of its
+    /// own. Returns whether this process is that run.
+    fn in_isolated_store(test: &str) -> bool {
+        const CHILD: &str = "MJ_CHAT_ISOLATED_STORE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let test = format!(
+            "{}::{test}",
+            module_path!()
+                .strip_prefix("mj_chat::")
+                .unwrap_or(module_path!())
+        );
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &test, "--nocapture"])
+            .env(CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path().join("data"))
+            .env("MJ_CONFIG_DIR", directory.path().join("config"));
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     #[tokio::test]
     async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
+        if !in_isolated_store(
+            "image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact",
+        ) {
+            return;
+        }
         let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
         let materialized = mj_core::state::MaterializedSession::empty("image-session");
         let mut operational =

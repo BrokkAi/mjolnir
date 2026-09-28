@@ -1023,8 +1023,31 @@ fn branch_exists(repository: &std::path::Path, branch: &str) -> bool {
         .success()
 }
 
+const ISOLATED_STORE_CHILD: &str = "MJ_LIFECYCLE_ISOLATED_STORE_CHILD";
+
+/// Run the named test alone, with a data directory of its own: destroying a
+/// session removes its attachment store under the data directory. Returns
+/// whether this process is that run.
+fn in_isolated_store(test: &str) -> bool {
+    if std::env::var_os(ISOLATED_STORE_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        test,
+    ))
+    .env(ISOLATED_STORE_CHILD, "1")
+    .isolated_store(directory.path())
+    .run();
+    false
+}
+
 #[test]
 fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
+    if !in_isolated_store("force_destroy_from_running_removes_target_worktree_branch_and_archive") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1077,6 +1100,9 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
 
 #[test]
 fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
+    if !in_isolated_store("force_destroy_keeps_the_branch_and_removes_the_checkout_by_default") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1121,6 +1147,9 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
 
 #[test]
 fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
+    if !in_isolated_store("force_destroy_without_a_target_or_archive_still_removes_the_record") {
+        return;
+    }
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Provisioning;
@@ -1205,6 +1234,9 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
 
 #[test]
 fn force_destroy_tolerates_a_missing_archive() {
+    if !in_isolated_store("force_destroy_tolerates_a_missing_archive") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);

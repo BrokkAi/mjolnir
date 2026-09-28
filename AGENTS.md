@@ -253,9 +253,10 @@ Always test new code in a separate named instance using `--instance <test-name>`
 Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
 the new build. Never point a test build at the host's default instance or live
 session data: protocol and store changes must not disrupt ongoing session work.
-A binary run from a Cargo target directory enforces this: it refuses to start,
-replace, stop, or migrate the default instance's daemon and store. When it
-refuses, add `--instance`; do not work around the refusal.
+A binary run from a Cargo target directory, test binaries included, enforces
+this: it refuses to start, replace, stop, or migrate the default instance's
+daemon and store. When it refuses, add `--instance` (or, in a unit test, give
+the test its own `MJ_DATA_DIR`); do not work around the refusal.
 Keep automated tests' existing isolated configuration and data directories.
 
 Classify every new database migration as compatible or breaking, with a short
