@@ -223,7 +223,7 @@ enum ArchiveSpacePreviewResult {
 enum BuildCachePreviewResult {
     Resolving,
     /// `None` when the target kind cannot share a cache.
-    Ready(Option<mj_core::state::BuildCachePreview>),
+    Ready(Option<Box<mj_core::state::BuildCachePreview>>),
     Failed(String),
 }
 
@@ -548,6 +548,10 @@ fn build_cache_gigabytes_label(size: &str) -> String {
 }
 
 /// Whether a full path names the given field of a machine's build cache.
+fn is_build_cache_budget(path: &[String]) -> bool {
+    is_build_cache_field(path, "max_size") || is_build_cache_field(path, "target_max_size")
+}
+
 fn is_build_cache_field(path: &[String], field: &str) -> bool {
     match path {
         [section, _, page, key] => section == "machines" && page == "build_cache" && key == field,
@@ -608,9 +612,9 @@ fn value_summary(
         Value::Bool(value) => Checkbox::marker(*value).to_owned(),
         // The cache size is measured in whole GB, whatever unit the file
         // spells it in. Only a hand-edited invalid value keeps its own text.
-        Value::String(size) if is_build_cache_field(&child_path, "max_size") => {
-            build_cache_gigabytes_label(size)
-        }
+        Value::String(size) if is_build_cache_budget(&child_path) => automatic
+            .filter(|label| label != "Resolving…" && label != "Unknown")
+            .unwrap_or_else(|| build_cache_gigabytes_label(size)),
         Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path, draft)),
         // The archive window's live estimate carries the value itself, so it
         // replaces the number as well as the "Never" placeholder.
@@ -962,6 +966,15 @@ impl SetupDialog {
             self.form = RefCell::new(Dialog::default());
             return;
         }
+        if (is_build_cache_budget(&path) || is_build_cache_field(&path, "directory"))
+            && self.build_cache_user_managed()
+        {
+            self.notice = Some(
+                "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
+                    .into(),
+            );
+            return;
+        }
         if value.is_object() || value.is_array() {
             self.path = path;
             self.selected = 0;
@@ -993,9 +1006,8 @@ impl SetupDialog {
                 } else {
                     EditorInput::Text(TextInput::from(if value.is_null() {
                         String::new()
-                    } else if let Some(size) = value
-                        .as_str()
-                        .filter(|_| is_build_cache_field(&path, "max_size"))
+                    } else if let Some(size) =
+                        value.as_str().filter(|_| is_build_cache_budget(&path))
                     {
                         // The field is edited in whole GB, so a value written
                         // in another unit is offered converted.
@@ -1249,15 +1261,35 @@ impl SetupDialog {
                     .unwrap_or_else(|| "Unknown".to_owned()),
                 // Resolved sizes are shown in the same whole GB the field is
                 // edited in.
-                "max_size" => match &preview.max_size {
-                    Some(BuildCacheLimit::Size(size)) => build_cache_gigabytes_label(size),
-                    // The value column is narrow, so these stay short.
-                    Some(BuildCacheLimit::HostConfiguration(Some(size))) => {
-                        format!("{}, host mbx config", build_cache_gigabytes_label(size))
+                "max_size" | "target_max_size" => {
+                    let limit = if field == "max_size" {
+                        &preview.max_size
+                    } else {
+                        &preview.target_max_size
+                    };
+                    match limit {
+                        Some(BuildCacheLimit::Size(size)) => {
+                            format!("{} GB, mj setting", build_cache_gigabytes_label(size))
+                        }
+                        Some(BuildCacheLimit::MjDefault(size)) => {
+                            format!("{} GB, mj default", build_cache_gigabytes_label(size))
+                        }
+                        Some(BuildCacheLimit::HostConfiguration(Some(size))) if size == "none" => {
+                            "Unlimited, host mbx".into()
+                        }
+                        Some(BuildCacheLimit::HostConfiguration(Some(size))) => {
+                            format!("{} GB, host mbx config", build_cache_gigabytes_label(size))
+                        }
+                        Some(BuildCacheLimit::HostConfiguration(None)) => {
+                            "Unknown, host mbx config".into()
+                        }
+                        Some(BuildCacheLimit::MbxDefault(Some(size))) => {
+                            format!("{} GB, mbx default", build_cache_gigabytes_label(size))
+                        }
+                        Some(BuildCacheLimit::MbxDefault(None)) => "Unlimited, mbx default".into(),
+                        None => "Unknown".into(),
                     }
-                    Some(BuildCacheLimit::HostConfiguration(None)) => "host mbx config".to_owned(),
-                    None => "Unknown".to_owned(),
-                },
+                }
                 _ => return None,
             },
             // The checkbox keeps showing the machine's own setting while the
@@ -1268,6 +1300,45 @@ impl SetupDialog {
             BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
         };
         Some(label)
+    }
+
+    fn current_build_cache_preview(&self) -> Option<&mj_core::state::BuildCachePreview> {
+        let (_, key) = self.build_cache_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        match &preview.result {
+            BuildCachePreviewResult::Ready(Some(preview)) => Some(preview.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn build_cache_user_managed(&self) -> bool {
+        self.current_build_cache_preview()
+            .is_some_and(|preview| preview.user_managed)
+    }
+
+    fn build_cache_policy_lines(&self) -> Vec<String> {
+        use mj_core::state::BuildCacheApplication;
+        let Some(preview) = self.current_build_cache_preview() else {
+            return Vec::new();
+        };
+        let owner = if preview.user_managed {
+            "User-managed mbx; mj budgets are inactive"
+        } else {
+            "Mj-managed mbx"
+        };
+        let status = match &preview.application {
+            BuildCacheApplication::Pending => "Pending application".into(),
+            BuildCacheApplication::Applied => "Applied to the machine".into(),
+            BuildCacheApplication::Failed(error) => format!("Application failed: {error}"),
+        };
+        let mut lines = vec![format!("{owner} · {status}")];
+        if let Some(note) = &preview.budget_note {
+            lines.push(note.clone());
+        }
+        lines
     }
 
     /// What this machine's cache has actually done, for a line under the
@@ -1467,7 +1538,7 @@ impl SetupDialog {
             editor.choices[editor.selected].clone()
         } else if let Some(number) = schema::whole_number(&editor.path) {
             schema::parse_whole_number(number, &editor.input.to_string())?
-        } else if is_build_cache_field(&editor.path, "max_size") {
+        } else if is_build_cache_budget(&editor.path) {
             let text = editor.input.trim().to_owned();
             if text.is_empty() {
                 Value::Null
@@ -1477,8 +1548,7 @@ impl SetupDialog {
                     .map_err(|_| "Enter a whole number of gigabytes.".to_owned())?;
                 if gigabytes == 0 {
                     return Err(
-                        "Enter at least 1 GB, or clear the field to use the host's own limits."
-                            .into(),
+                        "Enter at least 1 GB, or clear the field to use the default.".into(),
                     );
                 }
                 Value::String(mj_core::config::build_cache_size_from_gigabytes(gigabytes))
@@ -2164,7 +2234,7 @@ impl DashboardState {
         dialog.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: match result {
-                Ok(preview) => BuildCachePreviewResult::Ready(preview),
+                Ok(preview) => BuildCachePreviewResult::Ready(preview.map(Box::new)),
                 Err(error) => BuildCachePreviewResult::Failed(error),
             },
         });
@@ -2666,6 +2736,13 @@ pub(crate) fn render_setup(
                 None => String::new(),
             };
             // An open dropdown draws the value itself over this row.
+            let summary = if dialog.build_cache_user_managed()
+                && is_build_cache_field(&child_path, "directory")
+            {
+                dialog.build_cache_automatic_label(key).unwrap_or(summary)
+            } else {
+                summary
+            };
             let summary = if choice_editor && index == dialog.selected {
                 String::new()
             } else {
@@ -2676,7 +2753,12 @@ pub(crate) fn render_setup(
             let unavailable = blocked
                 .as_deref()
                 .filter(|_| is_build_cache_field(&child_path, "enabled"));
-            row_enabled.push(unavailable.is_none());
+            row_enabled.push(
+                unavailable.is_none()
+                    && !((is_build_cache_budget(&child_path)
+                        || is_build_cache_field(&child_path, "directory"))
+                        && dialog.build_cache_user_managed()),
+            );
             // Why the switch cannot be turned on, on its own unselectable line
             // under the row it explains.
             if let Some(reason) = unavailable {
@@ -2690,6 +2772,15 @@ pub(crate) fn render_setup(
                 row_map.push(None);
                 row_enabled.push(true);
             }
+        }
+        for note in dialog.build_cache_policy_lines() {
+            let line = truncate(&note, usize::from(body.width).saturating_sub(4));
+            rows.push(Line::styled(
+                format!("{SETTING_GUTTER}{line}"),
+                theme::muted(),
+            ));
+            row_map.push(None);
+            row_enabled.push(true);
         }
         // What the cache has done, under the fields that configure it.
         if let Some(activity) = dialog.build_cache_stats_line() {

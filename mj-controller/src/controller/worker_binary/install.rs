@@ -199,24 +199,29 @@ pub(in crate::controller) fn container_upload_ownership_args(
     args
 }
 
-/// Shell that writes the host's mbx configuration into the container user's
-/// own home, where the container's mbx reads it.
-const MBX_CONFIG_SCRIPT: &str =
-    r#"set -eu; mkdir -p "$HOME/.config/mbx"; cat > "$HOME/.config/mbx/config.toml""#;
+/// Link every mbx lookup to the one policy already reachable through the
+/// shared cache mount. File symlinks follow atomic replacements at the source.
+const MBX_CONFIG_SCRIPT: &str = r#"set -eu
+source=$1
+shift
+[ -r "$source/config.toml" ] || { echo 'shared machine mbx configuration is missing' >&2; exit 1; }
+for root in "$HOME/.config" "$@"; do
+    mkdir -p -- "$root/mbx"
+    link="$root/mbx/.config.mj-$$"
+    ln -s -- "$source/config.toml" "$link"
+    mv -Tf -- "$link" "$root/mbx/config.toml"
+done
+"#;
 
-/// Install `bin/mbx` and its `bin/cargo` shim beside the worker, and hand the
-/// container the host's mbx configuration when the host has one.
-///
-/// `bin` is the directory the worker later writes its `gh` wrapper into and
-/// prepends to `PATH`; it creates that directory without clearing it, so these
-/// two files survive and the shim is found before the image's own Cargo.
+/// Install the private binary and link configuration; never copy machine policy.
 pub(super) fn install_mbx_files(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker_root: &str,
     binary: &Path,
-    configuration: Option<&str>,
+    configuration: &Path,
+    config_roots: &[PathBuf],
 ) -> Result<()> {
     let bin = format!("{worker_root}/bin");
     let mbx = format!("{bin}/mbx");
@@ -340,8 +345,34 @@ pub(super) fn install_mbx_files(
         .stage(ProvisionStage::Syncing);
         execute_checked(executor, command)?;
     }
-    if let Some(configuration) = configuration {
-        let args = vec![
+    link_mbx_configuration(executor, locator, configuration, config_roots)
+}
+
+/// Upgrade configuration without touching an executable a live build may use.
+pub(super) fn link_mbx_configuration(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    configuration: &Path,
+    config_roots: &[PathBuf],
+) -> Result<()> {
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
+        }
+    };
+    {
+        let mut args = vec![
             engine.to_owned(),
             "exec".into(),
             "-i".into(),
@@ -349,14 +380,20 @@ pub(super) fn install_mbx_files(
             "sh".into(),
             "-c".into(),
             MBX_CONFIG_SCRIPT.to_owned(),
+            "mj-mbx-config".into(),
+            configuration.to_string_lossy().into_owned(),
         ];
+        args.extend(
+            config_roots
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
         let command = match ssh {
             None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
             Some(ssh) => crate::targets::ssh_command(ssh, args),
         }
-        .purpose("install the host mbx configuration")
-        .stage(ProvisionStage::Syncing)
-        .with_sensitive_stdin(configuration.as_bytes().to_vec());
+        .purpose("link the shared machine mbx configuration")
+        .stage(ProvisionStage::Syncing);
         execute_checked(executor, command)?;
     }
     Ok(())

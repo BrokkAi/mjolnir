@@ -6,7 +6,7 @@ pub(crate) mod checkpoint;
 mod git_cache;
 mod lifecycle;
 pub mod local_profile_homes;
-mod mbx;
+pub(crate) mod mbx;
 pub mod move_session;
 mod network_git;
 mod new_session_preflight;

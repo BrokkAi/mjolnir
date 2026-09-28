@@ -121,15 +121,9 @@ impl Controller {
             &ownership_path,
             &profile_stage,
         )?;
-        // The build cache is an optimization: a failure here leaves the
-        // session running the image's own Cargo.
-        if session.build_cache.is_some()
-            && let Err(error) = self.install_build_cache_shim(session, backend, executor)
-        {
-            tracing::warn!(
-                session_id,
-                "installing the mbx build cache failed: {error:#}"
-            );
+        if session.build_cache.is_some() {
+            self.install_build_cache_shim(session, backend, &launch, executor)
+                .context("install shared machine build cache configuration")?;
         }
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)
     }
@@ -138,10 +132,11 @@ impl Controller {
     /// directory, which the worker prepends to `PATH` for the harness, its
     /// terminals, and `bash -lc` shells. mbx invoked as `cargo` removes that
     /// directory from `PATH` and runs the image's real Cargo underneath.
-    fn install_build_cache_shim(
+    pub(in crate::controller) fn install_build_cache_shim(
         &self,
         session: &mj_core::state::SessionRecord,
         backend: &targets::TargetLocator,
+        launch: &WorkerLaunchConfig,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let worker_root = targets::worker_root(backend, &session.id)?;
@@ -151,18 +146,55 @@ impl Controller {
         let binary =
             crate::controller::mbx::binary_for(backend, executor).inspect_err(|error| {
                 executor.notify_notice(&format!(
-                    "The Rust build cache is unavailable: {error:#}; this session builds without it."
+                    "The Rust build cache could not be prepared: {error:#}."
                 ));
             })?;
-        let configuration = crate::controller::mbx::host_configuration(backend, executor)?;
+        let (configuration, config_roots) =
+            self.build_cache_configuration(session, backend, launch, executor)?;
         install_mbx_files(
             executor,
             backend,
             &session.id,
             &worker_root,
             &binary,
-            configuration.as_deref(),
+            &configuration,
+            &config_roots,
         )
+    }
+
+    pub(in crate::controller) fn prepare_build_cache_links(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        launch: &WorkerLaunchConfig,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let (configuration, config_roots) =
+            self.build_cache_configuration(session, backend, launch, executor)?;
+        link_mbx_configuration(executor, backend, &configuration, &config_roots)
+    }
+
+    fn build_cache_configuration(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        launch: &WorkerLaunchConfig,
+        executor: &impl CommandExecutor,
+    ) -> Result<(PathBuf, Vec<PathBuf>)> {
+        let configuration = crate::controller::mbx::prepare_session_configuration(
+            &self.config,
+            backend,
+            session
+                .build_cache
+                .as_ref()
+                .context("session has no build cache")?,
+            executor,
+        )?;
+        let config_roots = [&launch.target_environment, &launch.environment]
+            .into_iter()
+            .filter_map(|environment| environment.get("XDG_CONFIG_HOME").map(PathBuf::from))
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok((configuration, config_roots.into_iter().collect()))
     }
 
     /// Probe the installed binary and collect the dead worker's exit record
@@ -585,6 +617,12 @@ pub(super) fn worker_launch_config(
             "MBX_CACHE_DIR".into(),
             build_cache.directory.to_string_lossy().into_owned(),
         );
+        target_environment.insert(
+            "MJ_MBX_CONFIG_DIR".into(),
+            mj_core::config::build_cache_configuration_directory(&build_cache.directory)
+                .to_string_lossy()
+                .into_owned(),
+        );
         // Compiler symlinks name this worker's private executable. Sharing
         // them lets another container replace them with an unreachable path.
         target_environment.insert(
@@ -594,9 +632,6 @@ pub(super) fn worker_launch_config(
                 .to_string_lossy()
                 .into_owned(),
         );
-        if let Some(max_size) = &build_cache.max_size {
-            target_environment.insert("MBX_GC_MAX_TOTAL_SIZE".into(), max_size.clone());
-        }
         // The per-build summary and savings lines are for a human at a
         // terminal; in a harness session they only add noise to Cargo output.
         target_environment.insert("MBX_SUMMARY".into(), "off".into());

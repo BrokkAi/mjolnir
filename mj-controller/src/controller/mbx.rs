@@ -7,8 +7,11 @@
 //! mounts read-write at the same absolute path. Nothing is synchronized
 //! between hosts and mj never runs mbx garbage collection.
 //!
-//! Every failure here means the session runs without the cache. Nothing in
-//! this module ever fails provisioning.
+//! Cache discovery can leave new sessions uncached. Once a cache is selected,
+//! configuration failures are reported rather than launching with stale policy.
+
+mod configuration;
+pub(crate) mod service;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,8 @@ use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::{BuildCacheConfig, Config, TargetBuildCache, TargetTemplate};
 use mj_core::state::{
-    BuildCacheLimit, BuildCacheOff, BuildCachePreview, BuildCacheStats, SessionBuildCache,
+    BuildCacheApplication, BuildCacheLimit, BuildCacheOff, BuildCachePreview, BuildCacheStats,
+    SessionBuildCache,
 };
 
 /// The mbx release containers run. A native mbx older than this must not share
@@ -36,7 +40,6 @@ const MBX_AARCH64_SHA256: &str = "01cce632e7bacacd78935226e778c5199f6942a5578964
 const MBX_BINARY_ENV: &str = "MJ_MBX_BINARY";
 
 const DEFAULT_CACHE_RELATIVE: &str = ".cache/mbx";
-const HOST_CONFIG_RELATIVE: &str = ".config/mbx/config.toml";
 /// mbx's running totals, relative to the cache directory.
 const TALLY_RELATIVE: &str = "actions/savings/v1/tally.json";
 /// The cap on the computed default total budget: 100 GB, in SI bytes.
@@ -49,17 +52,13 @@ const LABEL: &str = "hel-mbx";
 pub(super) struct ResolvedBuildCache {
     /// Cache directory on the host, mounted at the same path in the container.
     pub directory: PathBuf,
-    /// `MBX_GC_MAX_TOTAL_SIZE` for the container, or `None` when the host's
-    /// own mbx configuration file already carries the budget. mbx measures
-    /// that variable across the action store, managed target directories, and
-    /// learned incremental state, which is every part of the cache mj mounts.
-    pub max_size: Option<String>,
     /// A `[target] root` the host configuration relocates outside the cache
     /// directory, which the container needs mounted at the same path too.
     pub target_root: Option<PathBuf>,
-    /// The host's `~/.config/mbx/config.toml`, copied into the container so
-    /// its mbx uses the host's own limits.
+    /// Desired policy for the shared machine file, never a private session copy.
     pub config_file: Option<String>,
+    pub config_directory: PathBuf,
+    pub previous_config: Option<String>,
 }
 
 /// Cached host inspections, keyed by host and per-target settings. An
@@ -70,6 +69,10 @@ type Resolutions = std::collections::BTreeMap<String, (Instant, Result<Inspectio
 
 static RESOLUTIONS: std::sync::LazyLock<std::sync::Mutex<Resolutions>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Resolutions::new()));
+
+type Applications = std::collections::BTreeMap<String, Result<(), String>>;
+static APPLICATIONS: std::sync::LazyLock<std::sync::Mutex<Applications>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Whether a caller can be served a memoized answer or needs the host asked
 /// again.
@@ -101,6 +104,10 @@ fn inspect(
                 native_mbx: None,
                 directory: None,
                 max_size: None,
+                target_max_size: None,
+                user_managed: false,
+                application: BuildCacheApplication::Pending,
+                budget_note: None,
                 stats: None,
                 off_reason: Some(BuildCacheOff::Unavailable(
                     "the build cache is turned off for every machine".into(),
@@ -167,7 +174,58 @@ pub(super) fn resolve(
         );
         return None;
     }
-    Some(cache)
+    match apply_cache(&host, &settings, global, cache, executor) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            tracing::warn!(
+                host = host.key(),
+                "applying machine build cache configuration failed: {error:#}"
+            );
+            executor.notify_notice(&format!(
+                "Build cache configuration could not be applied: {error:#}"
+            ));
+            None
+        }
+    }
+}
+
+fn apply_cache(
+    host: &CacheHost,
+    settings: &TargetBuildCache,
+    global: &BuildCacheConfig,
+    mut cache: ResolvedBuildCache,
+    executor: &impl CommandExecutor,
+) -> Result<ResolvedBuildCache> {
+    let key = format!("{}|{settings:?}", host.key());
+    let result = (|| {
+        if !configuration::apply(host, &cache, executor)? {
+            // Another application won. Accept it only if it already installs
+            // this policy; never replay an older desired value over a newer one.
+            cache = inspect(host, settings, global, Freshness::Fresh, executor)?
+                .cache
+                .context("build cache became unavailable during application")?;
+            ensure!(
+                cache.previous_config == cache.config_file,
+                "machine build cache policy changed during application; retry with current machine settings"
+            );
+        }
+        cache.previous_config = cache.config_file.clone();
+        if let Some((_, Ok(inspection))) =
+            RESOLUTIONS.lock().expect("mbx resolutions").get_mut(&key)
+        {
+            inspection.cache = Some(cache.clone());
+            inspection.preview.application = BuildCacheApplication::Applied;
+        }
+        Ok(cache)
+    })();
+    APPLICATIONS.lock().expect("mbx applications").insert(
+        key,
+        result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}")),
+    );
+    result
 }
 
 /// The targets that can share a host build cache. Apple `container` runs each
@@ -203,6 +261,81 @@ pub fn preview_build_cache(
     let settings = machine.build_cache().cloned().unwrap_or_default();
     inspect(&host, &settings, global, Freshness::Fresh, executor)
         .map(|inspection| Some(inspection.preview))
+}
+
+/// Apply one machine's desired policy. Both provisioning and the daemon use
+/// the same compare-and-replace operation; native settings are only read.
+pub(crate) fn apply_machine_build_cache(
+    machine: &mj_core::config::Machine,
+    global: &BuildCacheConfig,
+    mounted_directories: &[PathBuf],
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let Some(host) = CacheHost::for_machine(machine) else {
+        return Ok(());
+    };
+    let settings = machine.build_cache().cloned().unwrap_or_default();
+    let inspected = inspect(&host, &settings, global, Freshness::Fresh, executor)?;
+    if let Some(cache) = inspected.cache {
+        let cache = apply_cache(&host, &settings, global, cache, executor)?;
+        // Existing containers retain their mounts if placement changes. Publish
+        // the same machine policy to each still-mounted cache, once per path.
+        for directory in mounted_directories {
+            if directory != &cache.directory {
+                publish_at(&host, &cache, directory, executor)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publish_at(
+    host: &CacheHost,
+    cache: &ResolvedBuildCache,
+    directory: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    let mut projected = cache.clone();
+    projected.config_directory = configuration::shared_directory(directory);
+    projected.previous_config = configuration::read_file(
+        host,
+        &projected.config_directory.join("config.toml"),
+        executor,
+    )?;
+    ensure!(
+        configuration::apply(host, &projected, executor)?,
+        "machine configuration changed during application; retry with current settings"
+    );
+    Ok(projected.config_directory)
+}
+
+/// Upgrade an existing container through its existing cache mount. Resolving
+/// ownership uses its actual host, never a target name that can be reassigned.
+pub(super) fn prepare_session_configuration(
+    config: &Config,
+    backend: &targets::TargetLocator,
+    recorded: &SessionBuildCache,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    let host = host_for_locator(backend).context("build cache has no container host")?;
+    let mut settings = config
+        .machines
+        .values()
+        .filter(|machine| {
+            CacheHost::for_machine(machine).is_some_and(|candidate| candidate.key() == host.key())
+        })
+        .filter_map(|machine| machine.build_cache())
+        .next()
+        .cloned()
+        .unwrap_or_default();
+    settings.directory = Some(recorded.directory.clone());
+    // A disabled cache still exists in already provisioned containers. Keep
+    // its policy current until the session no longer mounts it.
+    settings.enabled = Some(true);
+    let cache = inspect_host(&host, &settings, executor)?
+        .cache
+        .context("build cache configuration unavailable")?;
+    publish_at(&host, &cache, &recorded.directory, executor)
 }
 
 /// Native mbx compatibility for a host used by configured container targets.
@@ -301,7 +434,7 @@ fn inspect_host(
     settings: &TargetBuildCache,
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
-    let native = native_version(host, executor);
+    let native = probe_native_version(host, executor)?;
     let native_version = native.as_ref().map(|native| native.version.clone());
     let off = |preview: BuildCachePreview| Inspection {
         preview,
@@ -314,6 +447,10 @@ fn inspect_host(
             native_mbx: native_version.clone(),
             directory: None,
             max_size: None,
+            target_max_size: None,
+            user_managed: true,
+            application: BuildCacheApplication::Pending,
+            budget_note: None,
             stats: None,
             off_reason: Some(BuildCacheOff::Unavailable(format!(
                 "the host's mbx {version} is older than the {MBX_VERSION} Mjolnir installs, \
@@ -321,12 +458,12 @@ fn inspect_host(
             ))),
         }));
     }
-    let directory = match &settings.directory {
-        Some(directory) => directory.clone(),
-        None => match &native {
-            Some(native) => native_cache_directory(host, native, executor)?,
-            None => host.home(executor)?.join(DEFAULT_CACHE_RELATIVE),
-        },
+    let directory = match &native {
+        Some(native) => native_cache_directory(host, native, executor)?,
+        None => settings
+            .directory
+            .clone()
+            .unwrap_or(host.home(executor)?.join(DEFAULT_CACHE_RELATIVE)),
     };
     ensure!(
         directory.is_absolute(),
@@ -334,31 +471,85 @@ fn inspect_host(
         directory.display()
     );
 
-    let config_file = host_config_file(host, executor)?;
+    let user_managed = native.is_some();
+    let config_directory = configuration::shared_directory(&directory);
+    let previous_config =
+        configuration::read_file(host, &config_directory.join("config.toml"), executor)?;
+    let (config_file, limit) = if user_managed {
+        let text = host_config_file(host, executor)?;
+        let limit = match configuration::configured_limit(text.as_deref(), "gc", "max_total_size")?
+        {
+            Some(size) => BuildCacheLimit::HostConfiguration(Some(size)),
+            None => BuildCacheLimit::MbxDefault(None),
+        };
+        (Some(text.unwrap_or_default()), limit)
+    } else {
+        let automatic = match configuration::automatic_total(previous_config.as_deref()) {
+            Some(size) => size,
+            None => default_max_size(host, &directory, executor)?,
+        };
+        let limit = match &settings.max_size {
+            Some(size) => BuildCacheLimit::Size(size.clone()),
+            None => BuildCacheLimit::MjDefault(automatic.clone()),
+        };
+        (
+            Some(configuration::managed_document(settings, &automatic)?),
+            limit,
+        )
+    };
     let target_root = config_file
         .as_deref()
         .and_then(|text| relocated_target_root(text, &directory));
-
-    let max_size = match (&settings.max_size, &config_file) {
-        (Some(max_size), _) => Some(max_size.clone()),
-        // The host's own file carries its budgets; a second one would fight it.
-        (None, Some(_)) => None,
-        (None, None) => Some(default_max_size(host, &directory, executor)?),
+    let configured_target =
+        configuration::configured_limit(config_file.as_deref(), "target", "max_size")?;
+    let target_limit = match configured_target {
+        Some(size) if user_managed => Some(BuildCacheLimit::HostConfiguration(Some(size))),
+        Some(size) => Some(BuildCacheLimit::Size(size)),
+        None => {
+            let disk = configuration::disk_total(
+                host,
+                target_root.as_deref().unwrap_or(&directory),
+                executor,
+            );
+            match disk {
+                Ok(total) => Some(BuildCacheLimit::MbxDefault(Some(
+                    configuration::scaled_budget(Some(total), 10, 10, 100, 30),
+                ))),
+                Err(error) => {
+                    tracing::warn!(
+                        host = host.key(),
+                        "could not resolve the worktree default: {error:#}"
+                    );
+                    None
+                }
+            }
+        }
     };
-    let limit = match (&max_size, &config_file) {
-        (Some(max_size), _) => BuildCacheLimit::Size(max_size.clone()),
-        (None, Some(text)) => BuildCacheLimit::HostConfiguration(configured_max_size(text)),
-        (None, None) => unreachable!("a missing budget is derived above"),
-    };
+    let mut application =
+        configuration::application(previous_config.as_deref(), config_file.as_deref());
+    if application == BuildCacheApplication::Pending
+        && let Some(Err(error)) = APPLICATIONS
+            .lock()
+            .expect("mbx applications")
+            .get(&format!("{}|{settings:?}", host.key()))
+    {
+        application = BuildCacheApplication::Failed(error.clone());
+    }
     // Read before the checks below, so a host that cannot share the cache
     // right now still reports what the cache did while it could.
     let stats = read_stats(host, &directory, executor);
-    let preview = |off_reason: Option<BuildCacheOff>| BuildCachePreview {
+    let preview = |off_reason: Option<BuildCacheOff>| {
+        BuildCachePreview {
         native_mbx: native_version.clone(),
         directory: Some(directory.clone()),
         max_size: Some(limit.clone()),
+        target_max_size: target_limit.clone(),
+        user_managed,
+        application: application.clone(),
+        budget_note: Some("The combined budget also reserves shared compiler outputs and incremental state; worktrees may be collected below their own limit.".into()),
         stats: stats.clone(),
         off_reason,
+    }
     };
 
     // The directory may not exist yet; its filesystem is its nearest
@@ -404,24 +595,12 @@ fn inspect_host(
         preview: preview(None),
         cache: Some(ResolvedBuildCache {
             directory,
-            max_size,
             target_root,
             config_file,
+            config_directory,
+            previous_config,
         }),
     })
-}
-
-/// The total budget a host configuration sets, for display only. A host that
-/// caps the whole cache with `gc.max_total_size` is showing the same quantity
-/// mj's own setting names, so that is preferred; `gc.max_size` is the older
-/// spelling and bounds the action store alone.
-fn configured_max_size(config_file: &str) -> Option<String> {
-    let document: toml::Value = toml::from_str(config_file).ok()?;
-    let gc = document.get("gc")?;
-    gc.get("max_total_size")
-        .or_else(|| gc.get("max_size"))?
-        .as_str()
-        .map(str::to_owned)
 }
 
 /// mbx's running totals for this cache, or `None` when it has none yet.
@@ -505,10 +684,6 @@ exit 1"#;
 
 /// The host's own mbx, or `None` when neither `PATH` nor `~/.cargo/bin`
 /// has one.
-fn native_version(host: &CacheHost, executor: &impl CommandExecutor) -> Option<NativeMbx> {
-    probe_native_version(host, executor).ok().flatten()
-}
-
 fn probe_native_version(
     host: &CacheHost,
     executor: &impl CommandExecutor,
@@ -579,21 +754,8 @@ cat -- "$1""#;
 /// so their mbx uses the host's own limits. mbx has no command that prints its
 /// effective configuration, so the file itself is the only accurate source.
 fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result<Option<String>> {
-    let path = host.home(executor)?.join(HOST_CONFIG_RELATIVE);
-    let command = host.shell_command(
-        READ_CONFIG_SCRIPT,
-        LABEL,
-        [path.to_string_lossy().into_owned()],
-        "read the container host mbx configuration",
-    );
-    let output = executor.execute(&command)?;
-    if output.status == 3 {
-        return Ok(None);
-    }
-    let output = checked(output, &command)?;
-    Ok(Some(
-        String::from_utf8(output.stdout).context("decode the host mbx configuration")?,
-    ))
+    let directory = configuration::host_directory(host, executor)?;
+    configuration::read_file(host, &directory.join("config.toml"), executor)
 }
 
 /// The `[target] root` a host configuration sets, when it lies outside the
@@ -643,7 +805,7 @@ fn nearest_existing_ancestor(
 /// The budget mj gives a host that has no mbx configuration of its own: the
 /// smaller of 100 GB and a quarter of the free space on the cache volume.
 ///
-/// It is passed as `MBX_GC_MAX_TOTAL_SIZE`, so it bounds the whole cache
+/// It is written as `gc.max_total_size`, so it bounds the whole cache
 /// rather than the action store alone. mbx's own per-part budgets still apply
 /// underneath it; they are fractions of the disk and this total is the
 /// binding constraint whenever it is the smaller number.
@@ -929,8 +1091,8 @@ pub(super) fn primary_repository_is_rust(
 }
 
 /// Decide the build cache for one session and attach its mounts, returning the
-/// value to record on the session. A session that already carries a decision
-/// (resume, move, or a sub-agent child) reuses it without resolving again.
+/// placement to record on the session. Resumes and moves resolve current
+/// machine policy instead of reviving a saved session budget.
 pub(super) fn prepare(
     target: &targets::TargetTemplate,
     global: &BuildCacheConfig,
@@ -940,33 +1102,23 @@ pub(super) fn prepare(
     mounts: &mut Vec<targets::AdditionalMount>,
     executor: &impl CommandExecutor,
 ) -> Option<SessionBuildCache> {
-    // A recorded cache is a directory on one particular host, so it only
-    // survives a resume that stays on that host.
-    let host_key = supported_host(target).map(|(host, _)| host.key());
-    if let Some(recorded) = &session.build_cache {
-        if host_key.as_deref() == Some(recorded.host.as_str()) {
-            return attach_mounts(recorded, mounts).then(|| recorded.clone());
-        }
-        tracing::info!(
-            session_id = session.id,
-            recorded_host = recorded.host,
-            host = host_key.as_deref().unwrap_or("unsupported target"),
-            "the session moved to another container host, so its build cache is resolved again"
-        );
-    }
+    // This function prepares container mounts. Budgets always come from the
+    // machine; a previously recorded budget is never revived on recreation.
     // A session at the legacy shared `/workspace` would collide with every
     // other legacy session in mbx's path-keyed records.
     session.container_workspace.as_ref()?;
     let resolved = resolve(target, global, executor)?;
     let host = supported_host(target)?.0;
-    let mirror = clone_cache?.mirror_for(&bundle?.primary)?;
-    if !primary_repository_is_rust(&host, mirror, executor) {
-        return None;
+    if session.build_cache.is_none() {
+        let mirror = clone_cache?.mirror_for(&bundle?.primary)?;
+        if !primary_repository_is_rust(&host, mirror, executor) {
+            return None;
+        }
     }
     let build_cache = SessionBuildCache {
         host: host.key(),
         directory: resolved.directory,
-        max_size: resolved.max_size,
+        max_size: None,
         target_root: resolved.target_root,
     };
     attach_mounts(&build_cache, mounts).then_some(build_cache)
@@ -1015,19 +1167,15 @@ pub(super) fn attach_mounts_for_tests(
 
 /// Read the configuration on the host that actually owns this container.
 /// The named template may have been removed or reassigned since creation.
-pub(super) fn host_configuration(
-    target: &targets::TargetLocator,
-    executor: &impl CommandExecutor,
-) -> Result<Option<String>> {
-    let host = match target {
-        targets::TargetLocator::LocalPodman { .. }
-        | targets::TargetLocator::LocalDocker { .. }
-        | targets::TargetLocator::AppleContainer { .. } => CacheHost::Local,
+fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheHost> {
+    match target {
+        targets::TargetLocator::LocalPodman { .. } | targets::TargetLocator::LocalDocker { .. } => {
+            Some(CacheHost::Local)
+        }
         targets::TargetLocator::SshPodman { ssh, .. }
-        | targets::TargetLocator::SshDocker { ssh, .. } => CacheHost::Ssh(ssh.clone()),
-        _ => return Ok(None),
-    };
-    host_config_file(&host, executor)
+        | targets::TargetLocator::SshDocker { ssh, .. } => Some(CacheHost::Ssh(ssh.clone())),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1044,6 +1192,7 @@ mod tests {
     fn isolated() -> std::sync::MutexGuard<'static, ()> {
         let guard = ISOLATED.lock().unwrap_or_else(|error| error.into_inner());
         RESOLUTIONS.lock().expect("mbx resolutions").clear();
+        APPLICATIONS.lock().expect("mbx applications").clear();
         guard
     }
 
@@ -1150,6 +1299,7 @@ mod tests {
     #[test]
     fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
         let executor = ProbeExecutor::new(&[
+            ("XDG_CONFIG_HOME", 0, "/home/builder/.config/mbx"),
             ("$HOME", 0, "/home/builder"),
             ("[ -f \"$1\" ]", 0, "[gc]\nmax_total_size = '50GB'\n"),
         ]);
@@ -1162,7 +1312,9 @@ mod tests {
             workspace_storage: Default::default(),
             borrowed_from: None,
         };
-        let config = host_configuration(&target, &executor).unwrap().unwrap();
+        let config = host_config_file(&host_for_locator(&target).unwrap(), &executor)
+            .unwrap()
+            .unwrap();
         assert!(config.contains("50GB"));
         assert!(
             executor
@@ -1198,12 +1350,23 @@ mod tests {
         let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor).unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/fast/mbx-cache"));
         // The host's own configuration file carries the budget.
-        assert_eq!(resolved.max_size, None);
+        assert_eq!(
+            configuration::configured_limit(
+                resolved.config_file.as_deref(),
+                "gc",
+                "max_total_size"
+            )
+            .unwrap(),
+            None
+        );
         assert_eq!(resolved.target_root, None);
         assert!(resolved.config_file.unwrap().contains("500GiB"));
         assert!(
-            !executor.ran().iter().any(|line| line.contains("df -B1")),
-            "a host with its own configuration is not measured"
+            !executor
+                .ran()
+                .iter()
+                .any(|line| line.contains("apply machine")),
+            "a host configuration is never rewritten"
         );
     }
 
@@ -1353,7 +1516,16 @@ mod tests {
         let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor).unwrap();
         assert_eq!(resolved.directory, default_cache_directory());
         // min(100 GB, 800 GB / 4) is the 100 GB cap.
-        assert_eq!(resolved.max_size.as_deref(), Some("100000000000B"));
+        assert_eq!(
+            configuration::configured_limit(
+                resolved.config_file.as_deref(),
+                "gc",
+                "max_total_size"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("100000000000B")
+        );
     }
 
     #[test]
@@ -1368,7 +1540,16 @@ mod tests {
         ));
         let executor = ProbeExecutor::new(&answers);
         let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor).unwrap();
-        assert_eq!(resolved.max_size.as_deref(), Some("10000000B"));
+        assert_eq!(
+            configuration::configured_limit(
+                resolved.config_file.as_deref(),
+                "gc",
+                "max_total_size"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("10000000B")
+        );
     }
 
     #[test]
@@ -1382,13 +1563,123 @@ mod tests {
                 enabled: Some(true),
                 directory: Some(PathBuf::from("/mnt/nvme/mbx")),
                 max_size: Some("250GiB".into()),
+                target_max_size: None,
             })),
             &BuildCacheConfig::default(),
             &executor,
         )
         .unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/nvme/mbx"));
-        assert_eq!(resolved.max_size.as_deref(), Some("250GiB"));
+        assert_eq!(
+            configuration::configured_limit(
+                resolved.config_file.as_deref(),
+                "gc",
+                "max_total_size"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("250GiB")
+        );
+    }
+
+    #[test]
+    fn total_and_worktree_budgets_resolve_into_one_machine_document() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&plain_host());
+        let settings = TargetBuildCache {
+            max_size: Some("500GiB".into()),
+            target_max_size: Some("250GiB".into()),
+            ..Default::default()
+        };
+        let inspection = inspect_host(&CacheHost::Local, &settings, &executor).unwrap();
+        assert!(!inspection.preview.user_managed);
+        assert_eq!(
+            inspection.preview.max_size,
+            Some(BuildCacheLimit::Size("500GiB".into()))
+        );
+        assert_eq!(
+            inspection.preview.target_max_size,
+            Some(BuildCacheLimit::Size("250GiB".into()))
+        );
+        assert_eq!(
+            inspection.preview.application,
+            BuildCacheApplication::Pending
+        );
+        let cache = inspection.cache.unwrap();
+        assert_eq!(
+            configuration::configured_limit(cache.config_file.as_deref(), "target", "max_size")
+                .unwrap()
+                .as_deref(),
+            Some("250GiB")
+        );
+        assert!(
+            !executor
+                .ran()
+                .iter()
+                .any(|command| command.contains(".mj-apply.lock")),
+            "preview never applies a setting"
+        );
+    }
+
+    #[test]
+    fn a_native_installation_owns_both_budgets_despite_saved_mj_overrides() {
+        let _isolated = isolated();
+        let native = current_native_mbx();
+        let mut answers = vec![
+            ("$m\" --version", 0, native.as_str()),
+            (
+                "mbx cache dir --json",
+                0,
+                r#"{"store":"/native/cache/actions"}"#,
+            ),
+            (
+                "[ -f \"$1\" ]",
+                0,
+                "[gc]\nmax_total_size = '400GiB'\n[target]\nmax_size = 'none'\n",
+            ),
+        ];
+        answers.extend(plain_host());
+        let executor = ProbeExecutor::new(&answers);
+        let settings = TargetBuildCache {
+            directory: Some("/ignored".into()),
+            max_size: Some("1GB".into()),
+            target_max_size: Some("2GB".into()),
+            ..Default::default()
+        };
+        let inspection = inspect_host(&CacheHost::Local, &settings, &executor).unwrap();
+        assert!(inspection.preview.user_managed);
+        assert_eq!(inspection.preview.directory, Some("/native/cache".into()));
+        assert_eq!(
+            inspection.preview.max_size,
+            Some(BuildCacheLimit::HostConfiguration(Some("400GiB".into())))
+        );
+        assert_eq!(
+            inspection.preview.target_max_size,
+            Some(BuildCacheLimit::HostConfiguration(Some("none".into())))
+        );
+        assert!(
+            !executor
+                .ran()
+                .iter()
+                .any(|command| command.contains(".mj-apply.lock"))
+        );
+    }
+
+    #[test]
+    fn the_automatic_total_is_reused_instead_of_following_free_space() {
+        let _isolated = isolated();
+        let saved = configuration::managed_document(&TargetBuildCache::default(), "17GB").unwrap();
+        let mut answers = vec![(".mjolnir/config/mbx/config.toml", 0, saved.as_str())];
+        answers.extend(plain_host());
+        let executor = ProbeExecutor::new(&answers);
+        let preview = inspect_host(&CacheHost::Local, &TargetBuildCache::default(), &executor)
+            .unwrap()
+            .preview;
+        assert_eq!(
+            preview.max_size,
+            Some(BuildCacheLimit::MjDefault("17GB".into()))
+        );
+        assert_eq!(preview.application, BuildCacheApplication::Applied);
     }
 
     /// Turning the cache on cannot override the host: without reflinks a
@@ -1406,6 +1697,7 @@ mod tests {
                     enabled: Some(true),
                     directory: None,
                     max_size: None,
+                    target_max_size: None,
                 })),
                 &BuildCacheConfig::default(),
                 &executor,
@@ -1445,7 +1737,7 @@ mod tests {
         assert_eq!(preview.directory, Some(default_cache_directory()));
         assert_eq!(
             preview.max_size,
-            Some(BuildCacheLimit::Size("100000000000B".into()))
+            Some(BuildCacheLimit::MjDefault("100000000000B".into()))
         );
         assert!(
             matches!(&preview.off_reason, Some(BuildCacheOff::Unavailable(reason)) if reason.contains("reflinks")),
@@ -1480,10 +1772,7 @@ mod tests {
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))
         );
-        assert_eq!(
-            preview.max_size,
-            Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into())))
-        );
+        assert_eq!(preview.max_size, Some(BuildCacheLimit::MbxDefault(None)));
         assert_eq!(preview.off_reason, None);
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
     }
@@ -1777,15 +2066,15 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_session_reuses_its_recorded_cache_without_resolving_again() {
+    fn a_resumed_session_uses_current_machine_policy_instead_of_its_saved_budget() {
         let _isolated = isolated();
-        let executor = ProbeExecutor::new(&[]);
+        let executor = ProbeExecutor::new(&plain_host());
         let mut record = session(Some("/workspace/session-1"));
         record.build_cache = Some(SessionBuildCache {
             host: "local".into(),
-            directory: PathBuf::from("/mnt/fast/mbx-cache"),
-            max_size: None,
-            target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
+            directory: default_cache_directory(),
+            max_size: Some("1GB".into()),
+            target_root: None,
         });
         let mut mounts = Vec::new();
         let build_cache = prepare(
@@ -1797,19 +2086,16 @@ mod tests {
             &mut mounts,
             &executor,
         )
-        .expect("a resumed session keeps its build cache");
-        assert_eq!(build_cache, record.build_cache.unwrap());
-        assert_eq!(
-            mounts
+        .unwrap();
+        assert_eq!(build_cache.max_size, None);
+        assert_eq!(build_cache.directory, default_cache_directory());
+        assert_eq!(mounts.len(), 1);
+        assert!(
+            executor
+                .ran()
                 .iter()
-                .map(|mount| mount.destination.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                PathBuf::from("/mnt/fast/mbx-cache"),
-                PathBuf::from("/mnt/fast/mbx-targets"),
-            ]
+                .any(|line| line.contains(".mj-apply.lock"))
         );
-        assert!(executor.ran().is_empty());
     }
 
     #[test]

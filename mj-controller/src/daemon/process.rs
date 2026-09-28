@@ -418,6 +418,12 @@ pub(super) async fn run_daemon_runtime(
     let daemon_metadata_path = metadata_path();
     let mut client_tasks = tokio::task::JoinSet::new();
     let mut delegation_outcome = None;
+    let mut cache_task = tokio::spawn(crate::controller::mbx::service::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
+
+    let mut cache_outcome = None;
 
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
@@ -434,6 +440,10 @@ pub(super) async fn run_daemon_runtime(
                     if let Some(targets) = &phone_targets {
                         targets.send_replace(prepared_targets.borrow_and_update().clone());
                     }
+                }
+                result = &mut cache_task => {
+                    cache_outcome = Some(result.context("machine cache service failed").and_then(|result| result));
+                    anyhow::bail!("machine build cache service stopped unexpectedly");
                 }
                 result = &mut delegation_task => {
                     delegation_outcome = Some(result.map_err(anyhow::Error::from).and_then(|result| result));
@@ -568,6 +578,17 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    record_daemon_cleanup(
+        &mut outcome,
+        "join machine build cache applications",
+        match cache_outcome {
+            Some(result) => result,
+            None => cache_task
+                .await
+                .context("machine cache service failed")
+                .and_then(|result| result),
+        },
+    );
     // Recovery copies and worker upgrades do not hold up a handoff, so some
     // may still be running. Stop them first: the next daemon starts them again.
     // The coordinators share one gate, and dropping either cancels both.
