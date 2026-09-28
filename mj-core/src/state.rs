@@ -1589,7 +1589,7 @@ impl SessionRecord {
             ));
         }
         (!issues.is_empty()).then(|| format!(
-            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+            "Session {:?} needs configuration repair: {}. Restore these entries in config.toml, then retry. Starting mj again rediscovers the agents installed on this machine; existing sessions are preserved.",
             self.id, issues.join("; ")
         ))
     }

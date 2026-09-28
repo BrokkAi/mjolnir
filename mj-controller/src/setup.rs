@@ -151,83 +151,59 @@ pub enum SetupOutcome {
     Cancelled,
 }
 
-/// Give an unconfigured terminal installation a local Codex profile and target
-/// without making remote/container setup a prerequisite for explicit session
-/// creation. This only writes configuration; it never creates a session.
+/// Add a profile for every coding agent installed on this machine that no
+/// profile covers yet, and return the profiles it added.
 ///
-/// Only when Codex is on this machine, though: its home exists or the `codex`
-/// command is on PATH. Otherwise nothing is written. The dashboard then opens
-/// on the Get started panel, which says no agent was found, and the next
-/// launch after Codex is installed adds the profile (launch finding R13-1).
-pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let kind = HarnessKind::Codex;
-        initialize_local_startup_config_with(
-            config_path,
-            || {
-                std::env::var_os(kind.home_env())
-                    .map(|value| kind.home_from_environment(value))
-                    .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
-                    .context("locate Codex home for the default local profile")
-            },
-            || {
-                crate::targets::program_on_path(
-                    kind.cli_binary_name(),
-                    std::env::var_os("PATH").as_deref(),
-                )
-            },
-        )?;
-    }
-    // Local bare targets are unsupported on Windows; retain explicit setup.
-    #[cfg(not(unix))]
-    let _ = config_path;
-    Ok(())
-}
-
-/// [`initialize_local_startup_config`] with the two facts it reads from this
-/// machine supplied: where the Codex home would be, and whether the `codex`
-/// command is installed.
-#[cfg(unix)]
-fn initialize_local_startup_config_with(
+/// `mj` runs this on every interactive start, so installing an agent and
+/// signing in to it is all it takes to use it: no setup command and no visit
+/// to Settings. It only adds. A profile covers its installation whether or not
+/// it is enabled, so turning a profile off keeps its agent out; removing the
+/// profile lets the next start add it back. Local targets need nothing here:
+/// [`Config::with_local_targets`] already supplies them.
+///
+/// Detection reads the file system and PATH and runs no command, so it cannot
+/// hold up the start, and the file is written only when something was added.
+pub fn add_installed_agent_profiles(
     config_path: &Path,
-    codex_home: impl FnOnce() -> Result<PathBuf>,
-    codex_on_path: impl FnOnce() -> bool,
-) -> Result<()> {
-    let config = Config::load_from(config_path)?;
-    if !config.is_unconfigured() {
-        return Ok(());
-    }
-    let home = codex_home()?;
-    if !home.exists() && !codex_on_path() {
-        return Ok(());
-    }
-    let home = std::path::absolute(home).context("resolve Codex profile home")?;
-    Config::update_to(config_path, |fresh| {
-        if fresh.is_unconfigured() {
-            configure_local_startup(fresh, home);
-        }
-        Ok(())
-    })?;
-    Ok(())
+) -> Result<BTreeMap<String, HarnessProfile>> {
+    let home = dirs::home_dir();
+    let path = std::env::var_os("PATH");
+    let installed = installed_agents(home.as_deref(), &harness_home_overrides(), |program| {
+        crate::targets::program_on_path(program, path.as_deref())
+    });
+    add_agent_profiles(config_path, &installed)
 }
 
-#[cfg(unix)]
-fn configure_local_startup(config: &mut Config, codex_home: PathBuf) {
-    config.profiles.insert(
-        "codex".into(),
-        HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: codex_home,
-            environment: BTreeMap::new(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-        },
+/// [`add_installed_agent_profiles`] with the installations supplied.
+fn add_agent_profiles(
+    config_path: &Path,
+    installed: &[(HarnessKind, PathBuf)],
+) -> Result<BTreeMap<String, HarnessProfile>> {
+    let discovered = profiles_config(
+        &installed
+            .iter()
+            .map(|(kind, path)| DiscoveredHome {
+                kind: *kind,
+                path: path.clone(),
+                authenticated: false,
+            })
+            .collect::<Vec<_>>(),
     );
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
+    // The common start finds nothing new; it must not take the lock or
+    // rewrite the file to learn that.
+    if Config::load_from(config_path)?
+        .setup_additions(&discovered)
+        .profiles
+        .is_empty()
+    {
+        return Ok(BTreeMap::new());
+    }
+    let (_, added) = Config::update_to(config_path, |latest| {
+        let added = latest.setup_additions(&discovered).profiles;
+        latest.profiles.extend(added.clone());
+        Ok(added)
+    })?;
+    Ok(added)
 }
 
 /// Run the setup dialog using the user's normal standard input and output.
@@ -262,21 +238,32 @@ pub fn discover_current(executor: &impl CommandExecutor) -> SetupDiscovery {
     }
 }
 
-/// The installed agent homes alone. Callers that only add profiles use this
-/// instead of `discover_current`, which also runs container, AWS, and SSH
-/// probes whose results they would discard.
+/// The installed agents alone, each with whether it is signed in. Callers
+/// that only add profiles use this instead of `discover_current`, which also
+/// runs container, AWS, and SSH probes whose results they would discard.
 pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome> {
     let home = dirs::home_dir();
-    let overrides = HarnessKind::ALL
+    let path = std::env::var_os("PATH");
+    discover_installed_profiles(
+        home.as_deref(),
+        &harness_home_overrides(),
+        |program| crate::targets::program_on_path(program, path.as_deref()),
+        executor,
+    )
+}
+
+/// The harness homes this process's environment names, such as
+/// `CODEX_HOME`, made absolute so a profile written from one never depends
+/// on the directory `mj` happened to start in.
+pub(crate) fn harness_home_overrides() -> BTreeMap<HarnessKind, PathBuf> {
+    HarnessKind::ALL
         .into_iter()
         .filter_map(|kind| {
-            std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
+            let value = std::env::var_os(kind.home_env()).filter(|value| !value.is_empty())?;
+            let home = kind.home_from_environment(value);
+            Some((kind, std::path::absolute(&home).unwrap_or(home)))
         })
-        .collect::<BTreeMap<_, _>>();
-    let mut homes =
-        discover_harness_homes_with_executor(home.as_deref(), overrides.clone(), executor);
-    discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor);
-    homes
+        .collect()
 }
 
 /// The container runtimes on this machine alone, usable or not, so a caller
@@ -338,75 +325,77 @@ pub fn ssh_config_aliases(contents: &str) -> Vec<String> {
     aliases
 }
 
-/// A newly installed CLI may not create its profile directory until login.
-/// Run these probes through setup's bounded, cancellable executor.
-fn discover_installed_harnesses(
+/// Every coding agent installed on this machine, as its harness and the home
+/// its profile uses: each harness home that exists, at its conventional place
+/// beneath `user_home` or where its environment variable points, and for a
+/// harness whose command `on_path` finds but that has no home yet (a CLI may
+/// not create one until the first login), the home it will use.
+///
+/// This is the one answer to which agents are installed. Startup adds a
+/// profile for each, and setup, Detect profiles, and the Get started panel
+/// report the same list.
+fn installed_agents(
     user_home: Option<&Path>,
     overrides: &BTreeMap<HarnessKind, PathBuf>,
-    homes: &mut Vec<DiscoveredHome>,
-    executor: &impl CommandExecutor,
-) {
+    on_path: impl Fn(&str) -> bool,
+) -> Vec<(HarnessKind, PathBuf)> {
+    let mut seen = BTreeSet::new();
+    let mut installed = user_home
+        .into_iter()
+        .flat_map(|home| HarnessKind::ALL.map(|kind| (kind, home.join(kind.default_home_leaf()))))
+        .chain(overrides.iter().map(|(kind, path)| (*kind, path.clone())))
+        .filter(|(kind, path)| seen.insert((*kind, path.clone())) && path.is_dir())
+        .collect::<Vec<_>>();
     for kind in HarnessKind::ALL {
-        if homes.iter().any(|home| home.kind == kind) {
+        if installed.iter().any(|(found, _)| *found == kind) || !on_path(kind.cli_binary_name()) {
             continue;
         }
-        let Some(home) = overrides
+        if let Some(home) = overrides
             .get(&kind)
             .cloned()
             .or_else(|| user_home.map(|home| home.join(kind.default_home_leaf())))
-        else {
-            continue;
-        };
-        let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
-            .purpose("detect installed harness before first login");
-        match executor.execute(&probe) {
-            Ok(output) if output.status == 0 => homes.push(DiscoveredHome {
-                kind,
-                path: home,
-                authenticated: false,
-            }),
-            Ok(_) => {}
-            Err(error) => tracing::debug!(
-                harness = kind.id(),
-                "installation probe unavailable: {error:#}"
-            ),
+        {
+            installed.push((kind, home));
         }
     }
+    installed
 }
 
+/// [`installed_agents`], each with whether it is signed in. A home that does
+/// not exist yet has never been signed in to.
+fn discover_installed_profiles(
+    user_home: Option<&Path>,
+    overrides: &BTreeMap<HarnessKind, PathBuf>,
+    on_path: impl Fn(&str) -> bool,
+    executor: &impl CommandExecutor,
+) -> Vec<DiscoveredHome> {
+    installed_agents(user_home, overrides, on_path)
+        .into_iter()
+        .map(|(kind, path)| {
+            let is_default_home =
+                user_home.is_some_and(|home| home.join(kind.default_home_leaf()) == path);
+            DiscoveredHome {
+                authenticated: path.is_dir()
+                    && harness_is_authenticated_with(
+                        &probe_profile(kind, &path),
+                        is_default_home,
+                        executor,
+                    ),
+                kind,
+                path,
+            }
+        })
+        .collect()
+}
+
+/// The harness homes that exist, each with whether it is signed in, leaving
+/// out a command installed without one.
 pub(crate) fn discover_harness_homes_with_executor(
     home: Option<&Path>,
     overrides: impl IntoIterator<Item = (HarnessKind, PathBuf)>,
     executor: &impl CommandExecutor,
 ) -> Vec<DiscoveredHome> {
-    let mut candidates = Vec::new();
-    if let Some(home) = home {
-        candidates.extend(
-            HarnessKind::ALL
-                .into_iter()
-                .map(|kind| (kind, home.join(kind.default_home_leaf()), true)),
-        );
-    }
-    candidates.extend(
-        overrides
-            .into_iter()
-            .map(|(kind, path)| (kind, path, false)),
-    );
-
-    let mut seen = BTreeSet::new();
-    candidates
-        .into_iter()
-        .filter(|(kind, path, _)| seen.insert((*kind, path.clone())) && path.is_dir())
-        .map(|(kind, path, is_default_home)| DiscoveredHome {
-            authenticated: harness_is_authenticated_with(
-                &probe_profile(kind, &path),
-                is_default_home,
-                executor,
-            ),
-            kind,
-            path,
-        })
-        .collect()
+    discover_installed_profiles(home, &overrides.into_iter().collect(), |_| false, executor)
 }
 
 /// A profile standing in for a home discovery found but the user has not
@@ -962,21 +951,11 @@ fn run_setup_dialog_inner(
 /// Setup's last line: what to do next with the configuration it wrote. With
 /// no enabled profile the dashboard has no Sessions pane to press n in, so
 /// the first step is an agent to run (launch finding R13-3).
-fn setup_next_step(config: &Config) -> String {
+fn setup_next_step(config: &Config) -> &'static str {
     if config.enabled_profiles().next().is_some() {
-        return "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
-            .to_owned();
-    }
-    match config
-        .keybinds()
-        .labels(mj_core::config::KeyAction::OpenSettings)
-        .into_iter()
-        .next()
-    {
-        Some(key) => format!(
-            "Install a coding agent, then run `mj` and open Settings ({key}) to add its profile."
-        ),
-        None => "Install a coding agent, then run `mj` and open Settings from the command palette to add its profile.".to_owned(),
+        "Run `mj` to open Mjolnir, then press n in the Sessions pane to start your first session."
+    } else {
+        "Install a coding agent and sign in to it, then run `mj`; it adds the agent's profile."
     }
 }
 

@@ -43,99 +43,113 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
     );
 }
 
-/// First launch as it finds this machine: `home` is the Codex home it would
-/// use, and `on_path` whether the `codex` command is installed.
-#[cfg(unix)]
-fn first_launch(path: &Path, home: &Path, on_path: bool) -> Result<()> {
-    initialize_local_startup_config_with(path, || Ok(home.to_path_buf()), || on_path)
+/// A start of `mj` on a machine whose user home is `home` and whose PATH
+/// holds `commands`.
+fn launch(path: &Path, home: &Path, commands: &[&str]) -> Result<BTreeMap<String, HarnessProfile>> {
+    add_agent_profiles(
+        path,
+        &installed_agents(Some(home), &BTreeMap::new(), |program| {
+            commands.contains(&program)
+        }),
+    )
 }
 
-#[cfg(unix)]
+/// Every agent on the machine is usable from the first start: a home that
+/// exists or a command on PATH is enough, and no setup step comes first.
 #[test]
-fn first_terminal_launch_writes_a_local_codex_config_once() {
+fn every_installed_agent_gets_a_profile_when_mj_starts() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let home = directory.path().join(".codex");
-    fs::create_dir(&home).unwrap();
-    first_launch(&path, &home, false).unwrap();
+    let home = directory.path().join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+
+    let added = launch(&path, &home, &["grok"]).unwrap();
+
+    assert_eq!(
+        added.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["claude", "codex", "grok"]
+    );
     let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.profiles, added);
+    assert_eq!(config.profiles["claude"].home, home.join(".claude"));
     assert_eq!(config.profiles["codex"].kind, HarnessKind::Codex);
-    assert!(config.profiles["codex"].home.is_absolute());
-    assert!(matches!(
-        config.targets["localhost"],
-        TargetTemplate::LocalBare
-    ));
+    // Grok is installed but not signed in: its profile names the home the
+    // first login creates, and launch preflight and doctor say to log in.
+    assert_eq!(config.profiles["grok"].home, home.join(".grok"));
+    assert!(config.profiles.values().all(|profile| profile.enabled));
     assert!(config.bundles.is_empty());
+    assert!(config.targets.is_empty(), "local targets are implicit");
+
+    // The next start finds nothing new and leaves the file alone.
     let written = fs::read(&path).unwrap();
-    first_launch(&path, &home, false).unwrap();
+    assert!(launch(&path, &home, &["grok"]).unwrap().is_empty());
     assert_eq!(fs::read(&path).unwrap(), written);
 }
 
-/// With no configuration, the first `mj` added a `codex` profile for a
-/// `~/.codex` that did not exist and a `codex` command that was not
-/// installed. Nothing said so: the wizard offered the profile and the launch
-/// failed naming Node.js (launch finding R13-1). With no sign of Codex the
-/// first launch now writes nothing, so the dashboard opens on the Get
-/// started panel.
-#[cfg(unix)]
+/// With no agent on the machine nothing is written, so the dashboard opens
+/// on the Get started panel (launch finding R13-1); the start after one is
+/// installed adds it.
 #[test]
-fn first_launch_without_codex_adds_no_profile() {
+fn a_start_without_an_agent_writes_nothing_and_the_next_one_adds_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let home = directory.path().join(".codex");
+    let home = directory.path().join("home");
 
-    first_launch(&path, &home, false).unwrap();
+    assert!(launch(&path, &home, &[]).unwrap().is_empty());
+    assert!(!path.exists(), "nothing is written without an agent");
 
-    assert!(!path.exists(), "nothing is written for an absent Codex");
-    assert!(Config::load_from(&path).unwrap().profiles.is_empty());
-
-    // Codex installed but not yet signed in still gets the default profile:
-    // its login is the next step, and launch preflight and doctor say so.
-    first_launch(&path, &home, true).unwrap();
+    let added = launch(&path, &home, &["codex"]).unwrap();
+    assert_eq!(added.keys().collect::<Vec<_>>(), ["codex"]);
     assert_eq!(
-        Config::load_from(&path).unwrap().profiles["codex"].kind,
-        HarnessKind::Codex
+        Config::load_from(&path).unwrap().profiles["codex"].home,
+        home.join(".codex")
     );
 }
 
-#[cfg(unix)]
+/// An agent installed after the first start is added to a configuration the
+/// user already shaped, and nothing the user wrote changes: a profile they
+/// turned off stays off and is not added again beside itself.
 #[test]
-fn local_startup_preserves_existing_settings_and_ignores_disabled_startup() {
+fn a_later_start_adds_a_new_agent_and_keeps_the_users_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let home = directory.path().join(".codex");
-    fs::create_dir(&home).unwrap();
-    let mut config = Config::default();
-    config.phone.enabled = false;
-    config.save_to(&path).unwrap();
-    first_launch(&path, &home, false).unwrap();
-    assert!(!Config::load_from(&path).unwrap().phone.enabled);
-
-    // Even a partially configured installation belongs to the user.
-    let configured = "version = 2\n# keep this comment\n[targets.custom]\nkind = 'local-bare'\n";
-    fs::write(&path, configured).unwrap();
-    first_launch(&path, &home, false).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), configured);
-
-    let disabled = "version = 2\n[startup]\nenabled = false\n";
-    fs::write(&path, disabled).unwrap();
-    first_launch(&path, &home, false).unwrap();
-    let bootstrapped = Config::load_from(&path).unwrap();
-    assert!(
-        serde_json::to_value(&bootstrapped)
-            .unwrap()
-            .get("startup")
-            .is_none()
+    let home = directory.path().join("home");
+    let claude = home.join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(home.join(".kimi-code")).unwrap();
+    let configured = format!(
+        "version = {}\n\
+         # keep this comment\n\
+         [phone]\nenabled = false\n\
+         [profiles.work]\nenabled = false\nkind = \"claude\"\nhome = {:?}\n",
+        mj_core::config::CONFIG_VERSION,
+        claude.display().to_string(),
     );
-    assert_eq!(bootstrapped.profiles["codex"].kind, HarnessKind::Codex);
-    assert!(matches!(
-        bootstrapped.targets["localhost"],
-        TargetTemplate::LocalBare
-    ));
+    fs::write(&path, &configured).unwrap();
 
+    let added = launch(&path, &home, &[]).unwrap();
+
+    assert_eq!(added.keys().collect::<Vec<_>>(), ["kimi"]);
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(written.starts_with(&configured), "{written}");
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.profiles.len(), 2);
+    assert!(!config.profiles["work"].enabled);
+    assert!(!config.phone.enabled);
+    assert_eq!(config.profiles["kimi"].kind, HarnessKind::Kimi);
+}
+
+#[test]
+fn a_start_never_rewrites_a_newer_builds_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let home = directory.path().join("home");
+    fs::create_dir_all(home.join(".codex")).unwrap();
     let newer = "version = 999\nfuture_field = true\n";
     fs::write(&path, newer).unwrap();
-    assert!(first_launch(&path, &home, false).is_err());
+
+    assert!(launch(&path, &home, &[]).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), newer);
 }
 
@@ -230,27 +244,16 @@ fn discovery_without_runtimes() -> SetupDiscovery {
 
 #[test]
 fn newly_installed_harness_is_discovered_before_its_first_login() {
-    struct InstalledMuse;
-    impl CommandExecutor for InstalledMuse {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.args, ["--version"]);
-            Ok(CommandOutput {
-                status: if command.program == "muse" { 0 } else { 127 },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("custom-muse-home");
     let overrides = BTreeMap::from([(HarnessKind::Muse, path.clone())]);
-    let mut homes = Vec::new();
+    let executor = FakeExecutor::succeeds();
     for _ in 0..2 {
-        discover_installed_harnesses(
+        let homes = discover_installed_profiles(
             Some(directory.path()),
             &overrides,
-            &mut homes,
-            &InstalledMuse,
+            |program| program == "muse",
+            &executor,
         );
         assert_eq!(
             homes,
@@ -1453,7 +1456,7 @@ fn a_failed_smoke_test_becomes_a_fixable_line_in_the_closing_report() {
     // No agent was discovered, so the last line says to install one.
     assert!(
         output.ends_with(
-            "Install a coding agent, then run `mj` and open Settings (ctrl+b s) to add its profile.\n"
+            "Install a coding agent and sign in to it, then run `mj`; it adds the agent's profile.\n"
         ),
         "{output}"
     );
@@ -1533,7 +1536,7 @@ fn setup_without_an_agent_ends_by_saying_to_install_one() {
     let output = String::from_utf8(output).unwrap();
     assert!(
         output.ends_with(
-            "Install a coding agent, then run `mj` and open Settings (ctrl+b s) to add its profile.\n"
+            "Install a coding agent and sign in to it, then run `mj`; it adds the agent's profile.\n"
         ),
         "{output}"
     );

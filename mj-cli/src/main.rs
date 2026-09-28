@@ -1036,7 +1036,7 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
-    dashboard::initialize_first_run_config().await?;
+    let added_agents = dashboard::add_installed_agent_profiles().await;
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
     let selected = if let Some(resume) = &resume
@@ -1094,6 +1094,7 @@ async fn run_workspace_dashboard(
         go,
         attachment.presence,
         resume,
+        added_agents,
     )
     .await;
     attachment_cancellation.cancel();
@@ -1638,7 +1639,9 @@ fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<Str
             "several profiles are configured; pass --profile with one of: {}",
             profile_ids(config)
         ),
-        (None, _) => bail!("no enabled agent profiles are configured; run `mj setup` first"),
+        (None, _) => bail!(
+            "no enabled agent profiles are configured; install a coding agent, then run `mj` to add it"
+        ),
     }
 }
 

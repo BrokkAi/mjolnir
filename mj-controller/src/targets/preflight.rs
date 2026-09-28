@@ -179,10 +179,14 @@ pub fn local_engine_command(template: &mj_core::config::TargetTemplate) -> Optio
 }
 
 /// Whether `program` is a file in one of the directories of `path`, a PATH
-/// value. A missing PATH finds nothing.
+/// value, under its own name or with the platform's executable suffix, as
+/// `Command` would find it. A missing PATH finds nothing.
 pub fn program_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let suffixed = format!("{program}{}", std::env::consts::EXE_SUFFIX);
     path.is_some_and(|path| {
-        std::env::split_paths(path).any(|directory| directory.join(program).is_file())
+        std::env::split_paths(path).any(|directory| {
+            directory.join(program).is_file() || directory.join(&suffixed).is_file()
+        })
     })
 }
 

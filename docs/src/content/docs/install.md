@@ -188,7 +188,7 @@ cd path/to/your/repository
 mj
 ```
 
-`mj setup` is optional: run it before `mj` to find installed agents and container runtimes from the shell. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
+`mj` adds a profile for every coding agent installed on this machine each time it starts, and local targets need no setup. `mj setup` is optional, for adding a project, an SSH host, or an EC2 target from the shell. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
 
 ## Uninstall
 
