@@ -113,6 +113,9 @@ pub struct DurableRelay {
     checkpoint_only: bool,
     /// Live reviewer leases share this owner's atomic checkpoint decision.
     reviewer_admissions: BTreeMap<u64, String>,
+    /// Reviewer leases exist only around the Unix reviewer runtime, so this
+    /// stays compiled on Windows with the field it feeds.
+    #[cfg_attr(not(unix), allow(dead_code))]
     next_reviewer_admission: u64,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
@@ -210,6 +213,9 @@ pub struct DurableRelay {
 }
 
 impl DurableRelay {
+    /// The Unix worker is the only production caller; the helper stays
+    /// compiled on Windows so the relay tests still build there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn has_retained_command_receipts(&self) -> bool {
         !self.snapshot.retained_command_receipts.is_empty()
     }
@@ -634,6 +640,7 @@ impl DurableRelay {
     }
 
     /// Called while the worker owner is held through durable tool admission.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn originating_command_id(&self) -> Option<String> {
         self.snapshot
             .active_prompt

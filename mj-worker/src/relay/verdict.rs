@@ -70,6 +70,10 @@ impl DurableRelay {
 
     /// Capture immutable semantic evidence before issuing a request. Completion
     /// itself already installed the pending record, so restart can finish this.
+    ///
+    /// The Unix worker is the only production caller; these assessment
+    /// operations stay compiled on Windows so their tests still build there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
         if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
             a.current()
@@ -138,6 +142,7 @@ impl DurableRelay {
         self.store_assessment(a)
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn store_assessment(&mut self, assessment: mj_core::assessment::TurnAssessment) -> Result<()> {
         self.append_relay_event(
             None,
@@ -148,6 +153,7 @@ impl DurableRelay {
         Ok(())
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn apply_turn_assessment(
         &mut self,
         ordinal: u64,
@@ -225,6 +231,7 @@ impl DurableRelay {
         Ok(reason)
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn fail_turn_assessment(&mut self, ordinal: u64, reason: &str) -> Result<()> {
         let Some(mut a) = self
             .snapshot

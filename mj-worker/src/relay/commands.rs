@@ -1544,6 +1544,10 @@ impl DurableRelay {
 
     /// A restarted harness changes journal metadata while the durable Move
     /// seal still excludes new work. Reestablish its cut after setup settles.
+    ///
+    /// The Unix worker is the only production caller; it stays compiled on
+    /// Windows so the relay tests still build there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn refresh_sealed_checkpoint(&mut self) -> Result<()> {
         if !self.command_ledger_is_sealed()
             || !self.acp_ready

@@ -65,6 +65,10 @@ impl UserShellRegistry {
 
     /// Close and await this tracker after dropping the registry to wait for
     /// cancelled shells' process cleanup, even if the coordinator failed.
+    ///
+    /// The Unix worker is the only production caller; it stays compiled on
+    /// Windows so its test still builds under `cargo test --no-run`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn completion_tracker(&self) -> tokio_util::task::TaskTracker {
         self.lifetimes.clone()
     }
