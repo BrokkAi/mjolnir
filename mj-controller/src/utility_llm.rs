@@ -601,7 +601,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             }
             let auth = Arc::new(crate::kimi_auth::KimiAuth::new(
                 &profile.home,
-                profile.environment.clone(),
+                profile.environment.resolved().clone(),
             ));
             config.build_with_token_provider(auth).map(Some)
         }
@@ -752,7 +752,8 @@ mod tests {
                     "X-Profile-Test: profile-header".into(),
                 ),
                 ("PATH".into(), "/missing-kimi-runtime".into()),
-            ]),
+            ])
+            .into(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -793,7 +794,7 @@ mod tests {
                 enabled: false,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/profiles/codex"),
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             },

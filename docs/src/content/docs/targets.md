@@ -345,9 +345,12 @@ the target container. `[profiles.<id>.environment]` configures the harness and
 ACP bridge. AWS and bare target variants do not accept a target environment
 table, but profile environment still applies to their workers.
 
-Do not put secrets in either table casually: `config.toml` is plain text. Use
-the harness login flow for provider credentials and the controller's GitHub
-token flow for GitHub access. See [Profiles and harnesses](/profiles/).
+Do not write secrets into either table as plain strings: `config.toml` is
+copied and read as ordinary configuration. Write `{ from_secret = "NAME" }` to
+read `secrets.toml` beside it, or `{ from_env = "NAME" }` to read the daemon's
+environment; see [Secrets](/configuration/#secrets-secretstoml). Use the
+harness login flow for provider credentials and the controller's GitHub token
+flow for GitHub access. See [Profiles and harnesses](/profiles/).
 
 ## Full field reference
 

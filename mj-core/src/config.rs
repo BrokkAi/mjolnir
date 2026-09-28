@@ -14,12 +14,14 @@
 //! * `targets` -- projects, containers and [`TargetTemplate`].
 //! * `ui` -- terminal appearance settings.
 //! * `loading` -- instance names, directories, and atomic file writes.
+//! * `secrets` -- environment entries that name a secret held elsewhere.
 
 mod document;
 mod harness;
 mod keys;
 mod loading;
 mod machines;
+mod secrets;
 mod targets;
 mod ui;
 
@@ -27,6 +29,7 @@ pub use harness::*;
 pub use keys::*;
 pub use loading::*;
 pub use machines::*;
+pub use secrets::*;
 pub use targets::*;
 pub use ui::*;
 
@@ -860,7 +863,7 @@ impl Config {
             platform: None,
             cpus: None,
             memory: None,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         };
         #[cfg(unix)]
@@ -941,8 +944,11 @@ impl Config {
         // on the next ordinary save. The version bump itself happens in
         // `TryFrom<StoredConfig>`, which is also what decides whether an old
         // `kind` is still accepted.
-        let config: Self = toml::from_str(&contents)
-            .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        // Environment references resolve against the secrets file beside
+        // this configuration and the process environment.
+        let config: Self =
+            with_secret_resolver(SecretResolver::beside(path), || toml::from_str(&contents))
+                .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }

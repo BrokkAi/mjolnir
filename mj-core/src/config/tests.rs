@@ -43,7 +43,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
         platform: Some("linux/amd64".into()),
         cpus: Some("2".into()),
         memory: Some("4g".into()),
-        environment: BTreeMap::from([("A".into(), "1".into())]),
+        environment: BTreeMap::from([("A".into(), "1".into())]).into(),
         workspace_storage: PodmanWorkspaceStorage::ContainerLayer,
         build_cache: Some(TargetBuildCache {
             enabled: Some(true),
@@ -95,7 +95,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         enabled: true,
         kind: HarnessKind::Codex,
         home: home.to_path_buf(),
-        environment,
+        environment: environment.into(),
         context_window_bytes: None,
         guardian_review_model: None,
     }
@@ -122,7 +122,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         enabled: true,
         kind,
         home: home.to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -282,7 +282,7 @@ fn guardian_review_model_accepts_its_three_forms_only_on_a_custom_provider() {
         enabled: true,
         kind: HarnessKind::Codex,
         home: native.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: Some(GUARDIAN_REVIEW_SESSION.to_owned()),
     };
@@ -300,7 +300,7 @@ fn a_codex_profile_with_no_home_yet_reports_a_native_login() {
         enabled: true,
         kind: HarnessKind::Codex,
         home: PathBuf::from("/does/not/exist"),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -369,6 +369,46 @@ fn saving_keeps_the_files_comments_and_order() {
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         format!("# keep me\nversion = {CONFIG_VERSION} # the file format\n")
+    );
+}
+
+/// A reference under `environment` resolves from `secrets.toml` beside the
+/// configuration, and a save writes the reference back, never the value.
+#[test]
+fn environment_references_resolve_from_the_secrets_file_and_survive_a_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let secrets = directory.path().join(SECRETS_FILE);
+    fs::write(&secrets, "PROVIDER_API_KEY = \"stored-value\"\n").unwrap();
+    let original = format!(
+        "version = {CONFIG_VERSION}\n\n[notify]\ntitle = false\nbell = true\n\n\
+         [profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+         [profiles.codex.environment]\nPROVIDER_API_KEY = {{ from_secret = \"PROVIDER_API_KEY\" }}\n\
+         PLAIN = \"value\"\n"
+    );
+    fs::write(&path, &original).unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    let environment = &config.profiles["codex"].environment;
+    assert_eq!(environment["PROVIDER_API_KEY"], "stored-value");
+    assert_eq!(environment["PLAIN"], "value");
+    assert_eq!(
+        environment.sources()["PROVIDER_API_KEY"],
+        EnvironmentValue::FromSecret("PROVIDER_API_KEY".into())
+    );
+
+    config.notify.bell = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("stored-value"), "{saved}");
+    assert_eq!(saved, original.replace("bell = true", "bell = false"));
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+
+    // A missing secret says which entry needs it and where.
+    fs::write(&secrets, "").unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("PROVIDER_API_KEY") && error.contains(SECRETS_FILE),
+        "{error}"
     );
 }
 
@@ -597,7 +637,7 @@ fn sample_config() -> Config {
                 context_window_bytes: None,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex-one"),
-                environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]),
+                environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
                 guardian_review_model: None,
             },
         )]),
@@ -624,7 +664,7 @@ fn sample_config() -> Config {
                     platform: None,
                     cpus: None,
                     memory: None,
-                    environment: BTreeMap::new(),
+                    environment: Default::default(),
                     workspace_storage: Default::default(),
                 },
             },
@@ -2033,7 +2073,7 @@ fn container_size_hosts_group_local_runtimes_and_exact_ssh_hosts() {
         platform: None,
         cpus: None,
         memory: None,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     };
     let podman = TargetTemplate::LocalPodman {
@@ -2213,7 +2253,7 @@ fn full_container(build_cache: Option<TargetBuildCache>) -> ContainerTemplate {
         platform: Some("linux/amd64".into()),
         cpus: Some("4".into()),
         memory: Some("8g".into()),
-        environment: BTreeMap::from([("RUST_LOG".into(), "debug".into())]),
+        environment: BTreeMap::from([("RUST_LOG".into(), "debug".into())]).into(),
         workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
         build_cache,
     }

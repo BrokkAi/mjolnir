@@ -78,7 +78,7 @@ fn podman_controller(state: SessionState) -> Controller {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: std::collections::BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },

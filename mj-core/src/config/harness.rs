@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{default_true, is_true, validate_id};
+use super::{Environment, default_true, is_true, validate_id};
 use crate::codex_provider::CodexProvider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -615,8 +615,10 @@ pub struct HarnessProfile {
     pub kind: HarnessKind,
     /// Controller-side source home. A fresh copy is made for each target.
     pub home: PathBuf,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment: BTreeMap<String, String>,
+    /// Passed to the harness and its bridge. An entry may name a secret
+    /// instead of holding it; see [`super::Environment`].
+    #[serde(default, skip_serializing_if = "Environment::is_empty")]
+    pub environment: Environment,
     /// Conservative byte budget for cross-harness transcript compaction.
     /// Bytes avoid pretending Hel has an accurate tokenizer for every model.
     #[serde(default, skip_serializing_if = "Option::is_none")]

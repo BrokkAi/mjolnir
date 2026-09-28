@@ -279,7 +279,7 @@ fn container_resources_and_environment_become_argv() {
             platform: Some("linux/arm64".into()),
             cpus: Some("4".into()),
             memory: Some("8g".into()),
-            environment: std::collections::BTreeMap::from([("A".into(), "b c".into())]),
+            environment: std::collections::BTreeMap::from([("A".into(), "b c".into())]).into(),
             workspace_storage: Default::default(),
         },
     };
@@ -305,7 +305,7 @@ fn session_size_overrides_beat_the_target_template_and_its_allocation() {
             platform: None,
             cpus: Some("4".into()),
             memory: Some("8g".into()),
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         },
     };
@@ -398,7 +398,7 @@ fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) 
         platform: None,
         cpus: None,
         memory: None,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     }
 }
@@ -597,7 +597,7 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
                 platform: Some("linux/amd64".into()),
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },
@@ -684,7 +684,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         platform: None,
         cpus: None,
         memory: None,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     };
     let ssh = |host: &str| SshConnection {
@@ -795,7 +795,7 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
             platform: None,
             cpus: None,
             memory: None,
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         },
     };
@@ -830,7 +830,7 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
             platform: None,
             cpus: None,
             memory: None,
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         },
     };
@@ -871,7 +871,7 @@ fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {
             platform: None,
             cpus: None,
             memory: None,
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         },
     };
@@ -921,7 +921,7 @@ fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
         platform: None,
         cpus: None,
         memory: None,
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     };
     for template in [
@@ -958,7 +958,7 @@ fn apple_container_preflight_failures_recommend_doctor() {
             platform: None,
             cpus: None,
             memory: None,
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             workspace_storage: Default::default(),
         },
     };

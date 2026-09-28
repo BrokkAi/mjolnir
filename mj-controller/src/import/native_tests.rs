@@ -53,7 +53,7 @@ fn test_config() -> Config {
                         platform: None,
                         cpus: None,
                         memory: None,
-                        environment: BTreeMap::new(),
+                        environment: Default::default(),
                         workspace_storage: Default::default(),
                     },
                 },

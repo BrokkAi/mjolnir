@@ -1490,7 +1490,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 guardian_review_model: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
-                environment: BTreeMap::new(),
+                environment: Default::default(),
             },
         )]);
         config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
@@ -1547,7 +1547,7 @@ fn new_session_profile_step_aligns_its_columns() {
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
     let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
@@ -1665,7 +1665,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     )]);
     config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
@@ -3272,7 +3272,7 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
     open_resume_wizard(&mut dashboard);
@@ -4442,7 +4442,7 @@ fn subagent_wizard_config() -> mj_core::config::Config {
             guardian_review_model: None,
             kind: HarnessKind::Grok,
             home: PathBuf::from("/profiles/grok"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
     configuration

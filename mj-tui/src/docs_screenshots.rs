@@ -118,7 +118,7 @@ fn documentation_dashboard() -> DashboardState {
             enabled: true,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },

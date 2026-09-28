@@ -722,7 +722,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                             guardian_review_model: None,
                             kind: HarnessKind::Codex,
                             home: PathBuf::from("/home/agent").join(id),
-                            environment: std::collections::BTreeMap::new(),
+                            environment: Default::default(),
                         },
                     )
                 })

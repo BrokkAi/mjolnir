@@ -3080,7 +3080,7 @@ mod tests {
                 enabled,
                 kind,
                 home: PathBuf::from(home),
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             }

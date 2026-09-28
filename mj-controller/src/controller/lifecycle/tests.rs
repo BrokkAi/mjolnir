@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 
 use anyhow::Result;
 
@@ -125,7 +124,7 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
             },
         },
@@ -470,7 +469,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
             },
         },
@@ -940,7 +939,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },

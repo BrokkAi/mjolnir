@@ -151,7 +151,7 @@ impl Controller {
         upload_reviewer_profile(executor, &backend, &worker_root, generation, &local)?;
 
         let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
-        let mut environment = profile.environment.clone();
+        let mut environment = profile.environment.resolved().clone();
         // The worker sets the harness home from the directory it staged, so
         // sending one here could only point the reviewer somewhere it must not
         // read.
@@ -550,7 +550,7 @@ mod tests {
                     enabled: true,
                     kind,
                     home,
-                    environment: BTreeMap::from([("EXTRA".into(), "1".into())]),
+                    environment: BTreeMap::from([("EXTRA".into(), "1".into())]).into(),
                     context_window_bytes: None,
                     guardian_review_model: None,
                 },

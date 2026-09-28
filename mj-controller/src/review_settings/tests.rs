@@ -204,7 +204,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             enabled: true,
             kind: HarnessKind::Claude,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },

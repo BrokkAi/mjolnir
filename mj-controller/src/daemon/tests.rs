@@ -3996,7 +3996,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 enabled: true,
                 kind: mj_core::config::HarnessKind::Codex,
                 home: profile_home,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             },

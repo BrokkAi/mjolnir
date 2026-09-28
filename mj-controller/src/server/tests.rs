@@ -117,7 +117,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 guardian_review_model: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
-                environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]),
+                environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
             },
         )]),
         bundles: BTreeMap::from([(
@@ -144,7 +144,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                         platform: None,
                         cpus: None,
                         memory: None,
-                        environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())]),
+                        environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())])
+                            .into(),
                         workspace_storage: Default::default(),
                     },
                 },
@@ -3437,7 +3438,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
             guardian_review_model: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
