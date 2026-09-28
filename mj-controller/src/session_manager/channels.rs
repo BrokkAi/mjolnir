@@ -197,10 +197,33 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    producers: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
+    producer: Option<Arc<UpdateProducer>>,
     pub(super) delegation: Option<DelegationSender>,
     pub(super) observer: Option<Arc<DelegationPublisher>>,
     pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
     pub(super) wake: mpsc::Sender<()>,
+}
+
+struct UpdateProducer {
+    registry: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
+    session_id: String,
+    identity: Arc<()>,
+}
+
+impl Drop for UpdateProducer {
+    fn drop(&mut self) {
+        let mut registry = self
+            .registry
+            .lock()
+            .expect("session producer registry poisoned");
+        if registry
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.identity))
+        {
+            registry.remove(&self.session_id);
+        }
+    }
 }
 
 /// Bounded latest-state feed for the dashboard. At most one snapshot per
@@ -219,7 +242,45 @@ pub(super) struct PendingUpdate {
 }
 
 impl CoalescedUpdateSender {
+    pub(super) fn for_actor(&self, session_id: &str) -> Self {
+        assert!(
+            self.producer.is_none(),
+            "only the manager registers producers"
+        );
+        let identity = Arc::new(());
+        let mut registry = self
+            .producers
+            .lock()
+            .expect("session producer registry poisoned");
+        registry.insert(session_id.to_owned(), identity.clone());
+        // Replacing a producer also invalidates its undelivered observation.
+        self.pending
+            .lock()
+            .expect("session update coalescer poisoned")
+            .remove(session_id);
+        let mut sender = self.clone();
+        sender.producer = Some(Arc::new(UpdateProducer {
+            registry: self.producers.clone(),
+            session_id: session_id.to_owned(),
+            identity,
+        }));
+        sender
+    }
+
     pub(crate) fn send(&self, update: SessionManagerUpdate) {
+        let registry = self
+            .producers
+            .lock()
+            .expect("session producer registry poisoned");
+        if let Some(producer) = &self.producer {
+            assert_eq!(producer.session_id, update.session_id);
+            if !registry
+                .get(&update.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &producer.identity))
+            {
+                return;
+            }
+        }
         if let Some(observer) = &self.observer {
             observer.publish(&update.view);
         }
@@ -278,6 +339,8 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            producers: Default::default(),
+            producer: None,
             delegation: None,
             observer: None,
             pending: pending.clone(),

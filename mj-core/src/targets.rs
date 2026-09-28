@@ -534,6 +534,10 @@ pub trait CommandExecutor {
     /// failure: the work continues, and the user is told what changed.
     fn notify_notice(&self, _notice: &str) {}
 
+    /// The Move source has been sealed; its destination belongs exclusively
+    /// to the lifecycle until queue admission completes.
+    fn reserve_move_destination(&self) {}
+
     fn execute_with_stdin(
         &self,
         _command: &CommandSpec,

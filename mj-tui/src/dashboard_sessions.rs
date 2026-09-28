@@ -424,17 +424,16 @@ impl DashboardState {
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
         if let Some(parent_id) = self.subagent_parent_id.as_deref() {
             let mut children = self
-                .state
-                .subagents
-                .values()
-                .filter(|record| record.parent_session_id == parent_id)
-                .filter_map(|record| self.state.sessions.get(&record.child_session_id))
+                .managed_child_ids(parent_id)
+                .into_iter()
+                .filter_map(|id| self.state.sessions.get(&id))
                 .collect::<Vec<_>>();
             children.extend(
-                self.native_agents
-                    .iter()
-                    .filter(|(_, pane)| pane.agent.parent_view_id() == parent_id)
-                    .filter_map(|(id, _)| self.state.sessions.get(id)),
+                self.native_by_parent
+                    .get(parent_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| self.state.sessions.get(id)),
             );
             children.sort_by_cached_key(|session| {
                 let group = if let Some(pane) = self.native_agents.get(&session.id) {
@@ -465,9 +464,8 @@ impl DashboardState {
             return Vec::new();
         };
         let active = self
-            .state
-            .sessions
-            .values()
+            .listed_session_candidates()
+            .into_iter()
             .filter(|session| self.is_listed_top_level_session(session, active_workspace_id))
             .collect::<Vec<_>>();
         let priority = self.config.advanced.session_order == SessionOrder::Priority;
@@ -622,17 +620,15 @@ impl DashboardState {
     /// child that finished its turn is taken to have handed it back.
     pub(crate) fn subagents_not_handed_back(&self, parent_id: &str) -> Vec<String> {
         let mut children = self
-            .state
-            .subagents
-            .values()
-            .filter(|record| record.parent_session_id == parent_id)
-            .filter(|record| {
+            .managed_active_child_ids(parent_id)
+            .into_iter()
+            .filter(|id| {
                 matches!(
-                    self.own_attention_level(&record.child_session_id),
+                    self.own_attention_level(id),
                     AttentionLevel::Working | AttentionLevel::Waiting
                 )
             })
-            .filter_map(|record| self.state.sessions.get(&record.child_session_id))
+            .filter_map(|id| self.state.sessions.get(&id))
             .collect::<Vec<_>>();
         children.sort_by(|left, right| {
             (left.created_at.as_str(), left.id.as_str())
@@ -650,15 +646,11 @@ impl DashboardState {
         &self,
         parent_id: &str,
     ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
-        self.state
-            .subagents
-            .values()
-            .filter(|record| record.parent_session_id == parent_id)
-            .filter(|record| {
-                self.own_attention_level(&record.child_session_id) == AttentionLevel::Waiting
-            })
-            .find_map(|record| {
-                let child = self.state.sessions.get(&record.child_session_id)?;
+        self.managed_active_child_ids(parent_id)
+            .into_iter()
+            .filter(|id| self.own_attention_level(id) == AttentionLevel::Waiting)
+            .find_map(|id| {
+                let child = self.state.sessions.get(&id)?;
                 let question = self
                     .session_details
                     .get(&child.id)?
@@ -697,9 +689,8 @@ impl DashboardState {
     /// urgent first and newest activity first within a level.
     pub fn attention_queue(&self) -> Vec<AttentionEntry> {
         let mut entries = self
-            .state
-            .sessions
-            .values()
+            .listed_session_candidates()
+            .into_iter()
             .filter(|session| self.is_listed_top_level_session(session, &session.workspace_id))
             .filter_map(|session| {
                 let level = self.attention_notice_level(&session.id);
@@ -749,9 +740,8 @@ impl DashboardState {
         workspace_id: &str,
     ) -> Option<(AttentionLevel, usize)> {
         self.attention_summary(
-            self.state
-                .sessions
-                .values()
+            self.listed_session_candidates()
+                .into_iter()
                 .filter(|session| self.is_listed_top_level_session(session, workspace_id)),
         )
     }

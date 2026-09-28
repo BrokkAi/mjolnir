@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) struct LifecycleStart {
+    pub(super) resume_workspace_id: Option<String>,
+    pub(super) request_key: Option<String>,
+    pub(super) create_control: Option<CreateSessionControl>,
+    pub(super) phase: LifecyclePhase,
+    pub(super) move_operation_id: Option<String>,
+}
+
 impl RuntimeState {
     pub(super) fn start_or_join_lifecycle<F, Fut>(
         self: &Arc<Self>,
@@ -63,17 +71,62 @@ impl RuntimeState {
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
+        self.admit_lifecycle(
+            session_id,
+            kind,
+            LifecycleStart {
+                resume_workspace_id,
+                request_key,
+                create_control,
+                phase: LifecyclePhase::Executing,
+                move_operation_id: None,
+            },
+            work,
+        )
+    }
+
+    pub(super) fn admit_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        work: F,
+    ) -> Result<LifecycleWatch>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        let LifecycleStart {
+            resume_workspace_id,
+            request_key,
+            create_control,
+            mut phase,
+            move_operation_id,
+        } = start;
         let mut work = Some(work);
-        ensure!(
-            matches!(
-                kind,
-                LifecycleKind::Move | LifecycleKind::ForceDestroy | LifecycleKind::StopSubagent
-            ) || !crate::controller::move_session::move_has_pending_queue(&session_id),
-            "Move queue admission is incomplete; retry Move on the same destination before another lifecycle operation"
-        );
         let result = {
             let mut lifecycle_owner = self.owner();
             lifecycle_owner.ensure_available()?;
+            ensure!(
+                matches!(
+                    kind,
+                    LifecycleKind::Move | LifecycleKind::ForceDestroy | LifecycleKind::StopSubagent
+                ) || !crate::controller::move_session::move_has_pending_queue(&session_id),
+                "Move queue admission is incomplete; retry Move on the same destination before another lifecycle operation"
+            );
+            if kind == LifecycleKind::Move
+                && lifecycle_owner
+                    .committed()
+                    .and_then(|state| state.moves.get(&session_id))
+                    .is_some_and(|operation| {
+                        move_operation_id.as_ref() == Some(&operation.operation_id)
+                            && operation.queue_admission_started
+                            && !operation.queue_admission_finished
+                    })
+            {
+                phase = LifecyclePhase::MovingDestination;
+            }
+
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let completed_other_kind = lifecycle
                 .get(&session_id)
@@ -110,7 +163,7 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
-                        phase: LifecyclePhase::Executing,
+                        phase,
                         operation_id: operation_reference.clone(),
                         create_control,
                         kind,
@@ -121,7 +174,6 @@ impl RuntimeState {
                         resume_destination: None,
                         notice: None,
                         request_key,
-                        move_source_closed: false,
                         _move_guard: (kind == LifecycleKind::Move)
                             .then(|| MoveMutationGuard::reserve(&session_id))
                             .transpose()?,

@@ -1,0 +1,127 @@
+//! Incremental membership for ordinary rendering; explicit history views may
+//! enumerate stopped records. Direct presentation edits use the same input map.
+use super::*;
+use mj_core::snapshot_map::SnapshotMap;
+
+#[derive(Default)]
+pub(crate) struct RowIndex {
+    records: SnapshotMap<String, SessionRecord>,
+    relations: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    live: BTreeSet<String>,
+    stopped: BTreeSet<String>,
+    children: BTreeMap<String, BTreeSet<String>>,
+    active_children: BTreeMap<String, BTreeSet<String>>,
+    #[cfg(test)]
+    pub(crate) visits: usize,
+}
+
+impl RowIndex {
+    fn synchronize(&mut self, state: &State) {
+        for (id, record) in self.records.changes(&state.sessions) {
+            #[cfg(test)]
+            {
+                self.visits += 1;
+            }
+            self.live.remove(id);
+            self.stopped.remove(id);
+            if let Some(record) = record {
+                if record.state.is_active() {
+                    self.live.insert(id.clone());
+                }
+                if record.state == SessionState::Stopped {
+                    self.stopped.insert(id.clone());
+                }
+            }
+        }
+        for (id, relation) in self.relations.changes(&state.subagents) {
+            if let Some(old) = self.relations.get(id)
+                && let Some(children) = self.children.get_mut(&old.parent_session_id)
+            {
+                children.remove(id);
+                if children.is_empty() {
+                    self.children.remove(&old.parent_session_id);
+                }
+            }
+            if let Some(relation) = relation {
+                self.children
+                    .entry(relation.parent_session_id.clone())
+                    .or_default()
+                    .insert(id.clone());
+            }
+        }
+        let changed = self
+            .records
+            .changes(&state.sessions)
+            .map(|(id, _)| id.clone())
+            .chain(
+                self.relations
+                    .changes(&state.subagents)
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        for id in changed {
+            if let Some(previous) = self.relations.get(&id)
+                && let Some(children) = self.active_children.get_mut(&previous.parent_session_id)
+            {
+                children.remove(&id);
+                if children.is_empty() {
+                    self.active_children.remove(&previous.parent_session_id);
+                }
+            }
+            if state
+                .sessions
+                .get(&id)
+                .is_some_and(|record| record.state.has_live_worker())
+                && let Some(relation) = state.subagents.get(&id)
+            {
+                self.active_children
+                    .entry(relation.parent_session_id.clone())
+                    .or_default()
+                    .insert(id);
+            }
+        }
+        self.records = state.sessions.clone();
+        self.relations = state.subagents.clone();
+    }
+}
+
+impl DashboardState {
+    pub(crate) fn listed_session_candidates(&self) -> Vec<&SessionRecord> {
+        let mut index = self.row_index.borrow_mut();
+        index.synchronize(&self.state);
+        let mut ids = index.live.clone();
+        if self.config.advanced.show_stopped_sessions {
+            ids.extend(index.stopped.iter().cloned());
+        }
+        ids.extend(self.session_operations.keys().cloned());
+        ids.into_iter()
+            .filter_map(|id| self.state.sessions.get(&id))
+            .collect()
+    }
+
+    pub(crate) fn managed_child_count(&self, parent: &str) -> usize {
+        let mut index = self.row_index.borrow_mut();
+        index.synchronize(&self.state);
+        index.children.get(parent).map_or(0, BTreeSet::len)
+    }
+
+    pub(crate) fn managed_active_child_ids(&self, parent: &str) -> Vec<String> {
+        let mut index = self.row_index.borrow_mut();
+        index.synchronize(&self.state);
+        index
+            .active_children
+            .get(parent)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn managed_child_ids(&self, parent: &str) -> Vec<String> {
+        let mut index = self.row_index.borrow_mut();
+        index.synchronize(&self.state);
+        index
+            .children
+            .get(parent)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}

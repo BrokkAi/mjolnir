@@ -383,13 +383,14 @@ struct ActiveLifecycle {
     notice: Option<String>,
     request_key: Option<String>,
     _move_guard: Option<MoveMutationGuard>,
-    move_source_closed: bool,
     result: LifecycleWatch,
 }
 
 enum LifecyclePhase {
     Executing,
+    MovingDestination,
     Cancelling,
+    CancellingMoveDestination,
     Completed(LifecycleResult),
 }
 
@@ -407,7 +408,10 @@ impl ActiveLifecycle {
     }
 
     fn request_cancel(&mut self) -> bool {
-        if !matches!(self.phase, LifecyclePhase::Executing) {
+        if !matches!(
+            self.phase,
+            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+        ) {
             return false;
         }
         let accepted = if let Some(control) = &self.create_control {
@@ -416,17 +420,22 @@ impl ActiveLifecycle {
             !self.cancelled.swap(true, Ordering::AcqRel)
         };
         if accepted {
-            self.phase = LifecyclePhase::Cancelling;
+            self.phase = match self.phase {
+                LifecyclePhase::MovingDestination => LifecyclePhase::CancellingMoveDestination,
+                _ => LifecyclePhase::Cancelling,
+            };
         }
         accepted
     }
 
     fn is_cancellable(&self) -> bool {
-        matches!(self.phase, LifecyclePhase::Executing)
-            && self.create_control.as_ref().map_or_else(
-                || !self.cancelled.load(Ordering::Acquire),
-                CreateSessionControl::is_cancellable,
-            )
+        matches!(
+            self.phase,
+            LifecyclePhase::Executing | LifecyclePhase::MovingDestination
+        ) && self.create_control.as_ref().map_or_else(
+            || !self.cancelled.load(Ordering::Acquire),
+            CreateSessionControl::is_cancellable,
+        )
     }
 }
 

@@ -177,15 +177,17 @@ impl RuntimeStateOwner {
     pub(super) fn worker_is_owned(&self, session_id: &str) -> bool {
         self.lifecycle.get(session_id).is_some_and(|active| {
             active.is_running()
-                && (active.move_source_closed
-                    || lifecycle_owns_worker_target(
-                        active.kind,
-                        self.controller
-                            .state
-                            .sessions
-                            .get(session_id)
-                            .map(|record| record.state),
-                    ))
+                && (matches!(
+                    active.phase,
+                    LifecyclePhase::MovingDestination | LifecyclePhase::CancellingMoveDestination
+                ) || lifecycle_owns_worker_target(
+                    active.kind,
+                    self.controller
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .map(|record| record.state),
+                ))
         })
     }
 

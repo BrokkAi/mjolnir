@@ -5623,3 +5623,78 @@ fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest()
         "{dialog}"
     );
 }
+
+#[test]
+fn live_render_membership_and_record_updates_do_not_revisit_history() {
+    for count in [100, 10_000, 100_000] {
+        let mut active = running_session();
+        active.id = "active".into();
+        let mut dashboard = dashboard_with_session(active.clone());
+        let mut state = dashboard.state.clone();
+        for n in 0..count {
+            let mut record = active.clone();
+            record.id = format!("history-{n}");
+            record.state = SessionState::Stopped;
+            state.sessions.insert(record.id.clone(), record);
+        }
+        dashboard.set_state(state.clone());
+        assert_eq!(dashboard.ordered_sessions().len(), 1);
+        dashboard.row_index.borrow_mut().visits = 0;
+        state.sessions.get_mut("active").unwrap().title = "renamed".into();
+        dashboard.set_state(state);
+        assert_eq!(dashboard.ordered_sessions()[0].title, "renamed");
+        dashboard.attention_queue();
+        assert_eq!(
+            dashboard.row_index.borrow().visits,
+            1,
+            "history size {count}"
+        );
+    }
+}
+
+#[test]
+fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
+    use mj_core::native_agent::*;
+    for count in [100, 10_000, 100_000] {
+        let parent = running_session();
+        let mut dashboard = dashboard_with_session(parent.clone());
+        let mut durable = dashboard.state.clone();
+        dashboard.set_native_agents(
+            (0..count)
+                .map(|n| {
+                    let agent = NativeAgent {
+                        owner_session_id: parent.id.clone(),
+                        session_id: format!("child-{n}"),
+                        parent_session_id: None,
+                        name: format!("Child {n}"),
+                        task: String::new(),
+                        capabilities: NativeAgentCapabilities::default(),
+                        state: NativeAgentState::Completed,
+                        availability: NativeAgentAvailability::Unknown,
+                        availability_reason: None,
+                        stable_id: None,
+                    };
+                    NativeAgentView {
+                        generation_ordinal: 1,
+                        projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
+                        agent,
+                    }
+                })
+                .collect(),
+        );
+        dashboard.set_state(durable.clone());
+        dashboard.reconciliation_visits.set(0);
+        durable.sessions.get_mut(&parent.id).unwrap().title = "Renamed".into();
+        dashboard.set_state(durable);
+        assert!(
+            dashboard.reconciliation_visits.get() <= 2,
+            "native history size {count}"
+        );
+        assert_eq!(dashboard.subagent_count_for(&parent.id), count);
+        assert_eq!(dashboard.working_subagent_count_for(&parent.id), 0);
+        assert!(
+            dashboard.reconciliation_visits.get() <= 2,
+            "working count visited native history {count}"
+        );
+    }
+}

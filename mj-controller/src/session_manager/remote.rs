@@ -72,7 +72,7 @@ pub(super) fn reconcile_actors(
         let (release_tx, release_rx) = mpsc::unbounded_channel();
         let (retirement_tx, retirement_rx) = watch::channel(false);
         let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
-        let mut actor_updates = updates.clone();
+        let mut actor_updates = updates.for_actor(session_id);
         actor_updates.observer = updates
             .delegation
             .as_ref()

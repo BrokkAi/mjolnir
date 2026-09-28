@@ -259,6 +259,29 @@ pub(super) async fn write_response(
     stream: &mut TcpStream,
     mut response: ResponseEnvelope,
 ) -> Result<()> {
+    if let Ok(DaemonReply::RuntimeChanges(frame)) = response.result {
+        // Bootstrap may traverse history once. Encode away from the control
+        // loop, then bound each write without rebuilding the snapshot per page.
+        let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&frame))
+            .await
+            .context("runtime encoder task failed")??;
+        let mut chunks = body.chunks(64 * 1024).peekable();
+        while let Some(bytes) = chunks.next() {
+            write_frame(
+                stream,
+                &ResponseEnvelope {
+                    protocol_version: response.protocol_version,
+                    request_id: response.request_id,
+                    result: Ok(DaemonReply::RuntimeChunk {
+                        bytes: bytes.to_vec(),
+                        finished: chunks.peek().is_none(),
+                    }),
+                },
+            )
+            .await?;
+        }
+        return Ok(());
+    }
     let body = serde_json::to_vec(&response)?;
     if body.len() <= MAX_FRAME_BYTES {
         return write_encoded_frame(stream, &body).await;

@@ -83,6 +83,10 @@ impl DelegationSender {
         mailbox
             .current
             .insert(session.to_owned(), (generation, None));
+        // A replacement revokes both queued and already-consumed observations
+        // until its own durable queue is available.
+        mailbox.enqueue(session, None);
+        let _ = self.wake.try_send(());
         Arc::new(DelegationPublisher {
             sender: self.clone(),
             session: session.to_owned(),

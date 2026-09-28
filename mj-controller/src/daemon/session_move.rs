@@ -94,11 +94,16 @@ impl RuntimeState {
         let key =
             serde_json::to_string(&(&selection, request.queue, request.acknowledge_interruption))?;
         let session_id = selection.session_id.clone();
-        let result = self.start_or_join_lifecycle_with_key(
+        let result = self.admit_lifecycle(
             session_id.clone(),
             LifecycleKind::Move,
-            None,
-            Some(key),
+            super::lifecycle::LifecycleStart {
+                resume_workspace_id: None,
+                request_key: Some(key),
+                create_control: None,
+                phase: LifecyclePhase::Executing,
+                move_operation_id: Some(operation_id.clone()),
+            },
             move |state, session_id, cancelled| async move {
                 blocking(move || {
                     let _reservation = reserve_recovery_or_cancel(
@@ -167,11 +172,21 @@ impl RuntimeState {
         }) {
             let id = operation.selection.session_id.clone();
             let key = format!("recovery:{}", operation.operation_id);
-            let result = self.start_or_join_lifecycle_with_key(
+            let phase = if operation.recovery_session.is_some() {
+                LifecyclePhase::MovingDestination
+            } else {
+                LifecyclePhase::Executing
+            };
+            let result = self.admit_lifecycle(
                 id.clone(),
                 LifecycleKind::Move,
-                None,
-                Some(key),
+                super::lifecycle::LifecycleStart {
+                    resume_workspace_id: None,
+                    request_key: Some(key),
+                    create_control: None,
+                    phase,
+                    move_operation_id: None,
+                },
                 move |state, session_id, cancelled| async move {
                     blocking(move || {
                         let _reservation = reserve_recovery_or_cancel(

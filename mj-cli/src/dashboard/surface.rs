@@ -1,4 +1,50 @@
 use super::*;
+use mj_core::state::{SessionState, State};
+
+#[derive(Default)]
+pub(super) struct PollingRecords {
+    records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    active: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+}
+
+impl PollingRecords {
+    fn controller(&mut self, source: &Controller) -> Controller {
+        for (id, record) in self.records.changes(&source.state.sessions) {
+            if let Some(record) = record.filter(|record| record.state.is_active()) {
+                self.active.insert(id.clone(), record.clone());
+            } else {
+                self.active.remove(id);
+            }
+        }
+        self.records = source.state.sessions.clone();
+        let mut sessions = self.active.clone();
+        let mut pending = self.active.keys().cloned().collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(parent) = source
+                .state
+                .subagents
+                .get(&id)
+                .and_then(|relation| source.state.sessions.get(&relation.parent_session_id))
+            {
+                sessions.insert(parent.id.clone(), parent.clone());
+                pending.push(parent.id.clone());
+            }
+        }
+        Controller {
+            config: source.config.clone(),
+            state: State {
+                sessions,
+                subagents: source.state.subagents.clone(),
+                last_subagent_policy: source.state.last_subagent_policy.clone(),
+                ..source.state.clone()
+            },
+        }
+    }
+}
 
 /// Posts one desktop notification with the platform's own helper. Output is
 /// piped and discarded so a helper's stderr cannot reach the terminal that
@@ -281,18 +327,51 @@ impl DashboardContext {
             return;
         }
         self.controller_changed = false;
-        let archive_targets = checkpoint_archive_targets(&self.controller);
-        if archive_targets != self.checkpoint_archive_targets_seen {
-            self.checkpoint_archive_targets_seen = archive_targets.clone();
-            self.checkpoint_archive_generation =
-                self.checkpoint_archive_generation.wrapping_add(1).max(1);
+        let mut changed_targets = BTreeMap::new();
+        let mut removed_sizes = BTreeMap::new();
+        for (id, record) in self
+            .checkpoint_archive_records
+            .changes(&self.controller.state.sessions)
+        {
+            let target = record
+                .filter(|record| record.state == SessionState::Stopped)
+                .and_then(|record| record.checkpoint.as_ref())
+                .map(|checkpoint| &checkpoint.archive_path);
+            if self.checkpoint_archive_targets_seen.get(id) == target {
+                continue;
+            }
+            if let Some(target) = target {
+                self.checkpoint_archive_targets_seen
+                    .insert(id.clone(), target.clone());
+                changed_targets.insert(id.clone(), target.clone());
+            } else {
+                self.checkpoint_archive_targets_seen.remove(id);
+                self.checkpoint_archive_pending.remove(id);
+                removed_sizes.insert(id.clone(), None);
+            }
+        }
+        self.checkpoint_archive_records = self.controller.state.sessions.clone();
+        self.dashboard.patch_checkpoint_archive_sizes(removed_sizes);
+        if !changed_targets.is_empty() {
+            self.checkpoint_archive_generation = self
+                .checkpoint_archive_generation
+                .checked_add(1)
+                .expect("archive request sequence exhausted");
+            for id in changed_targets.keys() {
+                self.checkpoint_archive_pending
+                    .insert(id.clone(), self.checkpoint_archive_generation);
+            }
             spawn_checkpoint_archive_size_refresh(
                 self.checkpoint_archive_generation,
-                archive_targets,
+                changed_targets,
                 self.dashboard_io_tx.clone(),
             );
         }
-        let capacity_targets = self.controller.deployment_capacity_targets();
+        let capacity_targets = self
+            .polling_records
+            .borrow_mut()
+            .controller(&self.controller)
+            .deployment_capacity_targets();
         if *self.capacity_targets_tx.borrow() != capacity_targets {
             self.capacity_targets_tx
                 .send_replace(capacity_targets.clone());
@@ -363,8 +442,12 @@ impl DashboardContext {
     /// Republishes what the pollers should watch, leaving out sessions a
     /// lifecycle operation currently owns.
     pub(crate) fn refresh_poll_targets(&self) {
+        let controller = self
+            .polling_records
+            .borrow_mut()
+            .controller(&self.controller);
         refresh_dashboard_poll_targets(
-            &self.controller,
+            &controller,
             &self.worker_targets_tx,
             &self.resource_targets_tx,
             &self.lifecycle_operations.keys().cloned().collect(),

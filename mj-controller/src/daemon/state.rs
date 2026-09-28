@@ -922,6 +922,10 @@ impl RuntimeState {
                 error = format!("{error:#}"),
                 "a queued prompt could not be saved back into the session's draft"
             );
+            self.push_notice(session_id, format!(
+                "Your prompt could not be sent ({reason}) or saved to the composer draft ({error:#}). Unsaved input:\n{restored}"
+            ));
+            return;
         }
         self.push_notice(
             session_id,
@@ -937,32 +941,13 @@ impl RuntimeState {
         );
     }
 
-    /// Put text back into the session's saved composer draft, after whatever
-    /// is already there. The database is the source of truth, because the
-    /// target refresher reloads the controller from disk regularly; the
-    /// in-memory record is updated too so the change shows up at once.
+    /// Restore input through the writer; the owner observes only committed data.
     pub(super) async fn append_draft_input(&self, session_id: &str, text: &str) -> Result<()> {
-        let existing = self
-            .session_record(session_id)
-            .map(|record| record.draft_input)
-            .unwrap_or_default();
-        let combined = [existing.as_str(), text]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let persisted_id = session_id.to_owned();
-        let persisted = combined.clone();
-        let stored =
-            blocking(move || crate::database::set_session_draft_input(&persisted_id, &persisted))
-                .await;
-        self.owner().edit_sessions(|sessions| {
-            if let Some(record) = sessions.get_mut(session_id) {
-                record.draft_input = combined;
-            }
-        });
+        let session_id = session_id.to_owned();
+        let text = text.to_owned();
+        blocking(move || crate::database::append_session_draft_input(&session_id, &text)).await?;
         self.publish_revision();
-        stored
+        Ok(())
     }
 
     /// Stop every startup queue and wait for its drain to report, so the text

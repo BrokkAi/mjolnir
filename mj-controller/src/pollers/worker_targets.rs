@@ -1,5 +1,22 @@
 use super::*;
 
+/// Remote handles forward commands to the daemon; they never reconnect to a
+/// worker themselves or need a recovery plan from the local database.
+pub fn remote_dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|record| session_target_is_pollable(record))
+        .map(|record| WorkerPollTarget {
+            session_id: record.id.clone(),
+            spec: crate::targets::CommandSpec::new("daemon-owned", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        })
+        .collect()
+}
+
 pub fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget> {
     controller
         .state

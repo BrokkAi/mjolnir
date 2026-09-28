@@ -52,6 +52,7 @@ mod ingest;
 mod keybinds;
 mod modal_surface;
 mod notify;
+mod row_index;
 pub use notify::Notification;
 mod palette;
 mod render;
@@ -745,6 +746,14 @@ struct SessionOrderCache {
 }
 
 pub struct DashboardState {
+    #[cfg(test)]
+    pub(crate) reconciliation_visits: Cell<usize>,
+    pub(crate) row_index: RefCell<row_index::RowIndex>,
+    pub(crate) presented_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    pub(crate) durable_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    pub(crate) native_running_by_parent: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) native_by_parent: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) native_by_owner: BTreeMap<String, BTreeSet<String>>,
     session_order_cache: RefCell<SessionOrderCache>,
     pub(crate) config: Config,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
@@ -1053,6 +1062,14 @@ impl DashboardState {
 
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
         let mut dashboard = Self {
+            #[cfg(test)]
+            reconciliation_visits: Cell::new(0),
+            row_index: Default::default(),
+            presented_records: state.sessions.clone(),
+            durable_records: state.sessions.clone(),
+            native_running_by_parent: Default::default(),
+            native_by_parent: Default::default(),
+            native_by_owner: Default::default(),
             keybinds: config.keybinds(),
             prefix_pending: false,
             resize_mode: false,

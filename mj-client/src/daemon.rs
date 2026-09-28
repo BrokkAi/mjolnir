@@ -723,6 +723,11 @@ pub enum DaemonReply {
     Snapshot(WorkspaceSnapshot),
     RuntimeSnapshot(Box<RuntimeSnapshot>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
+    /// Transport fragments of one RuntimeFrame; never exposed to consumers.
+    RuntimeChunk {
+        bytes: Vec<u8>,
+        finished: bool,
+    },
     RegisteredSession(Box<RegisteredSession>),
     MovePreparation(Box<MovePreparation>),
     MoveOutcome(MoveOutcome),
@@ -1060,6 +1065,45 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) ->
     serde_json::from_slice(&body).context("decode daemon frame")
 }
 
+/// Reassemble one runtime publication before exposing it to a replica. All
+/// fragments belong to the same response; disconnects discard partial state.
+pub async fn read_response(
+    stream: &mut TcpStream,
+    accepts_runtime_chunks: bool,
+) -> Result<ResponseEnvelope> {
+    let mut response: ResponseEnvelope = read_frame(stream).await?;
+    if !matches!(response.result, Ok(DaemonReply::RuntimeChunk { .. })) {
+        return Ok(response);
+    }
+    ensure!(accepts_runtime_chunks, "unexpected runtime fragments");
+    let protocol_version = response.protocol_version;
+    let request_id = response.request_id;
+    let mut body = Vec::new();
+    loop {
+        ensure!(
+            response.protocol_version == protocol_version && response.request_id == request_id,
+            "daemon crossed runtime fragment identities"
+        );
+        let Ok(DaemonReply::RuntimeChunk { bytes, finished }) = response.result else {
+            bail!("daemon interrupted runtime publication");
+        };
+        ensure!(!bytes.is_empty(), "empty runtime fragment");
+        body.extend(bytes);
+        if finished {
+            break;
+        }
+        response = read_frame(stream).await?;
+    }
+    let frame = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
+        .await
+        .context("runtime decoder task failed")??;
+    Ok(ResponseEnvelope {
+        protocol_version,
+        request_id,
+        result: Ok(DaemonReply::RuntimeChanges(Box::new(frame))),
+    })
+}
+
 pub struct DaemonClient {
     metadata: DaemonMetadata,
     stream: TcpStream,
@@ -1122,6 +1166,7 @@ impl DaemonClient {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
+        let accepts_runtime_chunks = matches!(action, DaemonAction::RuntimeChanges { .. });
         write_frame(
             &mut self.stream,
             &RequestEnvelope {
@@ -1132,7 +1177,7 @@ impl DaemonClient {
             },
         )
         .await?;
-        let response: ResponseEnvelope = read_frame(&mut self.stream).await?;
+        let response = read_response(&mut self.stream, accepts_runtime_chunks).await?;
         ensure!(
             response.protocol_version == protocol_version,
             "daemon changed protocol"

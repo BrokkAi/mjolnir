@@ -18,6 +18,7 @@ struct Entry {
 #[derive(Default)]
 pub(super) struct SubagentDispatch {
     entries: BTreeMap<Identity, Entry>,
+    available: BTreeSet<String>,
 }
 pub(super) enum Job {
     Execute(SubagentToolRequest),
@@ -25,6 +26,7 @@ pub(super) enum Job {
 }
 impl SubagentDispatch {
     pub fn observe(&mut self, parent: &str, requests: &[SubagentToolRequest]) {
+        self.available.insert(parent.to_owned());
         self.entries.retain(|(id, request), entry| {
             id != parent
                 || requests.iter().any(|r| &r.request_id == request)
@@ -42,12 +44,22 @@ impl SubagentDispatch {
         }
     }
     pub fn retire(&mut self, parent: &str) {
-        self.observe(parent, &[]);
+        self.available.remove(parent);
+        // Losing the observer does not mean the durable queue was emptied.
+        // Keep accepted executions and undelivered results across replacement.
+        self.entries.retain(|(id, _), entry| {
+            id != parent
+                || matches!(
+                    entry.phase,
+                    Phase::Executing | Phase::Delivery(..) | Phase::Delivering(_)
+                )
+        });
     }
     pub fn ready(&mut self, now: Instant) -> Vec<(Identity, Job)> {
         let mut ordered = self
             .entries
             .iter()
+            .filter(|(id, _)| self.available.contains(&id.0))
             .map(|(id, e)| (e.request.created_at_ms, id.clone()))
             .collect::<Vec<_>>();
         ordered.sort();
@@ -216,5 +228,28 @@ mod tests {
             replacement.ready(Instant::now()).pop().unwrap().0,
             ("p".into(), "first".into())
         );
+    }
+    #[test]
+    fn actor_replacement_preserves_an_executed_result_until_delivery() {
+        let mut queue = SubagentDispatch::default();
+        let request = input("first", "a", 1);
+        let id = ("p".into(), "first".into());
+        queue.observe("p", std::slice::from_ref(&request));
+        assert!(matches!(
+            queue.ready(Instant::now()).pop().unwrap().1,
+            Job::Execute(_)
+        ));
+        queue.executed(&id, result("first"));
+        queue.retire("p");
+        assert!(queue.ready(Instant::now()).is_empty());
+        queue.observe("p", &[request]);
+        assert!(matches!(
+            queue.ready(Instant::now()).pop().unwrap().1,
+            Job::Deliver(_)
+        ));
+        queue.delivered(&id, true);
+        assert!(queue.ready(Instant::now()).is_empty());
+        queue.observe("p", &[]);
+        assert!(queue.entries.is_empty());
     }
 }

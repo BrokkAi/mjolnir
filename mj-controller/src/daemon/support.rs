@@ -181,6 +181,12 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         }
     }
 
+    fn reserve_move_destination(&self) {
+        if let Some(id) = &self.operation_id {
+            self.state.reserve_move_destination(&self.session_id, id);
+        }
+    }
+
     fn notify_notice(&self, notice: &str) {
         if let Some(id) = &self.operation_id {
             self.state

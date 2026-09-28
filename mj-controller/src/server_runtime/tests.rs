@@ -1795,3 +1795,40 @@ fn historical_sessions_do_not_restore_missing_workspace_tabs() {
     );
     assert_eq!(snapshot.sessions.len(), 2, "history remains discoverable");
 }
+
+#[tokio::test]
+async fn a_missing_historical_checkout_is_not_probed_on_every_retry_tick() {
+    let root = tempfile::tempdir().unwrap();
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller
+        .config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut session = phone_session("history", 0);
+    session.state = SessionState::Stopped;
+    session.target_template_id = "local".into();
+    session.project_directory = Some(root.path().join("gone"));
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+    let mut sources = PhoneProjectSources::default();
+    sources.synchronize(&controller);
+    let result = sources.jobs.join_next().await.unwrap().unwrap();
+    assert!(result.result.is_err());
+    sources.complete(result);
+    assert!(sources.entries["history"].retry_at.is_none());
+    for _ in 0..10 {
+        sources.synchronize(&controller);
+    }
+    assert!(sources.jobs.is_empty());
+    controller.state.sessions.get_mut("history").unwrap().state = SessionState::Running;
+    sources.synchronize(&controller);
+    assert_eq!(
+        sources.jobs.len(),
+        1,
+        "resuming makes source discovery relevant again"
+    );
+    let result = sources.jobs.join_next().await.unwrap().unwrap();
+    sources.complete(result);
+}

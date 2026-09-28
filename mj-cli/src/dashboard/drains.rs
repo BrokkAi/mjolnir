@@ -176,7 +176,6 @@ impl DashboardContext {
 
     pub(crate) fn drain_worker_updates(&mut self) {
         while let Some(update) = self.worker.next_ready() {
-            self.controller_changed = true;
             let session_id = update.session_id.clone();
             let connected = update.view.connected;
             apply_session_activity(&mut self.dashboard, &session_id, &update.view);

@@ -1213,21 +1213,6 @@ pub(crate) fn spawn_imported_session_apply(
     );
 }
 
-pub(crate) fn checkpoint_archive_targets(controller: &Controller) -> BTreeMap<String, PathBuf> {
-    controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session.state == SessionState::Stopped)
-        .filter_map(|session| {
-            session
-                .checkpoint
-                .as_ref()
-                .map(|checkpoint| (session.id.clone(), checkpoint.archive_path.clone()))
-        })
-        .collect()
-}
-
 pub(crate) fn spawn_checkpoint_archive_size_refresh(
     generation: u64,
     targets: BTreeMap<String, PathBuf>,
@@ -1235,9 +1220,9 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 ) {
     tokio::task::spawn_blocking(move || {
         let sizes = targets
-            .into_iter()
+            .iter()
             .map(|(session_id, path)| {
-                let size = match std::fs::metadata(&path) {
+                let size = match std::fs::metadata(path) {
                     Ok(metadata) => Some(metadata.len()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => {
@@ -1245,13 +1230,17 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
                         None
                     }
                 };
-                (session_id, size)
+                (session_id.clone(), size)
             })
             .collect();
         report(
             "checkpoint archive sizes",
             &updates,
-            DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes },
+            DashboardIoUpdate::CheckpointArchiveSizes {
+                generation,
+                targets,
+                sizes,
+            },
         );
     });
 }

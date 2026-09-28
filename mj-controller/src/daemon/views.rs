@@ -363,14 +363,26 @@ impl RuntimeState {
         self.publish_revision();
     }
 
+    pub(super) fn reserve_move_destination(&self, session_id: &str, operation_id: &str) {
+        let mut owner = self.owner();
+        if let Some(active) = owner.lifecycle.get_mut(session_id)
+            && active.operation_id == operation_id
+            && active.kind == LifecycleKind::Move
+        {
+            active.phase = match active.phase {
+                LifecyclePhase::Executing => LifecyclePhase::MovingDestination,
+                LifecyclePhase::Cancelling => LifecyclePhase::CancellingMoveDestination,
+                _ => return,
+            };
+            self.publish_revision();
+        }
+    }
+
     pub(super) fn set_lifecycle_notice(&self, session_id: &str, operation_id: &str, notice: &str) {
         if let Some(active) = self.owner().lifecycle.get_mut(session_id)
             && active.operation_id == operation_id
             && active.is_running()
         {
-            if active.kind == LifecycleKind::Move && notice == "Preparing destination" {
-                active.move_source_closed = true;
-            }
             active.notice = Some(notice.to_owned());
             self.publish_revision();
         }

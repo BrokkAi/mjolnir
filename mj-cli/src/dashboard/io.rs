@@ -282,6 +282,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     CheckpointArchiveSizes {
         generation: u64,
+        targets: BTreeMap<String, std::path::PathBuf>,
         sizes: BTreeMap<String, Option<u64>>,
     },
     WorkerDiagnosis {
@@ -1270,10 +1271,20 @@ impl DashboardContext {
                         .set_move_preparation_failed(&session_id, request_id, error);
                 }
             },
-            DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes } => {
-                if generation == self.checkpoint_archive_generation {
-                    self.dashboard.apply_checkpoint_archive_sizes(sizes);
-                }
+            DashboardIoUpdate::CheckpointArchiveSizes {
+                generation,
+                targets,
+                sizes,
+            } => {
+                self.dashboard.patch_checkpoint_archive_sizes(
+                    sizes
+                        .into_iter()
+                        .filter(|(id, _)| {
+                            targets.get(id) == self.checkpoint_archive_targets_seen.get(id)
+                                && self.checkpoint_archive_pending.get(id) == Some(&generation)
+                        })
+                        .collect(),
+                );
             }
             DashboardIoUpdate::WorkerDiagnosis {
                 session_id,

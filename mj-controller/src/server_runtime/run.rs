@@ -236,12 +236,30 @@ pub(crate) async fn run_server(
         // exists to follow sessions, so losing that feed is a named failure
         // rather than a silent success.
         let mut failure: Option<anyhow::Error> = None;
+        let mut cache_records = controller.state.sessions.clone();
         macro_rules! publish_snapshot {
             ($control:lifetime, $revision:expr) => {
                 let runtime = match daemon_runtime.runtime_publication() {
                     Ok(runtime) => runtime,
                     Err(error) => { failure = Some(error); break $control; }
                 };
+                let mut conversations_changed = false;
+                for (id, record) in cache_records.changes(&runtime.records) {
+                    if record.is_none() {
+                        queued_prompts.remove(id);
+                        pending_elicitations.remove(id);
+                        prompt_images.remove(id);
+                        active_user_shells.remove(id);
+                        operational.remove(id);
+                        materialized_activity.remove(id);
+                    }
+                    if record.is_none_or(|record| !record.state.is_active()) {
+                        conversations_changed |= conversations.remove(id).is_some();
+                        conversation_projections.forget(id);
+                    }
+                }
+                cache_records = runtime.records.clone();
+                if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 controller.state.sessions = runtime.records;
                 controller.state.subagents = runtime.subagents;
@@ -1424,34 +1442,6 @@ pub(crate) async fn run_server(
                                 &capacity_targets_tx,
                                 &mut capacity_state,
                             );
-                            queued_prompts.retain(|session_id, _| {
-                                controller.state.sessions.contains_key(session_id)
-                            });
-                            pending_elicitations.retain(|session_id, _| {
-                                controller.state.sessions.contains_key(session_id)
-                            });
-                            prompt_images.retain(|session_id| {
-                                controller.state.sessions.contains_key(session_id)
-                            });
-                            operational.retain(|session_id, _| {
-                                controller.state.sessions.contains_key(session_id)
-                            });
-                            materialized_activity.retain(|session_id, _| {
-                                controller.state.sessions.contains_key(session_id)
-                            });
-                            conversations.retain(|id, _| {
-                                controller.state.sessions.get(id).is_some_and(|session| session.state.is_active())
-                            });
-                            for session_id in conversation_projections.session_ids() {
-                                if !controller
-                                    .state
-                                    .sessions
-                                    .get(&session_id)
-                                    .is_some_and(|session| session.state.is_active())
-                                {
-                                    conversation_projections.forget(&session_id);
-                                }
-                            }
                             revision = daemon_runtime.allocate_revision();
                             conversation_tx.send_replace(conversations.clone());
                             publish_snapshot!('control, revision);

@@ -2623,3 +2623,48 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
     task.await.unwrap().unwrap();
     manager.shutdown.shutdown().await.unwrap();
 }
+
+#[test]
+fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
+    let (sender, mut receiver) = coalesced_update_channel();
+    let old = sender.for_actor("session-1");
+    let update = |detail: &str| SessionManagerUpdate {
+        session_id: "session-1".into(),
+        view: ManagedSessionView {
+            error: Some(ViewError::Unreachable(detail.into())),
+            ..Default::default()
+        },
+    };
+    old.send(update("queued old view"));
+    let current = sender.for_actor("session-1");
+    assert!(receiver.try_recv().is_err());
+    old.send(update("late old view"));
+    assert!(receiver.try_recv().is_err());
+    drop(old);
+    current.send(update("current view"));
+    assert_eq!(
+        receiver.try_recv().unwrap().view.error.unwrap().detail(),
+        "current view"
+    );
+    // A final observation survives normal actor completion until consumed.
+    current.send(update("completed view"));
+    drop(current);
+    assert_eq!(
+        receiver.try_recv().unwrap().view.error.unwrap().detail(),
+        "completed view"
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_delegation_actor_revokes_its_queued_observation() {
+    let (feed, mut receiver) = delegation_channel();
+    let old = feed.register("parent");
+    old.publish(&view_at_ordinal(1));
+    let current = feed.register("parent");
+    let (id, observation) = receiver.recv().await.unwrap();
+    assert_eq!(id, "parent");
+    assert!(observation.is_none());
+    old.publish(&view_at_ordinal(2));
+    current.publish(&view_at_ordinal(3));
+    assert!(receiver.recv().await.unwrap().1.is_some());
+}

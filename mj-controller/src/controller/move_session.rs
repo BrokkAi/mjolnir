@@ -1006,6 +1006,7 @@ impl Controller {
             operation.recovery_session = Some(self.state.sessions[&id].clone());
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
+            executor.reserve_move_destination();
             executor.notify_notice("Preparing destination");
             if operation.in_place {
                 // The environment is kept, so there is nothing to provision and

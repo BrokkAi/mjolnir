@@ -1119,6 +1119,23 @@ pub(super) fn set_session_draft_input_at(path: &Path, session_id: &str, draft: &
     Ok(())
 }
 
+/// Append recovered input on the writer lane, preserving every preceding
+/// durable edit instead of combining with a stale daemon snapshot.
+pub fn append_session_draft_input(session_id: &str, text: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let text = text.to_owned();
+    submit_database_write("append_session_draft_input", move |connection| {
+        let updated = connection.execute(
+            "UPDATE sessions SET draft_input = CASE WHEN ?2 = '' THEN draft_input
+             WHEN draft_input = '' THEN ?2 ELSE draft_input || char(10) || char(10) || ?2 END
+             WHERE session_id = ?1",
+            params![session_id, text],
+        )?;
+        ensure!(updated == 1, "unknown session {session_id}");
+        Ok(())
+    })
+}
+
 /// Retire a submitted shared draft without erasing a newer client's edit.
 pub fn clear_session_draft_input_if_matches(session_id: &str, expected: &str) -> Result<()> {
     let session_id = session_id.to_owned();

@@ -23,12 +23,12 @@ interface; do not implement a second delegation scheduler.
 - [x] User approved incremental TUI and web feeds as part of this refactor.
 - [x] Claimed #1172 and added `agent-in-progress`.
 - [x] Introduce structurally shared session/relation maps and point-read support.
-- [ ] Add the operational owner and transition/index tests (owner and record indexes implemented; pollability work-count coverage passes at 100, 10,000, and 100,000 historical sessions; remaining consumer scaling coverage is pending).
-- [ ] Integrate ordered persistence receipts and lifecycle ownership (committed publication integrated; lifecycle phases explicit; remaining late-effect and worker-incarnation audit pending).
-- [ ] Replace daemon reloads and poller scans with maintained projections (pollable workers maintained in memory; historical runtime snapshot projections remain).
+- [x] Add the operational owner and transition/index tests, with work-count coverage at 100, 10,000, and 100,000 historical sessions.
+- [x] Integrate ordered persistence receipts, typed Move ownership, atomic draft restoration, and generation-checked worker observations.
+- [x] Replace ordinary daemon reloads and poller scans with maintained projections; retain explicit one-shot history operations.
 - [x] Implement cursor-based incremental TUI and web feeds (daemon cursor protocol, keyed TUI consumers, shared web rows, browser indexes, and bounded SSE deltas implemented; transport-size audit remains below).
-- [ ] Remove obsolete caches, validate scaling, upgrade, and recovery behavior.
-- [ ] Complete required Cargo checks and commit validated checkpoints.
+- [x] Remove obsolete refresh loops and validate scaling, upgrade, recovery, and actor replacement behavior.
+- [x] Complete required dev-profile tests, final TUI/CLI integration checks, Clippy, formatting, and JavaScript syntax validation. The validated tree is ready for the authorized commit and HEAD:master push.
 
 ## Surprises & Discoveries
 
@@ -85,18 +85,34 @@ map on mutation. Structural sharing must happen inside the collections.
 
 ## Outcomes & Retrospective
 
-The foundation compiles with `cargo check --all-targets`. The persistent-map
-copy-count test passes at 100, 10,000, and 100,000 records, and the wire-format
-test confirms ordinary JSON objects. Single-session durable reads now query only
-the selected session and its target, mounts, and checkpoint; session-manager
-outcome and repair reads use this path. The owner and indexes now consume committed changes. The daemon target refresher
-uses the in-memory pollable index and no longer reloads historical records.
-Incremental client feeds and the remaining historical snapshot projections are
-still pending.
+The refactor and audit are complete. Ordinary worker selection reads a maintained
+in-memory index, committed database changes update structurally shared records,
+and daemon/TUI/web feeds publish keyed changes. Worker producer identities and
+typed lifecycle phases reject stale effects. Move retries reserve their matching
+destination at admission. Recovered drafts append atomically to committed input.
+Initial runtime snapshots cross bounded transport frames and apply atomically.
+History scans remain for bootstrap, explicit history views, and maintenance.
+Legacy-record warnings are startup diagnostics rather than timer-driven reads.
 
-The working tree was clean at the start, on commit 40922d77. During implementation
-the user pulled master forward to bbdef44b. Their changes are retained. All runtime
-experiments must use the named instance below; never upgrade the live daemon.
+The full dev-profile workspace test suite passes, including 1,904 controller
+and 639 worker tests. The final TUI-only audit changes additionally pass all 837
+TUI tests, 235 CLI tests, all 11 daemon-startup tests, all 11 PTY tests, and all
+four store-divergence tests. Clippy with warnings denied, Rust formatting,
+JavaScript syntax, and diff whitespace checks pass. Work-count regressions cover
+100, 10,000, and 100,000 historical sessions and native children. All runtime tests
+use isolated stores and the named state-owner-1172 instance; the live installation
+was neither launched, upgraded, nor restarted.
+
+No implementation or validation work remains. Publication is the user's explicitly
+authorized final operation: commit the task files on hel2 and push HEAD:master
+without force. Remote acceptance is recorded in the completion report. The
+checkpoint notes below are historical records, not remaining work.
+
+The working tree was clean at the start, on commit 40922d77. The user's update to
+bbdef44b and the requested master integration through a3d4f61f are preserved.
+The design lesson is that shared snapshots alone are insufficient: every derived
+membership, transport boundary, and presentation-only row needs an explicit owner
+or incremental reconciliation to keep routine work independent of history.
 
 ## Context and Orientation
 
@@ -403,3 +419,79 @@ formatting, JavaScript syntax, and diff whitespace checks pass. Runtime tests
 used MJ_INSTANCE=state-owner-1172 with separate config/data directories throughout.
 No live daemon was launched or upgraded. The saved pre-merge stash can be removed
 once this checkpoint is committed; all its changes were restored and reconciled.
+
+Audit implementation (2026-09-27): The user authorized completion and pushing to
+origin/master after validation. The current audit closes producer identity for
+session-manager observations: replacement invalidates queued old views and late
+sends at the same registry lock, and producer registrations disappear on drop.
+Delegation replacement also revokes an already queued observation. Move target
+ownership now uses MovingDestination/CancellingMoveDestination phases and an
+operation-ID-checked typed executor callback; recovering a durable destination
+reserves it at lifecycle admission, before the worker manager can observe it.
+Display notice text no longer decides ownership.
+
+RuntimeChanges responses are encoded on a blocking task and sent as bounded
+64 KiB transport fragments under the existing per-frame limit. A client exposes
+only a fully decoded RuntimeFrame with a consistent request/protocol identity.
+Connection loss drops partial publications. Initial snapshots may traverse
+history once without entering an oversized-response retry loop. Explicit legacy
+one-shot responses retain their existing size limit. The protocol revision is
+still 40, introduced by this as-yet-unpublished refactor.
+
+The TUI maintains live/stopped membership and child indexes from shared-map
+differences; normal render and attention queries enumerate candidates. Record
+publication patches durable rows and details instead of scanning all records.
+Its polling/capacity controller contains active records and required ancestors.
+Remote handles carry no locally reconstructed worker recovery plan. Checkpoint
+size refreshes request only changed paths and validate completion identity per
+session, so independent requests can finish concurrently without discarding one
+another. Web cache pruning follows changed/deleted records. Stopped historical
+checkouts are probed at bootstrap or identity changes but do not retry indefinitely.
+Restored startup drafts append atomically on the writer lane; failure cannot
+publish a successful in-memory edit. Startup prompt fixtures now use real,
+process-isolated durable stores.
+
+Focused controller/client/TUI/CLI tests are compiling. Remaining work is to fix
+any regressions, finish the render call-site review, validate the full suite and
+Clippy, update final outcomes, commit, and push HEAD to origin/master. Do not
+claim completion or push until these checks pass. No live instance is involved.
+
+
+## Final audit milestone
+
+The audit closes remaining history-dependent work in native-child presentation
+and attention counts. Separate durable and presented snapshot roots let the TUI
+reconcile local launch rows without comparing every native presentation row to a
+store snapshot that intentionally omits them. Native running-child membership
+and managed active-child membership make badges depend on active children; total
+child counts use indexed cardinality. Explicit child/history views still enumerate
+their requested records. Removed child rows also drop their retained detail.
+
+A replaced delegation observer suspends dispatch until its replacement reports
+the durable queue. Already-executed results remain in delivery state, preventing
+actor replacement from executing a request again. A matching retained Move
+operation reserves its ready destination in the same admission decision as the
+lifecycle entry; an unrelated old Move cannot claim a new operation's target.
+The pending-queue check now also happens under the admission owner. Draft write
+failure reports unsaved input instead of falsely saying it was restored.
+
+Validation evidence: the complete isolated workspace `cargo test` passed after
+the ownership, transport, draft, and rendering fixes. The subsequent TUI suite
+also passed the 100,000-native-row reconciliation regression. Clippy passed.
+The final active-child badge index changes only TUI code; the complete TUI/CLI
+suites (including startup, PTY, and store-divergence integration tests) and Clippy
+are being rerun for that final change. Formatting, JavaScript syntax, and diff
+whitespace checks pass. No schema migration or live installation change was made.
+
+All audit findings have implementations and focused behavioral coverage. Finish
+by recording the final UI check results, committing the listed task files on hel2,
+and pushing HEAD:master without force. Preserve concurrent upstream commits if
+master advances. The pre-merge stash was already removed after its restoration
+was validated and committed in e5f2e6df.
+
+
+Final validation (2026-09-27): All final TUI/CLI checks completed successfully,
+including startup, store-divergence, and PTY integration tests. The full workspace
+suite and final Clippy, formatting, syntax, and whitespace checks pass. The audit
+has no open findings. Publish the validated tree as requested; no further test
+runs are needed unless a new change or upstream merge requires them.

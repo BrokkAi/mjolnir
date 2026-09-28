@@ -334,7 +334,6 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             notice: None,
             request_key: None,
             _move_guard: None,
-            move_source_closed: false,
             result,
         },
     );
@@ -360,7 +359,6 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             notice: None,
             request_key: None,
             _move_guard: None,
-            move_source_closed: false,
             result,
         },
     );
@@ -620,7 +618,7 @@ fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeSt
         manager.control.clone(),
         &recovery.observer(),
     );
-    Arc::new(RuntimeState::new_with_controller_loader(
+    let mut runtime = RuntimeState::new_with_controller_loader(
         manager.control.clone(),
         Controller {
             config: Config::default(),
@@ -635,7 +633,11 @@ fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeSt
                 state: mj_core::state::State::default(),
             })
         },
-    ))
+    );
+    if std::env::var_os("MJ_TEST_DURABLE_STARTUP").is_some() {
+        runtime.committed = Some(crate::database::subscribe_committed_state().unwrap());
+    }
+    Arc::new(runtime)
 }
 
 fn test_metadata(address: SocketAddr) -> DaemonMetadata {
@@ -1896,7 +1898,6 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             notice: None,
             request_key: None,
             _move_guard: None,
-            move_source_closed: false,
             result: result.clone(),
         },
     );
@@ -2457,11 +2458,28 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
 /// Put `session-1` into the daemon's in-memory controller as a session that
 /// is still coming up, which is when a startup prompt can be queued.
 fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {
-    let mut session = runtime_test_session("session-1", "workspace", SessionState::Provisioning);
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Provisioning,
+    );
     draft.clone_into(&mut session.draft_input);
-    state.owner().edit_sessions(|sessions| {
-        sessions.insert(session.id.clone(), session);
-    });
+    crate::database::save_session(&session).unwrap();
+    assert!(state.session_record(&session.id).is_some());
+}
+
+fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWriterOwner> {
+    if std::env::var_os("MJ_TEST_DURABLE_STARTUP").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), name),
+        )
+        .env("MJ_TEST_DURABLE_STARTUP", "1")
+        .isolated_store(root.path())
+        .run();
+        return None;
+    }
+    Some(crate::database::install_isolated_test_writer())
 }
 
 /// The smallest archived snapshot a hand-off step can carry.
@@ -2539,6 +2557,11 @@ async fn next_submit(
 /// prompts are then delivered in the order they were typed.
 #[tokio::test]
 async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready() {
+    let Some(_writer) = startup_prompt_test_store(
+        "queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready",
+    ) else {
+        return;
+    };
     let mut manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "");
@@ -2598,6 +2621,11 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
 /// without its context.
 #[tokio::test]
 async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
+    let Some(_writer) =
+        startup_prompt_test_store("a_queued_hand_off_runs_before_the_prompt_behind_it")
+    else {
+        return;
+    };
     let mut manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "");
@@ -2653,6 +2681,11 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
 /// text joins whatever draft the session already had.
 #[tokio::test]
 async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
+    let Some(_writer) =
+        startup_prompt_test_store("a_session_that_stops_returns_its_queued_prompt_to_the_draft")
+    else {
+        return;
+    };
     let manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "half-written note");
@@ -2686,6 +2719,11 @@ async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
 /// behind it with it, in the order they were typed.
 #[tokio::test]
 async fn a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue() {
+    let Some(_writer) =
+        startup_prompt_test_store("a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue")
+    else {
+        return;
+    };
     let mut manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "");
@@ -2717,6 +2755,11 @@ async fn a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue() {
 /// well inside its own bound, so quitting the daemon stays responsive.
 #[tokio::test]
 async fn cancelling_startup_prompts_returns_while_a_drain_is_waiting() {
+    let Some(_writer) =
+        startup_prompt_test_store("cancelling_startup_prompts_returns_while_a_drain_is_waiting")
+    else {
+        return;
+    };
     let manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "");
@@ -2749,6 +2792,11 @@ async fn cancelling_startup_prompts_returns_while_a_drain_is_waiting() {
 /// become ready, and when the daemon has no such session at all.
 #[tokio::test]
 async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessions() {
+    let Some(_writer) = startup_prompt_test_store(
+        "queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessions",
+    ) else {
+        return;
+    };
     let manager = TestRemoteManager::new().await;
     let state = test_runtime_state_with_manager(&manager);
     insert_starting_session(&state, "");
@@ -4599,4 +4647,254 @@ async fn completed_lifecycle_retention_does_not_grow_with_history() {
     assert!(state.active_lifecycles().is_empty());
     assert!(state.owner().lifecycle.contains_key("session-299"));
     assert!(!state.owner().lifecycle.contains_key("session-0"));
+}
+
+#[tokio::test]
+async fn move_destination_ownership_is_typed_and_survives_cancellation() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(
+            "moving".into(),
+            runtime_test_session("moving", "workspace", SessionState::Running),
+        );
+    });
+    let (_, result) = tokio::sync::watch::channel(None);
+    state.owner().lifecycle.insert(
+        "moving".into(),
+        ActiveLifecycle {
+            phase: LifecyclePhase::Executing,
+            operation_id: "current".into(),
+            create_control: None,
+            kind: LifecycleKind::Move,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            started_at_epoch_seconds: 1,
+            active_stages: BTreeMap::new(),
+            resume_workspace_id: None,
+            resume_destination: None,
+            notice: None,
+            request_key: None,
+            _move_guard: None,
+            result,
+        },
+    );
+    state.set_lifecycle_notice("moving", "current", "Preparing destination");
+    assert!(!state.owner().worker_is_owned("moving"));
+    state.reserve_move_destination("moving", "obsolete");
+    assert!(!state.owner().worker_is_owned("moving"));
+    state.reserve_move_destination("moving", "current");
+    assert!(state.owner().worker_is_owned("moving"));
+    state
+        .owner()
+        .lifecycle
+        .get_mut("moving")
+        .unwrap()
+        .request_cancel();
+    assert!(state.owner().worker_is_owned("moving"));
+    state.owner().lifecycle.get_mut("moving").unwrap().phase =
+        LifecyclePhase::Completed(Ok(DaemonLifecycleResult::Done));
+    assert!(!state.owner().worker_is_owned("moving"));
+}
+
+#[tokio::test]
+async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection_usable() {
+    use mj_client::runtime_feed::{RuntimeCursor, RuntimeFrame, RuntimeProjection};
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut projection = RuntimeProjection::default();
+    projection
+        .metadata
+        .workspace_names
+        .insert("large".into(), "x".repeat(MAX_FRAME_BYTES + 1024));
+    let expected = projection.clone();
+    let sender = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        for (request_id, result) in [
+            (
+                7,
+                Ok(DaemonReply::RuntimeChanges(Box::new(
+                    RuntimeFrame::Snapshot {
+                        cursor: RuntimeCursor {
+                            incarnation: "test".into(),
+                            sequence: 1,
+                        },
+                        projection: Box::new(projection),
+                    },
+                ))),
+            ),
+            (8, Ok(DaemonReply::Pong)),
+        ] {
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    result,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let response = mj_client::daemon::read_response(&mut stream, true)
+        .await
+        .unwrap();
+    assert_eq!(response.request_id, 7);
+    let Ok(DaemonReply::RuntimeChanges(frame)) = response.result else {
+        panic!("expected complete publication")
+    };
+    let RuntimeFrame::Snapshot { projection, .. } = *frame else {
+        panic!("expected snapshot")
+    };
+    assert_eq!(*projection, expected);
+    let response = mj_client::daemon::read_response(&mut stream, false)
+        .await
+        .unwrap();
+    assert_eq!(response.request_id, 8);
+    assert!(matches!(response.result, Ok(DaemonReply::Pong)));
+    sender.await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_runtime_fragments_never_publish_partial_state() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sender = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        write_frame(
+            &mut stream,
+            &ResponseEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 7,
+                result: Ok(DaemonReply::RuntimeChunk {
+                    bytes: b"{\"Snapshot\":".to_vec(),
+                    finished: false,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let (mut stream, _) = listener.accept().await.unwrap();
+    assert!(
+        mj_client::daemon::read_response(&mut stream, true)
+            .await
+            .is_err()
+    );
+    sender.await.unwrap();
+}
+
+#[tokio::test]
+async fn recovered_drafts_append_to_committed_edits_and_failed_writes_do_not_publish() {
+    let Some(_writer) = startup_prompt_test_store(
+        "recovered_drafts_append_to_committed_edits_and_failed_writes_do_not_publish",
+    ) else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "original");
+    crate::database::set_session_draft_input("session-1", "newer client edit").unwrap();
+    let (first, second) = tokio::join!(
+        state.append_draft_input("session-1", "first"),
+        state.append_draft_input("session-1", "second")
+    );
+    first.unwrap();
+    second.unwrap();
+    let saved = state.session_record("session-1").unwrap().draft_input;
+    assert!(saved.starts_with("newer client edit\n\n"));
+    assert!(saved.contains("first") && saved.contains("second"));
+    assert!(
+        state
+            .append_draft_input("missing", "lost input")
+            .await
+            .is_err()
+    );
+    assert!(state.session_record("missing").is_none());
+}
+
+#[tokio::test]
+async fn retry_admission_reserves_only_the_matching_move_destination() {
+    let Some(_writer) =
+        startup_prompt_test_store("retry_admission_reserves_only_the_matching_move_destination")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&session).unwrap();
+    let operation = mj_core::state::MoveOperation {
+        source_checkpoint_only: false,
+        in_place: false,
+        operation_id: "retained-move".into(),
+        selection: MoveSelection {
+            session_id: session.id.clone(),
+            profile_id: Some(session.last_profile.clone()),
+            target_template_id: Some(session.target_template_id.clone()),
+            additional_mounts: None,
+            resource_allocation: None,
+            clear_resource_allocation: false,
+        },
+        source_profile_id: session.last_profile.clone(),
+        source_target_template_id: session.target_template_id.clone(),
+        source_target: None,
+        source_native_session_id: None,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: "test".into(),
+        checkpoint: None,
+        recovery_session: Some(session.clone()),
+        queue: mj_core::state::ResumeQueueDisposition::Start,
+        phase: mj_core::state::MovePhase::StartingQueue,
+        queue_admission_started: true,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        error: None,
+    };
+    crate::database::save_move_operation(&operation).unwrap();
+    crate::controller::move_session::restore_move_queue_hold(&operation);
+    assert!(
+        state
+            .start_or_join_lifecycle(session.id.clone(), LifecycleKind::Resume, |_, _, _| async {
+                Ok(DaemonLifecycleResult::Done)
+            })
+            .is_err()
+    );
+    for (id, owned) in [("retained-move", true), ("different-move", false)] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let released = release.clone();
+        let watch = state
+            .admit_lifecycle(
+                session.id.clone(),
+                LifecycleKind::Move,
+                super::lifecycle::LifecycleStart {
+                    resume_workspace_id: None,
+                    request_key: Some(id.into()),
+                    create_control: None,
+                    phase: LifecyclePhase::Executing,
+                    move_operation_id: Some(id.into()),
+                },
+                move |_, _, _| async move {
+                    released.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                },
+            )
+            .unwrap();
+        assert_eq!(state.owner().worker_is_owned(&session.id), owned);
+        release.notify_one();
+        RuntimeState::wait_lifecycle_result(watch.clone())
+            .await
+            .unwrap();
+        state.remove_completed_lifecycle(&watch);
+    }
 }

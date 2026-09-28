@@ -1,6 +1,6 @@
 //! Controller state ingestion: projections, quotas, capacity, and notices.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -589,13 +589,56 @@ impl DashboardState {
 
     pub fn set_state(&mut self, mut state: State) {
         let stopped_by_suspend = self.subagents_stopped_by_suspend(&state);
-        for (id, pane) in &self.native_agents {
-            if state.sessions.contains_key(&pane.agent.owner_session_id)
-                && let Some(row) = self.state.sessions.get(id)
+        let mut changed_ids = self
+            .durable_records
+            .changes(&state.sessions)
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        // Local launch rows and optimistic presentation edits must also yield
+        // to the authoritative snapshot, even when that snapshot is unchanged.
+        changed_ids.extend(
+            self.presented_records
+                .changes(&self.state.sessions)
+                .filter(|(id, _)| !self.native_agents.contains_key(*id))
+                .map(|(id, _)| id.clone()),
+        );
+        #[cfg(test)]
+        self.reconciliation_visits
+            .set(self.reconciliation_visits.get() + changed_ids.len());
+        let changed = changed_ids
+            .into_iter()
+            .map(|id| {
+                let record = state.sessions.get(&id).cloned();
+                (id, record)
+            })
+            .collect::<Vec<_>>();
+        self.durable_records = state.sessions.clone();
+        let mut rows = self.state.sessions.clone();
+        for (id, record) in &changed {
+            if let Some(record) = record {
+                rows.insert(id.clone(), record.clone());
+            } else {
+                rows.remove(id);
+                if let Some(children) = self.native_by_owner.get(id) {
+                    for child in children {
+                        rows.remove(child);
+                        self.session_details.remove(child);
+                        self.project_sources.remove(child);
+                        self.viewed_failures.remove(child);
+                    }
+                }
+                self.session_details.remove(id);
+                self.project_sources.remove(id);
+            }
+            if self
+                .viewed_failures
+                .get(id)
+                .is_some_and(|seen| record.as_ref().is_none_or(|record| !seen.matches(record)))
             {
-                state.sessions.insert(id.clone(), row.clone());
+                self.viewed_failures.remove(id);
             }
         }
+        state.sessions = rows;
         self.state = state;
         let before = self.pane_sessions.len();
         self.pane_sessions
@@ -604,32 +647,20 @@ impl DashboardState {
             self.reconcile_pins();
             self.mark_layout_modified();
         }
-        self.viewed_failures.retain(|id, seen| {
-            self.state
-                .sessions
-                .get(id)
-                .is_some_and(|session| seen.matches(session))
-        });
-        self.session_details
-            .retain(|session_id, _| self.state.sessions.contains_key(session_id));
-        self.project_sources
-            .retain(|session_id, _| self.state.sessions.contains_key(session_id));
-        for session_id in self.state.sessions.keys() {
-            self.session_details.entry(session_id.clone()).or_default();
-        }
         self.apply_operation_projection();
-        for (session_id, detail) in &mut self.session_details {
-            let viewed_through_event_ordinal = self
-                .state
-                .sessions
-                .get(session_id)
-                .map_or(0, |session| session.viewed_through_event_ordinal);
-            detail.update_unread(viewed_through_event_ordinal);
+        for (id, record) in changed {
+            if let Some(record) = record {
+                self.session_details
+                    .entry(id)
+                    .or_default()
+                    .update_unread(record.viewed_through_event_ordinal);
+            }
         }
         // After the projection, so the rows see the records the dashboard does.
         self.rebuild_resume_rows();
         self.clamp_selections();
         self.leave_subagents_stopped_by_suspend(stopped_by_suspend);
+        self.presented_records = self.state.sessions.clone();
     }
 
     /// Replace the daemon's complete durable Move projection. Active intents
@@ -1245,6 +1276,20 @@ impl DashboardState {
         } else if let Some(detail) = self.session_details.get_mut(session_id) {
             detail.queued_prompts = queued_prompts;
         }
+    }
+
+    pub fn patch_checkpoint_archive_sizes(&mut self, sizes: BTreeMap<String, Option<u64>>) {
+        if sizes.is_empty() {
+            return;
+        }
+        for (id, size) in sizes {
+            if size.is_some() {
+                self.checkpoint_archive_sizes.insert(id, size);
+            } else {
+                self.checkpoint_archive_sizes.remove(&id);
+            }
+        }
+        self.rebuild_resume_rows();
     }
 
     pub fn apply_checkpoint_archive_sizes(&mut self, sizes: BTreeMap<String, Option<u64>>) {

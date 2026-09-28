@@ -56,9 +56,9 @@ use tokio_stream::StreamExt as _;
 
 use crate::dashboard::composer_drafts::ComposerDraftCache;
 use crate::dashboard::io::{
-    ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, checkpoint_archive_targets,
-    report, spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io,
-    spawn_lifecycle_reload, spawn_materialized_session_projection, spawn_project_source_resolution,
+    ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, report,
+    spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io, spawn_lifecycle_reload,
+    spawn_materialized_session_projection, spawn_project_source_resolution,
     spawn_stopped_subagent_transcript, spawn_stored_session_summary,
 };
 use crate::import::{
@@ -68,8 +68,8 @@ use crate::import::{
 use crate::pollers::{
     CapacityPollUpdate, Feed, LifecycleUpdate, QuotaRefreshBatch, QuotaUpdate, ResourcePollTarget,
     ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker, WorkerPollTarget,
-    apply_worker_poll_update, complete_manual_quota_refresh, dashboard_worker_targets,
-    projected_queued_prompts, quota_refresh_profiles, refresh_dashboard_poll_targets,
+    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
+    quota_refresh_profiles, refresh_dashboard_poll_targets, remote_dashboard_worker_targets,
     session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
     spawn_quota_refresher, spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
@@ -399,6 +399,9 @@ pub(crate) struct DashboardContext {
 
     checkpoint_archive_targets_seen: BTreeMap<String, std::path::PathBuf>,
     checkpoint_archive_generation: u64,
+    checkpoint_archive_pending: BTreeMap<String, u64>,
+    checkpoint_archive_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    polling_records: std::cell::RefCell<surface::PollingRecords>,
 }
 
 /// One deployment target's resolved instance sizes, or why they could not be
@@ -1526,7 +1529,7 @@ impl DashboardContext {
             .map(|notice| notice.id)
             .max();
         let runtime_config_rx = remote_worker.config;
-        worker_targets_tx.send_replace(dashboard_worker_targets(&controller));
+        worker_targets_tx.send_replace(remote_dashboard_worker_targets(&controller));
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
             tokio::sync::mpsc::unbounded_channel::<LifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
@@ -1658,6 +1661,9 @@ impl DashboardContext {
             read_receipts: read_receipts::ReadReceipts::default(),
             checkpoint_archive_targets_seen: BTreeMap::new(),
             checkpoint_archive_generation: 0,
+            checkpoint_archive_pending: Default::default(),
+            checkpoint_archive_records: Default::default(),
+            polling_records: Default::default(),
         };
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();

@@ -86,7 +86,8 @@ pub fn refresh_dashboard_poll_targets(
     resource_targets_tx: &tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
     excluded_sessions: &std::collections::BTreeSet<String>,
 ) {
-    let worker_targets = dashboard_worker_targets_excluding(controller, excluded_sessions);
+    let mut worker_targets = remote_dashboard_worker_targets(controller);
+    worker_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
     worker_targets_tx.send_replace(worker_targets);
     let mut resource_targets = dashboard_resource_targets(controller);
     resource_targets.retain(|target| !excluded_sessions.contains(&target.session_id));

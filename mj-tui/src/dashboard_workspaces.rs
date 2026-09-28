@@ -35,16 +35,13 @@ impl DashboardState {
         }
         self.subagent_parent_id = Some(parent_id.clone());
         self.selected_session_id = self
-            .state
-            .subagents
-            .values()
-            .find(|record| record.parent_session_id == parent_id)
-            .map(|record| record.child_session_id.clone())
+            .managed_child_ids(&parent_id)
+            .into_iter()
+            .next()
             .or_else(|| {
-                self.native_agents
-                    .iter()
-                    .find(|(_, pane)| pane.agent.parent_view_id() == parent_id)
-                    .map(|(id, _)| id.clone())
+                self.native_by_parent
+                    .get(&parent_id)
+                    .and_then(|ids| ids.first().cloned())
             });
         self.set_current_session(None);
         self.focus = Focus::Sessions;
@@ -68,10 +65,19 @@ impl DashboardState {
         &self,
         next: &State,
     ) -> Vec<SubagentStoppedBySuspend> {
-        self.state
-            .subagents
-            .values()
-            .filter(|relation| !next.sessions.contains_key(&relation.child_session_id))
+        let candidates = self
+            .durable_records
+            .changes(&next.sessions)
+            .chain(self.presented_records.changes(&self.state.sessions))
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        self.reconciliation_visits
+            .set(self.reconciliation_visits.get() + candidates.len());
+        candidates
+            .into_iter()
+            .filter(|id| !next.sessions.contains_key(id))
+            .filter_map(|id| self.state.subagents.get(&id))
             .filter_map(|relation| {
                 let child = self
                     .state

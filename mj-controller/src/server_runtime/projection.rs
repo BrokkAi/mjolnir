@@ -198,15 +198,6 @@ impl ConversationProjectionDispatcher {
         *generation = generation.wrapping_add(1);
     }
 
-    pub(super) fn session_ids(&self) -> std::collections::BTreeSet<String> {
-        self.in_flight
-            .keys()
-            .chain(self.pending.keys())
-            .chain(self.completed.keys())
-            .cloned()
-            .collect()
-    }
-
     pub(super) fn start(&mut self, request: ConversationProjectionRequest) {
         let session_id = request.materialized.session_id.clone();
         let projector = Arc::clone(self.projectors.entry(session_id.clone()).or_default());

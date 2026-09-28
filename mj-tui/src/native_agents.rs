@@ -31,24 +31,28 @@ impl DashboardState {
 
     pub fn working_subagent_count_for(&self, parent: &str) -> usize {
         let managed = self
-            .state
-            .subagents
-            .values()
-            .filter(|a| a.parent_session_id == parent)
-            .filter(|a| {
-                self.session_details
-                    .get(&a.child_session_id)
-                    .is_some_and(|d| {
-                        d.activity
-                            .is_working(d.current_turn_started_at, d.awaiting_input)
-                    })
+            .managed_active_child_ids(parent)
+            .into_iter()
+            .filter(|id| {
+                #[cfg(test)]
+                self.reconciliation_visits
+                    .set(self.reconciliation_visits.get() + 1);
+                self.session_details.get(id).is_some_and(|d| {
+                    d.activity
+                        .is_working(d.current_turn_started_at, d.awaiting_input)
+                })
             })
             .count();
         let native: BTreeSet<_> = self
-            .native_agents
-            .values()
-            .filter(|p| {
-                p.agent.parent_view_id() == parent && p.agent.state == NativeAgentState::Running
+            .native_running_by_parent
+            .get(parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.native_agents.get(id))
+            .inspect(|_| {
+                #[cfg(test)]
+                self.reconciliation_visits
+                    .set(self.reconciliation_visits.get() + 1);
             })
             .map(|p| p.agent.stable_id.as_ref().unwrap_or(&p.agent.session_id))
             .collect();
@@ -56,16 +60,8 @@ impl DashboardState {
     }
 
     pub fn subagent_count_for(&self, parent: &str) -> usize {
-        self.state
-            .subagents
-            .values()
-            .filter(|agent| agent.parent_session_id == parent)
-            .count()
-            + self
-                .native_agents
-                .values()
-                .filter(|pane| pane.agent.parent_view_id() == parent)
-                .count()
+        self.managed_child_count(parent)
+            + self.native_by_parent.get(parent).map_or(0, BTreeSet::len)
     }
 
     pub fn set_native_agents(&mut self, views: Vec<NativeAgentView>) {
@@ -91,11 +87,48 @@ impl DashboardState {
         }
         self.native_sources = views;
         for (id, view) in changes {
+            if let Some(old) = self.native_agents.get(&id) {
+                for (index, key) in [
+                    (&mut self.native_by_parent, old.agent.parent_view_id()),
+                    (
+                        &mut self.native_running_by_parent,
+                        old.agent.parent_view_id(),
+                    ),
+                    (
+                        &mut self.native_by_owner,
+                        old.agent.owner_session_id.clone(),
+                    ),
+                ] {
+                    if let Some(ids) = index.get_mut(&key) {
+                        ids.remove(&id);
+                        if ids.is_empty() {
+                            index.remove(&key);
+                        }
+                    }
+                }
+            }
             let Some(view) = view else {
                 self.state.sessions.remove(&id);
                 self.native_agents.remove(&id);
+                self.session_details.remove(&id);
+                self.project_sources.remove(&id);
+                self.viewed_failures.remove(&id);
                 continue;
             };
+            self.native_by_parent
+                .entry(view.agent.parent_view_id())
+                .or_default()
+                .insert(id.clone());
+            self.native_by_owner
+                .entry(view.agent.owner_session_id.clone())
+                .or_default()
+                .insert(id.clone());
+            if view.agent.state == NativeAgentState::Running {
+                self.native_running_by_parent
+                    .entry(view.agent.parent_view_id())
+                    .or_default()
+                    .insert(id.clone());
+            }
             // These records exist only in the presentation model. The controller
             // never sees a native child as a provisionable session.
             if let Some(mut row) = self

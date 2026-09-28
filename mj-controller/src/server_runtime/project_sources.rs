@@ -80,6 +80,21 @@ impl PhoneProjectSources {
                 .filter(|session| own_identity(session) && session.project_directory.is_some())
                 .map(|session| ProjectSourceKey::of(session, &controller.config));
             if key.is_some() && self.entries.get(&id).map(|entry| &entry.key) == key.as_ref() {
+                let entry = self.entries.get_mut(&id).expect("existing project source");
+                if state.sessions[&id].state.has_live_worker() {
+                    if entry.last_error.is_some()
+                        && entry.retry_at.is_none()
+                        && !self
+                            .records
+                            .get(&id)
+                            .is_some_and(|record| record.state.has_live_worker())
+                    {
+                        self.pending.insert(id.clone());
+                    }
+                } else if let Some(deadline) = entry.retry_at.take() {
+                    self.retries.remove(&(deadline, id.clone()));
+                    self.pending.remove(&id);
+                }
                 continue;
             }
             if let Some(entry) = self.entries.remove(&id) {
@@ -179,9 +194,17 @@ impl PhoneProjectSources {
                     tracing::warn!(session_id = %resolved.session_id, %error, "could not resolve web project source");
                 }
                 entry.last_error = Some(error);
-                let deadline = Instant::now() + Duration::from_secs(30);
-                entry.retry_at = Some(deadline);
-                self.retries.insert((deadline, resolved.session_id));
+                // Historical checkouts may have been removed permanently. A
+                // stopped record is probed once, then only when its inputs change.
+                if self
+                    .records
+                    .get(&resolved.session_id)
+                    .is_some_and(|record| record.state.has_live_worker())
+                {
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    entry.retry_at = Some(deadline);
+                    self.retries.insert((deadline, resolved.session_id));
+                }
             }
         }
     }
