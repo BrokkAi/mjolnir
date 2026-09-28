@@ -85,8 +85,9 @@ use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 pub use rendering::{truncate_line_to_width, wrap_styled_line};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
-    ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptScrollbarState,
-    TranscriptSelectionSpace, TranscriptToolClickTarget, materialized_chat_entries_reusing,
+    ToolDiffstatRequest, TranscriptAnchor, TranscriptLinkFrame, TranscriptRenderCache,
+    TranscriptScrollbarState, TranscriptSelectionSpace, TranscriptToolClickTarget,
+    materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
 
@@ -313,6 +314,9 @@ pub enum ChatAction {
         response: ElicitationResponse,
     },
     PasteFromClipboard,
+    /// Open an http(s) link the user clicked in the transcript in the
+    /// system's default browser.
+    OpenLink(String),
     Attach {
         path: PathBuf,
         command: String,
@@ -628,6 +632,9 @@ pub struct ChatState {
     expanded_tool_calls: BTreeSet<u64>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
     transcript_tool_click_targets: Vec<TranscriptToolClickTarget>,
+    /// Where the last transcript frame drew its rows, for resolving a click
+    /// on a link against the rows that frame painted.
+    transcript_link_frame: Option<TranscriptLinkFrame>,
     notices: Notices,
     feedback: Notices,
     connection_feedback: Option<String>,
@@ -807,6 +814,7 @@ impl ChatState {
             transcript_scrollbar: TranscriptScrollbarState::default(),
             expanded_tool_calls: BTreeSet::new(),
             transcript_tool_click_targets: Vec::new(),
+            transcript_link_frame: None,
             notices: Notices::default(),
             feedback: Notices::default(),
             connection_feedback: None,

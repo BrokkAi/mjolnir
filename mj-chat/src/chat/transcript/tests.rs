@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::ChatAction;
 use crate::chat::test_support::{
     agent_message_item, agent_transcript_item, drawn_transcript, drawn_transcript_selecting, key,
     line_text, mouse_in, queued, snapshot, transcript_text,
@@ -3971,4 +3972,136 @@ fn a_tool_that_ends_after_its_turn_was_interrupted_is_not_shown_as_done() {
         labels.contains(&"Tool · ended after interrupt") && labels.contains(&"Tool · done"),
         "{labels:#?}"
     );
+}
+
+fn click_text_action(chat: &mut ChatState, rows: &[String], text: &str) -> ChatAction {
+    let (row, line, offset) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(text).map(|offset| (row, line, offset)))
+        .unwrap_or_else(|| panic!("missing {text:?} in {rows:#?}"));
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(display_width(&line[..offset])).unwrap(),
+        row: u16::try_from(row).unwrap(),
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clicking_link_text_opens_that_links_destination() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "See [the report](https://example.com/one) and [the notes](https://example.com/two)."
+            .to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "notes"),
+        ChatAction::OpenLink("https://example.com/two".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "report"),
+        ChatAction::OpenLink("https://example.com/one".to_owned())
+    );
+    assert_eq!(click_text_action(&mut chat, &rows, "See"), ChatAction::None);
+}
+
+#[test]
+fn links_with_the_same_text_open_their_own_destinations() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "First [issue](https://example.com/a)\n\nSecond [issue](https://example.com/b)".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+    let second = rows
+        .iter()
+        .position(|row| row.contains("Second"))
+        .expect("second paragraph is drawn");
+    let line = &rows[second];
+    let offset = line.find("issue").unwrap();
+    let action = chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: u16::try_from(display_width(&line[..offset])).unwrap(),
+        row: u16::try_from(second).unwrap(),
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        action,
+        ChatAction::OpenLink("https://example.com/b".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "issue"),
+        ChatAction::OpenLink("https://example.com/a".to_owned())
+    );
+}
+
+#[test]
+fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "Please read [the open upstream report about integer division](https://example.com/issue) today."
+            .to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 28, 16);
+    let division_row = rows
+        .iter()
+        .position(|row| row.contains("division"))
+        .expect("link text is drawn");
+    assert!(
+        !rows[division_row].contains("Please"),
+        "the link must wrap for this test: {rows:#?}"
+    );
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "division"),
+        ChatAction::OpenLink("https://example.com/issue".to_owned())
+    );
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "today"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn clicking_a_non_web_link_does_not_open_it() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "Run [this helper](file:///tmp/helper.sh) now.".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "helper"),
+        ChatAction::None
+    );
+}
+
+#[test]
+fn a_line_that_is_only_a_link_opens_from_every_wrapped_row() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "[alpha bravo charlie delta echo foxtrot golf](https://example.com/only)".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 20, 16);
+    let expected = ChatAction::OpenLink("https://example.com/only".to_owned());
+
+    for word in ["alpha", "echo", "golf"] {
+        assert_eq!(
+            click_text_action(&mut chat, &rows, word),
+            expected,
+            "{rows:#?}"
+        );
+    }
 }

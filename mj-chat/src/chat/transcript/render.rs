@@ -57,6 +57,7 @@ pub(crate) fn render_transcript(
             "authoritative submission frame prepared");
     }
     chat.rebuild_transcript_tool_click_targets(inner, top, visible_rows);
+    chat.record_transcript_link_frame(inner, top, visible_rows);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
     let track = Rect::new(
         inner.right(),
@@ -276,6 +277,40 @@ pub(crate) fn render_transcript_entry_with_options(
     mode: TranscriptRenderMode,
     expanded_tool: bool,
 ) -> Vec<Line<'static>> {
+    render_entry_tracking_links(entry, width, mode, expanded_tool, None)
+}
+
+/// The link cells of one entry rendered with the given options, in the row
+/// coordinates of [`render_transcript_entry_with_options`].
+pub(crate) fn transcript_entry_links(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    expanded_tool: bool,
+) -> Vec<RowLink> {
+    let mut links = Vec::new();
+    render_entry_tracking_links(entry, width, mode, expanded_tool, Some(&mut links));
+    links
+}
+
+/// Cells `start..end` of rendered row `row` draw text of a link to `url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowLink {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
+}
+
+/// Renders one entry, and collects its link cells when `links` is given.
+/// Both callers share this so a link's cells are those of the drawn rows.
+fn render_entry_tracking_links(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    expanded_tool: bool,
+    links: Option<&mut Vec<RowLink>>,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let visual = entry_visual(entry);
     let time = match entry.role {
@@ -311,11 +346,13 @@ pub(crate) fn render_transcript_entry_with_options(
                 }
             }),
     );
-    out.extend(entry_body_rows_with_options(
+    let header_rows = out.len();
+    out.extend(entry_body_rows_inner(
         entry,
         width,
         mode,
         expanded_tool,
+        links.map(|links| (links, header_rows)),
     ));
     out.push(Line::from(""));
     out
@@ -337,15 +374,84 @@ pub(crate) fn entry_body_rows_with_options(
     mode: TranscriptRenderMode,
     expanded_tool: bool,
 ) -> Vec<Line<'static>> {
+    entry_body_rows_inner(entry, width, mode, expanded_tool, None)
+}
+
+/// Body rows, and with `links` the link cells of each row, numbered from the
+/// given first body row.
+fn entry_body_rows_inner(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    expanded_tool: bool,
+    mut links: Option<(&mut Vec<RowLink>, usize)>,
+) -> Vec<Line<'static>> {
     let visual = entry_visual(entry);
     let content_width = width.saturating_sub(ROLE_GUTTER_WIDTH).max(1);
-    entry_logical_lines(entry, mode, &visual, content_width, expanded_tool)
-        .into_iter()
-        .flat_map(|logical| {
-            wrap_styled_line(logical.line, content_width, logical.continuation_indent)
-        })
+    let mut rows = Vec::new();
+    for logical in entry_logical_lines(entry, mode, &visual, content_width, expanded_tool) {
+        match links.as_mut() {
+            Some((links, first_row)) if !logical.links.is_empty() => {
+                let (wrapped, sources) = wrap_styled_line_with_sources(
+                    logical.line,
+                    content_width,
+                    logical.continuation_indent,
+                );
+                for (offset, cells) in sources.iter().enumerate() {
+                    collect_row_links(
+                        links,
+                        *first_row + rows.len() + offset,
+                        cells,
+                        &logical.links,
+                    );
+                }
+                rows.extend(wrapped);
+            }
+            _ => rows.extend(wrap_styled_line(
+                logical.line,
+                content_width,
+                logical.continuation_indent,
+            )),
+        }
+    }
+    rows.into_iter()
         .map(|row| with_role_gutter(row, visual.rail_style))
         .collect()
+}
+
+/// Turns one wrapped row's cell sources into runs of link cells, shifted past
+/// the role gutter. Adjacent links stay separate runs.
+fn collect_row_links(
+    links: &mut Vec<RowLink>,
+    row: usize,
+    cells: &[Option<usize>],
+    spans: &[LinkSpan],
+) {
+    let mut run: Option<RowLink> = None;
+    for (cell, source) in cells.iter().enumerate() {
+        let url = source.and_then(|source| {
+            spans
+                .iter()
+                .find(|link| link.span == source)
+                .map(|link| link.url.as_str())
+        });
+        let column = ROLE_GUTTER_WIDTH + cell;
+        match (&mut run, url) {
+            (Some(current), Some(url)) if current.url == url && current.end == column => {
+                current.end = column + 1;
+            }
+            (_, url) => {
+                links.extend(run.take());
+                run = url.map(|url| RowLink {
+                    row,
+                    start: column,
+                    end: column + 1,
+                    url: url.to_owned(),
+                });
+            }
+        }
+    }
+    links.extend(run);
 }
 
 /// Format an optional transcript event timestamp as local 24-hour time.
@@ -389,6 +495,7 @@ pub(super) fn entry_logical_lines(
                         Span::styled(item.text.clone(), visual.body_style),
                     ]),
                     continuation_indent: 2,
+                    links: Vec::new(),
                 }
             })
             .collect();

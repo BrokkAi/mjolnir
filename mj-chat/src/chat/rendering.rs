@@ -57,6 +57,16 @@ pub(super) use mj_client::transcript::TranscriptRenderMode;
 pub(super) struct LogicalLine {
     pub(super) line: Line<'static>,
     pub(super) continuation_indent: usize,
+    /// The spans of `line` that render a Markdown link, and where each points.
+    pub(super) links: Vec<LinkSpan>,
+}
+
+/// One span of a rendered line that belongs to a Markdown link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LinkSpan {
+    /// Index into the line's spans.
+    pub(super) span: usize,
+    pub(super) url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +91,10 @@ struct MarkdownWriter {
     item_prefix: Option<String>,
     table: Option<TableState>,
     width: usize,
+    /// Destination of the link whose text is being written, if any.
+    link: Option<String>,
+    /// Link spans of the line in progress, indexed into `spans`.
+    line_links: Vec<LinkSpan>,
 }
 
 impl MarkdownWriter {
@@ -94,7 +108,20 @@ impl MarkdownWriter {
             item_prefix: None,
             table: None,
             width: width.max(1),
+            link: None,
+            line_links: Vec::new(),
         }
+    }
+
+    /// Adds an inline span, recording it as link text inside a link.
+    fn push_span(&mut self, span: Span<'static>) {
+        if let Some(url) = &self.link {
+            self.line_links.push(LinkSpan {
+                span: self.spans.len(),
+                url: url.clone(),
+            });
+        }
+        self.spans.push(span);
     }
 
     fn push_text(&mut self, text: &str) {
@@ -105,7 +132,7 @@ impl MarkdownWriter {
         let mut parts = text.split('\n').peekable();
         while let Some(part) = parts.next() {
             if !part.is_empty() {
-                self.spans.push(Span::styled(part.to_owned(), self.style));
+                self.push_span(Span::styled(part.to_owned(), self.style));
             }
             if parts.peek().is_some() {
                 self.finish_line();
@@ -130,10 +157,20 @@ impl MarkdownWriter {
                 Style::default().fg(theme::palette().muted),
             ));
         }
+        let prefix_spans = spans.len();
         spans.append(&mut self.spans);
+        let links = self
+            .line_links
+            .drain(..)
+            .map(|link| LinkSpan {
+                span: link.span + prefix_spans,
+                url: link.url,
+            })
+            .collect();
         self.lines.push(LogicalLine {
             line: Line::from(spans),
             continuation_indent,
+            links,
         });
     }
 
@@ -149,6 +186,7 @@ impl MarkdownWriter {
             self.lines.push(LogicalLine {
                 line: Line::default(),
                 continuation_indent: 0,
+                links: Vec::new(),
             });
         }
     }
@@ -240,6 +278,7 @@ impl MarkdownWriter {
                     Style::default().fg(theme::palette().muted),
                 )),
                 continuation_indent: 0,
+                links: Vec::new(),
             });
             for row in rows.iter().skip(1) {
                 self.render_table_row(row, &column_widths, &table.alignments, Style::default());
@@ -253,6 +292,7 @@ impl MarkdownWriter {
                             Style::default().fg(theme::palette().muted),
                         )),
                         continuation_indent: 0,
+                        links: Vec::new(),
                     });
                 }
                 for (column, value) in row.into_iter().enumerate() {
@@ -270,6 +310,7 @@ impl MarkdownWriter {
                             Span::from(value),
                         ]),
                         continuation_indent: display_width(&label) + 2,
+                        links: Vec::new(),
                     });
                 }
             }
@@ -321,6 +362,7 @@ impl MarkdownWriter {
             self.lines.push(LogicalLine {
                 line: Line::from(spans),
                 continuation_indent: 0,
+                links: Vec::new(),
             });
         }
     }
@@ -378,6 +420,7 @@ pub(super) fn markdown_lines(
                                 .add_modifier(Modifier::BOLD),
                         )),
                         continuation_indent: 0,
+                        links: Vec::new(),
                     });
                     style_stack.push(writer.style);
                     writer.style = Style::default()
@@ -413,7 +456,12 @@ pub(super) fn markdown_lines(
                     style_stack.push(writer.style);
                     writer.style = writer.style.add_modifier(Modifier::CROSSED_OUT);
                 }
-                Tag::Link { .. } => {
+                Tag::Link { dest_url, .. } => {
+                    // Table cells are laid out as plain text, so a link there
+                    // has no span of its own to point at.
+                    if writer.table.is_none() {
+                        writer.link = Some(dest_url.into_string());
+                    }
                     style_stack.push(writer.style);
                     writer.style = writer
                         .style
@@ -451,7 +499,11 @@ pub(super) fn markdown_lines(
                     writer.lists.pop();
                 }
                 TagEnd::Item => writer.finish_block(),
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+                    writer.style = style_stack.pop().unwrap_or(body_style);
+                }
+                TagEnd::Link => {
+                    writer.link = None;
                     writer.style = style_stack.pop().unwrap_or(body_style);
                 }
                 TagEnd::TableCell => {
@@ -477,7 +529,7 @@ pub(super) fn markdown_lines(
                 if writer.table.is_some() {
                     writer.push_text(&code);
                 } else {
-                    writer.spans.push(Span::styled(
+                    writer.push_span(Span::styled(
                         code.into_string(),
                         writer
                             .style
@@ -495,6 +547,7 @@ pub(super) fn markdown_lines(
                         Style::default().fg(theme::palette().muted),
                     )),
                     continuation_indent: 0,
+                    links: Vec::new(),
                 });
             }
             // Rich mode intentionally does not interpret or display raw HTML.
@@ -518,6 +571,7 @@ pub(super) fn raw_lines(source: &str, style: Style) -> Vec<LogicalLine> {
             continuation_indent: display_width(
                 &line[..line.len().saturating_sub(line.trim_start().len())],
             ),
+            links: Vec::new(),
         })
         .collect()
 }
@@ -534,21 +588,50 @@ pub fn wrap_styled_line(
     width: usize,
     continuation_indent: usize,
 ) -> Vec<Line<'static>> {
+    wrap_line(line, width, continuation_indent, None)
+}
+
+/// For each wrapped row, the index of the source span drawn in each cell, or
+/// `None` for a continuation indent.
+type CellSources = Vec<Vec<Option<usize>>>;
+
+/// Wrap `line` exactly as [`wrap_styled_line`] does, and also report which of
+/// its spans each cell of each row came from.
+pub(super) fn wrap_styled_line_with_sources(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+) -> (Vec<Line<'static>>, CellSources) {
+    let mut sources = Vec::new();
+    let rows = wrap_line(line, width, continuation_indent, Some(&mut sources));
+    (rows, sources)
+}
+
+fn wrap_line(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+    sources: Option<&mut CellSources>,
+) -> Vec<Line<'static>> {
     let width = width.max(1);
     let continuation_indent = continuation_indent.min(width.saturating_sub(1));
     if line.spans.len() == 1 {
-        return wrap_single_span(line, width, continuation_indent);
+        return wrap_single_span(line, width, continuation_indent, sources);
     }
-    wrap_styled_graphemes(line, width, continuation_indent)
+    wrap_styled_graphemes(line, width, continuation_indent, sources)
 }
 
 fn wrap_single_span(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,
+    mut sources: Option<&mut CellSources>,
 ) -> Vec<Line<'static>> {
     let span = &line.spans[0];
     if span.content.is_empty() {
+        if let Some(sources) = sources {
+            sources.push(Vec::new());
+        }
         return vec![Line::default()];
     }
     let indent = " ".repeat(continuation_indent);
@@ -558,12 +641,34 @@ fn wrap_single_span(
         .word_splitter(WordSplitter::NoHyphenation);
     let wrapped = textwrap::wrap(span.content.as_ref(), options);
     let mut out = Vec::new();
-    for wrapped_line in wrapped {
+    for (index, wrapped_line) in wrapped.into_iter().enumerate() {
+        // textwrap writes the continuation indent into the span's own text.
+        let indent_cells = if index == 0 { 0 } else { continuation_indent };
         let styled = Line::from(Span::styled(wrapped_line.into_owned(), span.style));
-        if styled.width() <= width {
+        let styled_width = styled.width();
+        if styled_width <= width {
+            if let Some(sources) = sources.as_deref_mut() {
+                let mut cells = vec![None; indent_cells.min(styled_width)];
+                cells.resize(styled_width, Some(0));
+                sources.push(cells);
+            }
             out.push(styled);
         } else {
-            out.extend(wrap_styled_graphemes(styled, width, continuation_indent));
+            let first_row = sources.as_deref().map_or(0, Vec::len);
+            out.extend(wrap_styled_graphemes(
+                styled,
+                width,
+                continuation_indent,
+                sources.as_deref_mut(),
+            ));
+            if let Some(cells) = sources
+                .as_deref_mut()
+                .and_then(|sources| sources.get_mut(first_row))
+            {
+                for cell in cells.iter_mut().take(indent_cells) {
+                    *cell = None;
+                }
+            }
         }
     }
     out
@@ -665,6 +770,7 @@ fn wrap_styled_graphemes(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,
+    sources: Option<&mut CellSources>,
 ) -> Vec<Line<'static>> {
     let buffer = StyledBuffer::new(&line);
     let indent = buffer.indent();
@@ -731,6 +837,18 @@ fn wrap_styled_graphemes(
     trim_trailing_whitespace(&mut current);
     if !current.is_empty() || rows.is_empty() {
         rows.push(current);
+    }
+    if let Some(sources) = sources {
+        // Style indexes past the line's spans belong to the indent.
+        let span_count = line.spans.len();
+        sources.extend(rows.iter().map(|row| {
+            row.iter()
+                .flat_map(|grapheme| {
+                    let source = (grapheme.style < span_count).then_some(grapheme.style);
+                    std::iter::repeat_n(source, usize::from(grapheme.width))
+                })
+                .collect()
+        }));
     }
     rows.iter().map(|row| buffer.line(row)).collect()
 }

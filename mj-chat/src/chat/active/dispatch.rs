@@ -286,6 +286,32 @@ impl ActiveChat {
                     &mut self.state,
                 );
             }
+            ChatAction::OpenLink(url) => {
+                self.state
+                    .set_notice(format!("Opening {url} in the browser…"));
+                let updates = self.chat_io_tx.clone();
+                let launch_url = url.clone();
+                // The launcher can wait on the browser process. A plain
+                // thread, unlike a Tokio blocking task, cannot hold runtime
+                // shutdown open while it waits.
+                let spawned = std::thread::Builder::new()
+                    .name("mj-chat-browser".to_owned())
+                    .spawn(move || {
+                        if let Err(error) = webbrowser::open(&launch_url) {
+                            let failed = ChatIoUpdate::LinkOpenFailed {
+                                url: launch_url,
+                                error: error.to_string(),
+                            };
+                            if let Err(error) = updates.send(failed) {
+                                tracing::debug!(%error, "chat closed before a link failure arrived");
+                            }
+                        }
+                    });
+                if let Err(error) = spawned {
+                    self.state
+                        .set_notice(format!("Could not open {url}: {error}"));
+                }
+            }
             ChatAction::PasteFromClipboard => {
                 if self.paste_in_flight {
                     self.state.set_notice("Clipboard read already in progress…");

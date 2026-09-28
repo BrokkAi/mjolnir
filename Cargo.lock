@@ -628,6 +628,7 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "unicode-width",
+ "webbrowser",
 ]
 
 [[package]]

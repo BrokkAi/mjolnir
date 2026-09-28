@@ -348,7 +348,21 @@ impl ChatState {
         // A plain transcript click reaches here only after the selection
         // router has confirmed that the press never became a drag. Keeping
         // this after scrollbar hit testing prevents a thumb click from
-        // toggling a tool underneath it.
+        // opening a link or toggling a tool underneath it. A link inside a
+        // tool's output opens rather than toggling the tool.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(url) = self.transcript_link_at(mouse.column, mouse.row)
+        {
+            if is_web_url(&url) {
+                return ChatAction::OpenLink(url);
+            }
+            // Agent text chooses these destinations; other schemes can start
+            // arbitrary local handlers, so only web pages open on a click.
+            self.set_notice(format!(
+                "Only http and https links open from the transcript: {url}"
+            ));
+            return ChatAction::None;
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.toggle_tool_at(mouse.column, mouse.row)
         {
@@ -447,4 +461,12 @@ impl ChatState {
         }
         ChatAction::None
     }
+}
+
+fn is_web_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && rest.starts_with("//")
 }

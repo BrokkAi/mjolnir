@@ -57,8 +57,9 @@ pub(super) use mj_transcript::transcript::{
 
 use super::ChatState;
 use super::rendering::{
-    LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, display_width, markdown_lines,
-    raw_lines, sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
+    LinkSpan, LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, display_width,
+    markdown_lines, raw_lines, sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
+    wrap_styled_line_with_sources,
 };
 
 #[derive(Debug, Clone)]
@@ -127,6 +128,15 @@ pub(super) struct TranscriptRenderCache {
 pub(super) struct TranscriptToolClickTarget {
     pub rect: Rect,
     pub start_seq: u64,
+}
+
+/// Where one transcript frame drew its rows. A link click is resolved against
+/// this frame's rows, the same way tool click targets are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TranscriptLinkFrame {
+    inner: Rect,
+    top: AnchorRow,
+    visible_rows: usize,
 }
 
 /// A read-only copy of the projected conversation that can be rendered by
@@ -1207,6 +1217,68 @@ impl ChatState {
             screen_offset = screen_offset.saturating_add(visible_line_count);
             skip = 0;
         }
+    }
+
+    /// Remembers where this frame drew the transcript, for [`Self::transcript_link_at`].
+    pub(super) fn record_transcript_link_frame(
+        &mut self,
+        inner: Rect,
+        top: AnchorRow,
+        visible_rows: usize,
+    ) {
+        self.transcript_link_frame = Some(TranscriptLinkFrame {
+            inner,
+            top,
+            visible_rows,
+        });
+    }
+
+    /// The destination of the link drawn at a screen cell of the last
+    /// transcript frame. Only the clicked entry is rendered again, with link
+    /// tracking, so ordinary frames pay nothing for links.
+    pub(super) fn transcript_link_at(&mut self, column: u16, row: u16) -> Option<String> {
+        let frame = self.transcript_link_frame?;
+        if !frame.inner.contains(Position::new(column, row)) {
+            return None;
+        }
+        let target = usize::from(row - frame.inner.y);
+        if target >= frame.visible_rows {
+            return None;
+        }
+        let column = usize::from(column - frame.inner.x);
+        let mut screen_offset = 0usize;
+        let mut skip = frame.top.row;
+        for index in frame.top.entry..self.entries.len() {
+            let collapse = *self.render_cache.collapse.get(index)?;
+            let rows = cached_entry_lines(&self.entries, &mut self.render_cache, index).len();
+            let visible = rows.saturating_sub(skip);
+            if target < screen_offset + visible {
+                let entry_row = skip + (target - screen_offset);
+                let expanded_tool = match collapse {
+                    EntryCollapse::None => false,
+                    EntryCollapse::Expanded => true,
+                    // A collapsed streak draws a summary, not entry text.
+                    _ => return None,
+                };
+                return transcript_entry_links(
+                    &self.entries[index],
+                    usize::from(self.render_cache.width),
+                    // `Expanded` rows always render as Rich; see `cached_entry_lines`.
+                    if expanded_tool {
+                        TranscriptRenderMode::Rich
+                    } else {
+                        self.render_cache.mode
+                    },
+                    expanded_tool,
+                )
+                .into_iter()
+                .find(|link| link.row == entry_row && (link.start..link.end).contains(&column))
+                .map(|link| link.url);
+            }
+            screen_offset += visible;
+            skip = 0;
+        }
+        None
     }
 
     /// Toggle an expanded completed tool at a frame-local screen coordinate.
