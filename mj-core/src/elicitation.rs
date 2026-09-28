@@ -68,10 +68,11 @@ impl ElicitationRequest {
             "elicitation has more than {MAX_FIELDS} fields"
         );
         let required = string_set(schema.get("required"), "requestedSchema.required")?;
-        let fields = properties
+        let mut fields = properties
             .iter()
             .map(|(field_id, schema)| parse_field(field_id, schema, required.contains(field_id)))
             .collect::<Result<Vec<_>>>()?;
+        pair_claude_custom_answers_by_name(&mut fields);
         Ok(Self {
             id: id.into(),
             message,
@@ -379,6 +380,40 @@ pub enum ElicitationValue {
     Number(f64),
     Boolean(bool),
     StringArray(Vec<String>),
+}
+
+/// Pairs each AskUserQuestion "Other" field with its question by name.
+///
+/// claude-agent-acp names the free-text field of question `question_<n>`
+/// `question_<n>_custom` (`dist/elicitation.js`,
+/// `askUserQuestionsToCreateRequest`). Up to 0.81.0 it also marked the field
+/// with `_meta._askUserQuestionCustomAnswer`; from 0.84.0 only JetBrains AIR
+/// clients get a marker, so the name is the only link left for Mjolnir.
+fn pair_claude_custom_answers_by_name(fields: &mut [ElicitationField]) {
+    let selects: Vec<String> = fields
+        .iter()
+        .filter(|field| {
+            field.id.starts_with("question_")
+                && matches!(
+                    field.kind,
+                    ElicitationFieldKind::SingleSelect { .. }
+                        | ElicitationFieldKind::MultiSelect { .. }
+                )
+        })
+        .map(|field| field.id.clone())
+        .collect();
+    for field in fields.iter_mut() {
+        if field.custom_answer_for.is_some()
+            || !matches!(field.kind, ElicitationFieldKind::Text { .. })
+        {
+            continue;
+        }
+        if let Some(question) = field.id.strip_suffix("_custom")
+            && selects.iter().any(|id| id == question)
+        {
+            field.custom_answer_for = Some(question.to_owned());
+        }
+    }
 }
 
 fn parse_field(field_id: &str, value: &Value, required: bool) -> Result<ElicitationField> {
@@ -714,6 +749,52 @@ mod tests {
             request.fields[1].custom_answer_for.as_deref(),
             Some("question_0")
         );
+    }
+
+    #[test]
+    fn pairs_claude_other_fields_by_name_without_the_marker() {
+        // The form claude-agent-acp 0.84.0 sends a client that is not
+        // JetBrains AIR: the "Other" fields carry no `_meta` marker.
+        let request = ElicitationRequest::from_acp_params(
+            "elicit-claude-084",
+            json!({
+                "sessionId": "session-1",
+                "mode": "form",
+                "message": "Please answer the following questions.",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question_0": {
+                            "type": "string",
+                            "title": "Cache",
+                            "oneOf": [{"const": "Redis", "title": "Redis"}]
+                        },
+                        "question_0_custom": {"type": "string", "title": "Other"},
+                        "question_1": {
+                            "type": "array",
+                            "title": "Targets",
+                            "items": {"anyOf": [{"const": "linux", "title": "linux"}]}
+                        },
+                        "question_1_custom": {"type": "string", "title": "Other"},
+                        "notes_custom": {"type": "string", "title": "Notes"}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let paired = |id: &str| {
+            request
+                .fields
+                .iter()
+                .find(|field| field.id == id)
+                .unwrap()
+                .custom_answer_for
+                .clone()
+        };
+        assert_eq!(paired("question_0_custom").as_deref(), Some("question_0"));
+        assert_eq!(paired("question_1_custom").as_deref(), Some("question_1"));
+        // A `_custom` field with no select of that name stays unpaired.
+        assert_eq!(paired("notes_custom"), None);
     }
 
     #[test]
