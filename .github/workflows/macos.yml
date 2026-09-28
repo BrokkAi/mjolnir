@@ -33,9 +33,7 @@ jobs:
         lane: cli-tests-aarch64-apple-darwin
         build-paths: |
           target/debug
-          target/release
           target/aarch64-apple-darwin/debug
-          target/aarch64-apple-darwin/release
 
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
@@ -45,14 +43,8 @@ jobs:
     - name: Run tests
       run: cargo test
 
-    - name: Build Mjolnir release
-      run: cargo build --release
-
     - name: Run desktop Clippy lints
       run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
-
-    - name: Build desktop application
-      run: cargo build --release --locked -p brokk-mj-desktop
 
     - name: Run desktop tests
       run: cargo test --locked -p brokk-mj-desktop
