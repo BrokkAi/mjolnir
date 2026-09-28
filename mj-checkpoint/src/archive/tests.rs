@@ -1596,6 +1596,7 @@ fn session_delta_bundles_commits_missing_from_every_origin_ref() {
 
     let destination = clone_repository(directory.path(), &origin, "restored");
     restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+
     assert_eq!(git_line(&destination, &["rev-parse", "HEAD"]), head);
     assert_eq!(
         git_line(
@@ -1670,6 +1671,22 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
     let destination = clone_repository(directory.path(), &origin, "restored");
     restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
     assert_eq!(
+        git(&destination, &["status", "--porcelain=v1", "-z"]),
+        git(&source, &["status", "--porcelain=v1", "-z"])
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", "HEAD"]),
+        git(&source, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(&destination, &["ls-files", "--stage", "-z"]),
+        git(&source, &["ls-files", "--stage", "-z"])
+    );
+    assert_eq!(
+        fs::read(destination.join("main.txt")).unwrap(),
+        b"main work\n"
+    );
+    assert_eq!(
         git_line(&destination, &["rev-parse", "refs/heads/side"]),
         side_tip
     );
@@ -1695,6 +1712,73 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
         git_line(&destination, &["rev-parse", "refs/tags/side-tag"]),
         git_line(&source, &["rev-parse", "refs/tags/side-tag"])
     );
+}
+
+#[test]
+fn managed_clone_restore_matches_head_index_and_worktree() {
+    for detached in [false, true] {
+        for dirty in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let origin = directory.path().join("origin");
+            initialize_repository(&origin);
+            commit_file(&origin, "tracked", b"base\n", "base");
+            commit_file(&origin, "deleted", b"remove me\n", "old file");
+            let base = git_line(&origin, &["rev-parse", "HEAD"]);
+            let source = clone_repository(directory.path(), &origin, "source");
+            commit_file(&source, "added", b"new committed file\n", "add file");
+            git(&source, &["rm", "deleted"]);
+            git(&source, &["commit", "-qm", "delete file"]);
+            if detached {
+                git(&source, &["checkout", "--detach"]);
+            }
+            if dirty {
+                fs::write(source.join("tracked"), b"staged\n").unwrap();
+                git(&source, &["add", "tracked"]);
+                fs::write(source.join("tracked"), b"unstaged\n").unwrap();
+                fs::write(source.join("untracked"), b"untracked\n").unwrap();
+            }
+            let snapshot = collect_git_snapshot(
+                &SystemGit,
+                &source,
+                &GitCollectionSpec {
+                    id: "repo".into(),
+                    relative_destination: "repo".into(),
+                    history: GitHistoryMode::CloneFrom(base),
+                    origin_override: None,
+                },
+            )
+            .unwrap();
+            let destination = clone_repository(directory.path(), &origin, "destination");
+            restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+            for args in [
+                vec!["rev-parse", "HEAD"],
+                vec!["status", "--porcelain=v1", "-z"],
+                vec!["ls-files", "--stage", "-z"],
+                vec!["diff", "--binary"],
+                vec!["diff", "--cached", "--binary"],
+                vec!["rev-parse", "--abbrev-ref", "HEAD"],
+            ] {
+                assert_eq!(
+                    git(&destination, &args),
+                    git(&source, &args),
+                    "{args:?}, detached={detached}, dirty={dirty}"
+                );
+            }
+            for path in ["tracked", "added"] {
+                assert_eq!(
+                    fs::read(destination.join(path)).unwrap(),
+                    fs::read(source.join(path)).unwrap()
+                );
+            }
+            assert!(!destination.join("deleted").exists());
+            if dirty {
+                assert_eq!(
+                    fs::read(destination.join("untracked")).unwrap(),
+                    b"untracked\n"
+                );
+            }
+        }
+    }
 }
 
 /// Provisioning must fetch a local repository's history before restoring

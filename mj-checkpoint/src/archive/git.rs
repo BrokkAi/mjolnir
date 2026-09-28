@@ -1062,6 +1062,39 @@ pub fn restore_git_snapshot(
     }
     let clone_refs =
         !snapshot.metadata.saved_refs.is_empty() || !snapshot.metadata.stash_stack.is_empty();
+    let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
+        snapshot.metadata.head_commit.as_str()
+    } else {
+        "FETCH_HEAD"
+    };
+    if let Some(branch) = &snapshot.metadata.branch {
+        git_bytes(
+            runner,
+            repository,
+            ["check-ref-format", "--branch", branch],
+            &[],
+            "validate restored branch",
+        )?;
+        git_bytes(
+            runner,
+            repository,
+            ["checkout", "-B", branch, checkout_target],
+            &[],
+            "restore committed branch",
+        )
+        .with_context(|| checkout_advice(snapshot))?;
+    } else {
+        git_bytes(
+            runner,
+            repository,
+            ["checkout", "--detach", checkout_target],
+            &[],
+            "restore detached commit",
+        )
+        .with_context(|| checkout_advice(snapshot))?;
+    }
+    // Check out before moving saved refs: changing the currently checked-out
+    // branch first leaves the old index and worktree staged against its new tip.
     if clone_refs {
         for (name, oid) in &snapshot.metadata.saved_refs {
             ensure!(
@@ -1115,37 +1148,6 @@ pub fn restore_git_snapshot(
                 "restore saved stash entry",
             )?;
         }
-    }
-    let checkout_target = if snapshot.committed_bundle.is_empty() || clone_refs {
-        snapshot.metadata.head_commit.as_str()
-    } else {
-        "FETCH_HEAD"
-    };
-    if let Some(branch) = &snapshot.metadata.branch {
-        git_bytes(
-            runner,
-            repository,
-            ["check-ref-format", "--branch", branch],
-            &[],
-            "validate restored branch",
-        )?;
-        git_bytes(
-            runner,
-            repository,
-            ["checkout", "-B", branch, checkout_target],
-            &[],
-            "restore committed branch",
-        )
-        .with_context(|| checkout_advice(snapshot))?;
-    } else {
-        git_bytes(
-            runner,
-            repository,
-            ["checkout", "--detach", checkout_target],
-            &[],
-            "restore detached commit",
-        )
-        .with_context(|| checkout_advice(snapshot))?;
     }
     restore_remote_workspace_configuration(runner, repository, &snapshot.metadata)?;
     if !snapshot.staged_patch.is_empty() {
