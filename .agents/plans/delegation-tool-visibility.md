@@ -13,8 +13,8 @@ Parents should see Mjolnir delegation as an ordinary way to investigate and comp
 - [x] (2026-09-28) Implemented Codex registration at worker startup, including existing worker upgrades and delegation disable.
 - [x] (2026-09-28) Review: trimmed server instructions to mechanics, kept routing beside `spawn`, replaced the three-search rule with a context-fraction rule, removed stale discovery text (Codex keeps a one-line hint for legacy ACP-delivered homes). Format, 106 subagent tests, staging and ACP launch tests, and clippy pass.
 - [x] (2026-09-28) Live, isolated instance `delegation-visibility`, bare target: Codex lists the six mj-agents tools in code mode beside the ACP-delivered mj-memory tools, and `list_agents` succeeds with no discovery step; Claude reports every mj-agents tool immediately callable while other MCP tools stay deferred. Both a Codex and a Claude parent spawned a child unprompted on a broad investigation question after one or two local lookups.
-- [ ] Children cannot start until the startup-step command id defect below is fixed; then repeat the smoke test end to end.
-- [ ] Review, commit on the current branch, and push to origin/master.
+- [x] (2026-09-28) Startup step ids are joined with `-` (commit "Join startup step ids with a hyphen so the worker relay admits them"). Repeated live: a Codex session created with a first prompt and `--model` answered; a Claude parent spawned two children in parallel, both worked and handed back, and the parent synthesized their reports with no rejected command ids.
+- [x] (2026-09-28) Committed on the current branch and pushed to origin/master.
 
 ## Surprises & Discoveries
 
@@ -64,6 +64,6 @@ Use the workspace's existing toml crate for structured private-profile changes. 
 
 ## Outcomes & Retrospective
 
-Both harnesses expose the delegation tools upfront in live sessions, and parents delegate on their own. The end-to-end smoke test is blocked by the startup-step command id defect, which predates this task. Commit and push remain.
+Both harnesses expose the delegation tools upfront in live sessions, parents delegate on their own, and after the startup step id fix children start and hand back end to end.
 
 Revision note: records the worker-owned Codex configuration design and the upgrade/override-order constraints that require it.
