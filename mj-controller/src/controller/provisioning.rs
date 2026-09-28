@@ -18,8 +18,8 @@ use crate::targets::{
 
 use super::backend::{
     ContainerOverrides, TargetCheck, backend_bundle, backend_locator, backend_target,
-    configure_github_token_environment, controller_github_token, locator_after_provision,
-    preflight_target, use_github_https_urls,
+    configure_github_token_environment, controller_github_token, preflight_target,
+    use_github_https_urls,
 };
 use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
@@ -497,6 +497,8 @@ impl Controller {
             let image_user = podman_image_user(&target, executor);
             let mut bundle = if session.project_directory.is_some() {
                 None
+            } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
+                Some(bundle)
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
                 Some(super::network_git::checkpoint_bundle(&session)?)
             } else {
@@ -516,16 +518,27 @@ impl Controller {
                 use_github_https_urls(bundle);
             }
             preflight_target(template, executor, TargetCheck::Launch)?;
-            let prepared_cache = bundle.as_mut().and_then(|bundle| {
-                git_cache::prepare(
-                    &target,
-                    session_id,
-                    bundle,
-                    &mut runtime_mounts,
-                    container_github_token,
-                    executor,
-                )
-            });
+            let resource_name = crate::database::load_move_operation(session_id)?
+                .filter(|op| {
+                    op.workspace_transfer.is_some()
+                        && op.phase == mj_core::state::MovePhase::ResumingDestination
+                })
+                .map(|op| targets::move_resource_name(session_id, &op.operation_id))
+                .unwrap_or_else(|| targets::resource_name(session_id))?;
+            let moving_workspace = resource_name != targets::resource_name(session_id)?;
+            let prepared_cache = bundle
+                .as_mut()
+                .filter(|_| !moving_workspace)
+                .and_then(|bundle| {
+                    git_cache::prepare(
+                        &target,
+                        session_id,
+                        bundle,
+                        &mut runtime_mounts,
+                        container_github_token,
+                        executor,
+                    )
+                });
             // Mounts are fixed when the container is created, so the build
             // cache is decided here, before the provisioning plan is built.
             let build_cache = super::mbx::prepare(
@@ -547,13 +560,14 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
-                        targets::provision_plan(
+                        targets::provision_plan_named(
                             &target,
                             session_id,
                             bundle,
                             &runtime_mounts,
                             image_user,
                             session.container_workspace.as_deref(),
+                            &resource_name,
                         )
                     })
             };
@@ -577,21 +591,30 @@ impl Controller {
             }
 
             let started = Instant::now();
-            let result =
-                provision_target_creation(&provision, &target, session_id, executor, |outputs| {
-                    locator_after_provision(
+            let result = provision_target_creation_named(
+                &provision,
+                &target,
+                session_id,
+                executor,
+                &resource_name,
+                |outputs| {
+                    super::backend::locator_after_provision_named(
                         template,
                         &target,
                         session_id,
                         outputs.first(),
                         executor,
+                        &resource_name,
                     )
-                })
-                .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
+                },
+            )
+            .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
             if result.is_err()
                 && let Some(cache) = &prepared_cache
             {
-                if let Some(locator) = provisioned_locator(&target, session_id, None) {
+                if let Some(locator) =
+                    provisioned_locator_named(&target, session_id, None, &resource_name)
+                {
                     let _ = targets::close_plan(&locator, session_id)
                         .and_then(|plan| plan.execute(executor).map(|_| ()));
                 } else {
@@ -1054,11 +1077,30 @@ fn provision_target(
 /// Bring the target into existence and return the commands that populate its
 /// repositories. The caller may overlap that remainder with worker/profile
 /// installation once it has persisted the discovered locator.
+#[cfg(test)]
 fn provision_target_creation(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
     session_id: &str,
     executor: &(impl CommandExecutor + Sync),
+    discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
+) -> Result<(TargetLocator, targets::CommandPlan)> {
+    provision_target_creation_named(
+        plan,
+        target,
+        session_id,
+        executor,
+        &targets::resource_name(session_id)?,
+        discover,
+    )
+}
+
+fn provision_target_creation_named(
+    plan: &targets::CommandPlan,
+    target: &targets::TargetTemplate,
+    session_id: &str,
+    executor: &(impl CommandExecutor + Sync),
+    name: &str,
     discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
 ) -> Result<(TargetLocator, targets::CommandPlan)> {
     let Some((creation, remainder)) = plan.split_at_target_creation() else {
@@ -1086,7 +1128,13 @@ fn provision_target_creation(
     discover(&outputs)
         .map(|locator| (locator, remainder))
         .map_err(|error| {
-            match cleanup_failed_provision(target, session_id, outputs.first(), executor) {
+            match cleanup_failed_provision_named(
+                target,
+                session_id,
+                outputs.first(),
+                executor,
+                name,
+            ) {
                 Some(note) => error.context(note),
                 None => error,
             }
@@ -1099,17 +1147,40 @@ fn provision_target_creation(
 ///
 /// The teardown is the session's own close plan, so a failed launch and an
 /// ordinary close can never disagree about what removing a target means.
+#[cfg(test)]
 fn cleanup_failed_provision(
     target: &targets::TargetTemplate,
     session_id: &str,
     create_output: Option<&CommandOutput>,
     executor: &impl CommandExecutor,
 ) -> Option<String> {
-    let locator = provisioned_locator(target, session_id, create_output)?;
+    cleanup_failed_provision_named(
+        target,
+        session_id,
+        create_output,
+        executor,
+        &targets::resource_name(session_id).ok()?,
+    )
+}
+
+fn cleanup_failed_provision_named(
+    target: &targets::TargetTemplate,
+    session_id: &str,
+    create_output: Option<&CommandOutput>,
+    executor: &impl CommandExecutor,
+    name: &str,
+) -> Option<String> {
+    let locator = provisioned_locator_named(target, session_id, create_output, name)?;
+
     let leak = format!(
         "the resource may still exist; find it via its dev.mj.session={session_id} label/tag"
     );
-    let plan = match targets::close_plan(&locator, session_id) {
+    let cleanup = if name == targets::resource_name(session_id).ok()? {
+        targets::close_plan(&locator, session_id)
+    } else {
+        targets::retire_move_target_plan(&locator, session_id)
+    };
+    let plan = match cleanup {
         Ok(plan) => plan,
         Err(error) => {
             tracing::warn!(
@@ -1156,12 +1227,14 @@ fn cleanup_failed_provision(
 ///
 /// Every target but AWS is named before its plan runs; an EC2 instance
 /// reports its own ID in the launch response.
-fn provisioned_locator(
+fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,
     create_output: Option<&CommandOutput>,
+    name: &str,
 ) -> Option<targets::TargetLocator> {
-    let container_id = || targets::resource_name(session_id).ok();
+    let container_id = || Some(name.to_owned());
+
     Some(match target {
         // A bare project directory belongs to the user: provisioning creates
         // nothing that a failure could leak.
@@ -1169,7 +1242,7 @@ fn provisioned_locator(
         targets::TargetTemplate::LocalPodman(container) => targets::TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: container_id()?,
-            workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
+            workspace_storage: targets::podman_workspace_locator_named(container, name).ok()?,
         },
         targets::TargetTemplate::LocalDocker(_) => targets::TargetLocator::LocalDocker {
             borrowed_from: None,
@@ -1184,7 +1257,7 @@ fn provisioned_locator(
                 borrowed_from: None,
                 ssh: ssh.clone(),
                 container_id: container_id()?,
-                workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
+                workspace_storage: targets::podman_workspace_locator_named(container, name).ok()?,
             }
         }
         targets::TargetTemplate::SshDocker { ssh, .. } => targets::TargetLocator::SshDocker {

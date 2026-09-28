@@ -181,13 +181,71 @@ pub fn data_dir() -> PathBuf {
     if let Some(path) = env_override_os("DATA_DIR") {
         return PathBuf::from(path);
     }
-    with_instance_dir(
-        dirs::data_local_dir()
-            .or_else(dirs::data_dir)
-            .unwrap_or_else(|| PathBuf::from(".local/share"))
-            .join(PRODUCT_DIR),
-        instance_name().as_deref(),
-    )
+    with_instance_dir(default_data_dir(), instance_name().as_deref())
+}
+
+/// The default instance's data directory: no instance, no override.
+fn default_data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .join(PRODUCT_DIR)
+}
+
+/// Refuse to let a development build own the default instance's store.
+///
+/// This is the one decision behind every step that would take the default
+/// instance over: starting its daemon, replacing or stopping a running one,
+/// and opening its database as the writer, which migrates it. A development
+/// build may still read the default instance through its running daemon.
+/// Development builds are the ones run from a Cargo target directory; an
+/// installed `mj` lives elsewhere. `action` names the refused step.
+pub fn ensure_may_control_store(store: &Path, action: &str) -> Result<()> {
+    let Ok(executable) = std::env::current_exe() else {
+        return Ok(());
+    };
+    match development_build_controlling_default_store(&executable, store, &default_data_dir()) {
+        Some(profile_dir) => bail!(
+            "refusing to {action}: this is a development build from {} and {} is the \
+             default Mjolnir instance, which holds live sessions. Development builds may \
+             read the default instance but never start, replace, stop, or migrate it. \
+             Test this build in an isolated instance with `--instance <name>`.",
+            profile_dir.display(),
+            store.display(),
+        ),
+        None => Ok(()),
+    }
+}
+
+/// The Cargo profile directory `executable` was built into, when `store` is
+/// the default instance's data directory. Pure form of
+/// [`ensure_may_control_store`].
+pub(super) fn development_build_controlling_default_store<'a>(
+    executable: &'a Path,
+    store: &Path,
+    default_store: &Path,
+) -> Option<&'a Path> {
+    let same_store = match (fs::canonicalize(store), fs::canonicalize(default_store)) {
+        (Ok(store), Ok(default_store)) => store == default_store,
+        _ => store == default_store,
+    };
+    if !same_store {
+        return None;
+    }
+    cargo_profile_dir(executable)
+}
+
+/// The Cargo profile directory (`target/<profile>` or
+/// `target/<triple>/<profile>`) holding `executable`, directly or in `deps/`.
+/// Cargo keeps its `.fingerprint` directory there. A path that no longer
+/// names a file, such as a Linux `/proc/self/exe` target ending in
+/// ` (deleted)` after a rebuild, is judged by its directory.
+fn cargo_profile_dir(executable: &Path) -> Option<&Path> {
+    executable
+        .ancestors()
+        .skip(1)
+        .take(2)
+        .find(|directory| directory.join(".fingerprint").is_dir())
 }
 
 /// Identity stamped on every worker this Mjolnir instance creates, so a

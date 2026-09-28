@@ -323,6 +323,7 @@ pub enum DashboardAction {
     /// The workspace is intentionally absent: it is fixed by the session
     /// record and never offered as a move selector.
     MoveSession {
+        workspace_selection: mj_core::move_workspace::WorkspaceSelection,
         session_id: String,
         profile_id: String,
         target_template_id: String,

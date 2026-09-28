@@ -1935,8 +1935,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
         )?;
         let launch: WorkerLaunchConfig = serde_json::from_value(serde_json::json!({
             "session_id": session, "harness": "codex", "bridge_command": "/not-used",
-            "bridge_args": [], "environment": {"MJ_INSTANCE": "issue-1138-docker"},
-            "target_environment": {"MJ_INSTANCE": "issue-1138-docker"},
+            "bridge_args": [], "environment": {}, "target_environment": {},
             "cwd": "/tmp", "execution_policy": "configured_approvals", "run_mode": "checkpoint_only"
         }))?;
         let plan = WorkerRecoveryPlan {

@@ -132,6 +132,13 @@ impl Controller {
     ) -> Result<bool> {
         self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
             .await?;
+        if disposition == SourceTargetDisposition::RetainForInPlaceSwap
+            || operation.workspace_transfer.is_some()
+        {
+            self.seal_move_handoff(session_id, executor, manager, operation, preparation)
+                .await?;
+            return Ok(false);
+        }
         self.suspend_session_controlled_with_manager(
             session_id,
             executor,
@@ -201,20 +208,25 @@ impl Controller {
         };
 
         let artifact = latched.artifact.clone();
-        let publication = match previous.managed_worktree.as_ref().map(|owned| owned.kind) {
-            Some(ManagedCheckoutKind::Clone) => Some(super::publication::assess_clone_checkpoint(
-                &previous,
-                &artifact.metadata,
-            )),
-            Some(ManagedCheckoutKind::Worktree) => None,
-            None if previous.project_directory.is_none() => {
-                Some(super::publication::assess_network_checkpoint(
-                    &previous,
-                    &artifact.metadata,
-                    &self.config,
-                ))
+        // Retained environments are not being published or retired. A profile
+        // switch must not wait on the repository's network remote.
+        let publication = if disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+            None
+        } else {
+            match previous.managed_worktree.as_ref().map(|owned| owned.kind) {
+                Some(ManagedCheckoutKind::Clone) => Some(
+                    super::publication::assess_clone_checkpoint(&previous, &artifact.metadata),
+                ),
+                Some(ManagedCheckoutKind::Worktree) => None,
+                None if previous.project_directory.is_none() => {
+                    Some(super::publication::assess_network_checkpoint(
+                        &previous,
+                        &artifact.metadata,
+                        &self.config,
+                    ))
+                }
+                None => None,
             }
-            None => None,
         };
         if !acknowledge_unpublished_work
             && publication

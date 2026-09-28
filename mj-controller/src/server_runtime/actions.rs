@@ -315,7 +315,7 @@ pub(super) async fn apply_phone_action(
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(request).await?;
             match outcome.outcome.as_str() {
-                "completed" | "unchanged" => Ok(()),
+                "completed" | "unchanged" | "interrupted" => Ok(()),
                 "cancelled" | "failed" => {
                     // The daemon keeps detailed diagnostics in its durable
                     // operation record. Only its safe recovery guidance is

@@ -2361,10 +2361,12 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = mj_core::state::MovePreparation {
+            workspace: None,
             in_place: false,
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
+                workspace: Default::default(),
                 session_id: "session-1".into(),
                 profile_id: Some("codex-1".into()),
                 target_template_id: Some("podman".into()),

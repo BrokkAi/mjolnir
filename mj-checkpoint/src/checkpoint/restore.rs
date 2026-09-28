@@ -1,5 +1,31 @@
 use super::*;
 
+/// Whether the destination worker owns dispatch immediately, drops the queue,
+/// or waits for its controller to admit the archived commands after readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueRestorePolicy {
+    Restore,
+    Discard,
+    Defer,
+}
+
+fn deserialize_queue_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<QueueRestorePolicy, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Legacy(bool),
+        Policy(QueueRestorePolicy),
+    }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Legacy(true) => QueueRestorePolicy::Discard,
+        Wire::Legacy(false) => QueueRestorePolicy::Restore,
+        Wire::Policy(policy) => policy,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRestoreSpec {
@@ -9,7 +35,11 @@ pub struct CheckpointRestoreSpec {
     pub harness_home: PathBuf,
     pub restore_repositories: bool,
     pub restore_native: bool,
-    pub discard_queued_prompts: bool,
+    #[serde(
+        alias = "discard_queued_prompts",
+        deserialize_with = "deserialize_queue_policy"
+    )]
+    pub queue_policy: QueueRestorePolicy,
     /// Where the primary repository actually sits, when that is not
     /// `workspace_root` joined with the archived destination. A resume that
     /// moves a session between representations puts the checkout somewhere the
@@ -81,14 +111,31 @@ pub fn restore_checkpoint_with_native_state(
         },
         native_session_unused,
     };
-    if spec.discard_queued_prompts {
+    if spec.queue_policy != QueueRestorePolicy::Restore {
         if let Some(value) = &mut seed.command_ledger {
             let mut ledger =
                 mj_core::relay::CheckpointCommandLedger::decode(value, seed.event_frontier)?;
             for queued in &seed.queued_prompts {
                 if let Some(receipt) = ledger.handled_commands.get_mut(&queued.command_id) {
-                    receipt.terminal_ordinal = Some(seed.event_frontier);
-                    receipt.outcome = Some(mj_core::relay::RelayCommandOutcome::Cancelled);
+                    ensure!(
+                        receipt.terminal_ordinal.is_none(),
+                        "queued command {} already has a terminal receipt",
+                        queued.command_id
+                    );
+                    match spec.queue_policy {
+                        QueueRestorePolicy::Discard => {
+                            receipt.terminal_ordinal = Some(seed.event_frontier);
+                            receipt.outcome = Some(mj_core::relay::RelayCommandOutcome::Cancelled);
+                        }
+                        QueueRestorePolicy::Defer => {
+                            // The sealed source never dispatched this queued command.
+                            // The controller transfers admission with the original ID;
+                            // all completed receipts remain authoritative.
+                            ledger.handled_commands.remove(&queued.command_id);
+                            ledger.retained_command_receipts.remove(&queued.command_id);
+                        }
+                        QueueRestorePolicy::Restore => unreachable!(),
+                    }
                 }
             }
             *value = serde_json::to_value(ledger)?;

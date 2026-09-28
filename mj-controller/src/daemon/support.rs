@@ -181,6 +181,42 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         }
     }
 
+    fn begin_resumable_move_work(&self) -> Result<()> {
+        let owner = self.state.owner();
+        let active = owner
+            .lifecycle
+            .get(&self.session_id)
+            .context("Move lifecycle missing")?;
+        ensure!(
+            self.operation_id.as_ref() == Some(&active.operation_id),
+            "Move lifecycle changed"
+        );
+        active
+            .upgrade_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Ok(())
+    }
+
+    fn end_resumable_move_work(&self) -> Result<()> {
+        let work = crate::upgrade::activity("Move control transition")?;
+        let owner = self.state.owner();
+        let active = owner
+            .lifecycle
+            .get(&self.session_id)
+            .context("Move lifecycle missing")?;
+        ensure!(
+            self.operation_id.as_ref() == Some(&active.operation_id),
+            "Move lifecycle changed"
+        );
+        *active
+            .upgrade_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
+        Ok(())
+    }
+
     fn reserve_move_destination(&self) {
         if let Some(id) = &self.operation_id {
             self.state.reserve_move_destination(&self.session_id, id);

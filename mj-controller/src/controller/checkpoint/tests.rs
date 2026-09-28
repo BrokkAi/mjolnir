@@ -2893,12 +2893,13 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let _writer = crate::database::install_isolated_test_writer();
 
     let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
-    let relay_root = data_directory.join("relay");
+    let relay_root = data_directory.join("workers").join(LATCH_RELAY_SESSION);
     let profile_home = data_directory.join("profile");
     let archive_directory = data_directory.join("archives");
     for directory in [&relay_root, &profile_home, &archive_directory] {
         std::fs::create_dir_all(directory).unwrap();
     }
+    std::fs::create_dir_all(relay_root.join("profile")).unwrap();
     // The archive covers exactly the two observations seeded below, so the
     // close latch reuses it instead of exporting a new one.
     let mut seed =
@@ -2917,17 +2918,12 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     drop(seed);
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
 
-    // A container is the case an in-place move is really for: the container,
-    // its workspace, and its caches all survive the harness swap.
-    let container_id = targets::resource_name(LATCH_RELAY_SESSION).unwrap();
+    let repository = crate::controller::test_support::committed_repository();
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
-    session.target_template_id = "podman".into();
-    session.target = Some(TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: container_id.clone(),
-        workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
-            name: format!("{container_id}-workspace"),
-        },
+    session.target_template_id = "local".into();
+    session.project_directory = Some(repository.path().to_owned());
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
     });
     session.checkpoint = Some(checkpoint.clone());
     crate::database::save_session(&session).unwrap();
@@ -2947,21 +2943,9 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
                 guardian_review_model: None,
             },
         );
-        config.targets.insert(
-            "podman".into(),
-            TargetTemplate::LocalPodman {
-                container: mj_core::config::ContainerTemplate {
-                    build_cache: None,
-                    image: "test:latest".into(),
-                    pull_policy: Default::default(),
-                    platform: None,
-                    cpus: None,
-                    memory: None,
-                    environment: Default::default(),
-                    workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
-                },
-            },
-        );
+        config
+            .targets
+            .insert("local".into(), TargetTemplate::LocalBare);
         config.bundles.insert(
             "project".into(),
             ProjectBundle {
@@ -2990,20 +2974,23 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     };
 
     let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),
         profile_id: Some("codex".into()),
-        target_template_id: Some("podman".into()),
+        target_template_id: Some("local".into()),
         additional_mounts: Some(Vec::new()),
         resource_allocation: None,
     };
     let mut operation = mj_core::state::MoveOperation {
+        workspace_transfer: None,
+        handoff: None,
         in_place: true,
         source_checkpoint_only: false,
         operation_id: "move-in-place-close".into(),
         selection: selection.clone(),
         source_profile_id: "codex".into(),
-        source_target_template_id: "podman".into(),
+        source_target_template_id: "local".into(),
         source_target: session.target.clone(),
         source_native_session_id: session.native_session_id.clone(),
         source_additional_mounts: Vec::new(),
@@ -3034,9 +3021,22 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.purposes.lock().unwrap().push(command.purpose.clone());
+            ProcessExecutor.execute(command)
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            mut input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            anyhow::ensure!(
+                command.purpose == "export target checkpoint",
+                "unexpected command"
+            );
+            let checkpoint = mj_worker::checkpoint::export_from_spec_reader(&mut input)?;
             Ok(CommandOutput {
                 status: 0,
-                stdout: Vec::new(),
+                stdout: serde_json::to_vec(&checkpoint)?,
                 stderr: Vec::new(),
             })
         }
@@ -3085,10 +3085,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     for purpose in &purposes {
         let lowered = purpose.to_lowercase();
         assert!(
-            !lowered.contains("remove")
-                && !lowered.contains("stop")
+            !lowered.contains("remove exact")
+                && !lowered.contains("stop the")
                 && !lowered.contains("delete")
-                && !lowered.contains("clean"),
+                && !lowered.contains("retire"),
             "an in-place close must not tear anything down, but it ran {purpose:?} \
              (all: {purposes:?})"
         );

@@ -1,6 +1,19 @@
 use super::*;
 
 pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
+    close_plan_scoped(locator, session_id, true)
+}
+
+/// A Move can have two generations on one host. Shared session caches remain owned by the destination.
+pub fn retire_move_target_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
+    close_plan_scoped(locator, session_id, false)
+}
+
+fn close_plan_scoped(
+    locator: &TargetLocator,
+    session_id: &str,
+    remove_shared_cache: bool,
+) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
     ensure!(
         !is_borrowed(locator),
@@ -10,12 +23,13 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
         ssh, container_id, ..
     } = locator
     {
-        let local = close_plan(
+        let local = close_plan_scoped(
             &TargetLocator::LocalDocker {
                 borrowed_from: None,
                 container_id: container_id.clone(),
             },
             session_id,
+            remove_shared_cache,
         )?;
         return Ok(CommandPlan {
             description: local.description,
@@ -33,7 +47,12 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
         locator,
         TargetLocator::LocalPodman { .. } | TargetLocator::SshPodman { .. }
     ) {
-        return podman_cleanup_plan(locator, session_id);
+        let mut plan = podman_cleanup_plan(locator, session_id)?;
+        if !remove_shared_cache {
+            plan.commands
+                .retain(|command| command.stage != Some(ProvisionStage::CleaningCache));
+        }
+        return Ok(plan);
     }
     let command = match locator {
         TargetLocator::LocalBare { .. } => {
@@ -80,7 +99,7 @@ elif ! docker info >/dev/null 2>&1; then
     status=1
 fi
 if [ "$status" -eq 0 ]; then
-    volumes=$(docker volume ls --quiet --filter "label=dev.mj.managed=true" --filter "label=dev.mj.session=$2") || status=$?
+    volumes=$(docker volume ls --quiet --filter "label=dev.mj.managed=true" --filter "label=dev.mj.session=$2" --filter "name=^$1-mount-") || status=$?
     if [ "$status" -eq 0 ]; then
         backings=
         for volume in $volumes; do
@@ -96,7 +115,7 @@ if [ "$status" -eq 0 ]; then
         fi
     fi
 fi
-if [ "$status" -eq 0 ]; then
+if [ "$status" -eq 0 ] && [ "$3" = true ]; then
     rm -rf -- "$HOME/.cache/mjolnir/git/sessions/$2" || status=$?
 fi
 if [ "$status" -eq 0 ]; then
@@ -106,13 +125,33 @@ if [ "$status" -eq 0 ]; then
     fi
 fi
 exit "$status""#;
-            CommandSpec::new("sh", ["-c", script, "mj-close", container_id, session_id])
-                .purpose("remove local Docker session container, overlay volumes, and cache state")
+            CommandSpec::new(
+                "sh",
+                [
+                    "-c",
+                    script,
+                    "mj-close",
+                    container_id,
+                    session_id,
+                    if remove_shared_cache { "true" } else { "false" },
+                ],
+            )
+            .purpose("remove local Docker session container, overlay volumes, and cache state")
         }
         TargetLocator::AppleContainer { container_id, .. } => {
-            let script = "status=0; container rm --force \"$1\" || status=$?; rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\"; exit \"$status\"";
-            CommandSpec::new("sh", ["-c", script, "mj-close", container_id, session_id])
-                .purpose("remove Apple session container and Git cache snapshot")
+            let script = "status=0; container rm --force \"$1\" || status=$?; if [ \"$status\" -eq 0 ] && [ \"$3\" = true ]; then rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\" || status=$?; fi; exit \"$status\"";
+            CommandSpec::new(
+                "sh",
+                [
+                    "-c",
+                    script,
+                    "mj-close",
+                    container_id,
+                    session_id,
+                    if remove_shared_cache { "true" } else { "false" },
+                ],
+            )
+            .purpose("remove Apple session container and Git cache snapshot")
         }
         TargetLocator::AwsEc2 {
             profile,

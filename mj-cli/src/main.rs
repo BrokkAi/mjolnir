@@ -107,6 +107,18 @@ enum Command {
     Checkpoint(CheckpointArgs),
     /// Move a session to another configured profile and/or target.
     Move(MoveArgs),
+    /// Inspect stopped sources retained by Move, or explicitly remove one.
+    MoveSources {
+        /// Session whose retained Move sources should be listed or cleaned up.
+        #[arg(long)]
+        session: String,
+        /// Operation ID of the retained source to delete.
+        #[arg(long)]
+        cleanup: Option<String>,
+        /// Confirm deletion of the retained source and its excluded files.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a harness login for a profile so live sessions pick up fresh credentials.
     Login(LoginArgs),
     /// Create a session through the API and print its id.
@@ -242,6 +254,15 @@ struct CheckpointArgs {
         .multiple(true)
 ))]
 struct MoveArgs {
+    /// Inspect the transfer and return its preparation without moving anything.
+    #[arg(long)]
+    prepare: bool,
+    /// Explicitly accept a workspace transfer of at least 1 GB.
+    #[arg(long)]
+    allow_large_transfer: bool,
+    /// Leave an untracked path at the source (repeatable REPOSITORY:PATH).
+    #[arg(long = "exclude")]
+    exclusions: Vec<String>,
     /// Session to move. The session identity is retained by the operation.
     #[arg(long)]
     session: String,
@@ -486,6 +507,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Recover(_)) => "recover",
         Some(Command::Checkpoint(_)) => "checkpoint",
         Some(Command::Move(_)) => "move",
+        Some(Command::MoveSources { .. }) => "move-sources",
         Some(Command::Login(_)) => "login",
         Some(Command::New(_)) => "new",
         Some(Command::Prompt(_)) => "prompt",
@@ -598,6 +620,20 @@ async fn run_command(
             Ok(DashboardExit::Normal)
         }
         Some(Command::Move(args)) => move_session(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::MoveSources {
+            session,
+            cleanup,
+            yes,
+        }) => {
+            anyhow::ensure!(
+                cleanup.is_none() || yes,
+                "Inspect with mj move-sources --session {session}, then pass --cleanup OPERATION --yes to delete that source and its excluded files"
+            );
+            let mut daemon = daemon::connect_or_start().await?;
+            let sources = daemon.move_sources(session, cleanup).await?;
+            println!("{}", serde_json::to_string_pretty(&sources)?);
+            Ok(DashboardExit::Normal)
+        }
         Some(Command::Login(args)) => login(args).await.map(|()| DashboardExit::Normal),
         Some(Command::New(args)) => {
             let workspace = args.workspace.or(requested_workspace);
@@ -684,6 +720,7 @@ async fn run_command(
 /// Ctrl-C does.
 async fn move_session(args: MoveArgs) -> Result<()> {
     if !args.yes
+        && !args.prepare
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
             || !std::io::IsTerminal::is_terminal(&std::io::stdout()))
     {
@@ -719,6 +756,24 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         }
     };
     let selection = MoveSelection {
+        workspace: mj_core::move_workspace::WorkspaceSelection {
+            exclusions: args
+                .exclusions
+                .iter()
+                .map(|entry| {
+                    let (repository, path) = entry
+                        .split_once(':')
+                        .context("--exclude requires REPOSITORY:PATH")?;
+                    let path = mj_core::move_workspace::WorkspacePath {
+                        repository: repository.into(),
+                        path: path.into(),
+                    };
+                    path.validate()?;
+                    Ok(path)
+                })
+                .collect::<Result<Vec<_>>>()?,
+            acknowledge_large_transfer: args.allow_large_transfer,
+        },
         session_id: args.session.clone(),
         profile_id: args.profile.clone(),
         target_template_id: args.target.clone(),
@@ -743,6 +798,26 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             return Err(error).context("prepare move");
         }
     };
+    if args.prepare {
+        println!("{}", serde_json::to_string_pretty(&preparation)?);
+        return Ok(());
+    }
+    if let Some(workspace) = &preparation.workspace {
+        use mj_core::move_workspace::format_bytes;
+        eprintln!(
+            "Workspace transfer: {}",
+            format_bytes(preparation.selection.workspace.included_bytes(workspace))
+        );
+        for root in &workspace.roots {
+            eprintln!("  {}", root.label());
+        }
+        if let Err(error) = preparation.selection.workspace.validate(workspace) {
+            if args.json {
+                print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
+            }
+            return Err(error.context("use --prepare to inspect files, --allow-large-transfer to include all eligible data, or --exclude REPOSITORY:PATH to leave selected files at the source"));
+        }
+    }
     let pending = preparation.queued_commands.len();
     let queue = match (args.queue, pending, args.yes) {
         (Some(queue), _, _) => Some(queue.into()),
@@ -1008,6 +1083,10 @@ fn print_move_human(outcome: &mj_core::state::MoveOutcome) {
         ),
         "unchanged" => println!(
             "{} is already on {destination}; unchanged. (operation {})",
+            outcome.session_id, outcome.operation_id
+        ),
+        "interrupted" => println!(
+            "Move for {} will continue after daemon upgrade. (operation {})",
             outcome.session_id, outcome.operation_id
         ),
         other => println!(
@@ -1375,6 +1454,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             }
         }
         DaemonCommand::Stop => {
+            mj_core::config::ensure_may_control_store(
+                &mj_core::config::data_dir(),
+                "stop the Mjolnir daemon",
+            )?;
             let daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {

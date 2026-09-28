@@ -1,7 +1,9 @@
 //! One recoverable stop/restore operation, independent of its initiating viewer.
 
+mod handoff;
 #[cfg(test)]
 mod tests;
+mod transfer;
 
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
@@ -77,12 +79,10 @@ pub fn restore_move_queue_hold(operation: &MoveOperation) {
 
 /// What a recovered, interrupted source stop tells the person.
 ///
-/// An in-place move promised to keep the environment; a recovery that tears it
-/// down has broken that promise, so the message says so instead of leaving the
-/// person to infer it from an unchanged "retry" line.
+/// Recovery keeps the environment promised by an in-place move.
 fn interrupted_source_stop_message(recovered: &str, in_place: bool) -> String {
     if in_place {
-        format!("{recovered}; the in-place swap was interrupted; the environment was released")
+        format!("{recovered}; the in-place swap was interrupted; the environment was retained")
     } else {
         recovered.to_owned()
     }
@@ -129,6 +129,9 @@ fn failed_move_recovery(
 ) -> String {
     if operation.queue_admission_started {
         return "Destination is live; retry queue admission on this same destination. Already accepted work may have effects.".to_owned();
+    }
+    if operation.in_place && record.is_some_and(|record| record.target.is_some()) {
+        return "Environment and checkpoint retained. Retry Move on the same target; the checkout will not be recreated.".to_owned();
     }
     match record {
         Some(record) if source_stopped_with_verified_checkpoint(record) => {
@@ -338,8 +341,7 @@ impl Controller {
                 "queue admission is incomplete on the live destination; retry that move before selecting another destination"
             );
             let checkpoint = operation
-                .checkpoint
-                .as_ref()
+                .restore_artifact()
                 .context("retained queue checkpoint is missing")?;
             let verified = verify_archive_streaming(&checkpoint.archive_path)?;
             ensure!(
@@ -507,7 +509,8 @@ impl Controller {
         );
         let previous = crate::database::load_move_operation(&source.id)?;
         let retry = previous.as_ref().is_some_and(|op| {
-            !matches!(op.phase, MovePhase::Completed) && source.checkpoint.is_some()
+            !matches!(op.phase, MovePhase::Completed)
+                && (op.restore_artifact().is_some() || source.checkpoint.is_some())
         });
         ensure!(
             matches!(
@@ -534,6 +537,29 @@ impl Controller {
             selection.resource_allocation = selection
                 .resource_allocation
                 .or_else(|| source.resource_allocation.clone());
+        }
+        if selection.clear_resource_allocation
+            && source.resource_allocation.is_none()
+            && source.container_cpus.is_none()
+            && source.container_memory.is_none()
+        {
+            selection.clear_resource_allocation = false;
+        }
+        if let Some(retained) = previous.as_ref().filter(|op| {
+            op.retains_source_environment()
+                && op.phase != MovePhase::Completed
+                && op.recovery_session.is_some()
+        }) {
+            ensure!(
+                retained.selection == selection,
+                "a sealed Move must be retried with its prepared destination and file selection"
+            );
+            ensure!(
+                !retained.in_place
+                    || (retained.source_target.is_some()
+                        && source.target == retained.source_target),
+                "retained Move target is missing or changed; refusing to recreate it"
+            );
         }
         let profile_id = selection.profile_id.as_deref().unwrap();
         let target_id = selection.target_template_id.as_deref().unwrap();
@@ -618,18 +644,28 @@ impl Controller {
             .filter(|operation| {
                 operation.selection == selection
                     && operation.phase != MovePhase::Completed
-                    && operation.checkpoint.is_some()
+                    && operation.restore_artifact().is_some()
             })
             .map(|operation| operation.operation_id.clone())
             .unwrap_or(new_command_id("move")?);
-        Ok(MovePreparation {
-            source_unavailable: false,
-            in_place: in_place_move_eligible(
+        let in_place = previous
+            .as_ref()
+            .is_some_and(|op| retry && op.in_place && op.selection == selection)
+            || in_place_move_eligible(
                 source,
                 &selection,
                 self.state.subagents.contains_key(&source.id),
                 retry,
-            ),
+            );
+        let workspace = if in_place {
+            None
+        } else {
+            Some(self.assess_move_workspace(&selection, executor)?)
+        };
+        Ok(MovePreparation {
+            workspace,
+            source_unavailable: false,
+            in_place,
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -699,20 +735,19 @@ impl Controller {
         );
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
+        if let Some(assessment) = &checked.workspace {
+            checked.selection.workspace.validate(assessment)?;
+        }
         let old_operation = crate::database::load_move_operation(&id)?;
         let retry = old_operation.filter(|op| {
             op.selection == prepared.selection
                 && op.phase != MovePhase::Completed
-                && op.checkpoint.is_some()
+                && op.restore_artifact().is_some()
         });
         if retry.is_none()
             && source.state == SessionState::Running
             && source.last_profile == checked.selection.profile_id.as_deref().unwrap()
-            && source.target_template_id == checked.selection.target_template_id.as_deref().unwrap()
-            && Some(&source.additional_mounts) == checked.selection.additional_mounts.as_ref()
-            && source.resource_allocation == checked.selection.resource_allocation
-            && (!checked.selection.clear_resource_allocation
-                || (source.container_cpus.is_none() && source.container_memory.is_none()))
+            && move_environment_change(&source, &checked.selection).is_none()
         {
             return Ok(outcome(
                 &prepared.operation_id,
@@ -746,6 +781,22 @@ impl Controller {
                 op
             }
             None => MoveOperation {
+                workspace_transfer: if checked.in_place {
+                    None
+                } else {
+                    Some(
+                        self.new_workspace_transfer(
+                            &id,
+                            &prepared.operation_id,
+                            checked
+                                .workspace
+                                .clone()
+                                .context("Move workspace assessment missing")?,
+                            executor,
+                        )?,
+                    )
+                },
+                handoff: None,
                 source_checkpoint_only: false,
                 in_place: in_place_move_eligible(
                     &source,
@@ -781,13 +832,26 @@ impl Controller {
         crate::database::save_move_operation(&operation)?;
         tracing::info!(
             session_id = id,
+            in_place = operation.in_place,
+            reason = move_environment_change(&source, &checked.selection).unwrap_or(
+                if operation.in_place {
+                    "environment unchanged"
+                } else {
+                    "source environment unavailable or previously released"
+                }
+            ),
+            "move environment decision"
+        );
+        tracing::info!(
+            session_id = id,
             phase = "preflight",
             elapsed_ms = started.elapsed().as_millis() as u64,
             "move phase completed"
         );
-        let result = self
-            .execute_move(&mut operation, Some(&checked), executor, manager)
-            .await;
+        // Move nests checkpoint and restore state machines. Heap-own their
+        // futures so dev builds fit the runtime's ordinary thread stacks.
+        let result =
+            Box::pin(self.execute_move(&mut operation, Some(&checked), executor, manager)).await;
         self.finish_move_result(&mut operation, result, executor)
     }
 
@@ -797,6 +861,20 @@ impl Controller {
         result: Result<()>,
         executor: &impl CommandExecutor,
     ) -> Result<MoveOutcome> {
+        if result.is_err()
+            && operation.workspace_transfer.is_some()
+            && !crate::upgrade::gate().is_open()
+        {
+            // Handoff cancellation is not user cancellation. Leave the durable
+            // phase active so the next daemon resumes the accepted Move.
+            return Ok(outcome(
+                &operation.operation_id,
+                &operation.selection,
+                "interrupted",
+                None,
+                Some("Move will continue after the daemon upgrade".into()),
+            ));
+        }
         let (status, error, recovery) = match result {
             Ok(()) => {
                 operation.phase = MovePhase::Completed;
@@ -846,13 +924,27 @@ impl Controller {
             let session = self.state.sessions.get(&id).context("move session is missing")?.clone();
             if operation.queue_admission_started {
                 ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
+                self.finish_workspace_transfer(&mut operation, executor)?;
                 return self.admit_move_queue(&mut operation, executor).await;
+            }
+            if operation.workspace_transfer.is_some() && operation.recovery_session.is_some() && !operation.cancellation_requested
+                && !(operation.phase == MovePhase::ResumingDestination && session.state == SessionState::Running) {
+                if session.state == SessionState::Provisioning || session.target != operation.source_target {
+                    self.rollback_move_destination(&operation, anyhow::anyhow!("resume interrupted Move transfer"), executor)?;
+                }
+                return Box::pin(self.execute_move(&mut operation, None, executor, manager)).await;
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
-                self.recover_move_source_stop(&mut operation, &cleanup, manager).await?;
+                Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
                 operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
-                if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
+                if operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Closing {
+                    let previous = self.state.sessions[&id].clone();
+                    operation.recovery_session = Some(previous.clone());
+                    let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
+                    return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
+                }
+                if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                     self.cleanup_stopped_target(&id, &cleanup)?;
                 }
                 bail!("{}", interrupted_source_stop_message(
@@ -876,23 +968,29 @@ impl Controller {
                     crate::database::save_move_operation(&operation)?;
                     restore_move_queue_hold(&operation);
                     ensure!(!operation.cancellation_requested, "Move was cancelled; ready destination retained");
+                    self.finish_workspace_transfer(&mut operation, executor)?;
                     self.admit_move_queue(&mut operation, executor).await
                 }
                 MovePhase::ResumingDestination => {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
-                    // An in-place swap still owns the checkout the source was
-                    // using, so the rollback retires it exactly as a resume
-                    // that recreated one.
-                    let error = self.rollback_failed_resume(&id, previous, operation.in_place,
-                        anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry"), executor)?;
+                    // The retained environment belongs to this Move, even
+                    // when only part of its worker installation completed.
+                    let cause = anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry");
+                    let error = if operation.in_place {
+                        self.retain_failed_in_place_move(&id, previous, cause)?
+                    } else if operation.workspace_transfer.is_some() {
+                        self.rollback_move_destination(&operation, cause, executor)?
+                    } else {
+                        self.rollback_failed_resume(&id, previous, false, cause, executor)?
+                    };
                     Err(error)
                 }
                 MovePhase::ClosingSource => {
                     if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
-                        self.recover_move_source_stop(&mut operation, executor, manager).await?;
+                        Box::pin(self.recover_move_source_stop(&mut operation, executor, manager)).await?;
                     }
                     operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
-                    if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
+                    if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                         self.cleanup_stopped_target(&id, executor)?;
                     }
                     bail!("{}", interrupted_source_stop_message(
@@ -921,35 +1019,55 @@ impl Controller {
                 .await?;
             let mut lease = handle.lease_connection().await?;
             let execution = lease.connection_mut().sync().await?.operational.execution;
+            if operation.retains_source_environment()
+                && matches!(
+                    execution,
+                    mj_core::relay::RelayExecutionState::Closing
+                        | mj_core::relay::RelayExecutionState::Closed
+                )
+            {
+                super::checkpoint::wait_for_relay_closed(lease.connection_mut()).await?;
+                lease.release();
+                ensure!(
+                    operation.restore_artifact().is_some()
+                        || self.state.sessions[&id].checkpoint.is_some(),
+                    "sealed Move source has no checkpoint"
+                );
+                return Ok(());
+            }
             lease.release();
             if matches!(
                 execution,
                 mj_core::relay::RelayExecutionState::Idle
                     | mj_core::relay::RelayExecutionState::Running
             ) {
-                if operation.cancellation_requested {
+                if operation.cancellation_requested || operation.retains_source_environment() {
                     let record = self.state.sessions.get_mut(&id).unwrap();
                     record.state = SessionState::Running;
                     record.updated_at = now();
-                    record.last_error =
-                        Some("Move was cancelled before the source was sealed".into());
+                    record.last_error = Some(
+                        "Move was interrupted before the source was sealed; source retained".into(),
+                    );
                     crate::database::save_lifecycle_session(record)?;
                 } else {
-                    // A recovered source stop always tears its target down: an
-                    // interrupted in-place swap falls back to the fresh path.
-                    self.suspend_session_for_move(
+                    // Fresh-environment moves finish their admitted source stop.
+                    Box::pin(self.suspend_session_for_move(
                         &id,
                         executor,
                         manager,
                         operation,
                         None,
                         SourceTargetDisposition::Destroy,
-                    )
+                    ))
                     .await?;
                 }
                 return Ok(());
             }
         }
+        ensure!(
+            !operation.retains_source_environment(),
+            "retained Move source cannot be proven; refusing target teardown"
+        );
         // A move's source stop was admitted by the move itself.
         self.recover_interrupted_close_managed(&id, executor, manager, true, None)
             .await?;
@@ -969,30 +1087,49 @@ impl Controller {
             "move cancelled before source interruption"
         );
         if !operation.queue_admission_started {
+            if operation.in_place {
+                ensure!(
+                    operation.source_target.is_some()
+                        && self.state.sessions[&id].target == operation.source_target,
+                    "retained Move target is missing or changed; refusing to recreate the environment"
+                );
+            }
             if self.state.sessions[&id].state == SessionState::Error
                 && let Some(previous) = operation.recovery_session.as_ref()
             {
                 // A prior failed teardown retains its exact partial checkout.
                 // Restore source identity only after that owner is stopped.
-                let failure = self.rollback_failed_resume(
-                    &id,
-                    previous,
-                    false,
-                    anyhow::anyhow!("clean up the partial Move destination before retry"),
-                    executor,
-                )?;
-                ensure!(
-                    self.state.sessions[&id].state == SessionState::Stopped,
-                    "{failure:#}"
-                );
+                let cause = anyhow::anyhow!("clean up the partial Move destination before retry");
+                if operation.in_place {
+                    self.retain_failed_in_place_move(&id, previous, cause)?;
+                    let record = self.state.sessions.get_mut(&id).unwrap();
+                    record.state = SessionState::Closing;
+                    crate::database::save_resumed_session(record, None)?;
+                } else if operation.workspace_transfer.is_some() {
+                    self.rollback_move_destination(operation, cause, executor)?;
+                    let record = self.state.sessions.get_mut(&id).unwrap();
+                    record.state = SessionState::Closing;
+                    crate::database::save_resumed_session(record, None)?;
+                } else {
+                    let failure =
+                        self.rollback_failed_resume(&id, previous, false, cause, executor)?;
+                    ensure!(
+                        self.state.sessions[&id].state == SessionState::Stopped,
+                        "{failure:#}"
+                    );
+                }
             }
             let state = self.state.sessions[&id].state;
-            if matches!(state, SessionState::Closing | SessionState::Destroying) {
-                self.recover_move_source_stop(operation, executor, manager)
-                    .await?;
+            if matches!(state, SessionState::Closing | SessionState::Destroying)
+                && !(operation.retains_source_environment() && operation.recovery_session.is_some())
+            {
+                Box::pin(self.recover_move_source_stop(operation, executor, manager)).await?;
                 operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
-            } else if matches!(state, SessionState::Running | SessionState::Disconnected)
-                && operation.destination_target.is_none()
+            }
+            if matches!(
+                self.state.sessions[&id].state,
+                SessionState::Running | SessionState::Disconnected
+            ) && operation.destination_target.is_none()
             {
                 executor.notify_notice("Stopping source");
                 let _timing = MovePhaseTimer::new(&id, "checkpoint and source stop");
@@ -1007,19 +1144,20 @@ impl Controller {
                 } else {
                     SourceTargetDisposition::Destroy
                 };
-                self.suspend_session_for_move(
+                Box::pin(self.suspend_session_for_move(
                     &id,
                     executor,
                     manager,
                     operation,
                     preparation,
                     disposition,
-                )
+                ))
                 .await?;
             }
             // An in-place move never reaches `Stopped` with a target: its
             // source stays `Closing` in the environment the destination reuses.
             if !operation.in_place
+                && operation.workspace_transfer.is_none()
                 && self.state.sessions[&id].state == SessionState::Stopped
                 && self.state.sessions[&id].target.is_some()
             {
@@ -1032,12 +1170,12 @@ impl Controller {
                 .clone()
                 .or_else(|| self.state.sessions[&id].checkpoint.clone());
             ensure!(
-                operation.checkpoint.is_some(),
+                operation.restore_artifact().is_some(),
                 "move has no verified checkpoint"
             );
             ensure!(
                 !executor.cancellation_requested(),
-                "move cancelled after source teardown; session is stopped"
+                "move cancelled after source sealing; checkpoint and remaining environment retained"
             );
             operation.phase = MovePhase::ResumingDestination;
             operation.recovery_session = Some(self.state.sessions[&id].clone());
@@ -1049,11 +1187,11 @@ impl Controller {
                 // The environment is kept, so there is nothing to provision and
                 // no allocation to clear: eligibility already required the
                 // allocation to be unchanged.
-                self.restore_session_in_place(
+                Box::pin(self.restore_session_in_place(
                     &id,
                     operation.selection.profile_id.as_deref().unwrap(),
                     executor,
-                )
+                ))
                 .await?;
             } else {
                 if operation.selection.clear_resource_allocation {
@@ -1063,18 +1201,26 @@ impl Controller {
                     session.container_memory = None;
                     crate::database::save_resumed_session(session, None)?;
                 }
-                self.resume_session_controlled(
-                    &id,
-                    operation.selection.profile_id.as_deref().unwrap(),
-                    operation.selection.target_template_id.as_deref().unwrap(),
-                    SessionResumeOptions {
-                        additional_mounts: operation.selection.additional_mounts.clone(),
-                        resource_allocation: operation.selection.resource_allocation.clone(),
-                        discard_queue: true,
-                    },
-                    executor,
-                )
-                .await?;
+                if operation.workspace_transfer.is_some() {
+                    self.capture_move_workspace(operation, executor)?;
+                    Box::pin(self.resume_session_for_move(operation, executor)).await?;
+                    operation.workspace_transfer = crate::database::load_move_operation(&id)?
+                        .context("Move intent disappeared during restore")?
+                        .workspace_transfer;
+                } else {
+                    Box::pin(self.resume_session_controlled(
+                        &id,
+                        operation.selection.profile_id.as_deref().unwrap(),
+                        operation.selection.target_template_id.as_deref().unwrap(),
+                        SessionResumeOptions {
+                            additional_mounts: operation.selection.additional_mounts.clone(),
+                            resource_allocation: operation.selection.resource_allocation.clone(),
+                            discard_queue: true,
+                        },
+                        executor,
+                    ))
+                    .await?;
+                }
             }
             let destination = &self.state.sessions[&id];
             operation.destination_target = destination.target.clone();
@@ -1086,6 +1232,7 @@ impl Controller {
             crate::database::save_move_operation(operation)?;
         }
         restore_move_queue_hold(operation);
+        self.finish_workspace_transfer(operation, executor)?;
         self.admit_move_queue(operation, executor).await
     }
 
@@ -1127,19 +1274,40 @@ impl Controller {
             );
             relay
         };
-        if operation.queue == ResumeQueueDisposition::Start && !operation.queue_admission_finished {
+        let mut admitted_receipts = Vec::new();
+        if operation.queue == ResumeQueueDisposition::Start {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
             let checkpoint = operation
-                .checkpoint
-                .as_ref()
+                .restore_artifact()
                 .context("move queue archive is missing")?;
             let verified = verify_archive_streaming(&checkpoint.archive_path)?;
             ensure!(
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
+            let source_receipts = verified
+                .canonical_session
+                .command_ledger
+                .as_ref()
+                .map(|value| {
+                    mj_core::relay::CheckpointCommandLedger::decode(
+                        value,
+                        verified.canonical_session.event_frontier,
+                    )
+                })
+                .transpose()?
+                .map(|ledger| ledger.retained_command_receipts)
+                .unwrap_or_default();
             for queued in verified.canonical_session.queued_prompts {
+                // Existing receipt owners survive the move. Release only the
+                // additional pins this admission acquires for legacy commands.
+                if !source_receipts.contains(&queued.command_id) {
+                    admitted_receipts.push(queued.command_id.clone());
+                }
+                if operation.queue_admission_finished {
+                    continue;
+                }
                 ensure!(
                     !executor.cancellation_requested(),
                     "move cancelled during queue admission; destination retained"
@@ -1156,12 +1324,19 @@ impl Controller {
                         RelayCommand::SetConfig { key, value }
                     }
                 };
-                relay.submit(queued.command_id, command).await?;
+                relay
+                    .submit_durable_accepted(queued.command_id, command)
+                    .await?;
             }
         }
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
+        // The durable completion boundary makes releasing receipts safe: a
+        // retry from here only releases them, never resubmits the queue.
+        for command_id in admitted_receipts {
+            relay.release_command_receipt(command_id).await?;
+        }
         let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
             "Queued work was discarded; ready and idle."
         } else {
@@ -1213,12 +1388,14 @@ impl Controller {
             operation.selection.target_template_id.as_deref().unwrap(),
             executor,
         )?;
-        if let super::ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = self
-            .preflight_resume_repository_sources(
-                id,
-                operation.selection.target_template_id.as_deref().unwrap(),
-                executor,
-            )?
+        if !operation.in_place
+            && operation.workspace_transfer.is_none()
+            && let super::ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = self
+                .preflight_resume_repository_sources(
+                    id,
+                    operation.selection.target_template_id.as_deref().unwrap(),
+                    executor,
+                )?
         {
             bail!(
                 "destination repository source is missing checkpoint commit {}; source retained",
@@ -1226,9 +1403,9 @@ impl Controller {
             );
         }
         if let Some(prepared) = preparation {
-            let checkpoint = self.state.sessions[id]
-                .checkpoint
-                .as_ref()
+            let checkpoint = operation
+                .restore_artifact()
+                .or(self.state.sessions[id].checkpoint.as_ref())
                 .context("no move checkpoint")?;
             let verified = verify_archive_streaming(&checkpoint.archive_path)?;
             let actual: Vec<_> = verified
@@ -1278,8 +1455,8 @@ fn validate_preserved_configuration(
 ///
 /// The environment is kept only when nothing about it changes: the same target
 /// template, the same attached mounts, and the same resource allocation. A
-/// retry starts from a torn-down or unknown source, and a sub-agent never owns
-/// its own target, so both take the full fresh-environment path.
+/// retry takes its retention decision from the durable Move intent instead;
+/// a sub-agent never owns its own target.
 pub(super) fn in_place_move_eligible(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
@@ -1293,10 +1470,7 @@ pub(super) fn in_place_move_eligible(
             source.state,
             SessionState::Running | SessionState::Disconnected
         )
-        && Some(&source.target_template_id) == selection.target_template_id.as_ref()
-        && Some(&source.additional_mounts) == selection.additional_mounts.as_ref()
-        && source.resource_allocation == selection.resource_allocation
-        && !selection.clear_resource_allocation
+        && move_environment_change(source, selection).is_none()
 }
 
 fn outcome(
@@ -1314,5 +1488,24 @@ fn outcome(
         outcome: status.into(),
         error,
         recovery,
+    }
+}
+
+/// One decision shared by no-op detection and environment retention.
+fn move_environment_change(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+) -> Option<&'static str> {
+    if Some(&source.target_template_id) != selection.target_template_id.as_ref() {
+        Some("target changed")
+    } else if Some(&source.additional_mounts) != selection.additional_mounts.as_ref() {
+        Some("attached mounts changed")
+    } else if source.resource_allocation != selection.resource_allocation
+        || (selection.clear_resource_allocation
+            && (source.container_cpus.is_some() || source.container_memory.is_some()))
+    {
+        Some("resource allocation changed")
+    } else {
+        None
     }
 }

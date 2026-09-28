@@ -373,7 +373,7 @@ impl WorkerLaunchConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
             .with_context(|| format!("read worker launch config {}", path.display()))?;
-        serde_json::from_slice(&body).with_context(|| {
+        let mut launch: Self = serde_json::from_slice(&body).with_context(|| {
             format!("parse worker launch config {} with worker build {}", path.display(), crate::worker_build::BUILD_ID)
         }).map_err(|error| {
             if error.root_cause().to_string().contains("unknown field") {
@@ -381,7 +381,15 @@ impl WorkerLaunchConfig {
             } else {
                 error
             }
-        })
+        })?;
+        // Daemons from 2.11 through 2.23 stamped their instance identity here.
+        // For the default instance that is a data-directory fingerprint, which
+        // every `mj` in the session then read as a named instance. Workers
+        // launched then keep that config across upgrades, so drop it on load.
+        launch
+            .target_environment
+            .remove(crate::config::INSTANCE_ENV);
+        Ok(launch)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {

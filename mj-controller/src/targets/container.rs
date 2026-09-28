@@ -108,7 +108,7 @@ pub(super) fn podman_container_run(
     ssh: Option<&SshTarget>,
     workspace_root: &str,
 ) -> Result<CommandSpec> {
-    let workspace = podman_workspace_locator(template, session_id)?;
+    let workspace = podman_workspace_locator_named(template, name)?;
     let run_args = container_run_args(
         "podman",
         template,

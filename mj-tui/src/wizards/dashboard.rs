@@ -61,9 +61,10 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
             let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
             declare_review_controls(&mut form, can_attach, submit_enabled);
         }
-        WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
-            wizard.declare_extra_step(dashboard, &mut form)
-        }
+        WizardStep::Bundle
+        | WizardStep::NewBundle
+        | WizardStep::ProjectDirectory
+        | WizardStep::MoveFiles => wizard.declare_extra_step(dashboard, &mut form),
     }
     form.end_frame(initial);
 }
@@ -506,8 +507,12 @@ impl DashboardState {
     fn activate_wizard_review<W: WizardDraft>(
         &mut self,
         id: WizardControl,
-        mut wizard: W,
+        wizard: W,
     ) -> DashboardAction {
+        let mut wizard = match wizard.activate_extra(self, id) {
+            Ok(action) => return action,
+            Err(wizard) => wizard,
+        };
         let can_attach = mount_history_host(
             &self.config.targets[&nth_key(&self.config.targets, wizard.target())],
         )

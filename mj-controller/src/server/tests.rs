@@ -3161,6 +3161,7 @@ async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
     request
         .reply
         .send(Ok(MovePreparation {
+            workspace: None,
             in_place: false,
             source_unavailable: false,
             conversion: None,
@@ -3659,6 +3660,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
+        workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: "session-1".into(),
         profile_id: Some("codex-1".into()),
@@ -3667,6 +3669,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        workspace: None,
         in_place: false,
         source_unavailable: false,
         conversion: None,
@@ -4948,4 +4951,29 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
                 .expect("idle stream must release its snapshot without another publication");
         }
     }
+}
+
+#[test]
+fn browser_move_selection_keeps_sizes_and_capacity_in_sync() {
+    let source = viewer_source("function moveFileKey", "function renderMoveFiles");
+    run_viewer_script(
+        "move-file-selection",
+        &format!(
+            r#"{source}
+const assessment = {{ required_bytes: 50, files: [
+  {{ location: {{repository:'repo',path:'.agents/build/large'}}, bytes:1_000_000_000 }},
+  {{ location: {{repository:'repo',path:'.agents/build/small'}}, bytes:1234 }},
+], storage: [{{location:'Source', available_bytes:100_000_000, copies:1}}] }};
+const draft = {{ preparation: {{workspace:assessment}}, workspaceSelection: {{exclusions:[]}} }};
+if (moveBytes(1_000_000_000) !== '1.00 GB') throw Error('wrong GB label');
+if (moveBytes(1234) !== '1.2 KB') throw Error('wrong file size label');
+if (moveSelectedBytes(draft, assessment) !== 1_000_001_284) throw Error('wrong selected size');
+if (moveStorageProblems(draft).length !== 1) throw Error('missing space warning');
+draft.workspaceSelection.exclusions = [{{repository:'repo',path:'.agents/build/large'}}];
+if (moveStorageProblems(draft).length) throw Error('excluding the large file did not clear the space warning');
+if (!moveFileIncluded(draft, assessment.files[1].location)) throw Error('excluding a sibling changed another selection');
+if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'other',path:'.agents/build/large'}})) throw Error('selection crossed repositories');
+"#
+        ),
+    );
 }

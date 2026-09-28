@@ -76,7 +76,7 @@ async fn live_muse_checkpoint_restore_relocates_native_context_and_preserves_que
             harness_home: restored_home.clone(),
             restore_repositories: true,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -301,7 +301,7 @@ fn checkpoint_restore_preserves_command_receipts_and_cancelled_admission() {
             harness_home: temp.path().join("destination-home"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts: false,
+            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -341,4 +341,118 @@ fn checkpoint_restore_preserves_command_receipts_and_cancelled_admission() {
     ));
     assert!(matches!(release.body, RelayResponseBody::Ok { .. }));
     assert!(source.operational_state().command_ledger_seal.is_none());
+}
+
+#[test]
+fn deferred_move_queue_dispatches_once_after_readiness_and_restart() {
+    use crate::relay::DurableRelay;
+    use crate::relay::test_support::{finish_prompt, prompt, relay_request};
+    use mj_checkpoint::checkpoint::QueueRestorePolicy;
+    use mj_core::relay::{
+        CheckpointCommandLedger, HandledRelayCommand, RelayCommandOutcome, RelayRequest,
+        RelayResponseBody, RelayResponsePayload,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let queued = prompt("next");
+    let finished = prompt("already completed");
+    let receipt = |command, terminal| HandledRelayCommand {
+        command,
+        accepted_ordinal: 1,
+        terminal_ordinal: terminal,
+        outcome: terminal.map(|_| RelayCommandOutcome::Cancelled),
+        failure: None,
+    };
+    spec.canonical_session.command_ledger = Some(
+        serde_json::to_value(CheckpointCommandLedger {
+            version: 1,
+            latest_prompt_accepted_ordinal: Some(1),
+            retained_command_receipts: ["queued-1".into(), "finished".into()].into(),
+            cancelled_command_admissions: ["cancelled".into()].into(),
+            handled_commands: [
+                ("queued-1".into(), receipt(queued.clone(), None)),
+                ("finished".into(), receipt(finished.clone(), Some(1))),
+            ]
+            .into(),
+        })
+        .unwrap(),
+    );
+    export_checkpoint(&spec).unwrap();
+    for policy in [QueueRestorePolicy::Defer, QueueRestorePolicy::Discard] {
+        let root = temp.path().join(format!("destination-{policy:?}"));
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: root.clone(),
+                harness_home: temp.path().join("destination-home"),
+                restore_repositories: false,
+                restore_native: false,
+                queue_policy: policy,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        let mut relay = DurableRelay::open(&root, SESSION, "test").unwrap();
+        assert!(
+            relay.claim_pending_commands(true).unwrap().is_empty(),
+            "nothing dispatches before Move admission"
+        );
+        let submit = RelayRequest::SubmitDurable {
+            command_id: "queued-1".into(),
+            command: queued.clone(),
+        };
+        let accepted = relay.handle(relay_request("admit", submit.clone())).body;
+        assert!(matches!(
+            &accepted,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::Accepted { .. }
+            }
+        ));
+        drop(relay);
+        let mut relay = DurableRelay::open(&root, SESSION, "test").unwrap();
+        assert_eq!(
+            relay
+                .handle(relay_request("lost-ack-retry", submit.clone()))
+                .body,
+            accepted
+        );
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        if policy == QueueRestorePolicy::Defer {
+            assert_eq!(
+                claimed.len(),
+                1,
+                "deferred durable receipt must not suppress execution"
+            );
+            finish_prompt(&mut relay, "queued-1");
+        } else {
+            assert!(
+                claimed.is_empty(),
+                "discarded commands must remain cancelled"
+            );
+        }
+        relay.handle(relay_request("duplicate", submit));
+        relay.handle(relay_request(
+            "completed-retry",
+            RelayRequest::SubmitDurable {
+                command_id: "finished".into(),
+                command: finished.clone(),
+            },
+        ));
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        assert!(matches!(
+            relay
+                .handle(relay_request(
+                    "cancelled-retry",
+                    RelayRequest::SubmitDurable {
+                        command_id: "cancelled".into(),
+                        command: queued.clone(),
+                    }
+                ))
+                .body,
+            RelayResponseBody::Error { .. }
+        ));
+    }
 }

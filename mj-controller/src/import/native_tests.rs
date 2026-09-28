@@ -219,7 +219,7 @@ fn native_checkpoint_restore_relocates_muse_without_changing_identity() {
             harness_home: restored_home.clone(),
             restore_repositories: false,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: mj_checkpoint::checkpoint::QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &mj_checkpoint::archive::SystemGit,

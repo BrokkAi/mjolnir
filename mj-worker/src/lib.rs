@@ -13,6 +13,7 @@ pub mod acp;
 pub mod terminal;
 
 pub mod checkpoint;
+pub mod move_workspace;
 
 mod mcp_stdio;
 pub mod memory_mcp;

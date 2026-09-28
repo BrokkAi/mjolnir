@@ -1918,7 +1918,7 @@ fn assert_canonical_restore_rejected_before_mutation(
             harness_home: harness_home.clone(),
             restore_repositories: true,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2283,7 +2283,25 @@ fn checkpoint_wire_requires_the_new_capture_mode_and_rejects_legacy_fields() {
         "restore_native": true,
         "discard_queued_prompts": false
     });
-    assert!(serde_json::from_value::<CheckpointRestoreSpec>(restore.clone()).is_ok());
+    let decoded = serde_json::from_value::<CheckpointRestoreSpec>(restore.clone()).unwrap();
+    assert_eq!(decoded.queue_policy, QueueRestorePolicy::Restore);
+    let mut legacy_discard = restore.clone();
+    legacy_discard["discard_queued_prompts"] = json!(true);
+    assert_eq!(
+        serde_json::from_value::<CheckpointRestoreSpec>(legacy_discard)
+            .unwrap()
+            .queue_policy,
+        QueueRestorePolicy::Discard
+    );
+    let deferred = CheckpointRestoreSpec {
+        queue_policy: QueueRestorePolicy::Defer,
+        ..decoded
+    };
+    assert_eq!(
+        serde_json::from_value::<CheckpointRestoreSpec>(serde_json::to_value(&deferred).unwrap())
+            .unwrap(),
+        deferred
+    );
     let mut missing_flag = restore.clone();
     missing_flag
         .as_object_mut()
@@ -2364,7 +2382,11 @@ fn restore_into(temp: &Path, spec: &CheckpointExportSpec, discard_queued_prompts
             harness_home: temp.join("restored-harness"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts,
+            queue_policy: if discard_queued_prompts {
+                QueueRestorePolicy::Discard
+            } else {
+                QueueRestorePolicy::Restore
+            },
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2400,7 +2422,7 @@ fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_
                 harness_home: temp.path().join(format!("seeded-harness-{restore_native}")),
                 restore_repositories: false,
                 restore_native,
-                discard_queued_prompts: false,
+                queue_policy: QueueRestorePolicy::Restore,
                 primary_repository_root: None,
             },
             &SystemGit,
@@ -2457,7 +2479,7 @@ fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() 
                     harness_home: temp.path().join(format!("harness-{name}")),
                     restore_repositories: false,
                     restore_native,
-                    discard_queued_prompts: false,
+                    queue_policy: QueueRestorePolicy::Restore,
                     primary_repository_root: None,
                 },
                 &SystemGit,
@@ -2543,7 +2565,7 @@ fn image_checkpoint_fixture(
             harness_home: temp.join("restored-image-harness"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2677,7 +2699,7 @@ fn restore_refuses_a_relay_root_that_already_holds_relay_state() {
             harness_home: temp.path().join("restored-harness"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2717,7 +2739,7 @@ fn restore_refuses_to_seed_the_relay_through_a_dangling_symlink() {
             harness_home: temp.path().join("restored-harness"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2751,7 +2773,7 @@ fn restore_refuses_a_native_artifact_under_a_symlinked_directory() {
             harness_home,
             restore_repositories: false,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2805,7 +2827,7 @@ fn restore_writes_native_artifacts_privately_under_the_harness_home() {
             harness_home: harness_home.clone(),
             restore_repositories: false,
             restore_native: true,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,
@@ -2848,7 +2870,7 @@ fn incompatible_schema_is_rejected_before_restore_mutates_target() {
                 harness_home: temp.path().join("restored-harness"),
                 restore_repositories: true,
                 restore_native: true,
-                discard_queued_prompts: false,
+                queue_policy: QueueRestorePolicy::Restore,
                 primary_repository_root: None,
             },
             &SystemGit,
@@ -2985,7 +3007,7 @@ fn checkpoint_carries_subagent_reports_and_restores_them_beside_the_repositories
             harness_home: temp.path().join("restored-report-harness"),
             restore_repositories: false,
             restore_native: false,
-            discard_queued_prompts: false,
+            queue_policy: QueueRestorePolicy::Restore,
             primary_repository_root: None,
         },
         &SystemGit,

@@ -482,11 +482,14 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
         {
             let pid = std::fs::read_to_string(worker_root.join(mj_core::relay::WORKER_PID_FILE))?;
             let environment = std::fs::read(format!("/proc/{}/environ", pid.trim()))?;
+            // Neither the fingerprint an older daemon saved in launch.json nor
+            // the launcher's own selection may reach the worker: every `mj` a
+            // harness runs would read it as a named instance.
             ensure!(
-                environment
+                !environment
                     .split(|byte| *byte == 0)
-                    .any(|entry| entry == b"MJ_INSTANCE=qa-empty-recovery-1063"),
-                "worker environment did not contain its configured instance"
+                    .any(|entry| entry.starts_with(b"MJ_INSTANCE=")),
+                "worker environment selects a Mjolnir instance"
             );
         }
         Ok(())

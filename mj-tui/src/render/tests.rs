@@ -3809,6 +3809,34 @@ fn without_a_resume_destination_the_row_falls_back_to_the_session_record() {
 }
 
 #[test]
+fn move_panel_elapsed_counts_the_operation_across_stage_changes() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    dashboard.begin_session_operation_at(
+        "session-1".into(),
+        SessionOperationKind::Moving,
+        None,
+        now - 125,
+    );
+    dashboard
+        .session_operations
+        .get_mut("session-1")
+        .unwrap()
+        .active_stages
+        .insert(ProvisionStage::Restoring, now);
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("Current stage: Restore"), "{text}");
+    assert!(text.contains("Elapsed: 2m"), "{text}");
+}
+
+#[test]
 fn stage_clock_counts_from_when_the_stage_began_not_the_operation() {
     let session = stopped_session();
     let mut operation = operation(

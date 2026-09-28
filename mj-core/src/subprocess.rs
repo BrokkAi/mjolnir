@@ -436,6 +436,18 @@ pub fn run_inherited(command: &mut Command) -> Result<ExitStatus> {
         .context("run child process")
 }
 
+/// Run a noninteractive child with stdout sent directly to a file. No payload
+/// pipe or in-memory output buffer is created. Call from supervised blocking
+/// work, whose process group owns cancellation of the child.
+pub fn run_to_file(command: &mut Command, output: std::fs::File) -> Result<ExitStatus> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::inherit())
+        .status()
+        .context("run child process with file output")
+}
+
 /// Transfer the terminal to a foreground child, including its input. Used
 /// for process replacement on platforms without exec; the caller must have
 /// released its own terminal event reader before waiting here.
