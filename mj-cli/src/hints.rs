@@ -101,24 +101,25 @@ pub(crate) fn multiplexer_name() -> Option<&'static str> {
     None
 }
 
-/// One hint waiting for the notice bar, or holding it.
+/// One hint waiting for the notice bar, or holding it. A notice about this
+/// launch alone has no hint to record.
 #[derive(Debug)]
 struct QueuedHint {
-    hint: Hint,
+    hint: Option<Hint>,
     text: String,
 }
 
 /// The hint on screen now: when it went up, and whether the file records it.
 #[derive(Debug)]
 struct ShownHint {
-    hint: Hint,
+    hint: Option<Hint>,
     text: String,
     since: Instant,
     recorded: bool,
 }
 
-/// The first-launch hints, shown one after another as the notice bar comes
-/// free.
+/// The first-launch hints and this launch's own news, shown one after
+/// another as the notice bar comes free.
 ///
 /// A hint is recorded as shown only once it has been in the bar, because a
 /// launch that restores a conversation gives the bar to its own reports first
@@ -147,7 +148,17 @@ impl PendingHints {
             return;
         }
         self.queue.push_back(QueuedHint {
-            hint,
+            hint: Some(hint),
+            text: text.into(),
+        });
+    }
+
+    /// Queues news about this launch, such as the agents it just added, to
+    /// take its turn in the bar like a hint. It is never recorded: the next
+    /// launch has news of its own.
+    pub(crate) fn queue_launch_notice(&mut self, text: impl Into<String>) {
+        self.queue.push_back(QueuedHint {
+            hint: None,
             text: text.into(),
         });
     }
@@ -161,7 +172,9 @@ impl PendingHints {
         if let Some(showing) = self.showing.as_mut() {
             // It was set before the previous frame, so it has been drawn.
             if !showing.recorded {
-                self.seen.mark_shown(showing.hint);
+                if let Some(hint) = showing.hint {
+                    self.seen.mark_shown(hint);
+                }
                 showing.recorded = true;
             }
             bar_holds_a_hint = notices.current().as_deref() == Some(showing.text.as_str());
@@ -292,6 +305,34 @@ mod tests {
         let reloaded = SeenHints::load_from(path);
         assert!(!reloaded.pending(Hint::PrefixCollision));
         assert!(!reloaded.pending(Hint::PrefixKeys));
+    }
+
+    /// The agents a launch added are news for that launch alone: they take
+    /// their turn ahead of the hints, and nothing about them is recorded.
+    #[test]
+    fn a_launch_notice_takes_its_turn_and_is_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client-hints.json");
+        let mut hints = PendingHints::new(SeenHints::load_from(path.clone()));
+        hints.queue_launch_notice("added");
+        hints.queue(Hint::PrefixKeys, "keys");
+        let notices = Notices::default();
+        let now = Instant::now();
+
+        assert!(hints.pump(&notices, true, now));
+        assert_eq!(notices.current().as_deref(), Some("added"));
+        assert!(!hints.pump(&notices, true, now));
+        assert!(!path.exists(), "a launch notice writes nothing");
+
+        let later = now + NOTICE_MINIMUM_DISPLAY;
+        assert!(hints.pump(&notices, true, later));
+        assert_eq!(notices.current().as_deref(), Some("keys"));
+        assert!(!hints.pump(&notices, true, later));
+        let seen = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            seen.contains("prefix_keys") && !seen.contains("added"),
+            "{seen}"
+        );
     }
 
     /// A hint already shown on an earlier launch is never queued again.

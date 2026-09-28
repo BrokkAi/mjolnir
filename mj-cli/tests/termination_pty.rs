@@ -15,6 +15,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Hide this machine's coding agents from a fixture dashboard. Every start
+/// of `mj` adds a profile for each agent it finds in the user's home, in the
+/// harness home variables, or on PATH, so a fixture that inherited them would
+/// offer the host's agents beside its own configuration.
+fn isolate_from_host_agents(command: &mut Command, root: &std::path::Path) {
+    let home = root.join("home");
+    fs::create_dir_all(&home).expect("create fixture home");
+    command.env("HOME", home);
+    for kind in mj_core::config::HarnessKind::ALL {
+        command.env_remove(kind.home_env());
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let without_agents = std::env::split_paths(&path).filter(|directory| {
+        mj_core::config::HarnessKind::ALL
+            .iter()
+            .all(|kind| !directory.join(kind.cli_binary_name()).exists())
+    });
+    command.env(
+        "PATH",
+        std::env::join_paths(without_agents).expect("rebuild fixture PATH"),
+    );
+}
+
 /// Empty-session text that appears after the combined dashboard is ready.
 const READY_MARKER: &[u8] = b"No live session";
 // Fixture setup includes daemon initialization; interaction and exit remain bounded separately.
@@ -724,6 +747,7 @@ image = "ubuntu:24.04"
         .stderr(Stdio::from(duplicate(slave.as_raw_fd())))
         .env("MJ_CONFIG_DIR", config_root.join("hel"))
         .env("MJ_DATA_DIR", storage.path().join("data/hel"));
+    isolate_from_host_agents(&mut command, storage.path());
     if exit_when_idle {
         command.env("MJ_DAEMON_EXIT_WHEN_IDLE", "1");
     } else {

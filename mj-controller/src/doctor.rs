@@ -9,7 +9,8 @@ use serde::Serialize;
 
 use crate::controller::{WorkerBinaryAvailability, worker_binary_prerequisite_for_arch};
 use crate::setup::{
-    DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
+    DiscoveredHome, discover_harness_homes_with_executor, harness_home_overrides,
+    harness_is_authenticated_with_executor,
 };
 use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
@@ -287,21 +288,17 @@ fn harness_discovery_check(
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let home = dirs::home_dir();
-    let overrides = HarnessKind::ALL.into_iter().filter_map(|kind| {
-        std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
-    });
-    let discovered = discover_harness_homes_with_executor(home.as_deref(), overrides, executor);
+    let discovered =
+        discover_harness_homes_with_executor(home.as_deref(), harness_home_overrides(), executor);
     harness_discovery_check_from(
         &discovered,
         config.is_ok_and(|config| !config.profiles.is_empty()),
-        &settings_key(config.ok()),
     )
 }
 
 fn harness_discovery_check_from(
     discovered: &[DiscoveredHome],
     has_configured_profiles: bool,
-    settings_key: &str,
 ) -> DoctorCheck {
     if discovered.is_empty() {
         return if has_configured_profiles {
@@ -318,9 +315,7 @@ fn harness_discovery_check_from(
                     "No {} home was found in the default or environment-overridden locations.",
                     HarnessKind::every_display_name_or()
                 ),
-                format!(
-                    "Install and sign in to a supported harness, then open Mjolnir, press {settings_key} for Settings, and choose Agent Profiles."
-                ),
+                "Install and sign in to a supported harness, then run `mj`; it adds a profile for each agent it finds.",
             )
         };
     }
@@ -407,11 +402,11 @@ prerequisites.\n\n\
         InstructionsPlatform::Macos => format!(
             "# Mjolnir setup instructions for macOS\n\n\
 Run these commands as the user who will run `mj`:\n\n\
-1. Install and sign in to a supported coding agent, then run `mj setup`.\n\
-   Setup discovers agent homes and local runtimes, offers AWS when the AWS CLI\n\
-   has credentials, and offers SSH hosts from `~/.ssh/config`. Review its\n\
-   proposed configuration and confirm writing `config.toml`. It runs smoke\n\
-   tests for newly added container targets and ends with a doctor report.\n\
+1. Install and sign in to a supported coding agent. Every start of `mj` adds a\n\
+   profile for each agent installed on this machine, and the local runtimes\n\
+   need no configuration. `mj setup` is optional: it also offers AWS when the\n\
+   AWS CLI has credentials and SSH hosts from `~/.ssh/config`, runs smoke tests\n\
+   for container targets it adds, and ends with a doctor report.\n\
 2. Run `mj doctor --json` and follow every `fixable` remediation. Repeat until\n\
    no check is `fixable`. Review warnings for any target you intend to use;\n\
    `unsupported` runtimes are unavailable, not ready.\n\
@@ -419,9 +414,9 @@ Run these commands as the user who will run `mj`:\n\n\
    `mj doctor --json --smoke`. Do this for Docker Desktop as well as Apple\n\
    container. Resolve failures for the target you intend to use.\n\
 4. Run `mj`, then press n in the Sessions pane to start your first session.\n\
-   If no profile was discovered, open Settings (Ctrl-B then s by default)\n\
-   to add one first.\n\n\
-You can also configure profiles and targets in Settings instead of `mj setup`.\n\
+   If it found no agent, it says so; install and sign in to one and run `mj`\n\
+   again.\n\n\
+Settings (Ctrl-B then s by default) edits profiles and targets by hand.\n\
 For a named instance, use the same `--instance <name>` on every command above.\n\n\
 For a coding-agent handoff, provide this entire instructions page together with\n\
 the latest `mj doctor --json` output.\n\n\
@@ -499,7 +494,7 @@ impl ConfigGap {
                 "Update Mjolnir to the build that wrote config.toml or newer, then rerun `mj doctor`."
             }
             ConfigGap::Missing => {
-                "Run `mj` and add an agent profile, or run `mj setup`; either one writes config.toml. Then rerun `mj doctor`."
+                "Install and sign in to a coding agent, then run `mj`; it adds a profile for each agent on this machine and writes config.toml. Then rerun `mj doctor`."
             }
             ConfigGap::Unreadable => "Fix config.toml, then rerun `mj doctor`.",
         }
@@ -629,10 +624,7 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
             "harness.profiles",
             "Harness profiles",
             "No harness profiles are configured.",
-            format!(
-                "Open Mjolnir, press {} for Settings, and choose Agent Profiles to detect accounts or add a profile.",
-                settings_key(Some(config))
-            ),
+            "Install and sign in to a coding agent, then run `mj`; it adds a profile for each agent on this machine.",
         )];
     }
     config

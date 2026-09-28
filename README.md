@@ -91,11 +91,12 @@ mj
 
 This opens the dashboard of workspaces, sessions, targets, and quota. Press
 `ctrl+b c` to create a session: pick an agent profile and where the session
-runs. If no agent profile is set up yet, the dashboard says what it found on
-this machine and how to add one.
+runs. `mj` adds a profile for every coding agent installed on this machine
+each time it starts, so there is nothing to set up first; if it finds none, the
+dashboard says how to install one.
 
-- `mj setup` is optional. Run it before `mj` to find installed agents and
-  container runtimes from the shell.
+- `mj setup` is optional. Run it to add a project, an SSH host, or an EC2
+  target from the shell.
 - `mj go` is a shortcut for later. Each folder remembers its setup, and
   running `mj go` again returns you to that folder's last conversation.
 - `mj doctor` checks prerequisites and tells you how to fix anything missing.

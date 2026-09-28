@@ -11,8 +11,11 @@ Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
 palette (**prefix+:**) also provides **Manage agent profiles**, **Manage
 machines**, and **Manage runtimes**. No setup command or file editing is
-required. **Detect profiles** on the **Agent Profiles** page can import existing
-agent accounts for review.
+required: each start of `mj` adds a profile for every coding agent installed on
+this machine that no profile covers yet, and **Detect profiles** on the **Agent
+Profiles** page finds agents installed while Mjolnir is open. A profile covers
+its agent whether or not it is enabled, so turn a profile off to keep its agent
+out; a profile you remove comes back on the next start.
 
 Standard local targets are supplied automatically: localhost, Podman, Docker,
 and Apple container on macOS. Saved entries override their defaults. The new,
@@ -955,8 +958,8 @@ and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 
-Harness-home variables influence `mj setup` discovery when no profile is yet
-written:
+Harness-home variables decide where agent discovery (each start of `mj`,
+**Detect profiles**, and `mj setup`) looks for each agent's home:
 
 | Harness | Discovery variable | Conventional home |
 | --- | --- | --- |

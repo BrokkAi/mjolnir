@@ -496,25 +496,54 @@ fn launch_repository_top_level() -> Option<std::path::PathBuf> {
     (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
 }
 
-/// Write the first-run configuration for an interactive dashboard, before
-/// the daemon starts.
+/// Add a profile for each coding agent installed on this machine that no
+/// profile covers yet, before the daemon starts, and answer what was added
+/// for the dashboard to report.
 ///
 /// The daemon reads the configuration when it starts. Written after that,
 /// the daemon's first snapshot carried the older configuration without the
 /// new profile; the dashboard took it, dropped the profile's quota refresh,
 /// then reloaded the file and got the profile back with no refresh on the
 /// way, so its row read "refreshing…" for good (launch finding R13-8).
-pub(crate) async fn initialize_first_run_config() -> Result<()> {
+///
+/// A failure does not stop the launch: the dashboard opens and says why the
+/// agents were not added.
+pub(crate) async fn add_installed_agent_profiles() -> Result<AddedAgentProfiles> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
     {
-        return Ok(());
+        return Ok(AddedAgentProfiles::new());
     }
     tokio::task::spawn_blocking(|| {
-        mj_controller::setup::initialize_local_startup_config(&config_path())
+        mj_controller::setup::add_installed_agent_profiles(&config_path())
     })
     .await
-    .context("initialize startup configuration task failed")?
+    .context("add installed coding agents task failed")?
+}
+
+/// The agent profiles a launch added, by id.
+pub(crate) type AddedAgentProfiles = BTreeMap<String, mj_core::config::HarnessProfile>;
+
+/// What the notice bar says about the agent profiles this launch added.
+fn added_agents_notice(added: &AddedAgentProfiles) -> Option<String> {
+    if added.is_empty() {
+        return None;
+    }
+    let agents = added
+        .iter()
+        .map(|(id, profile)| {
+            let name = profile.kind.display_name();
+            if id == profile.kind.id() {
+                name.to_owned()
+            } else {
+                format!("{name} ({id})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Added the coding agents found on this machine: {agents}."
+    ))
 }
 
 pub(crate) async fn run_dashboard_for_workspace(
@@ -524,6 +553,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     go: Option<(mj_tui::GoMode, bool)>,
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
     resume: Option<UpgradeResume>,
+    added_agents: Result<AddedAgentProfiles>,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -575,6 +605,22 @@ pub(crate) async fn run_dashboard_for_workspace(
     // a restored conversation and reporting on that; a hint written over those
     // reports would be recorded as shown without ever being drawn.
     let mut hints = crate::hints::PendingHints::new(crate::hints::SeenHints::load());
+    match added_agents {
+        Ok(added) => {
+            if let Some(notice) = added_agents_notice(&added) {
+                hints.queue_launch_notice(notice);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not add installed coding agents"
+            );
+            context.dashboard.set_failure_notice(format!(
+                "Could not add the coding agents found on this machine: {error:#}"
+            ));
+        }
+    }
     let prefix = context.dashboard.keybinds().prefix_label();
     if let Some(multiplexer) = crate::hints::multiplexer_name()
         && prefix == mj_core::config::DEFAULT_PREFIX

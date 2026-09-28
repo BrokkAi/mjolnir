@@ -31,9 +31,12 @@ target including a bare runtime on this machine, runs from a staged copy of the
 home that belongs to the session, and the harness's home variable points at
 that copy. See [What a session's staged home holds](#what-a-sessions-staged-home-holds).
 
-`mj setup` checks the home variable first and otherwise looks in the
-conventional location. A detected home becomes the explicit `home` path in
-`config.toml`; subsequent sessions use that configured path.
+Each start of `mj`, **Detect profiles**, and `mj setup` check the home
+variable first and otherwise look in the conventional location. An agent whose
+command is on `PATH` but that has no home yet gets the home its first sign-in
+creates. A detected home becomes the explicit `home` path in `config.toml`;
+subsequent sessions use that configured path. `mj` adds a profile only for a
+home that no profile names yet, so a profile you turn off stays off.
 
 Kimi Code and Muse Code do not expose a guardian approval mode. Mjolnir warns
 before using either on a raw target. Muse always runs unconstrained, regardless

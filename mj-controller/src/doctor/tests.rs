@@ -237,8 +237,8 @@ fn checks_waiting_for_a_config_say_how_to_get_one_without_json() {
         assert_eq!(check.status, CheckStatus::Fixable, "{id}");
         let remediation = check.remediation.unwrap_or_default();
         assert!(
-            remediation.contains("Run `mj`")
-                && remediation.contains("`mj setup`")
+            remediation.contains("run `mj`")
+                && !remediation.contains("`mj setup`")
                 && remediation.contains("rerun `mj doctor`"),
             "{id}: {remediation}"
         );
@@ -1679,7 +1679,6 @@ fn harness_discovery_reports_each_authentication_state() {
             },
         ],
         true,
-        "ctrl+b s",
     );
 
     assert_eq!(check.status, CheckStatus::Ready);
@@ -1748,13 +1747,13 @@ fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
 
 #[test]
 fn missing_harness_homes_are_fixable_without_a_configured_profile() {
-    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
+    let check = harness_discovery_check_from(&[], false);
 
     assert_eq!(check.status, CheckStatus::Fixable);
     assert_eq!(
         check.remediation.as_deref(),
         Some(
-            "Install and sign in to a supported harness, then open Mjolnir, press ctrl+b s for Settings, and choose Agent Profiles."
+            "Install and sign in to a supported harness, then run `mj`; it adds a profile for each agent it finds."
         )
     );
 }
@@ -1764,7 +1763,7 @@ fn missing_harness_homes_are_fixable_without_a_configured_profile() {
 /// for (launch finding R13-12).
 #[test]
 fn missing_harness_homes_name_every_supported_agent() {
-    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
+    let check = harness_discovery_check_from(&[], false);
 
     assert_eq!(
         check.detail,

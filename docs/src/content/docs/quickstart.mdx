@@ -25,22 +25,28 @@ Two words come up on every screen:
   a local container, an SSH host, or an EC2 instance.
 
 When no workspace exists, Mjolnir creates one named after the current
-directory. It does not start a session. On Linux and macOS, when there is no
-configuration yet and Codex is on this machine (`~/.codex` exists or the
-`codex` command is installed), `mj` also adds a `codex` profile that uses
-`~/.codex`, and a `localhost` target. When no agent profile is set up, the
-dashboard opens on a **Get started** panel instead of the session list; see
+directory. It does not start a session. Each time it starts, `mj` also adds a
+profile for every coding agent installed on this machine that no profile
+covers yet, and says which ones it added. An agent counts as installed when
+its home directory exists (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
+`~/.config/muse`, or the directory its home variable names) or its command is
+on `PATH`. Local targets need no setup either: `localhost`, Podman, Docker, and
+Apple container on macOS are always offered. To keep an agent out, turn its
+profile off in Settings; a profile you remove comes back on the next start.
+When no agent profile is set up, the dashboard opens on a **Get started**
+panel instead of the session list; see
 [If no coding agent is installed](#if-no-coding-agent-is-installed).
 
 Press **Create**, `N`, or `prefix+c` to open the full creation wizard. Choose the
 profile, target, project, resources, and attached directories before launch.
 Launch progress and failures appear on the dashboard. When the new session is
-ready, type a prompt and press `Enter`. Use **prefix+s Settings** to discover agent
-accounts, add SSH or EC2 connections, and change runtime options.
+ready, type a prompt and press `Enter`. Use **prefix+s Settings** to edit agent
+profiles, add SSH or EC2 connections, and change runtime options.
 
-`mj setup` is optional. Run it before `mj` if you prefer to set up from the
-shell. It looks for signed-in agents and local container runtimes, and lists
-what it will add to `config.toml`. Then it asks
+`mj setup` is optional; nothing above needs it. From the shell it can also
+add the current repository as a project, an EC2 target when the AWS CLI has
+credentials, or an SSH host from `~/.ssh/config`, and it smoke-tests local
+container runtimes. It lists what it will add to `config.toml`. Then it asks
 `Write this configuration? [y/N]`. Type `y` and press `Enter` to write the
 file. Pressing `Enter` alone answers no and writes nothing. After writing,
 setup runs `mj doctor` and ends by saying what to do next. You can skip setup
@@ -54,12 +60,9 @@ the folder.
 ### If no coding agent is installed
 
 Mjolnir runs an agent you already use; it does not include one. Without one,
-`mj setup` prints `No existing Codex, Claude Code, Kimi Code, Grok Build, or
-Muse Code homes found.` and ends by telling you to install an agent. The
-dashboard shows the **Get started** panel, which says `No coding agent was
-found on this machine.` This panel appears whenever no agent profile is set
-up: after `mj setup` found no agent, or on the first `mj` when Codex is not
-installed. To fix this:
+the dashboard shows the **Get started** panel, which says `No coding agent was
+found on this machine.` (`mj setup` says the same: `No existing Codex, Claude
+Code, Kimi Code, Grok Build, or Muse Code homes found.`) To fix this:
 
 1. Install one supported agent and sign in with it once, using that agent's
    own instructions. For example, Claude Code: `npm install -g
@@ -67,8 +70,9 @@ installed. To fix this:
    @openai/codex`, then run `codex login`. Signing in creates the agent's home
    directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`, or
    `~/.config/muse`).
-2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
-   profiles**, or run `mj setup` again.
+2. Run `mj` again; it adds the agent's profile. If the dashboard is still
+   open, open Settings (`prefix+s`), choose **Agent Profiles**, and choose
+   **Detect profiles** instead.
 
 Codex and Claude Code sessions on this machine also need Node.js 22 or newer
 and npm on `PATH`; Mjolnir installs its own pinned copy of the agent with them.
