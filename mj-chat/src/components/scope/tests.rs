@@ -254,6 +254,79 @@ fn focus_repairs_after_removal_and_disabling_every_control() {
 }
 
 #[test]
+fn arrows_leave_list_boundaries_and_return_from_actions() {
+    let mut form = list_form();
+    form.declare(2, ControlKind::Button);
+    form.declare_with_enabled(3, ControlKind::Button, false);
+    form.declare(4, ControlKind::Button);
+    form.end_frame(1);
+    for selected in [1, 2] {
+        assert_eq!(
+            form.handle(&key(KeyCode::Down)).action,
+            Some(Interaction::Select(1, selected))
+        );
+        assert_eq!(form.focused(), Some(1));
+    }
+    for expected in [2, 4, 1] {
+        form.handle(&key(KeyCode::Down));
+        assert_eq!(form.focused(), Some(expected));
+    }
+    form.handle(&key(KeyCode::Home));
+    for expected in [4, 2, 1] {
+        form.handle(&key(KeyCode::Up));
+        assert_eq!(form.focused(), Some(expected));
+    }
+    form.handle(&key(KeyCode::Down));
+    assert_eq!(form.selected(1), Some(1));
+}
+
+#[test]
+fn arrows_leave_a_list_with_no_selectable_rows() {
+    let mut form = Form::new();
+    form.declare(
+        1,
+        ControlKind::ChoiceList {
+            len: 0,
+            selected: 0,
+        },
+    );
+    form.declare(2, ControlKind::Button);
+    form.end_frame(1);
+    form.handle(&key(KeyCode::Down));
+    assert_eq!(form.focused(), Some(2));
+    assert_eq!(
+        form.handle(&key(KeyCode::Enter)).action,
+        Some(Interaction::Activate(2))
+    );
+    form.handle(&key(KeyCode::Up));
+    assert_eq!(form.focused(), Some(1));
+}
+
+#[test]
+fn arrow_boundaries_skip_list_headers_and_disabled_rows() {
+    let mut form = Form::new();
+    form.register_with_rows(
+        1,
+        ControlKind::ChoiceList {
+            len: 3,
+            selected: 1,
+        },
+        Rect::new(0, 0, 10, 5),
+        true,
+        vec![None, Some(0), Some(1), Some(2), None],
+        vec![false, false, true, false, false],
+    );
+    form.declare(2, ControlKind::Button);
+    form.end_frame(1);
+    for direction in [KeyCode::Down, KeyCode::Up] {
+        form.focus(1);
+        form.handle(&key(direction));
+        assert_eq!(form.focused(), Some(2));
+        assert_eq!(form.selected(1), Some(1));
+    }
+}
+
+#[test]
 fn pointer_release_outside_or_after_disappearance_never_activates() {
     let mut form = form();
     let down = mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);

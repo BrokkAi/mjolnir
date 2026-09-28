@@ -2016,6 +2016,70 @@ fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     );
 }
 
+#[test]
+fn build_cache_buttons_are_keyboard_reachable_across_redraws() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    drawn(&mut dashboard, 140, 30);
+    for expected in [SetupControl::Back, SetupControl::Save, SetupControl::List] {
+        dashboard.handle_key(key(KeyCode::Tab));
+        drawn(&mut dashboard, 140, 30);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.form.borrow().focused(), Some(expected));
+    }
+    dashboard.handle_key(key(KeyCode::BackTab));
+    drawn(&mut dashboard, 140, 30);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.form.borrow().focused(), Some(SetupControl::Save));
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::SaveSetup { .. }
+    ));
+}
+
+#[test]
+fn build_cache_arrows_reach_back_and_save_after_the_last_field() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    drawn(&mut dashboard, 140, 30);
+    dashboard.handle_key(key(KeyCode::End));
+    for expected in [SetupControl::Back, SetupControl::Save] {
+        dashboard.handle_key(key(KeyCode::Down));
+        drawn(&mut dashboard, 140, 30);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.form.borrow().focused(), Some(expected));
+    }
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.path, ["machines", "local"]);
+}
+
+#[test]
+fn settings_project_create_is_reachable_with_tab_and_arrows() {
+    for navigation in [KeyCode::Tab, KeyCode::Down] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        choose(&mut dashboard, "bundles");
+        drawn(&mut dashboard, 100, 24);
+        dashboard.handle_key(key(KeyCode::End));
+        drawn(&mut dashboard, 100, 24);
+        dashboard.handle_key(key(navigation));
+        drawn(&mut dashboard, 100, 24);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.form.borrow().focused(), Some(SetupControl::Add));
+        dashboard.handle_key(key(KeyCode::Enter));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(dialog.editor.as_ref().is_some_and(|editor| editor.adding));
+    }
+}
+
 /// A refused value is reported with the field it was typed into, not on the
 /// dialog's bottom rows a page below it.
 #[test]
