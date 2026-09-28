@@ -134,6 +134,9 @@ pub struct RepositoryManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalSessionSnapshot {
+    /// Versioned retained command receipts and cancelled admission tombstones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_ledger: Option<serde_json::Value>,
     /// Versioned worker assessment state, validated by assessment::Checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_state: Option<serde_json::Value>,
@@ -166,7 +169,8 @@ impl CanonicalSessionSnapshot {
     /// bookkeeping advances them without changing what the session contains.
     /// `last_activity_at_ms` is a watermark of the same kind.
     pub fn content_matches(&self, other: &Self) -> bool {
-        self.assessment_state == other.assessment_state
+        self.command_ledger == other.command_ledger
+            && self.assessment_state == other.assessment_state
             && self.transcript == other.transcript
             && self.queued_prompts == other.queued_prompts
             && self.session.without_activity_watermark()
@@ -377,6 +381,9 @@ pub struct NativeArtifact {
 }
 
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {
+    if let Some(value) = &snapshot.command_ledger {
+        crate::relay::CheckpointCommandLedger::decode(value, snapshot.event_frontier)?;
+    }
     if let Some(value) = &snapshot.assessment_state {
         crate::assessment::Checkpoint::decode(value)?;
     }

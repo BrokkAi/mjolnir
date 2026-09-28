@@ -18,8 +18,21 @@ impl RuntimeState {
         request: crate::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
         let _upgrade_work = crate::upgrade::activity("subagent admission")?;
-        let relation = blocking(move || {
+        let (relation, needs_provisioning) = blocking(move || {
             let mut controller = Controller::load()?;
+            if let Some(existing) = crate::database::lookup_subagent_request(
+                &request.parent_session_id,
+                &request.request_key,
+            )? {
+                let needs_provisioning = controller
+                    .state
+                    .sessions
+                    .get(&existing.child_session_id)
+                    .is_some_and(|record| {
+                        record.state == mj_core::state::SessionState::Provisioning
+                    });
+                return Ok((existing, needs_provisioning));
+            }
             let mut request = request;
             // The parent's report root is made before the child exists, so the
             // child's first prompt can name its own directory under it. A
@@ -30,9 +43,14 @@ impl RuntimeState {
                     .prepare_subagent_report_root(&request.parent_session_id, &executor)
                     .context("create the sub-agent report directory")?,
             );
-            controller.register_subagent(request)
+            controller
+                .register_subagent(request)
+                .map(|relation| (relation, true))
         })
         .await?;
+        if !needs_provisioning {
+            return Ok(relation);
+        }
         let session_id = relation.child_session_id.clone();
         self.start_or_join_lifecycle_controlled(
             session_id.clone(),
@@ -44,6 +62,17 @@ impl RuntimeState {
                 let mut controller = tokio::task::spawn_blocking(Controller::load)
                     .await
                     .context("load controller for sub-agent startup")??;
+                // The lifecycle owner now excludes competing resume/close work.
+                // Recovery may already have settled this registration before
+                // admission; replay never reinstalls an existing worker.
+                if controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .is_none_or(|record| record.state != mj_core::state::SessionState::Provisioning)
+                {
+                    return Ok(DaemonLifecycleResult::Done);
+                }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
                     state,
@@ -259,12 +288,82 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
+            DaemonLifecycleResult::Move(_)
+            | DaemonLifecycleResult::Park(_)
+            | DaemonLifecycleResult::Superseded => {
                 unreachable!("cleanup cannot return a move outcome")
             }
             DaemonLifecycleResult::DeferredCleanup => {
                 unreachable!("session creation cannot schedule target cleanup")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod delegation_replay_tests {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+
+    #[tokio::test]
+    async fn replayed_spawn_does_not_reprovision_an_existing_child() {
+        const CHILD: &str = "MJ_TEST_SPAWN_REPLAY";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "replayed_spawn_does_not_reprovision_an_existing_child",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "concurrency-sweep-spawn")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("spawn replay").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        for (index, status) in [
+            mj_core::state::SessionState::Running,
+            mj_core::state::SessionState::Parked,
+            mj_core::state::SessionState::Stopped,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let child_id = format!("child-{index}");
+            let child =
+                crate::daemon::tests::runtime_test_session(&child_id, &workspace.id, status);
+            let relation = crate::daemon::tests::runtime_test_subagent(&child_id, "parent");
+            crate::database::save_subagent_session(&child, &relation).unwrap();
+            let runtime = crate::daemon::tests::test_runtime_state();
+            let replayed = runtime
+                .start_subagent_session(crate::controller::RegisterSubagentRequest {
+                    parent_session_id: "parent".into(),
+                    task_name: "must reuse original".into(),
+                    profile_id: "missing-profile".into(),
+                    model: None,
+                    effort: None,
+                    working_directory: Default::default(),
+                    initial_prompt: "must not resend".into(),
+                    request_key: relation.request_key.clone(),
+                    report_root: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(replayed, relation);
+            assert!(runtime.active_lifecycles().is_empty());
+            assert_eq!(
+                crate::database::load_session_record(&child_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                status
+            );
         }
     }
 }

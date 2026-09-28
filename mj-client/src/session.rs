@@ -97,7 +97,28 @@ pub enum ReviewerAction {
     AnalyzeDelta {
         repositories: Vec<AnalyzeDeltaRepository>,
     },
+    SubmitDurable {
+        generation: u64,
+        command_id: String,
+        command: RelayCommand,
+    },
+    ReviewerCommandReceipt {
+        generation: u64,
+        command_id: String,
+    },
+    CancelReviewerCommandAdmission {
+        generation: u64,
+        command_id: String,
+    },
+    ReleaseReviewerCommandReceipt {
+        generation: u64,
+        command_id: String,
+    },
     TakeLaneDispatches,
+    ReadLaneDispatches,
+    AckLaneDispatches {
+        ids: Vec<String>,
+    },
 }
 
 impl ReviewerAction {
@@ -113,7 +134,13 @@ impl ReviewerAction {
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
+            Self::SubmitDurable { .. } => "reviewer_submit_durable",
+            Self::ReviewerCommandReceipt { .. } => "reviewer_command_receipt",
+            Self::CancelReviewerCommandAdmission { .. } => "reviewer_cancel_command_admission",
+            Self::ReleaseReviewerCommandReceipt { .. } => "reviewer_release_command_receipt",
             Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
+            Self::ReadLaneDispatches => "reviewer_read_lane_dispatches",
+            Self::AckLaneDispatches { .. } => "reviewer_ack_lane_dispatches",
         }
     }
 }
@@ -137,6 +164,14 @@ pub enum ReviewerOutcome {
     ChangedFunctions {
         packet: String,
     },
+    PendingLaneDispatches {
+        dispatches: Vec<mj_core::relay::ReviewerLaneDispatch>,
+    },
+    CommandReceipt {
+        receipt: Option<Box<mj_core::relay::HandledRelayCommand>>,
+    },
+    CommandReceiptReleased,
+    LaneDispatchesAcknowledged,
     LaneDispatches {
         requests: Vec<mj_core::review::lanes::ReviewSubagentRequest>,
     },
@@ -240,6 +275,36 @@ pub trait SessionHandleBackend: Send + Sync {
         command_id: String,
         command: RelayCommand,
     ) -> BoxFuture<'_, Result<PendingRelaySubmit>>;
+    fn submit_durable(
+        &self,
+        _command_id: String,
+        _command: RelayCommand,
+    ) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async {
+            anyhow::bail!("durable submissions are unavailable on this session transport")
+        })
+    }
+    fn command_receipt(
+        &self,
+        _command_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
+        Box::pin(async {
+            anyhow::bail!("command receipts are unavailable on this session transport")
+        })
+    }
+    fn cancel_command_admission(
+        &self,
+        _command_id: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
+        Box::pin(async {
+            anyhow::bail!("atomic command cancellation is unavailable on this session transport")
+        })
+    }
+    fn release_command_receipt(&self, _command_id: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async {
+            anyhow::bail!("command receipts are unavailable on this session transport")
+        })
+    }
     fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>>;
     fn respond_elicitation(
         &self,
@@ -313,6 +378,28 @@ impl SessionHandle {
 
     pub async fn submit(&self, command_id: String, command: RelayCommand) -> Result<u64> {
         self.enqueue_submit(command_id, command).await?.wait().await
+    }
+
+    pub async fn submit_durable(&self, command_id: String, command: RelayCommand) -> Result<u64> {
+        self.backend.submit_durable(command_id, command).await
+    }
+
+    pub async fn command_receipt(
+        &self,
+        command_id: String,
+    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
+        self.backend.command_receipt(command_id).await
+    }
+
+    pub async fn cancel_command_admission(
+        &self,
+        command_id: String,
+    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
+        self.backend.cancel_command_admission(command_id).await
+    }
+
+    pub async fn release_command_receipt(&self, command_id: String) -> Result<()> {
+        self.backend.release_command_receipt(command_id).await
     }
 
     /// Apply a setting and wait for its durable success or rejection.

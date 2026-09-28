@@ -133,6 +133,7 @@ pub struct RuntimeState {
     /// person typed while it started, and the hand-off a restored session
     /// carries. One ordered queue per session, each drained by one task.
     startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
+    startup_enqueue: tokio::sync::Mutex<()>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     recovery_observer: RecoveryObserver,
@@ -348,22 +349,30 @@ fn durable_session_state(controller: &Controller, session_id: &str) -> Option<Se
 /// Both kinds are ordered against each other on purpose: a restored session's
 /// hand-off is the hidden context its first prompt reads, so it has to be
 /// installed before any queued prompt is submitted.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) enum StartupStep {
     InstallHandoff(Box<mj_core::archive::CanonicalSessionSnapshot>),
+    PreparedHandoff {
+        text: String,
+    },
     Prompt {
         text: String,
         inherited_draft: Option<String>,
     },
+    Configure {
+        key: String,
+        value: String,
+        optional: bool,
+    },
+    ApiPrompt {
+        text: String,
+    },
 }
 
-/// The steps waiting for one session, and the task draining them.
-///
-/// The entry exists only while a drain task owns it. `in_flight` marks a step
-/// that has been popped and is running, so the queue is never treated as empty
-/// while its last step is still being carried out.
+/// One supervised drain per session. Pending payloads stay in SQLite.
 struct StartupQueue {
-    pending: VecDeque<StartupStep>,
-    in_flight: bool,
+    identity: Arc<()>,
+    last_error: Option<String>,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -442,6 +451,8 @@ impl ActiveLifecycle {
 #[derive(Debug, Clone)]
 enum DaemonLifecycleResult {
     Done,
+    /// A durable effect addressed a previous resource incarnation.
+    Superseded,
     DeferredCleanup,
     Move(MoveOutcome),
     Park(crate::controller::ParkOutcome),
@@ -523,6 +534,7 @@ use readiness::{HarnessReadinessWatch, ReadinessObservation, UnreadySession};
 mod lifecycle;
 mod resume;
 mod snapshot;
+pub(crate) mod startup_followup;
 mod state;
 mod subagent_park;
 mod support;

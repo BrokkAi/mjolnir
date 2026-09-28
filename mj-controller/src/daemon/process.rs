@@ -118,8 +118,8 @@ pub(super) async fn run_daemon_runtime(
         None
     };
 
-    // Start the primary manager last: every remaining fallible operation is
-    // inside `outcome`, so its owner always reaches the awaited epilogue.
+    // Start the primary manager after store preparation. Bootstrap failures
+    // below have an awaited epilogue just like failures in the serving loop.
     let (delegation_tx, delegation_updates) = crate::session_manager::delegation_channel();
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
     let manager_targets = manager.targets;
@@ -145,17 +145,78 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
-    let move_operations = blocking(crate::database::load_move_operations).await?;
-    // Every session a durable move intent names is owned by that intent,
-    // whether or not this startup resumes it, so reconciliation leaves it
-    // alone.
-    let move_sessions = move_operations
-        .iter()
-        .map(|operation| operation.selection.session_id.clone())
-        .collect::<BTreeSet<_>>();
-    let move_owned = state.recover_moves(move_operations)?;
-    state.resume_retained_cleanups();
     let cancellation = crate::termination::Coordinator::install().token();
+    // Bootstrap already owns live managers. Capture its error so those owners
+    // are shut down before the process-level writer can be closed.
+    let bootstrap = async {
+        // Restore review admission before prompts or external services start.
+        state
+            .review_host()
+            .ready()
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let move_operations = blocking(crate::database::load_move_operations).await?;
+        let move_sessions = move_operations
+            .iter()
+            .map(|operation| operation.selection.session_id.clone())
+            .collect::<BTreeSet<_>>();
+        let move_owned = state.recover_moves(move_operations)?;
+        state.resume_retained_cleanups();
+        state.restore_startup_deliveries(&cancellation).await?;
+        Ok::<_, anyhow::Error>((move_sessions, move_owned))
+    }
+    .await;
+    let (move_sessions, move_owned) = match bootstrap {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            epilogue_started.store(true, Ordering::Release);
+            spawn_shutdown_watchdog();
+            cancellation.cancel();
+            let mut outcome = Err(error);
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap worker upgrade coordinator",
+                worker_upgrades.shutdown().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap recovery coordinator",
+                recovery.shutdown().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down turn review host after bootstrap failure",
+                state
+                    .review_host()
+                    .shutdown()
+                    .await
+                    .map_err(anyhow::Error::msg),
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "cancel bootstrap lifecycle operations",
+                state.cancel_and_wait_lifecycles().await,
+            );
+            record_daemon_cleanup(
+                &mut outcome,
+                "drain bootstrap startup deliveries",
+                state.cancel_and_join_startup_prompts().await,
+            );
+            if let Some(remote) = remote.take() {
+                record_daemon_cleanup(
+                    &mut outcome,
+                    "shut down bootstrap remote session manager",
+                    remote.shutdown.shutdown().await,
+                );
+            }
+            record_daemon_cleanup(
+                &mut outcome,
+                "shut down bootstrap session manager",
+                manager_shutdown.shutdown().await,
+            );
+            return outcome;
+        }
+    };
     // Checkpoint files that a cancelled or interrupted checkpoint left in a
     // local worker root. Deleting them can take minutes after a long leak, so
     // this runs beside the daemon rather than before it serves. It stops at
@@ -510,8 +571,16 @@ pub(super) async fn run_daemon_runtime(
     // Recovery copies and worker upgrades do not hold up a handoff, so some
     // may still be running. Stop them first: the next daemon starts them again.
     // The coordinators share one gate, and dropping either cancels both.
-    drop(worker_upgrades);
-    drop(recovery);
+    record_daemon_cleanup(
+        &mut outcome,
+        "shut down worker upgrade coordinator",
+        worker_upgrades.shutdown().await,
+    );
+    record_daemon_cleanup(
+        &mut outcome,
+        "shut down recovery coordinator",
+        recovery.shutdown().await,
+    );
     match continuation_task.await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),

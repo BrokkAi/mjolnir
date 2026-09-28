@@ -112,7 +112,7 @@ fn voice_form() -> Form<VoiceControl> {
     form
 }
 
-pub use active::{ActiveChat, ChatDaemonRequest, PreparedChat};
+pub use active::{ActiveChat, ChatDaemonRequest, ChatInstance, PreparedChat};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
     TAIL_SEED_ITEMS, TranscriptSnapshot, format_event_time, render_agent_message_head,

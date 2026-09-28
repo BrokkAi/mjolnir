@@ -116,7 +116,7 @@ pub(in crate::controller) fn worker_binary_for(
     materialize_worker_source(worker_binary_for_arch(platform.architecture, requirement)?)
 }
 
-fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf> {
+pub(super) fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf> {
     let path = match source {
         WorkerBinaryAvailability::Local { path, .. } => Ok(path),
         WorkerBinaryAvailability::Remote {

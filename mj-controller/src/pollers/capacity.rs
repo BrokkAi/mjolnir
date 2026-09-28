@@ -328,11 +328,13 @@ async fn run_resource_command(
     // lease is held until the probe has exited.
     let (command, ssh_session) = if command.ssh_session.is_some() {
         let requested = command.clone();
+        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+            crate::targets::SSH_MASTER_OPEN_TIMEOUT,
+        );
+        let _cancel_preparation = executor.cancel_on_drop();
         tokio::task::spawn_blocking(move || {
             requested
-                .open_ssh_session(&crate::targets::BoundedProcessExecutor::new(
-                    crate::targets::SSH_MASTER_OPEN_TIMEOUT,
-                ))
+                .open_ssh_session(&executor)
                 .map(crate::targets::SessionCommand::into_parts)
         })
         .await
@@ -342,23 +344,11 @@ async fn run_resource_command(
     };
     let command = &command;
     let mut process = tokio::process::Command::new(&command.program);
-    process
-        .args(&command.args)
-        .envs(&command.env)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = process
-        .spawn()
-        .with_context(|| format!("start {} for {}", command.program, command.purpose))?;
-    // stdin is null; nothing writes while output drains, so this cannot hit
-    // the write-then-wait deadlock the disallowed_methods lint guards against.
-    #[allow(clippy::disallowed_methods)]
-    let output = child
-        .wait_with_output()
-        .await
-        .with_context(|| format!("wait for {}", command.purpose))?;
+    process.args(&command.args).envs(&command.env);
+    let output =
+        mj_core::subprocess::run_bounded(&mut process, 8 * 1024 * 1024, RESOURCE_POLL_TIMEOUT)
+            .await
+            .with_context(|| format!("wait for {}", command.purpose))?;
     let command_output = CommandOutput {
         status: output.status.code().unwrap_or(-1),
         stdout: output.stdout,

@@ -43,73 +43,31 @@ impl HostState {
                 self.prompt_primary(session_id, command_id, prompt);
             }
             ReviewRequest::PauseRole { role } => {
-                let session_id = session_id.to_owned();
-                self.spawn_reviewer(
-                    session_id.clone(),
+                let generation = self
+                    .reviews
+                    .get(session_id)
+                    .and_then(|slot| slot.role_generations.get(&role))
+                    .copied();
+                let key = format!("pause:{role}");
+                self.review_effect(
+                    session_id,
                     Some(role),
-                    ReviewerAction::Pause,
-                    move |outcome| {
-                        if let Err(error) = outcome {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                %error,
-                                "pausing a review role failed"
-                            );
-                        }
-                        None
-                    },
+                    generation.map_or(ReviewerAction::Pause, |generation| {
+                        ReviewerAction::PauseGeneration { generation }
+                    }),
+                    key,
                 );
             }
-            ReviewRequest::AdvanceBaseline {
-                trees,
-                reviewed_through_ordinal,
-            } => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.baselines = trees.clone();
-                    slot.state.reviewed_through_ordinal = reviewed_through_ordinal;
-                    // Clear an accepted handoff in the same durable state
-                    // write as its prior-review record and baseline. Until
-                    // this point shutdown/restart must retain it for command
-                    // id reconciliation.
-                    slot.state.pending_forward = None;
-                    let state = slot.state.clone();
-                    if let Err(error) = self.persist(session_id.to_owned(), state, None) {
-                        tracing::warn!(session_id, %error, "could not queue review baseline persistence");
-                    }
-                }
-                let session_id = session_id.to_owned();
-                self.spawn_reviewer(
-                    session_id.clone(),
+            ReviewRequest::AdvanceBaseline { trees, .. } => {
+                self.review_effect(
+                    session_id,
                     None,
                     ReviewerAction::AdvanceBaseline { trees },
-                    move |outcome| {
-                        if let Err(error) = outcome {
-                            // The controller's copy is what the next capture is
-                            // taken against; the worker-side ref is only a gc
-                            // pin, so a failure here costs nothing but the pin.
-                            tracing::debug!(
-                                session_id = %session_id,
-                                %error,
-                                "the review baseline ref could not be pinned"
-                            );
-                        }
-                        None
-                    },
+                    "baseline".into(),
                 );
             }
-            ReviewRequest::RecordPriorReview { prior } => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.prior_review = Some(prior);
-                }
-            }
-            ReviewRequest::ClearPriorReview => {
-                if let Some(slot) = self.reviews.get_mut(session_id) {
-                    slot.state.prior_review = None;
-                    let state = slot.state.clone();
-                    if let Err(error) = self.persist(session_id.to_owned(), state, None) {
-                        tracing::warn!(session_id, %error, "could not queue prior review cleanup");
-                    }
-                }
+            local @ (ReviewRequest::RecordPriorReview { .. } | ReviewRequest::ClearPriorReview) => {
+                self.run(session_id, vec![local]);
             }
             ReviewRequest::Close => {
                 if self.closing.contains(session_id) {
@@ -117,6 +75,7 @@ impl HostState {
                 }
                 if let Some(slot) = self.reviews.get_mut(session_id) {
                     slot.state.active = None;
+                    slot.state.orchestration = None;
                     if matches!(
                         slot.driver.phase(),
                         TurnReviewPhase::Resolved(Resolution::Cancelled)
@@ -127,22 +86,19 @@ impl HostState {
                         // branch before its durable reconciliation sequence.
                         slot.state.pending_forward = None;
                     }
+                    let epoch = slot.epoch;
                     let state = slot.state.clone();
                     self.closing.insert(session_id.to_owned());
-                    // The primary handoff has already returned a durable
-                    // acceptance before Close can be requested. Releasing now
-                    // lets later user prompts queue behind that accepted
-                    // corrective turn; no held prompt can overtake it.
-                    release_prompts(session_id);
                     if let Err(error) = self.persist(
                         session_id.to_owned(),
                         state,
-                        Some(PersistenceCompletion::Close),
+                        Some(PersistenceCompletion::Close { epoch }),
                     ) {
-                        tracing::warn!(session_id, %error, "could not queue review close persistence");
-                        self.closing.remove(session_id);
-                        self.reviews.remove(session_id);
-                        release_prompts(session_id);
+                        self.state_saved(
+                            session_id.to_owned(),
+                            PersistenceCompletion::Close { epoch },
+                            Err(error),
+                        );
                     }
                 }
             }
@@ -151,31 +107,17 @@ impl HostState {
 
     /// Stages the configured reviewer profile and starts one role under it.
     pub(super) fn start_role(&mut self, session_id: &str, role: String, fresh: bool) {
-        let fresh_generation = if fresh {
-            match next_review_generation() {
-                Ok(generation) => Some(generation),
-                Err(error) => {
-                    self.fail(
-                        session_id,
-                        format!("the reviewer could not allocate a fresh conversation: {error}"),
-                    );
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let _ = fresh;
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
-        // A fresh role must not reuse the running harness session: the
-        // validator judges the reviewer's claims against source, so it must
-        // not inherit them. Bumping the generation is what the sidecar reads
-        // as "this is a different reviewer".
-        if let Some(generation) = fresh_generation {
-            slot.generation = generation;
-        }
-        let generation = slot.generation;
+        // Generation was selected and checkpointed before this effect started.
+        let generation = slot
+            .role_generations
+            .get(&role)
+            .copied()
+            .unwrap_or(slot.generation);
+        slot.generation = generation;
         let epoch = slot.epoch;
         let reviewer = slot.reviewer.clone();
         let repositories = slot.driver.repository_roots();
@@ -194,11 +136,13 @@ impl HostState {
                 &repositories,
             )
             .await;
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::RoleStarted { role, result },
-            });
+            let _ = events
+                .send(HostEvent::Step {
+                    session_id,
+                    epoch,
+                    step: ReviewStep::RoleStarted { role, result },
+                })
+                .await;
         });
     }
 
@@ -212,12 +156,19 @@ impl HostState {
         let Some(epoch) = self.reviews.get(session_id).map(|slot| slot.epoch) else {
             return;
         };
+        let generation = self
+            .reviews
+            .get(session_id)
+            .and_then(|slot| slot.role_generations.get(role))
+            .copied()
+            .unwrap_or_default();
         let owner = session_id.to_owned();
         let result_role = role.to_owned();
         self.spawn_reviewer(
             session_id.to_owned(),
             Some(role.to_owned()),
-            ReviewerAction::Submit {
+            ReviewerAction::SubmitDurable {
+                generation,
                 command_id,
                 command: prompt_command(prompt),
             },
@@ -257,14 +208,27 @@ impl HostState {
             return;
         };
         let control = self.control.clone();
+        let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
             let submitted = async {
+                if primary_accepted(environment.clone(), session_id.clone(), command_id.clone())
+                    .await?
+                {
+                    return Ok(());
+                }
                 let handle = control
                     .session(session_id.clone())
                     .await
                     .map_err(|error| format!("{error:#}"))?;
+                handle
+                    .sync_now()
+                    .await
+                    .map_err(|error| format!("refresh review handoff receipt: {error:#}"))?;
+                if primary_accepted(environment, session_id.clone(), command_id).await? {
+                    return Ok(());
+                }
                 handle
                     .submit_review_delivery(admission, prompt_command(prompt))
                     .await
@@ -272,11 +236,13 @@ impl HostState {
                     .map_err(|error| format!("{error:#}"))
             }
             .await;
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::PrimaryPrompted(submitted),
-            });
+            let _ = events
+                .send(HostEvent::Step {
+                    session_id,
+                    epoch,
+                    step: ReviewStep::PrimaryPrompted(submitted),
+                })
+                .await;
         });
     }
 
@@ -285,6 +251,9 @@ impl HostState {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
+        if !slot.polling_roles.insert(role.to_owned()) {
+            return;
+        }
         let transcript = slot.roles.entry(role.to_owned()).or_default();
         let after_ordinal = transcript.cursor_ordinal;
         let after_digest = if transcript.cursor_digest.is_empty() {
@@ -315,11 +284,13 @@ impl HostState {
                 Ok(ReviewerOutcome::Attached(attachment)) => Ok(attachment.events),
                 other => Err(unexpected(other)),
             };
-            let _ = events.send(HostEvent::Step {
-                session_id,
-                epoch,
-                step: ReviewStep::RoleEvents { role, result },
-            });
+            let _ = events
+                .send(HostEvent::Step {
+                    session_id,
+                    epoch,
+                    step: ReviewStep::RoleEvents { role, result },
+                })
+                .await;
         });
     }
 
@@ -329,31 +300,34 @@ impl HostState {
         role: String,
         result: Result<Vec<RelayEvent>, String>,
     ) {
+        if let Some(slot) = self.reviews.get_mut(&session_id) {
+            slot.polling_roles.remove(&role);
+        }
         let events = match result {
             Ok(events) => events,
             Err(error) => {
-                if self.reviews.get(&session_id).is_some_and(|slot| {
-                    matches!(slot.driver.phase(), TurnReviewPhase::Forwarding { .. })
-                }) {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        role = %role,
-                        %error,
-                        "ignoring a late reviewer-role poll during primary handoff"
-                    );
-                    return;
+                let active = self.reviews.get_mut(&session_id).is_some_and(|slot| {
+                    slot.delivery_errors.insert(format!("poll:{role}"), error);
+                    slot.driver.active_roles().contains(&role)
+                });
+                if active {
+                    self.poll_role(&session_id, &role, Duration::from_secs(1));
+                    self.publish(&session_id);
                 }
-                self.fail(&session_id, error);
                 return;
             }
         };
         let Some(slot) = self.reviews.get_mut(&session_id) else {
             return;
         };
+        slot.delivery_errors.remove(&format!("poll:{role}"));
         let idle = events.is_empty();
         let relay_session = role_session_id(&session_id, &role);
         let transcript = slot.roles.entry(role.clone()).or_default();
-        transcript.apply(&relay_session, &events);
+        if let Err(error) = transcript.apply(&relay_session, &events) {
+            self.fail(&session_id, error);
+            return;
+        }
         // The newest agent message is not enough on its own: after the
         // validator starts, the reviewer's own findings are still the newest
         // message in that role's journal. The relay's completion record for
@@ -389,7 +363,9 @@ impl HostState {
             }
             _ => Vec::new(),
         };
-        self.run(&session_id, requests);
+        if !events.is_empty() || !requests.is_empty() {
+            self.run(&session_id, requests);
+        }
         let Some(slot) = self.reviews.get(&session_id) else {
             return;
         };
@@ -418,11 +394,28 @@ impl HostState {
     /// tool. The tool answers the supervisor at once and leaves the request in
     /// the worker; this is where the host picks it up and launches them.
     pub(super) fn poll_dispatches(&mut self, session_id: &str) {
-        self.review_step(session_id, ReviewerAction::TakeLaneDispatches, |outcome| {
+        let Some(slot) = self.reviews.get_mut(session_id) else {
+            return;
+        };
+        if slot.reading_dispatches {
+            return;
+        }
+        slot.reading_dispatches = true;
+        self.review_step(session_id, ReviewerAction::ReadLaneDispatches, |outcome| {
             ReviewStep::Dispatches(match outcome {
-                Ok(ReviewerOutcome::LaneDispatches { requests }) => Ok(requests),
+                Ok(ReviewerOutcome::PendingLaneDispatches { dispatches }) => Ok(dispatches),
                 other => Err(unexpected(other)),
             })
         });
     }
+}
+
+async fn primary_accepted(
+    environment: Arc<dyn ReviewEnvironment>,
+    session: String,
+    command: String,
+) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || environment.primary_prompt_accepted(&session, &command))
+        .await
+        .map_err(|error| format!("review handoff receipt task stopped: {error}"))?
 }

@@ -448,6 +448,10 @@ fn detach_chat(state: &mut ChatState) -> u64 {
     last_seen_event_ordinal
 }
 
+/// Opaque ownership identity for one view and its current actor attachment.
+#[derive(Clone)]
+pub struct ChatInstance(Arc<()>);
+
 /// A chat view and every background feed behind it.
 ///
 /// The combined surface owns one of these for the conversation on screen. It
@@ -455,6 +459,7 @@ fn detach_chat(state: &mut ChatState) -> u64 {
 /// is lost while the user looks elsewhere. Dropping it detaches the proxy and
 /// leaves the target worker alive.
 pub struct ActiveChat {
+    instance: ChatInstance,
     state: ChatState,
     session: ManagedSessionHandle,
     session_manager: SessionManagerControl,
@@ -816,6 +821,7 @@ impl ActiveChat {
             state.set_notice(format!("Recovery copy failed: {detail}"));
         }
         let mut chat = Self {
+            instance: ChatInstance(Arc::new(())),
             state,
             session,
             session_manager: control,
@@ -856,6 +862,15 @@ impl ActiveChat {
             chat.poll_reviewer_events();
         }
         chat
+    }
+
+    /// Identity of this owned view, independent of the session it displays.
+    pub fn instance(&self) -> ChatInstance {
+        self.instance.clone()
+    }
+
+    pub fn is_instance(&self, instance: &ChatInstance) -> bool {
+        Arc::ptr_eq(&self.instance.0, &instance.0)
     }
 
     pub fn session_id(&self) -> &str {

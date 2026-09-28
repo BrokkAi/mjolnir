@@ -163,6 +163,7 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 origin_override: None,
             }],
             canonical_session: CanonicalSessionSnapshot {
+                command_ledger: None,
                 assessment_state: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),
@@ -197,4 +198,147 @@ pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
 fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
     serde_json::from_slice(&fs::read(mj_core::relay::restored_relay_seed_path(relay_root)).unwrap())
         .unwrap()
+}
+
+#[test]
+fn checkpoint_restore_preserves_command_receipts_and_cancelled_admission() {
+    use crate::relay::DurableRelay;
+    use crate::relay::test_support::{finish_prompt, prompt, ready_checkpoint, relay_request};
+    use mj_core::relay::{RelayRequest, RelayResponseBody, RelayResponsePayload};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let mut source = DurableRelay::open(&spec.relay_root, SESSION, "test").unwrap();
+    let command = prompt(&"receipt content ".repeat(24 * 1024));
+    let submit = RelayRequest::SubmitDurable {
+        command_id: "receipt-command".into(),
+        command: command.clone(),
+    };
+    let accepted = source.handle(relay_request("submit", submit.clone())).body;
+    assert!(matches!(
+        &accepted,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Accepted { .. }
+        }
+    ));
+    assert_eq!(source.claim_pending_commands(true).unwrap().len(), 1);
+    finish_prompt(&mut source, "receipt-command");
+    source.handle(relay_request(
+        "cancel-admission",
+        RelayRequest::CancelCommandAdmission {
+            command_id: "cancelled-command".into(),
+        },
+    ));
+    let cursor = ready_checkpoint(&mut source, "move-cut");
+    let mut bytes = Vec::new();
+    let mut pages = 0;
+    loop {
+        let body = source
+            .handle(relay_request(
+                "ledger",
+                RelayRequest::CheckpointCommandLedger {
+                    through_ordinal: cursor.ordinal,
+                    through_digest: cursor.digest.clone(),
+                    seal: true,
+                    offset: bytes.len(),
+                },
+            ))
+            .body;
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CheckpointCommandLedger { data, total_bytes },
+        } = body
+        else {
+            panic!("{body:?}");
+        };
+        pages += 1;
+        bytes.extend(data);
+        if bytes.len() == total_bytes {
+            break;
+        }
+    }
+    assert!(pages > 1, "exercise transfer beyond a bounded page");
+    assert!(
+        source
+            .cancel_checkpoint_barrier_on_disconnect("move-cut")
+            .unwrap()
+            .is_none()
+    );
+    // The receipt cut is a durable admission seal, including after restart.
+    drop(source);
+    let mut source = DurableRelay::open(&spec.relay_root, SESSION, "test").unwrap();
+    let reopened = source.operational_state();
+    assert_eq!(reopened.command_ledger_seal.as_deref(), Some("move-cut"));
+    assert_eq!(reopened.checkpoint_ready.as_ref(), Some(&cursor));
+    for request in [
+        RelayRequest::ReleaseCommandReceipt {
+            command_id: "receipt-command".into(),
+        },
+        RelayRequest::CancelCommandAdmission {
+            command_id: "late-command".into(),
+        },
+        RelayRequest::SubmitDurable {
+            command_id: "late-command".into(),
+            command: prompt("late"),
+        },
+    ] {
+        assert!(
+            matches!(source.handle(relay_request("sealed", request)).body,
+            RelayResponseBody::Error { error } if error.retryable)
+        );
+    }
+    spec.canonical_session.command_ledger = Some(serde_json::from_slice(&bytes).unwrap());
+    spec.canonical_session.event_frontier = cursor.ordinal;
+    spec.canonical_session.event_frontier_digest = cursor.digest;
+    export_checkpoint(&spec).unwrap();
+    let destination = temp.path().join("destination-relay");
+    let destination_workspace = temp.path().join("destination-workspace");
+    fs::create_dir_all(&destination_workspace).unwrap();
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: spec.output_path,
+            workspace_root: destination_workspace,
+            relay_root: destination.clone(),
+            harness_home: temp.path().join("destination-home"),
+            restore_repositories: false,
+            restore_native: false,
+            discard_queued_prompts: false,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let mut restored = DurableRelay::open(&destination, SESSION, "test").unwrap();
+    let before = restored.latest_ordinal();
+    assert_eq!(
+        restored.handle(relay_request("retry", submit)).body,
+        accepted
+    );
+    assert_eq!(
+        restored.latest_ordinal(),
+        before,
+        "retry must not create another acceptance"
+    );
+    assert!(
+        matches!(restored.handle(relay_request("cancelled-submit", RelayRequest::SubmitDurable {
+        command_id: "cancelled-command".into(), command,
+    })).body, RelayResponseBody::Error { error } if !error.retryable)
+    );
+    assert!(
+        matches!(restored.handle(relay_request("receipt", RelayRequest::CommandReceipt {
+        command_id: "receipt-command".into(),
+    })).body, RelayResponseBody::Ok { payload: RelayResponsePayload::CommandReceipt { receipt: Some(receipt) } }
+        if receipt.terminal_ordinal.is_some() && receipt.outcome.is_some())
+    );
+    // Only an explicit lifecycle release reopens the old source's admission.
+    let release = source.handle(relay_request(
+        "release",
+        RelayRequest::Submit {
+            command_id: "release-source-cut".into(),
+            command: mj_core::relay::RelayCommand::ReleaseCheckpoint {
+                barrier_command_id: "move-cut".into(),
+            },
+        },
+    ));
+    assert!(matches!(release.body, RelayResponseBody::Ok { .. }));
+    assert!(source.operational_state().command_ledger_seal.is_none());
 }

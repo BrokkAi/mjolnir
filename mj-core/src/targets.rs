@@ -111,6 +111,13 @@ pub struct CommandSpec {
     /// already exists, so a later failure owes that target's teardown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub creates_target: bool,
+    /// This command deliberately leaves a process running after it exits: it
+    /// starts a detached worker, whose lifetime belongs to the session rather
+    /// than to the launch. The executor still gives the command its own
+    /// process group, and cancellation still signals that group, but the
+    /// successful completion of a launch must not kill what it launched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detaches: bool,
     /// The SSH destination this command opens a connection to, when it does.
     /// Tagged commands pass through [`SshAdmission`] so the daemon never
     /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
@@ -150,6 +157,7 @@ impl CommandSpec {
             stage: None,
             parallel_group: None,
             creates_target: false,
+            detaches: false,
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
@@ -597,7 +605,7 @@ fn with_ssh_admission(
     for attempt in 1..=SSH_RETRY_ATTEMPTS {
         let session = command.open_ssh_session(executor)?;
         let output = {
-            let _permit = SshAdmission::acquire(destination);
+            let _permit = SshAdmission::acquire_unless(destination, is_cancelled)?;
             run(session.command())?
         };
         let refusal = ssh_refusal(output.status, &String::from_utf8_lossy(&output.stderr));
@@ -661,7 +669,7 @@ impl ProcessExecutor {
             let mut input = std::io::Cursor::new(input.0.as_slice());
             // Owned bytes, so each attempt gets its own reader.
             return stream_command_with_stdin(
-                configured_command(command),
+                cancellable_command(command),
                 command,
                 &mut input,
                 &|| false,
@@ -700,7 +708,7 @@ impl CommandExecutor for ProcessExecutor {
             .as_deref()
             .map(SshAdmission::acquire);
         let command = session.command();
-        let process = configured_command(command);
+        let process = cancellable_command(command);
         // Plain process execution is not cancellable, so the transfer only
         // ends when the child does.
         stream_command_with_stdin(process, command, input, &|| false)
@@ -731,6 +739,8 @@ fn stream_command_with_stdin(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
+    let group =
+        (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
     let stdin = child
         .stdin
         .take()
@@ -781,6 +791,7 @@ fn stream_command_with_stdin(
             }
             stdin.flush().context("flush command input")
         });
+        let mut status = None;
         let status = loop {
             if is_cancelled() {
                 terminate_cancellable_child(&mut child);
@@ -792,9 +803,12 @@ fn stream_command_with_stdin(
                 }
                 bail!("operation cancelled while {}", command.purpose);
             }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            match if status.is_some() {
+                Ok(status)
+            } else {
+                child.try_wait()
+            } {
+                Ok(observed) => status = observed,
                 Err(error) => {
                     terminate_cancellable_child(&mut child);
                     if let Err(join_error) = input_writer.join() {
@@ -806,6 +820,16 @@ fn stream_command_with_stdin(
                     return Err(error).with_context(|| format!("wait for {}", command.purpose));
                 }
             }
+            // Pipe ownership can outlive the direct child. Keep cancellation
+            // active until all three I/O tasks finish, including inherited pipes.
+            if let Some(status) = status
+                && input_writer.is_finished()
+                && stdout_reader.is_finished()
+                && stderr_reader.is_finished()
+            {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(25));
         };
         let input_result = input_writer
             .join()
@@ -819,6 +843,7 @@ fn stream_command_with_stdin(
         .join()
         .map_err(|_| anyhow::anyhow!("streamed command stderr reader panicked"))??;
     let (status, input_result) = process_result?;
+    drop(group);
     if status.success() {
         // A child that exited first explains the failure through its own
         // status and stderr; the broken pipe that exit caused would only hide
@@ -840,7 +865,20 @@ pub struct CancellableProcessExecutor {
     deadline: Option<Instant>,
 }
 
+/// Cancels synchronous executor work when its supervising async wait is dropped.
+pub struct ProcessCancellationGuard(Arc<AtomicBool>);
+
+impl Drop for ProcessCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 impl CancellableProcessExecutor {
+    pub fn cancel_on_drop(&self) -> ProcessCancellationGuard {
+        ProcessCancellationGuard(self.cancelled.clone())
+    }
+
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
             cancelled,
@@ -941,6 +979,8 @@ impl CancellableProcessExecutor {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
+        let group = (!command.detaches)
+            .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let mut stdout = child.stdout.take().context("command stdout missing")?;
         let mut stderr = child.stderr.take().context("command stderr missing")?;
         let stdout_reader = std::thread::spawn(move || {
@@ -988,6 +1028,7 @@ impl CancellableProcessExecutor {
             .join()
             .map_err(|_| anyhow::anyhow!("command stderr reader panicked"))??;
         let status = status.code().unwrap_or(-1);
+        drop(group);
         trace_command_duration(command, started, status);
         Ok(CommandOutput {
             status,
@@ -1019,7 +1060,8 @@ impl CommandExecutor for CancellableProcessExecutor {
         let _permit = command
             .ssh_destination
             .as_deref()
-            .map(SshAdmission::acquire);
+            .map(|destination| SshAdmission::acquire_unless(destination, &|| self.is_cancelled()))
+            .transpose()?;
         let command = session.command();
         // The child runs in its own process group so cancellation can kill the
         // whole group, which is what releases a writer blocked on a full pipe.
@@ -1989,6 +2031,73 @@ mod executor_tests {
     use std::fs;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_commands_stop_descendants_that_closed_their_pipes() {
+        for streamed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let pid_file = temp.path().join("descendant");
+            let command = CommandSpec::new("sh", [
+                "-c".to_owned(),
+                "cat >/dev/null; head -c 131072 /dev/zero; sleep 60 </dev/null >/dev/null 2>&1 & echo $! > \"$1\"".to_owned(),
+                "owned-descendant".to_owned(), pid_file.display().to_string(),
+            ]);
+            let executor = CancellableProcessExecutor::with_timeout(Duration::from_secs(5));
+            let output = if streamed {
+                executor
+                    .execute_with_stdin(&command, &mut std::io::Cursor::new(vec![b'x'; 256 * 1024]))
+            } else {
+                executor.execute(&command)
+            }
+            .unwrap();
+            assert_eq!(output.stdout.len(), 131072);
+            let pid: i32 = fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                if state.as_ref().is_none_or(|state| {
+                    state
+                        .rsplit_once(") ")
+                        .is_some_and(|(_, fields)| fields.starts_with('Z'))
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // Do not leave the fixture behind when the regression fails.
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    panic!(
+                        "successful command left descendant {pid} running (streamed={streamed})"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_deadline_survives_leader_exit_and_inherited_pipes() {
+        let command = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                "head -c 131072 /dev/zero; cat >/dev/null; (trap '' TERM; sleep 60) & exit 0",
+            ],
+        );
+        let mut input = std::io::Cursor::new(vec![b'x'; 256 * 1024]);
+        let started = Instant::now();
+        let error = CancellableProcessExecutor::with_timeout(Duration::from_millis(300))
+            .execute_with_stdin(&command, &mut input)
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     /// A stand-in for `ssh` that is refused by the server on its first call and
     /// connects on the next, the way a host at its `MaxStartups` ceiling

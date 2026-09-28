@@ -583,7 +583,8 @@ struct TestRemoteManager {
 
 impl TestRemoteManager {
     async fn new() -> Self {
-        let channels = spawn_remote_session_manager().expect("remote manager");
+        let channels =
+            crate::session_manager::spawn_reply_fixture_session_manager().expect("remote manager");
         let session_id = "session-1";
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session_id.to_owned(),
@@ -2288,6 +2289,7 @@ fn ready_startup_view() -> ManagedSessionView {
         queued_prompts: Vec::new(),
         active_user_shells: Vec::new(),
         active_agent_terminals: Vec::new(),
+        command_ledger_seal: None,
         checkpoint_barrier: None,
         checkpoint_ready: None,
         last_acp_activity_at_ms: None,
@@ -2318,7 +2320,7 @@ fn ready_startup_view() -> ManagedSessionView {
 #[tokio::test]
 async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     let mut state = test_runtime_state();
-    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let (observations, mut observed) = crate::recovery_gate::observation_channel();
     Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
         observations,
         gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
@@ -2336,7 +2338,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
         .publish_session("session-1".into(), view)
         .await
         .unwrap();
-    let first = observed.try_recv().unwrap();
+    let first = observed.try_recv().unwrap().observation;
     assert_eq!(first.checkpoint_wait, None);
     assert_eq!(first.latest_completed_turn_ordinal, Some(9));
     let revision = state.revisions.current();
@@ -2347,7 +2349,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
         sessions.get_mut("session-1").unwrap().title = "renamed".into();
     });
     state.refresh_background_policies();
-    let retry = observed.try_recv().unwrap();
+    let retry = observed.try_recv().unwrap().observation;
     assert_eq!(retry.session.title, "renamed");
     assert_eq!(retry.latest_completed_turn_ordinal, Some(9));
     assert_eq!(retry.checkpoint_wait, None);
@@ -2357,13 +2359,13 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
         sessions.get_mut("session-1").unwrap().state = SessionState::Parked;
     });
     state.refresh_background_policies();
-    assert!(observed.try_recv().is_err());
+    assert!(observed.try_recv().is_none());
     state.owner().edit_sessions(|sessions| {
         sessions.get_mut("session-1").unwrap().state = SessionState::Running;
     });
     state.refresh_background_policies();
     assert!(
-        observed.try_recv().is_err(),
+        observed.try_recv().is_none(),
         "resumed sessions need a fresh worker view"
     );
 }
@@ -2376,7 +2378,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
 #[tokio::test]
 async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     let mut state = test_runtime_state();
-    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let (observations, mut observed) = crate::recovery_gate::observation_channel();
     Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
         observations,
         gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
@@ -2402,7 +2404,7 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
         .await
         .unwrap();
 
-    let observation = observed.try_recv().unwrap();
+    let observation = observed.try_recv().unwrap().observation;
     assert_eq!(
         observation.checkpoint_wait,
         Some(mj_core::activity::CheckpointWait::WorkInFlight),
@@ -2411,7 +2413,7 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     // The retry tick re-sends the same answer rather than recomputing it.
     state.refresh_background_policies();
     assert_eq!(
-        observed.try_recv().unwrap().checkpoint_wait,
+        observed.try_recv().unwrap().observation.checkpoint_wait,
         Some(mj_core::activity::CheckpointWait::WorkInFlight)
     );
 }
@@ -2419,7 +2421,7 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
 #[tokio::test]
 async fn disconnected_and_removed_sessions_stop_background_retries() {
     let mut state = test_runtime_state();
-    let (observations, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let (observations, mut observed) = crate::recovery_gate::observation_channel();
     Arc::get_mut(&mut state).unwrap().recovery_observer = RecoveryObserver {
         observations,
         gate: Arc::new(crate::recovery_gate::RecoveryGate::default()),
@@ -2440,7 +2442,7 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
         .await
         .unwrap();
     state.refresh_background_policies();
-    assert!(observed.try_recv().is_err());
+    assert!(observed.try_recv().is_none());
 
     state
         .publish_session("session-1".into(), ready_startup_view())
@@ -2451,7 +2453,7 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
         sessions.remove("session-1");
     });
     state.refresh_background_policies();
-    assert!(observed.try_recv().is_err());
+    assert!(observed.try_recv().is_none());
     assert!(state.owner().background_policies.is_empty());
 }
 
@@ -2485,6 +2487,7 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
 /// The smallest archived snapshot a hand-off step can carry.
 fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
     mj_core::archive::CanonicalSessionSnapshot {
+        command_ledger: None,
         assessment_state: None,
         event_frontier: 0,
         event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
@@ -2616,9 +2619,8 @@ async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready
 
 /// A restored session's hand-off is queued ahead of any prompt, so the prompt
 /// is never submitted before the context it is meant to read. Here the
-/// hand-off cannot be installed -- a remote session manager refuses it -- so
-/// the prompt behind it is put back into the draft instead of going out
-/// without its context.
+/// hand-off cannot be installed, so the prompt behind it remains durable
+/// without going out before its context.
 #[tokio::test]
 async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
     let Some(_writer) =
@@ -2637,6 +2639,7 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
             StartupStep::InstallHandoff(Box::new(empty_archive_snapshot())),
             &cancellation,
         )
+        .await
         .expect("queue the hand-off");
     state
         .queue_startup_step(
@@ -2647,6 +2650,7 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
             },
             &cancellation,
         )
+        .await
         .expect("queue the prompt behind the hand-off");
     manager
         .publisher
@@ -2654,35 +2658,31 @@ async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
         .await
         .expect("publish the ready view");
 
-    let restored = wait_for_draft(&state, "after the hand-off").await;
-    assert_eq!(restored, "after the hand-off");
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+        panic!("expected handoff command")
+    };
+    assert!(matches!(command, RelayCommand::InstallPromptContext { .. }));
+    reply.send(Err("handoff rejected".into())).unwrap();
+    wait_for_startup_pause(&state).await;
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(crate::database::load_startup_deliveries().unwrap().len(), 2);
     assert!(
         tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
             .await
-            .is_err(),
-        "the prompt was submitted even though its hand-off never was"
-    );
-    let notices = notice_texts(&state);
-    assert!(
-        notices
-            .iter()
-            .any(|notice| notice.contains("without its archived hand-off")),
-        "the dropped hand-off was not reported: {notices:?}"
-    );
-    assert!(
-        notices
-            .iter()
-            .any(|notice| notice.contains("it is back in the composer draft")),
-        "the restored prompt was not reported: {notices:?}"
+            .is_err()
     );
 }
 
 /// A session that stops while its prompt waits ends the wait at once, and the
-/// text joins whatever draft the session already had.
+/// queue remains durable and its independent draft is preserved.
 #[tokio::test]
-async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
+async fn a_session_that_stops_preserves_its_durable_startup_queue() {
     let Some(_writer) =
-        startup_prompt_test_store("a_session_that_stops_returns_its_queued_prompt_to_the_draft")
+        startup_prompt_test_store("a_session_that_stops_preserves_its_durable_startup_queue")
     else {
         return;
     };
@@ -2704,24 +2704,20 @@ async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
         sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
     });
 
-    let draft = wait_for_draft(&state, "undelivered prompt").await;
-    assert_eq!(draft, "half-written note\n\nundelivered prompt");
-    let notices = notice_texts(&state);
-    assert!(
-        notices
-            .iter()
-            .any(|notice| notice.contains("it is back in the composer draft")),
-        "the undelivered prompt was not reported: {notices:?}"
-    );
+    wait_for_startup_pause(&state).await;
+    assert_eq!(session_draft_input(&state), "half-written note");
+    let saved = crate::database::load_startup_deliveries().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(saved[0].step_json.contains("undelivered prompt"));
 }
 
-/// A refused submit puts the refused text back, and the prompts still waiting
-/// behind it with it, in the order they were typed.
+/// An uncertain submit keeps its stable command and the following prompts
+/// without creating a second copy in the composer.
 #[tokio::test]
-async fn a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue() {
-    let Some(_writer) =
-        startup_prompt_test_store("a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue")
-    else {
+async fn a_refused_submit_preserves_order_without_creating_duplicate_drafts() {
+    let Some(_writer) = startup_prompt_test_store(
+        "a_refused_submit_preserves_order_without_creating_duplicate_drafts",
+    ) else {
         return;
     };
     let mut manager = TestRemoteManager::new().await;
@@ -2747,8 +2743,12 @@ async fn a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue() {
         .send(Err("the harness refused the prompt".into()))
         .expect("the drain awaits the submit reply");
 
-    let draft = wait_for_draft(&state, "prompt behind it").await;
-    assert_eq!(draft, "refused prompt\n\nprompt behind it");
+    wait_for_startup_pause(&state).await;
+    assert_eq!(session_draft_input(&state), "");
+    let saved = crate::database::load_startup_deliveries().unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].phase, "delivering");
+    assert_eq!(saved[1].phase, "pending");
 }
 
 /// Shutdown cancels a drain that is still waiting for a harness and returns
@@ -2785,7 +2785,156 @@ async fn cancelling_startup_prompts_returns_while_a_drain_is_waiting() {
         "cancelling the startup queues took {:?}",
         started.elapsed()
     );
-    assert_eq!(session_draft_input(&state), "never delivered");
+    assert_eq!(session_draft_input(&state), "");
+    assert_eq!(crate::database::load_startup_deliveries().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn startup_restart_reuses_the_durable_command_identity_after_a_lost_reply() {
+    let Some(_writer) = startup_prompt_test_store(
+        "startup_restart_reuses_the_durable_command_identity_after_a_lost_reply",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let cancellation = CancellationToken::new();
+    state
+        .queue_startup_step(
+            "session-1",
+            StartupStep::Prompt {
+                text: "once".into(),
+                inherited_draft: None,
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap();
+    let saved_id = crate::database::load_startup_deliveries().unwrap()[0]
+        .command_id
+        .clone();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command_id, reply, ..
+    } = request
+    else {
+        panic!("expected prompt")
+    };
+    assert_eq!(command_id, saved_id);
+    reply
+        .send(Err("connection lost after acceptance".into()))
+        .unwrap();
+    wait_for_startup_pause(&state).await;
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    assert_eq!(session_draft_input(&state), "");
+    let recovered = test_runtime_state_with_manager(&manager);
+    recovered
+        .restore_startup_deliveries(&CancellationToken::new())
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit {
+        command_id, reply, ..
+    } = request
+    else {
+        panic!("expected recovered prompt")
+    };
+    assert_eq!(
+        command_id, saved_id,
+        "restart assigned a new execution identity"
+    );
+    reply.send(Ok(7)).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
+    let Some(_writer) =
+        startup_prompt_test_store("startup_batch_identity_rejects_changed_payload_and_keeps_order")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let cancellation = CancellationToken::new();
+    let steps = || {
+        vec![
+            (
+                "request-first".into(),
+                StartupStep::Prompt {
+                    text: "first".into(),
+                    inherited_draft: None,
+                },
+            ),
+            (
+                "request-second".into(),
+                StartupStep::Prompt {
+                    text: "second".into(),
+                    inherited_draft: None,
+                },
+            ),
+        ]
+    };
+    state
+        .queue_startup_steps_with_ids("session-1", steps(), Some("request".into()), &cancellation)
+        .await
+        .unwrap();
+    state
+        .queue_startup_steps_with_ids("session-1", steps(), Some("request".into()), &cancellation)
+        .await
+        .unwrap();
+    let mut changed = steps();
+    changed.pop();
+    assert!(
+        state
+            .queue_startup_steps_with_ids(
+                "session-1",
+                changed,
+                Some("request".into()),
+                &cancellation
+            )
+            .await
+            .is_err()
+    );
+    let rows = crate::database::load_startup_deliveries().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].command_id, "request-first");
+    assert_eq!(rows[1].command_id, "request-second");
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    crate::database::cancel_startup_groups("session-1").unwrap();
+    assert!(
+        crate::database::set_startup_delivery_phase("request-first", "delivering", None).is_err()
+    );
+    assert!(crate::database::set_startup_delivery_accepted("request-first", Some(9)).is_err());
+    assert_eq!(
+        crate::database::next_startup_delivery("session-1")
+            .unwrap()
+            .unwrap()
+            .phase,
+        "cancelling"
+    );
 }
 
 /// Queueing is refused when the text is empty, when the session can no longer
@@ -2847,22 +2996,17 @@ async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessio
     );
 }
 
-/// Wait for a failed delivery to put text back into the in-memory record.
-/// Unit tests run without a database writer, so the persisted copy fails and
-/// is reported; the in-memory record is what a surface would read.
-async fn wait_for_draft(state: &Arc<RuntimeState>, expected: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let draft = session_draft_input(state);
-        if draft.contains(expected) {
-            return draft;
+async fn wait_for_startup_pause(state: &Arc<RuntimeState>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !notice_texts(state)
+            .iter()
+            .any(|notice| notice.contains("remains saved"))
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "no queued prompt was restored into the session draft"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .expect("startup delivery did not report its saved work");
 }
 
 #[cfg(unix)]
@@ -4354,10 +4498,14 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     )
     .unwrap();
 
-    let state = test_runtime_state_loading_the_store();
+    let mut state = test_runtime_state_loading_the_store();
+    // This fixture needs live recovery admission. Its usual inert observers
+    // belong to coordinators already dropped by the runtime helper.
+    let mut recovery = crate::recovery::RecoveryCoordinator::spawn(state.session_manager.clone());
+    Arc::get_mut(&mut state).unwrap().recovery_observer = recovery.observer();
     // A recovery copy in flight holds the child's stop at its start, where
     // the operation is already visible.
-    state
+    let recovery_attempt = state
         .recovery_observer
         .gate
         .try_start(WORKING_CHILD)
@@ -4380,7 +4528,7 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     })
     .await
     .unwrap();
-    state.recovery_observer.gate.finish(WORKING_CHILD);
+    drop(recovery_attempt);
 
     assert_eq!(
         serde_json::to_value(stopping.kind).unwrap(),
@@ -4399,6 +4547,7 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
             .sessions
             .contains_key(WORKING_CHILD)
     );
+    recovery.shutdown().await.unwrap();
 }
 
 /// Run the named test alone, with a store and a SessionWiki index of its own
@@ -4897,4 +5046,238 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
             .unwrap();
         state.remove_completed_lifecycle(&watch);
     }
+}
+
+#[tokio::test]
+async fn api_startup_persists_the_entire_ordered_followup_before_acknowledging() {
+    let Some(_writer) = startup_prompt_test_store(
+        "api_startup_persists_the_entire_ordered_followup_before_acknowledging",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let followup = crate::server::api::StartFollowup {
+        model: Some("model-a".into()),
+        effort: Some("high".into()),
+        fast_mode: true,
+        prompt: Some("accepted before readiness".into()),
+    };
+    state
+        .queue_api_followup("session-1", "api-test".into(), followup.clone())
+        .await
+        .unwrap();
+    state
+        .queue_api_followup("session-1", "api-test".into(), followup.clone())
+        .await
+        .unwrap();
+    let rows = crate::database::load_latest_startup_group("session-1").unwrap();
+    assert_eq!(
+        rows.len(),
+        4,
+        "retry must reuse the entire existing request"
+    );
+    let commands: Vec<_> = rows.iter().map(|row| row.command_id.as_str()).collect();
+    assert_eq!(
+        commands,
+        [
+            "api-test:model",
+            "api-test:effort",
+            "api-test:fast-mode",
+            "api-test:prompt"
+        ]
+    );
+    assert!(
+        matches!(serde_json::from_str::<StartupStep>(&rows.last().unwrap().step_json).unwrap(), StartupStep::ApiPrompt { text } if text == "accepted before readiness")
+    );
+    let mut changed = followup;
+    changed.prompt = None;
+    assert!(
+        state
+            .queue_api_followup("session-1", "api-test".into(), changed)
+            .await
+            .is_err(),
+        "a request ID cannot change the saved workflow"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), manager.requests.recv())
+            .await
+            .is_err(),
+        "nothing is submitted before readiness"
+    );
+    assert!(
+        !crate::upgrade::active_labels()
+            .iter()
+            .any(|label| label.contains("API startup followup"))
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    assert_eq!(
+        crate::database::load_latest_startup_group("session-1")
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn cancelled_api_startup_is_not_submitted_after_daemon_reconstruction() {
+    let Some(_writer) = startup_prompt_test_store(
+        "cancelled_api_startup_is_not_submitted_after_daemon_reconstruction",
+    ) else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "cancelled-api".into(),
+            crate::server::api::StartFollowup {
+                prompt: Some("must never start".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state.cancel_api_followup("session-1").await.unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    let recovered = test_runtime_state_with_manager(&manager);
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    recovered
+        .restore_startup_deliveries(&CancellationToken::new())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if crate::database::next_startup_delivery("session-1")
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled work should finish receipt cleanup");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), manager.requests.recv())
+            .await
+            .is_err(),
+        "cancelled initial input must not become a new prompt on restart"
+    );
+    assert_eq!(
+        crate::database::load_latest_startup_group("session-1").unwrap()[0].phase,
+        "dismissed"
+    );
+}
+
+#[tokio::test]
+async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
+    let Some(_writer) =
+        startup_prompt_test_store("startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let cancellation = CancellationToken::new();
+    state
+        .queue_startup_step(
+            "session-1",
+            StartupStep::Prompt {
+                text: "first".into(),
+                inherited_draft: None,
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap();
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "first");
+    reply.send(Err("transient disconnect".into())).unwrap();
+    wait_for_startup_pause(&state).await;
+    state
+        .queue_startup_step(
+            "session-1",
+            StartupStep::Prompt {
+                text: "second".into(),
+                inherited_draft: None,
+            },
+            &cancellation,
+        )
+        .await
+        .unwrap();
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(
+        text, "first",
+        "new input overtook the uncertain earlier command"
+    );
+    reply.send(Ok(4)).unwrap();
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "second");
+    reply.send(Ok(8)).unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replayed_child_close_cannot_stop_or_mark_a_resumed_incarnation() {
+    if !in_isolated_parked_test("replayed_child_close_cannot_stop_or_mark_a_resumed_incarnation") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Close replay").unwrap();
+    let child_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let mut child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+    crate::database::save_session(&child).unwrap();
+    let previous = crate::database::session_incarnation(child_id)
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::Stopped;
+    crate::database::save_lifecycle_session(&child).unwrap();
+    child.state = SessionState::Provisioning;
+    crate::database::save_lifecycle_session(&child).unwrap();
+    child.state = SessionState::Running;
+    child.last_error = Some("new incarnation diagnostic".into());
+    crate::database::save_lifecycle_session(&child).unwrap();
+    let current = crate::database::session_incarnation(child_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(previous, current);
+    let state = test_runtime_state_loading_the_store();
+    let error = state
+        .close_subagent_request(
+            child_id.into(),
+            "parent".into(),
+            "old-close".into(),
+            previous,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("earlier child incarnation"));
+    let stored = crate::database::read_durable_session_record(child_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, SessionState::Running);
+    assert_eq!(stored.last_error, child.last_error);
+    assert_eq!(
+        crate::database::session_incarnation(child_id)
+            .unwrap()
+            .as_deref(),
+        Some(current.as_str())
+    );
+    assert!(!state.owner().lifecycle.contains_key(child_id));
 }

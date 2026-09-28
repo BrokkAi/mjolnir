@@ -67,6 +67,7 @@ pub use binary_source::*;
 mod binary_select;
 pub(super) use binary_select::*;
 mod harness;
+pub(crate) use harness::prepare_local_managed_harness;
 pub(super) use harness::*;
 mod catalog;
 pub(super) use catalog::*;

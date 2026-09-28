@@ -11,15 +11,17 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::controller::{Controller, WorkerUpgradeOutcome};
 use crate::recovery::{backoff_delay, elapsed_at_least};
-use crate::recovery_gate::{RecoveryGate, RecoveryObserver};
+use crate::recovery_gate::{
+    ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver, observation_channel,
+};
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
 use mj_core::config::Config;
@@ -29,6 +31,7 @@ use mj_core::state::{SessionRecord, SessionState, State};
 /// consecutive failure. The daemon periodically reobserves quiet sessions, so
 /// without this one broken target would be retried continuously.
 const WORKER_UPGRADE_RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const WORKER_UPGRADE_DEFERRED_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Ceiling on the widening retry delay, so a target that is broken rather than
 /// blipping is still probed, just rarely.
@@ -62,19 +65,13 @@ pub struct WorkerUpgradeObservation {
 /// event loop and must never wait on an upgrade decision.
 #[derive(Clone)]
 pub struct WorkerUpgradeObserver {
-    observations: mpsc::UnboundedSender<WorkerUpgradeObservation>,
+    observations: ObservationSender<WorkerUpgradeObservation>,
 }
 
 impl WorkerUpgradeObserver {
     pub fn observe(&self, observation: WorkerUpgradeObservation) {
-        let session_id = observation.session.id.clone();
-        if let Err(error) = self.observations.send(observation) {
-            tracing::debug!(
-                %session_id,
-                %error,
-                "worker upgrade observation dropped because the coordinator stopped"
-            );
-        }
+        self.observations
+            .send(observation.session.id.clone(), observation, |_, _| {});
     }
 }
 
@@ -88,20 +85,17 @@ pub struct WorkerUpgradeResult {
 }
 
 pub struct WorkerUpgradeCoordinator {
+    supervisor: Option<tokio::task::JoinHandle<()>>,
     observer: WorkerUpgradeObserver,
-    results: mpsc::UnboundedReceiver<WorkerUpgradeResult>,
-    cancelled: Arc<AtomicBool>,
+    results: ObservationReceiver<WorkerUpgradeResult>,
     gate: Arc<RecoveryGate>,
 }
 
 impl Drop for WorkerUpgradeCoordinator {
     fn drop(&mut self) {
-        // Stop the coordinator loop, then cancel every attempt already
-        // running. The gate is shared, so this also stops recovery copies -
-        // which is what dropping either coordinator means: the process that
-        // owns both is going away.
-        self.cancelled.store(true, Ordering::Release);
-        self.gate.cancel_all();
+        // Closing the shared gate prevents new attempts and cancels existing
+        // ones atomically. Both supervisors retain ownership until settlement.
+        self.gate.close();
     }
 }
 
@@ -110,22 +104,22 @@ impl WorkerUpgradeCoordinator {
     /// recovery copy and an upgrade never touch one session at the same time.
     pub fn spawn(session_manager: SessionManagerControl, recovery: &RecoveryObserver) -> Self {
         let (observations_tx, mut observations_rx) =
-            mpsc::unbounded_channel::<WorkerUpgradeObservation>();
-        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<WorkerUpgradeResult>();
-        let (results_tx, results_rx) = mpsc::unbounded_channel();
+            observation_channel::<WorkerUpgradeObservation>();
+        let (results_tx, results_rx) = observation_channel();
         let gate = recovery.gate.clone();
         let coordinator_gate = gate.clone();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let coordinator_cancelled = cancelled.clone();
-        tokio::spawn(async move {
+        let supervisor = tokio::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
+            let mut attempts = JoinSet::new();
+            let mut closing = false;
             loop {
+                if closing && attempts.is_empty() {
+                    break;
+                }
                 tokio::select! {
-                    observed = observations_rx.recv() => {
-                        let Some(observation) = observed else { break };
-                        if coordinator_cancelled.load(Ordering::Acquire) {
-                            break;
-                        }
+                    _ = coordinator_gate.closed(), if !closing => { closing = true; }
+                    observed = observations_rx.recv(), if !closing => {
+                        let Some(observation) = observed else { coordinator_gate.close(); closing = true; continue; };
                         let session_id = observation.session.id.clone();
                         let policy = policies.entry(session_id.clone()).or_default();
                         policy.observe(&observation);
@@ -136,22 +130,21 @@ impl WorkerUpgradeCoordinator {
                         else {
                             continue;
                         };
-                        policy.attempt_started();
-                        let completed_tx = completed_tx.clone();
                         let session_manager = session_manager.clone();
-                        let task_cancelled = upgrade_cancelled.clone();
+                        let task_cancelled = upgrade_cancelled.cancellation();
                         let task_session_id = session_id.clone();
-                        tokio::spawn(async move {
-                            let joined = tokio::task::spawn_blocking(move || {
+                        attempts.spawn(async move {
+                            let (joined, admission) = upgrade_cancelled.run_blocking(move |cancelled| {
+                                let Some(session) = crate::recovery_gate::current_background_session(&observation.session)
+                                    .map_err(|error| format!("read current upgrade placement: {error:#}"))?
+                                else { return Ok(WorkerUpgradeOutcome::Deferred); };
                                 let mut state = State::default();
-                                state
-                                    .sessions
-                                    .insert(task_session_id.clone(), observation.session);
+                                state.sessions.insert(task_session_id.clone(), session);
                                 let controller = Controller {
                                     config: observation.config,
                                     state,
                                 };
-                                let executor = CancellableProcessExecutor::new(task_cancelled)
+                                let executor = CancellableProcessExecutor::new(cancelled)
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
                                 mj_core::runtime::block_on(controller.upgrade_session_worker(
                                     &task_session_id,
@@ -170,43 +163,47 @@ impl WorkerUpgradeCoordinator {
                             let result = WorkerUpgradeResult {
                                 session_id,
                                 outcome,
-                                cancelled: upgrade_cancelled.load(Ordering::Acquire),
+                                cancelled: task_cancelled.load(Ordering::Acquire),
                             };
-                            let result_session_id = result.session_id.clone();
-                            if let Err(error) = completed_tx.send(result) {
-                                tracing::debug!(
-                                    session_id = %result_session_id,
-                                    %error,
-                                    "worker upgrade result dropped because the coordinator stopped"
-                                );
-                            }
+                            (result, admission)
                         });
                     }
-                    completed = completed_rx.recv() => {
-                        let Some(result) = completed else { break };
-                        coordinator_gate.finish(&result.session_id);
+                    completed = attempts.join_next(), if !attempts.is_empty() => {
+                        let Some(completed) = completed else { continue };
+                        let (result, _admission) = match completed {
+                            Ok(completed) => completed,
+                            Err(error) => { tracing::error!(%error, "worker upgrade attempt supervisor failed"); continue; }
+                        };
                         let policy = policies.entry(result.session_id.clone()).or_default();
                         policy.record(&result, Utc::now());
-                        let result_session_id = result.session_id.clone();
-                        if let Err(error) = results_tx.send(result) {
-                            tracing::debug!(
-                                session_id = %result_session_id,
-                                %error,
-                                "worker upgrade result dropped because its consumer stopped"
-                            );
+                        if let Err(error) = &result.outcome && !result.cancelled {
+                            tracing::warn!(session_id = %result.session_id, %error, "background worker upgrade failed");
                         }
+                        results_tx.send(result.session_id.clone(), result, |_, _| {});
                     }
                 }
             }
         });
         Self {
+            supervisor: Some(supervisor),
             observer: WorkerUpgradeObserver {
                 observations: observations_tx,
             },
             results: results_rx,
-            cancelled,
             gate,
         }
+    }
+
+    /// Close admission and wait for every admitted executor and durable
+    /// settlement. The daemon applies its shared shutdown watchdog outside.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.gate.close();
+        if let Some(supervisor) = self.supervisor.take() {
+            supervisor.await.map_err(|error| {
+                anyhow::anyhow!("background coordinator supervisor failed: {error}")
+            })?;
+        }
+        Ok(())
     }
 
     pub fn observer(&self) -> WorkerUpgradeObserver {
@@ -214,7 +211,7 @@ impl WorkerUpgradeCoordinator {
     }
 
     pub fn try_result(&mut self) -> Option<WorkerUpgradeResult> {
-        self.results.try_recv().ok()
+        self.results.try_recv()
     }
 }
 
@@ -224,10 +221,8 @@ struct PolicyState {
     /// The build proved current for this coordinator. While the observed
     /// build still matches it, no attempt is needed and nothing is hashed.
     current_build: Option<String>,
-    /// An attempt is running. The gate enforces this too, but it is shared, so
-    /// the policy keeps its own record of what it started.
-    attempt_in_flight: bool,
     failed_at: Option<DateTime<Utc>>,
+    deferred_at: Option<DateTime<Utc>>,
     consecutive_failures: u32,
 }
 
@@ -236,13 +231,15 @@ impl PolicyState {
     fn due(&self, observation: &WorkerUpgradeObservation, now: DateTime<Utc>) -> bool {
         // Killing a worker mid-turn destroys the turn, and a session that is
         // shutting down or already stopped has no worker worth replacing.
-        if !observation.quiet
-            || observation.session.state != SessionState::Running
-            || self.attempt_in_flight
-        {
+        if !observation.quiet || observation.session.state != SessionState::Running {
             return false;
         }
         if self.worker_is_known_current(observation.worker_build.as_deref()) {
+            return false;
+        }
+        if self.deferred_at.is_some_and(|deferred| {
+            !elapsed_at_least(deferred, now, WORKER_UPGRADE_DEFERRED_INTERVAL)
+        }) {
             return false;
         }
         self.failed_at.is_none_or(|failed_at| {
@@ -278,28 +275,23 @@ impl PolicyState {
             && observation.worker_build.as_deref() == self.current_build.as_deref()
         {
             self.failed_at = None;
+            self.deferred_at = None;
             self.consecutive_failures = 0;
         }
     }
 
-    fn attempt_started(&mut self) {
-        self.attempt_in_flight = true;
-    }
-
     fn record(&mut self, result: &WorkerUpgradeResult, now: DateTime<Utc>) {
-        self.attempt_in_flight = false;
         if result.cancelled {
             // A preempted attempt judged nothing: it must neither be counted
             // as a failure nor suppress the next observation.
             return;
         }
+        self.deferred_at = None;
         match &result.outcome {
             Ok(WorkerUpgradeOutcome::Deferred) => {
-                // The session started working between the observation and the
-                // attempt. That is ordinary, and the next quiet observation
-                // tries again.
-                self.failed_at = None;
-                self.consecutive_failures = 0;
+                // A busy worker or target recovery can refuse the swap. Do not
+                // repeat preparation on every unchanged quiet observation.
+                self.deferred_at = Some(now);
             }
             Ok(outcome @ WorkerUpgradeOutcome::AlreadyCurrent { .. }) => {
                 self.failed_at = None;
@@ -462,19 +454,7 @@ mod tests {
         }
     }
 
-    /// One attempt per session at a time: further observations of the same
-    /// quiet session must not pile up restarts on the same worker.
-    #[test]
-    fn an_attempt_in_flight_suppresses_further_observations() {
-        let now = Utc::now();
-        let mut policy = PolicyState::default();
-        policy.attempt_started();
-
-        assert!(!policy.due(&observation(Some("build-a"), true), now));
-    }
-
-    /// A worker an attempt proved current stays trusted for the coordinator's
-    /// lifetime, while a different observed build is checked immediately.
+    /// A proved build stays current until a different worker is observed.
     #[test]
     fn a_worker_proved_current_stays_trusted_for_coordinator_lifetime() {
         let now = Utc::now();
@@ -501,7 +481,6 @@ mod tests {
     fn a_failed_upgrade_backs_off_and_widens() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
-        policy.attempt_started();
         policy.record(&failure("install the current Mjolnir worker binary"), now);
 
         let interval = chrono::Duration::from_std(WORKER_UPGRADE_RETRY_INTERVAL).unwrap();
@@ -512,7 +491,6 @@ mod tests {
         ));
         assert!(policy.due(&observation(Some("build-a"), true), now + interval));
 
-        policy.attempt_started();
         policy.record(&failure("install the current Mjolnir worker binary"), now);
         assert!(!policy.due(
             &observation(Some("build-a"), true),
@@ -528,9 +506,7 @@ mod tests {
     fn a_successful_upgrade_stops_the_probing_and_confirming_it_clears_the_backoff() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
-        policy.attempt_started();
         policy.record(&failure("install the current Mjolnir worker binary"), now);
-        policy.attempt_started();
         policy.record(&success(upgraded("build-b")), now);
 
         let confirmed = observation(Some("build-b"), true);
@@ -550,7 +526,6 @@ mod tests {
     fn an_upgrade_that_does_not_take_backs_off_instead_of_looping() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
-        policy.attempt_started();
         policy.record(&success(upgraded("build-b")), now);
 
         // The worker came back as something else, so nothing confirms the
@@ -561,23 +536,26 @@ mod tests {
         assert!(!policy.due(&unchanged, now));
         assert!(policy.due(&unchanged, now + interval));
 
-        policy.attempt_started();
         policy.record(&success(upgraded("build-b")), now + interval);
         policy.observe(&unchanged);
         assert!(!policy.due(&unchanged, now + interval * 2));
         assert!(policy.due(&unchanged, now + interval * 3));
     }
 
-    /// A session that started working again judged nothing about the target,
-    /// so the next quiet observation tries straight away.
+    /// Deferrals retain a bounded retry deadline even if observations stay quiet.
     #[test]
-    fn a_deferred_upgrade_is_retried_at_the_next_quiet_observation() {
+    fn a_deferred_upgrade_waits_before_repeating_preparation() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
-        policy.attempt_started();
         policy.record(&success(WorkerUpgradeOutcome::Deferred), now);
 
-        assert!(policy.due(&observation(Some("build-a"), true), now));
+        assert!(!policy.due(&observation(Some("build-a"), true), now));
+        let delay = chrono::Duration::from_std(WORKER_UPGRADE_DEFERRED_INTERVAL).unwrap();
+        assert!(!policy.due(
+            &observation(Some("build-a"), true),
+            now + delay - chrono::Duration::milliseconds(1)
+        ));
+        assert!(policy.due(&observation(Some("build-a"), true), now + delay));
     }
 
     /// A preempted attempt says nothing either way: it must not count as a
@@ -586,7 +564,6 @@ mod tests {
     fn a_preempted_attempt_is_neither_a_success_nor_a_failure() {
         let now = Utc::now();
         let mut policy = PolicyState::default();
-        policy.attempt_started();
         policy.record(
             &WorkerUpgradeResult {
                 session_id: "session-1".into(),
@@ -609,30 +586,29 @@ mod tests {
 
         assert!(gate.try_start("session-1").is_none());
 
-        gate.finish("session-1");
-        assert!(gate.try_start("session-1").is_some());
         drop(recovery_copy);
+        assert!(gate.try_start("session-1").is_some());
     }
 
     /// Observing must hand off and return: the daemon reports from its event
     /// loop, and no upgrade decision may hold that loop up.
     #[test]
     fn observing_hands_off_without_waiting() {
-        let (observations, mut queued) = mpsc::unbounded_channel();
+        let (observations, mut queued) = observation_channel();
         let observer = WorkerUpgradeObserver { observations };
 
         for _ in 0..64 {
             observer.observe(observation(Some("build-a"), true));
         }
 
-        let received = std::iter::from_fn(|| queued.try_recv().ok()).count();
-        assert_eq!(received, 64);
+        let received = std::iter::from_fn(|| queued.try_recv()).count();
+        assert_eq!(received, 1);
     }
 
     /// A stopped coordinator leaves observing harmless.
     #[test]
     fn observing_a_stopped_coordinator_is_a_no_op() {
-        let (observations, queued) = mpsc::unbounded_channel();
+        let (observations, queued) = observation_channel();
         let observer = WorkerUpgradeObserver { observations };
         drop(queued);
 

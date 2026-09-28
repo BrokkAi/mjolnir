@@ -994,10 +994,11 @@ impl DurableRelay {
         snapshot
             .handled_commands
             .iter()
-            .filter(|(_, handled)| {
-                handled
-                    .terminal_ordinal
-                    .is_some_and(|terminal| terminal <= through)
+            .filter(|(command_id, handled)| {
+                !snapshot.retained_command_receipts.contains(*command_id)
+                    && handled
+                        .terminal_ordinal
+                        .is_some_and(|terminal| terminal <= through)
             })
             .map(|(command_id, _)| command_id.clone())
             .collect()
@@ -1029,13 +1030,14 @@ impl DurableRelay {
             self.finish_relay_local_command(&command_id)?;
         }
 
-        // Checkpoint barriers are controller-owned coordination commands. A
-        // restarted relay has no owner that can complete them, regardless of
-        // whether they were merely accepted, started, or already ready.
+        // Ordinary checkpoint barriers lose their connection owner on restart.
+        // A sealed Move/close cut instead belongs to durable lifecycle recovery
+        // and must retain its admission fence until explicit release/completion.
         let mut ownerless_barriers: Vec<(u64, String)> = self
             .snapshot
             .dispatches
             .iter()
+            .filter(|(id, _)| self.snapshot.command_ledger_seal.as_ref() != Some(*id))
             .filter(|(_, dispatch)| {
                 matches!(dispatch.command, RelayCommand::BeginCheckpoint { .. })
                     && !matches!(
@@ -1070,6 +1072,7 @@ impl DurableRelay {
             .snapshot
             .dispatches
             .iter()
+            .filter(|(id, _)| self.snapshot.command_ledger_seal.as_ref() != Some(*id))
             .filter(|(_, dispatch)| dispatch.state == RelayDispatchState::InFlight)
             .filter_map(|(command_id, _)| {
                 self.snapshot

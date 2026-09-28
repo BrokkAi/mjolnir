@@ -723,6 +723,119 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;")?;
     }
 
+    // Breaking: an older daemon cannot resume acknowledged startup delivery
+    // and may instead restore or resend its prompt with a different identity.
+    if version < 59 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS startup_steps (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                group_id TEXT,
+                command_id TEXT NOT NULL UNIQUE,
+                step_json TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (phase IN ('pending', 'delivering', 'accepted', 'cancelling', 'rejecting', 'done', 'failed', 'dismissed')),
+                error TEXT,
+                accepted_ordinal INTEGER
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS startup_steps_session_sequence
+                ON startup_steps(session_id, sequence);
+            CREATE INDEX IF NOT EXISTS startup_steps_group_sequence
+                ON startup_steps(group_id, sequence) WHERE group_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS startup_steps_pending
+                ON startup_steps(session_id, sequence)
+                WHERE phase IN ('pending', 'delivering', 'accepted', 'cancelling', 'rejecting');
+            UPDATE schema_compatibility SET minimum_compatible_version = 59 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (59, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 59;
+            COMMIT;")?;
+    }
+    // Breaking: older dispatchers would resolve a prepared request's target
+    // again instead of honoring its persisted effect identity and outcome.
+    if version < 60 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS delegation_effects (
+                parent_session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                prepared_json TEXT,
+                result_json TEXT,
+                receipt_pending INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(parent_session_id, request_id)
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS delegation_effects_receipt_cleanup
+                ON delegation_effects(parent_session_id, request_id) WHERE receipt_pending = 1;
+            UPDATE schema_compatibility SET minimum_compatible_version = 60 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (60, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 60;
+            COMMIT;")?;
+    }
+    // Breaking: older review hosts clear active reviews on startup and cannot
+    // reconstruct or preserve the durable orchestration and effect outbox.
+    if version < 61 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "turn_review_state",
+            "orchestration",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE turn_review_state ADD COLUMN orchestration TEXT;"
+        };
+        connection.execute_batch(&format!("BEGIN IMMEDIATE;
+            {add_column}
+            UPDATE schema_compatibility SET minimum_compatible_version = 61 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (61, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 61;
+            COMMIT;"))?;
+    }
+    // Breaking: older recovery cannot distinguish an accepted worker swap
+    // awaiting readiness from a worker that should be recreated or abandoned.
+    if version < 62 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS worker_restart_intents (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                operation_id TEXT NOT NULL,
+                target_json TEXT NOT NULL,
+                desired_build TEXT NOT NULL,
+                phase TEXT NOT NULL CHECK(phase IN ('prepared', 'swapping', 'awaiting_readiness'))
+            ) STRICT;
+            UPDATE schema_compatibility SET minimum_compatible_version = 62 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (62, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 62;
+            COMMIT;")?;
+    }
+
+    // Breaking: older delegation executors do not fence delayed lifecycle
+    // effects against the durable incarnation they originally selected.
+    if version < 63 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS session_incarnations (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                identity TEXT NOT NULL
+            ) STRICT;
+            INSERT OR IGNORE INTO session_incarnations(session_id, identity)
+                SELECT session_id, lower(hex(randomblob(16))) FROM sessions;
+            CREATE TRIGGER IF NOT EXISTS session_incarnation_insert
+                AFTER INSERT ON sessions BEGIN
+                    INSERT INTO session_incarnations(session_id, identity)
+                    VALUES(NEW.session_id, lower(hex(randomblob(16))));
+                END;
+            CREATE TRIGGER IF NOT EXISTS session_incarnation_resume
+                AFTER UPDATE OF state ON sessions
+                WHEN (NEW.state = 'provisioning' AND OLD.state <> 'provisioning')
+                  OR (NEW.state = 'running' AND OLD.state IN
+                      ('stopped', 'parked', 'error', 'lost', 'destroyed-with-data-loss'))
+                BEGIN
+                    UPDATE session_incarnations SET identity = lower(hex(randomblob(16)))
+                    WHERE session_id = NEW.session_id;
+                END;
+            UPDATE schema_compatibility SET minimum_compatible_version = 63 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (63, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 63;
+            COMMIT;")?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -946,8 +1059,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 57 replaces stored API event bodies.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 58;
+    /// `SCHEMA_VERSION`. Migration 62 requires durable worker-swap recovery.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 63;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

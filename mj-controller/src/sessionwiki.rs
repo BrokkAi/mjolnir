@@ -1971,6 +1971,7 @@ fn snapshot_of(
     let event_frontier = transcript.len() as u64;
     let last_activity_at_ms = transcript.last().map(|item| item.last_changed_at_ms);
     Ok(CanonicalSessionSnapshot {
+        command_ledger: None,
         assessment_state: None,
         event_frontier,
         // Not a relay frontier, so there is no recorded digest to carry. It has
@@ -2250,6 +2251,7 @@ mod tests {
                     primary_repository: "project".into(),
                 },
                 canonical_session: CanonicalSessionSnapshot {
+                    command_ledger: None,
                     assessment_state: None,
                     event_frontier: 4,
                     event_frontier_digest: "a".repeat(64),

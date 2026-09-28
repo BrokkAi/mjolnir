@@ -4877,6 +4877,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
     std::fs::write(
         mj_core::relay::restored_relay_seed_path(&root),
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+            command_ledger: None,
             assessment_state: None,
             event_frontier: 0,
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
@@ -4917,6 +4918,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
     std::fs::write(
         mj_core::relay::restored_relay_seed_path(&root),
         serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+            command_ledger: None,
             assessment_state: None,
             event_frontier: 0,
             event_frontier_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
@@ -4954,6 +4956,7 @@ fn a_restored_never_prompted_session_may_replace_its_native_session() {
         std::fs::write(
             mj_core::relay::restored_relay_seed_path(&root),
             serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+                command_ledger: None,
                 assessment_state: None,
                 event_frontier: 7,
                 event_frontier_digest: "b".repeat(64),
@@ -5315,16 +5318,26 @@ fn repeated_dispatch_wakes_coalesce_to_one_pending_token() {
 }
 
 #[tokio::test]
-async fn coordinator_failure_aborts_peer_and_preserves_the_cause() {
-    let mut peer = tokio::spawn(std::future::pending::<()>());
-    let error = unix::abort_peer_and_return(
+async fn coordinator_failure_waits_for_peer_cleanup_and_preserves_the_cause() {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let peer_shutdown = shutdown.clone();
+    let peer_stopped = stopped.clone();
+    let mut peer = tokio::spawn(async move {
+        peer_shutdown.cancelled().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        peer_stopped.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    });
+    let error = unix::stop_peer_and_return(
         &mut peer,
+        &shutdown,
         anyhow::anyhow!("original coordinator failure"),
         "relay coordinator failed",
     )
     .await
     .unwrap_err();
-
+    assert!(stopped.load(std::sync::atomic::Ordering::Acquire));
     assert!(peer.is_finished());
     assert!(format!("{error:#}").contains("original coordinator failure"));
 }
@@ -6575,4 +6588,134 @@ async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
 /// events without one.
 fn no_prompt_loop() -> mpsc::Sender<CommandRequest> {
     mpsc::channel(1).0
+}
+
+#[test]
+fn sealed_move_restart_refreshes_its_cut_after_startup_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let request = |relay: &mut DurableRelay, request| {
+        relay
+            .handle(RelayRequestEnvelope {
+                request_id: "startup-recut-request".into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request,
+            })
+            .body
+    };
+    let export =
+        |cursor: &mj_core::relay::RelayCursor, offset| RelayRequest::CheckpointCommandLedger {
+            through_ordinal: cursor.ordinal,
+            through_digest: cursor.digest.clone(),
+            seal: true,
+            offset,
+        };
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(
+        &mut durable,
+        "move-startup-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    durable.claim_pending_commands(true).unwrap();
+    durable
+        .record_checkpoint_ready("move-startup-barrier")
+        .unwrap();
+    let original = durable.operational_state().checkpoint_ready.unwrap();
+    assert!(matches!(
+        request(&mut durable, export(&original, 0)),
+        RelayResponseBody::Ok { .. }
+    ));
+    drop(durable);
+
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    durable.refresh_sealed_checkpoint().unwrap();
+    assert_eq!(
+        durable.operational_state().checkpoint_ready,
+        Some(original.clone())
+    );
+    assert!(durable.operational_state().latest_ordinal > original.ordinal);
+    let relay = Arc::new(Mutex::new(durable));
+    for (index, event) in [
+        RuntimeEvent::SessionStarted {
+            native_session_id: "resumed-native".into(),
+            resumed: true,
+            execution_mode: None,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        },
+        RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        },
+        RuntimeEvent::SessionModesConfigured { modes: None },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        unix::record_runtime_event(&relay, &mut BTreeMap::new(), &no_prompt_loop(), event).unwrap();
+        let mut durable = relay.lock().unwrap();
+        if index == 1 {
+            let configured = durable.operational_state().checkpoint_ready.unwrap();
+            assert!(matches!(
+                request(&mut durable, export(&configured, 0)),
+                RelayResponseBody::Ok { .. }
+            ));
+        }
+        assert!(matches!(
+            request(
+                &mut durable,
+                RelayRequest::CancelCommandAdmission {
+                    command_id: "never-admitted-command".into(),
+                }
+            ),
+            RelayResponseBody::Error { .. }
+        ));
+    }
+    let mut durable = relay.lock().unwrap();
+    let state = durable.operational_state();
+    let refreshed = state.checkpoint_ready.unwrap();
+    assert_eq!(refreshed.ordinal, state.latest_ordinal);
+    assert_eq!(refreshed.digest, state.latest_digest);
+    assert!(refreshed.ordinal > original.ordinal);
+    durable.refresh_sealed_checkpoint().unwrap();
+    assert_eq!(
+        durable.operational_state().latest_ordinal,
+        refreshed.ordinal
+    );
+    assert!(matches!(
+        request(&mut durable, export(&original, 1)),
+        RelayResponseBody::Error { .. }
+    ));
+    assert!(
+        matches!(
+            request(&mut durable, export(&refreshed, 1)),
+            RelayResponseBody::Error { .. }
+        ),
+        "the changed cut must invalidate the prior paged export"
+    );
+    assert!(matches!(
+        request(&mut durable, export(&refreshed, 0)),
+        RelayResponseBody::Ok { .. }
+    ));
+    submit(
+        &mut durable,
+        "release-startup-seal",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "move-startup-barrier".into(),
+        },
+    );
+    submit(
+        &mut durable,
+        "prompt-after-startup-release",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("continue")],
+        },
+    );
+    let claimed = durable.claim_pending_commands(true).unwrap();
+    assert!(
+        claimed
+            .iter()
+            .any(|command| command.command_id == "prompt-after-startup-release")
+    );
 }

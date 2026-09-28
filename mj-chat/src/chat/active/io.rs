@@ -531,6 +531,7 @@ impl ActiveChat {
         match result {
             Ok(session) => {
                 let view = session.view();
+                self.instance = ChatInstance(Arc::new(()));
                 self.session = session;
                 self.session_open = apply_session_view(&mut self.state, Ok(view));
                 self.apply_deferred_elicitation_draft();

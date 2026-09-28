@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
+mod external_links;
+
 #[cfg(not(target_os = "android"))]
 use tao::dpi::LogicalSize;
 #[cfg(not(target_os = "android"))]
@@ -83,6 +85,7 @@ pub enum DesktopShellExit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellEvent {
     CookieInstalled,
+    OpenExternal(String),
     Close,
     Fatal(String),
 }
@@ -232,21 +235,23 @@ pub fn run(
     .context("create Mjolnir desktop window")?;
 
     let popup_policy = policy.clone();
+    let popup_proxy = event_proxy.clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
         .with_incognito(true)
         .with_new_window_req_handler(move |url, _features| {
-            let _ = handle_navigation(&popup_policy, &url);
+            let _ = handle_navigation(&popup_policy, &url, &popup_proxy);
             NewWindowResponse::Deny
         });
     #[cfg(not(target_os = "macos"))]
     let builder = {
         let navigation_policy = policy.clone();
+        let navigation_proxy = event_proxy.clone();
         builder.with_navigation_handler(move |url| {
             if url == "about:blank" {
                 return true;
             }
-            handle_navigation(&navigation_policy, &url)
+            handle_navigation(&navigation_policy, &url, &navigation_proxy)
         })
     };
 
@@ -284,6 +289,7 @@ pub fn run(
     )?;
     install_bootstrap_cookie(&webview, &policy, &options, event_proxy.clone())?;
 
+    let external_links = external_links::ExternalLinks::new();
     let mut result = Ok(DesktopShellExit::WindowClosed);
     let _exit_code = event_loop.run_return(|event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -299,6 +305,18 @@ pub fn run(
                 }
             }
             Event::UserEvent(ShellEvent::Close) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(ShellEvent::OpenExternal(url)) => {
+                let destination = url.clone();
+                if let Err(error) = external_links.launch(
+                    move || {
+                        webbrowser::open(&destination)
+                            .map_err(|error| format!("open {destination}: {error}"))
+                    },
+                    |error| eprintln!("mj-desktop: failed to open external link: {error}"),
+                ) {
+                    eprintln!("mj-desktop: failed to start external link {url}: {error}");
+                }
+            }
             Event::UserEvent(ShellEvent::Fatal(message)) => {
                 result = Err(anyhow!(message));
                 *control_flow = ControlFlow::Exit;
@@ -323,12 +341,16 @@ fn application_icon() -> Result<Icon> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn handle_navigation(policy: &OriginPolicy, url: &str) -> bool {
+fn handle_navigation(
+    policy: &OriginPolicy,
+    url: &str,
+    event_proxy: &EventLoopProxy<ShellEvent>,
+) -> bool {
     match policy.decide(url) {
         NavigationDecision::Internal => true,
         NavigationDecision::External => {
-            if let Err(error) = webbrowser::open(url) {
-                tracing::warn!(%url, %error, "failed to open external desktop link");
+            if let Err(error) = event_proxy.send_event(ShellEvent::OpenExternal(url.to_owned())) {
+                tracing::warn!(%url, %error, "failed to request external desktop link");
             }
             false
         }
@@ -393,7 +415,8 @@ fn install_platform_certificate_pin(
                     .and_then(|url| url.absoluteString())
                     .map(|url| url.to_string());
                 let allow = candidate.as_deref().is_some_and(|url| {
-                    url == "about:blank" || handle_navigation(&self.ivars().policy, url)
+                    url == "about:blank"
+                        || handle_navigation(&self.ivars().policy, url, &self.ivars().event_proxy)
                 });
                 handler.call((if allow {
                     WKNavigationActionPolicy::Allow

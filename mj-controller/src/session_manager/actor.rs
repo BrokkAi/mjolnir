@@ -1,5 +1,7 @@
 use super::*;
 
+const DEFERRED_SUBMIT_CAPACITY: usize = 32;
+
 /// Whether a session's durable state means its relay actor should stop.
 ///
 /// `Closing` and `Destroying` are still in flight and their owners need the
@@ -424,6 +426,7 @@ pub(super) async fn run_session_actor(
                 }
                 match command {
                     ActorCommand::Submit {
+                        durable,
                         queued_at,
                         command_id,
                         command,
@@ -502,7 +505,15 @@ pub(super) async fn run_session_actor(
                             // A checkpoint or other lifecycle operation owns the
                             // connection. Hold the prompt instead of rejecting it
                             // and deliver it when the lease comes back.
+                            if deferred_submits.len() >= DEFERRED_SUBMIT_CAPACITY {
+                                let _ = reply.send(Err(
+                                    "session lifecycle queue is full; request was not accepted"
+                                        .into(),
+                                ));
+                                continue;
+                            }
                             deferred_submits.push_back(DeferredSubmit {
+                                durable,
                                 queued_at,
                                 command_id,
                                 command,
@@ -515,6 +526,7 @@ pub(super) async fn run_session_actor(
                             &target,
                             &mut connection,
                             DeferredSubmit {
+                                durable,
                                 queued_at,
                                 command_id,
                                 command,
@@ -525,6 +537,46 @@ pub(super) async fn run_session_actor(
                             &updates,
                         )
                         .await;
+                    }
+                    ActorCommand::CommandReceipt {
+                        command_id,
+                        action,
+                        reply,
+                    } => {
+                        let result = async {
+                            // A leased actor may still deliver an earlier queued
+                            // submit. Neither absence nor release is safe until
+                            // its return has drained those deferred commands.
+                            ensure!(
+                                !lifecycle.is_leased(),
+                                "session is reserved for a lifecycle operation"
+                            );
+                            if connection.is_none() {
+                                sync_actor_connection(&target, &mut connection).await?;
+                            }
+                            let client = connection.as_mut().context("relay is disconnected")?;
+                            match action {
+                                CommandReceiptAction::Release => {
+                                    client.release_command_receipt(command_id).await?;
+                                    Ok(None)
+                                }
+                                CommandReceiptAction::Lookup => {
+                                    client.command_receipt(command_id).await
+                                }
+                                CommandReceiptAction::CancelAdmission => {
+                                    client.cancel_command_admission(command_id).await
+                                }
+                            }
+                        }
+                        .await;
+                        if result
+                            .as_ref()
+                            .is_err_and(|error| !is_final_rejection(error))
+                            && !lifecycle.is_leased()
+                        {
+                            connection = None;
+                        }
+                        let _ = reply.send(result);
                     }
                     ActorCommand::Sync { reply } => {
                         if lifecycle.is_leased() {
@@ -936,6 +988,7 @@ pub(super) async fn deliver_submit(
     updates: &CoalescedUpdateSender,
 ) {
     let DeferredSubmit {
+        durable,
         queued_at,
         command_id,
         command,
@@ -971,7 +1024,8 @@ pub(super) async fn deliver_submit(
     let started = Instant::now();
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
         %command_id, queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0, "submission dispatched");
-    let result = submit_actor_command(target, connection, &command_id, &command).await;
+    let result =
+        submit_actor_command_with_receipt(target, connection, &command_id, &command, durable).await;
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
         %command_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         accepted_ordinal = ?result.as_ref().ok(), "submission answered");
@@ -1070,22 +1124,28 @@ pub(super) fn is_final_rejection(error: &anyhow::Error) -> bool {
         .is_some_and(|rejected| !rejected.is_retryable())
 }
 
-pub(super) async fn submit_actor_command(
+async fn submit_actor_command_with_receipt(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
     command_id: &str,
     command: &RelayCommand,
+    durable: bool,
 ) -> Result<u64> {
     let mut first_error = None;
     for attempt in 1..=2 {
         if connection.is_none() {
             sync_actor_connection(target, connection).await?;
         }
-        let result = connection
-            .as_mut()
-            .context("relay is disconnected")?
-            .submit_accepted(command_id.to_owned(), command.clone())
-            .await;
+        let client = connection.as_mut().context("relay is disconnected")?;
+        let result = if durable {
+            client
+                .submit_durable_accepted(command_id.to_owned(), command.clone())
+                .await
+        } else {
+            client
+                .submit_accepted(command_id.to_owned(), command.clone())
+                .await
+        };
         match result {
             Ok(ordinal) => return Ok(ordinal),
             // A final rejection is a completed round trip: the relay read the
@@ -1225,6 +1285,86 @@ pub(super) async fn drive_reviewer(
         ReviewerAction::AnalyzeDelta { repositories } => ReviewerOutcome::ChangedFunctions {
             packet: client.analyze_review_delta(role, repositories).await?,
         },
+        ReviewerAction::SubmitDurable {
+            generation,
+            command_id,
+            command,
+        } => ReviewerOutcome::Accepted {
+            ordinal: client
+                .submit_reviewer_durable(role, generation, command_id, command)
+                .await?,
+        },
+        ReviewerAction::ReviewerCommandReceipt {
+            generation,
+            command_id,
+        } => {
+            match client
+                .reviewer_receipt(
+                    role,
+                    mj_core::relay::ReviewerRequest::CommandReceipt {
+                        generation,
+                        command_id,
+                    },
+                )
+                .await?
+            {
+                mj_core::relay::RelayResponsePayload::CommandReceipt { receipt } => {
+                    ReviewerOutcome::CommandReceipt {
+                        receipt: receipt.map(Box::new),
+                    }
+                }
+                _ => anyhow::bail!("unexpected reviewer command receipt response"),
+            }
+        }
+        ReviewerAction::CancelReviewerCommandAdmission {
+            generation,
+            command_id,
+        } => {
+            match client
+                .reviewer_receipt(
+                    role,
+                    mj_core::relay::ReviewerRequest::CancelCommandAdmission {
+                        generation,
+                        command_id,
+                    },
+                )
+                .await?
+            {
+                mj_core::relay::RelayResponsePayload::CommandReceipt { receipt } => {
+                    ReviewerOutcome::CommandReceipt {
+                        receipt: receipt.map(Box::new),
+                    }
+                }
+                _ => anyhow::bail!("unexpected reviewer cancellation receipt response"),
+            }
+        }
+        ReviewerAction::ReleaseReviewerCommandReceipt {
+            generation,
+            command_id,
+        } => {
+            match client
+                .reviewer_receipt(
+                    role,
+                    mj_core::relay::ReviewerRequest::ReleaseCommandReceipt {
+                        generation,
+                        command_id,
+                    },
+                )
+                .await?
+            {
+                mj_core::relay::RelayResponsePayload::CommandReceiptReleased => {
+                    ReviewerOutcome::CommandReceiptReleased
+                }
+                _ => anyhow::bail!("unexpected reviewer receipt release response"),
+            }
+        }
+        ReviewerAction::ReadLaneDispatches => ReviewerOutcome::PendingLaneDispatches {
+            dispatches: client.read_lane_dispatches().await?,
+        },
+        ReviewerAction::AckLaneDispatches { ids } => {
+            client.ack_lane_dispatches(ids).await?;
+            ReviewerOutcome::LaneDispatchesAcknowledged
+        }
         ReviewerAction::TakeLaneDispatches => ReviewerOutcome::LaneDispatches {
             requests: client.take_lane_dispatches().await?,
         },
@@ -1238,6 +1378,24 @@ pub(super) async fn sync_actor_connection(
     if connection.is_none() {
         let fresh = StandaloneSession::connect(target).await?;
         let snapshot = fresh.snapshot();
+        if let Some(recovery) = target.worker_recovery.as_ref() {
+            let session_id = target.session_id.clone();
+            let source_target = recovery.source_target.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                if let Some(intent) = crate::database::load_worker_restart(&session_id)?
+                    && intent.target == source_target
+                {
+                    // A successful sync establishes a live owner, including
+                    // an older worker that survived a pre-stop interruption or
+                    // a newer build recovered by the replacement daemon.
+                    // Upgrade policy owns the separate build-version decision.
+                    crate::database::finish_worker_restart(&session_id, &intent.operation_id)?;
+                }
+                Ok(())
+            })
+            .await
+            .context("settle worker restart observation")??;
+        }
         *connection = Some(fresh);
         return Ok(Some(snapshot));
     }

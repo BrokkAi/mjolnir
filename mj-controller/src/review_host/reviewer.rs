@@ -157,6 +157,13 @@ pub(super) async fn prepare(
             "prompts are queued; the review waits for them".to_owned(),
         ));
     }
+    if snapshot
+        .operational
+        .relay_protocol_version
+        .is_none_or(|version| version < mj_core::relay::MIN_DURABLE_REVIEW_DISPATCH_PROTOCOL)
+    {
+        return Err(StartRefusal("turn review requires durable worker command receipts; upgrade the worker before starting it".into()));
+    }
     let state = {
         let session = session_id.to_owned();
         let environment = environment.clone();
@@ -253,9 +260,10 @@ pub(super) async fn prepare_recovery(
     let state = tokio::task::spawn_blocking(move || environment.load_state(&session))
         .await
         .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
-    let Some(pending) = state.pending_forward.clone() else {
+    let pending = state.pending_forward.clone();
+    if pending.is_none() && state.orchestration.is_none() {
         return Ok(None);
-    };
+    }
     let handle = control
         .session(session_id.to_owned())
         .await
@@ -282,7 +290,7 @@ pub(super) async fn prepare_recovery(
         reviewer: ReviewerIdentity::default(),
         tier: ReviewTier::Quick,
         materialized: Box::new(snapshot.materialized),
-        resume_forward: Some(pending),
+        resume_forward: pending,
         captured: None,
     }))
 }

@@ -2055,7 +2055,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
     )
 }
 // Delegation policies replace boolean creation fields and extend runtime snapshots.
-pub const PROTOCOL_VERSION: u32 = 40;
+pub const PROTOCOL_VERSION: u32 = 41;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

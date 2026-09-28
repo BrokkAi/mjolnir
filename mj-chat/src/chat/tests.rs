@@ -1260,7 +1260,6 @@ fn restored_question_drafts_keep_distinct_answers_and_reject_changed_requests() 
         assert!(!chat.restore_elicitation_draft(draft.clone()));
         chat.sync_elicitation(std::slice::from_ref(&request));
         assert!(chat.restore_elicitation_draft(draft.clone()));
-        chat.handle_key(key(KeyCode::Enter));
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter)),
             ChatAction::RespondElicitation {

@@ -574,9 +574,8 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "brokk-anvil-client"
-version = "0.28.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e88cd91e25fea589e58a59c5ddb21cd1da4dde312c810ca9890bd6a4cbfcffb"
+version = "0.28.5"
+source = "git+https://github.com/BrokkAi/anvil.git?rev=8248f521c0f99b456b4c48353b7e4993675e137e#8248f521c0f99b456b4c48353b7e4993675e137e"
 dependencies = [
  "anyhow",
  "base64",
@@ -587,6 +586,7 @@ dependencies = [
  "futures",
  "http",
  "jsonschema",
+ "libc",
  "oauth2",
  "rand 0.10.2",
  "reqwest",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "brokk-mj-core",
  "serde",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.23.1"
+version = "2.23.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

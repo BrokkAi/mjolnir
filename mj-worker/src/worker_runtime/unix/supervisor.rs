@@ -3,14 +3,31 @@ use super::*;
 pub(crate) const PROXY_INITIAL_INPUT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-pub(crate) async fn abort_peer_and_return<T>(
-    peer: &mut tokio::task::JoinHandle<T>,
+pub(crate) async fn stop_peer_and_return(
+    peer: &mut tokio::task::JoinHandle<Result<()>>,
+    shutdown: &tokio_util::sync::CancellationToken,
     error: anyhow::Error,
     context: &'static str,
 ) -> Result<()> {
-    peer.abort();
-    let _ = peer.await;
+    shutdown.cancel();
+    // The peer owns a supervisor process, which in turn owns the harness
+    // group. Aborting the peer would kill that owner before it can clean up.
+    let error = match peer.await {
+        Ok(Ok(())) => error,
+        Ok(Err(cleanup)) => error.context(format!("ACP cleanup also failed: {cleanup:#}")),
+        Err(cleanup) => error.context(format!("ACP cleanup task failed: {cleanup}")),
+    };
     Err(error.context(context))
+}
+
+pub(crate) async fn stop_failed_coordinator(peer: &mut tokio::task::JoinHandle<Result<()>>) {
+    peer.abort();
+    match peer.await {
+        Ok(Ok(())) => {}
+        Err(error) if error.is_cancelled() => {}
+        Ok(Err(error)) => tracing::warn!(%error, "relay coordinator failed during shutdown"),
+        Err(error) => tracing::warn!(%error, "relay coordinator task failed during shutdown"),
+    }
 }
 
 pub(crate) async fn read_bounded_line(
@@ -242,11 +259,13 @@ where
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
     command.process_group(0);
     let mut child = command
         .spawn()
         .with_context(|| format!("launch supervised ACP bridge {}", spec.command.display()))?;
+    let _group = mj_core::subprocess::ProcessGroupGuard::new(child.id());
     let pid = child
         .id()
         .context("supervised ACP bridge has no process ID")? as i32;

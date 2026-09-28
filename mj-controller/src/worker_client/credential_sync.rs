@@ -173,7 +173,7 @@ impl CredentialSyncCoordinator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,

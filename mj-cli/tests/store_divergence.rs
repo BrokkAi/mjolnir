@@ -12,7 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-const METADATA_WAIT: Duration = Duration::from_secs(8);
+// Daemon startup pins and probes worker binaries before it publishes its
+// endpoint. That is seconds on a fast host and longer on a shared runner, so
+// this bound only ends a wedged fixture; it is not a startup-time assertion.
+const METADATA_WAIT: Duration = Duration::from_secs(30);
 const EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// A daemon under test is a real process. Kill it however the test ends.

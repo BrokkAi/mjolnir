@@ -351,102 +351,136 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// A replay targets the child incarnation selected when the durable effect
+    /// was prepared. Admission is held across the comparison and all close
+    /// effects, so Resume cannot replace that incarnation between them.
+    pub async fn close_subagent_request(
+        self: &Arc<Self>,
+        session_id: String,
+        parent_session_id: String,
+        request_id: String,
+        expected_incarnation: String,
+    ) -> Result<()> {
+        let key = serde_json::to_string(&(parent_session_id, request_id))?;
+        let result = self.start_or_join_lifecycle_with_key(
+            session_id,
+            LifecycleKind::Suspend,
+            None,
+            Some(key),
+            move |state, session_id, cancelled| async move {
+                let current = blocking({
+                    let session_id = session_id.clone();
+                    move || crate::database::session_incarnation(&session_id)
+                })
+                .await?;
+                if current.as_deref() != Some(expected_incarnation.as_str()) {
+                    return Ok(DaemonLifecycleResult::Superseded);
+                }
+                state.suspend_admitted(session_id, cancelled, true).await
+            },
+        )?;
+        let completed = result.clone();
+        let outcome = Self::wait_lifecycle_result(result).await;
+        self.remove_completed_lifecycle(&completed);
+        match outcome? {
+            DaemonLifecycleResult::Superseded => bail!(
+                "close request belongs to an earlier child incarnation; the current session was left running"
+            ),
+            _ => Ok(()),
+        }
+    }
+
     async fn close_requested_session_with_ack(
         self: &Arc<Self>,
         session_id: String,
         acknowledge_unpublished_work: bool,
     ) -> Result<()> {
         self.wait_before_close(&session_id).await?;
-        let route = blocking({
-            let session_id = session_id.clone();
-            move || {
-                let controller = Controller::load()?;
-                Ok(close_route(controller.state.sessions.get(&session_id)))
-            }
-        })
-        .await?;
-        match route {
-            CloseRoute::Done | CloseRoute::DeferredCleanup => {
-                // The parent is closed already, so nothing can fail after
-                // its sub-agents stop.
-                self.stop_subagents_for_suspend(&session_id).await?;
-                if route == CloseRoute::DeferredCleanup {
-                    self.start_deferred_cleanup(session_id)?;
-                }
-                return Ok(());
-            }
-            CloseRoute::Graceful
-            | CloseRoute::RecoverInterrupted
-            | CloseRoute::SettleWithoutCheckpoint => {}
-        }
-        let operation_session_id = session_id.clone();
-        let result = self
-            .run_lifecycle(
-                operation_session_id,
-                LifecycleKind::Suspend,
-                move |state, session_id, cancelled| async move {
-                    let _recovery_reservation = tokio::task::spawn_blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        let cancelled = cancelled.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                    })
+        self.run_lifecycle(
+            session_id,
+            LifecycleKind::Suspend,
+            move |state, session_id, cancelled| async move {
+                state
+                    .suspend_admitted(session_id, cancelled, acknowledge_unpublished_work)
                     .await
-                    .context("reserve recovery for daemon close task")??;
-                    let mut controller = tokio::task::spawn_blocking(Controller::load)
-                        .await
-                        .context("load controller for daemon close task")??;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state.clone(),
-                        session_id.clone(),
-                    );
-                    let deferred = match route {
-                        // `prepare_suspension` marks a live session `Closing`,
-                        // so this is also the route of every live suspend.
-                        CloseRoute::RecoverInterrupted => {
-                            controller
-                                .recover_interrupted_close_managed(
-                                    &session_id,
-                                    &executor,
-                                    &state.session_manager,
-                                    acknowledge_unpublished_work,
-                                    Some(state.stop_subagents_before_close(&session_id)),
-                                )
-                                .await?
-                        }
-                        // Nothing to archive and no relay to latch, so this
-                        // close only tears down and settles. The route was
-                        // decided after `wait_before_close` let any live
-                        // create or resume finish, so a session that is still
-                        // genuinely provisioning is not caught here.
-                        CloseRoute::SettleWithoutCheckpoint => {
-                            // No checkpoint can fail after the sub-agents stop.
-                            state.stop_subagents_for_suspend(&session_id).await?;
-                            controller.suspend_session_without_checkpoint(&session_id, &executor)?
-                        }
-                        _ => {
-                            controller
-                                .suspend_session_managed_controlled(
-                                    &session_id,
-                                    &executor,
-                                    &state.session_manager,
-                                    acknowledge_unpublished_work,
-                                    Some(state.stop_subagents_before_close(&session_id)),
-                                )
-                                .await?
-                        }
-                    };
-                    Ok(if deferred {
-                        DaemonLifecycleResult::DeferredCleanup
-                    } else {
-                        DaemonLifecycleResult::Done
-                    })
-                },
-            )
-            .await?;
-        let _ = result; // Deferred cleanup is handed off by the daemon-owned supervisor.
+            },
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn suspend_admitted(
+        self: &Arc<Self>,
+        session_id: String,
+        cancelled: Arc<AtomicBool>,
+        acknowledge_unpublished_work: bool,
+    ) -> Result<DaemonLifecycleResult> {
+        let _recovery_reservation = tokio::task::spawn_blocking({
+            let observer = self.recovery_observer.clone();
+            let session_id = session_id.clone();
+            let cancelled = cancelled.clone();
+            move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
+        })
+        .await
+        .context("reserve recovery for daemon close task")??;
+        let mut controller = tokio::task::spawn_blocking(Controller::load)
+            .await
+            .context("load controller for daemon close task")??;
+        let route = close_route(controller.state.sessions.get(&session_id));
+        if matches!(route, CloseRoute::Done | CloseRoute::DeferredCleanup) {
+            self.stop_subagents_for_suspend(&session_id).await?;
+            return Ok(if route == CloseRoute::DeferredCleanup {
+                DaemonLifecycleResult::DeferredCleanup
+            } else {
+                DaemonLifecycleResult::Done
+            });
+        }
+        let executor = DaemonStageReportingExecutor::new(
+            CancellableProcessExecutor::new(cancelled),
+            self.clone(),
+            session_id.clone(),
+        );
+        let deferred = match route {
+            // `prepare_suspension` marks a live session `Closing`,
+            // so this is also the route of every live suspend.
+            CloseRoute::RecoverInterrupted => {
+                controller
+                    .recover_interrupted_close_managed(
+                        &session_id,
+                        &executor,
+                        &self.session_manager,
+                        acknowledge_unpublished_work,
+                        Some(self.stop_subagents_before_close(&session_id)),
+                    )
+                    .await?
+            }
+            // Nothing to archive and no relay to latch, so this
+            // close only tears down and settles. The route was
+            // decided after `wait_before_close` let any live
+            // create or resume finish, so a session that is still
+            // genuinely provisioning is not caught here.
+            CloseRoute::SettleWithoutCheckpoint => {
+                // No checkpoint can fail after the sub-agents stop.
+                self.stop_subagents_for_suspend(&session_id).await?;
+                controller.suspend_session_without_checkpoint(&session_id, &executor)?
+            }
+            _ => {
+                controller
+                    .suspend_session_managed_controlled(
+                        &session_id,
+                        &executor,
+                        &self.session_manager,
+                        acknowledge_unpublished_work,
+                        Some(self.stop_subagents_before_close(&session_id)),
+                    )
+                    .await?
+            }
+        };
+        Ok(if deferred {
+            DaemonLifecycleResult::DeferredCleanup
+        } else {
+            DaemonLifecycleResult::Done
+        })
     }
 
     pub(super) fn start_deferred_cleanup(
@@ -551,7 +585,9 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
+            DaemonLifecycleResult::Move(_)
+            | DaemonLifecycleResult::Park(_)
+            | DaemonLifecycleResult::Superseded => {
                 unreachable!("cleanup cannot return a move outcome")
             }
             DaemonLifecycleResult::DeferredCleanup => {

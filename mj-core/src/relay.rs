@@ -50,7 +50,10 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// session and replace the worker with the current build once it is quiet.
 /// Until then, a request the older worker cannot decode is refused on the
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
-pub const RELAY_PROTOCOL_VERSION: u32 = 25;
+/// Durable review dispatches are read until the controller acknowledges them.
+pub const MIN_DURABLE_REVIEW_DISPATCH_PROTOCOL: u32 = 26;
+
+pub const RELAY_PROTOCOL_VERSION: u32 = 26;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// The first protocol whose workers read a gzip-compressed skills archive
 /// (`HELSKIL2`). A controller sends an older worker the uncompressed
@@ -207,6 +210,9 @@ impl AcpActivityClock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoredRelaySeed {
+    /// Versioned retained command receipts and cancelled admission tombstones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_ledger: Option<serde_json::Value>,
     /// Versioned worker assessment state, validated by assessment::Checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_state: Option<serde_json::Value>,
@@ -236,6 +242,9 @@ impl RestoredRelaySeed {
     /// The same frontier checks a canonical session snapshot carries, so a
     /// malformed seed is refused before it can become relay state.
     pub fn validate(&self) -> Result<()> {
+        if let Some(value) = &self.command_ledger {
+            CheckpointCommandLedger::decode(value, self.event_frontier)?;
+        }
         if let Some(value) = &self.assessment_state {
             crate::assessment::Checkpoint::decode(value)?;
         }

@@ -1,5 +1,25 @@
 use super::*;
 
+enum LifecycleCompletion {
+    Current(Option<Box<ActiveLifecycleOperation>>),
+    Superseded,
+}
+
+fn take_lifecycle_completion(
+    operations: &mut BTreeMap<String, ActiveLifecycleOperation>,
+    update: &DashboardLifecycleUpdate,
+) -> LifecycleCompletion {
+    match operations.entry(update.session_id.clone()) {
+        std::collections::btree_map::Entry::Occupied(entry)
+            if Arc::ptr_eq(&entry.get().cancelled, &update.operation) =>
+        {
+            LifecycleCompletion::Current(Some(Box::new(entry.remove())))
+        }
+        std::collections::btree_map::Entry::Occupied(_) => LifecycleCompletion::Superseded,
+        std::collections::btree_map::Entry::Vacant(_) => LifecycleCompletion::Current(None),
+    }
+}
+
 impl DashboardContext {
     pub(crate) fn cancel_background_work(&mut self) {
         self.help_search.cancel();
@@ -39,11 +59,12 @@ impl DashboardContext {
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
-        self.drain_dashboard_io();
+        let pending_completed = self.drain_dashboard_io();
         self.refresh_open_review();
         // Collected rather than short-circuited: every feed's flag has to be
         // cleared for the next drain.
         [
+            pending_completed,
             self.quota.take_delivered(),
             self.worker.take_delivered(),
             self.runtime_state.take_delivered(),
@@ -403,27 +424,16 @@ impl DashboardContext {
         for chat in self.chats.values_mut() {
             chat.set_review_config(config.review.clone());
         }
-        if config == self.controller.config || self.config_reload_in_flight {
+        if config == self.controller.config {
             return;
         }
         self.controller.config = config.clone();
         self.dashboard.set_config(config);
         self.refresh_chat_context();
         self.refresh_poll_targets();
-        self.request_quota_refresh();
-        self.config_reload_in_flight = true;
-        let workspace_id = self.workspace_id.clone();
-        let client_id = self.client_id.clone();
-        spawn_io(
-            "reload daemon configuration",
-            self.dashboard_io_tx.clone(),
-            move || {
-                let mut controller = Controller::load()?;
-                retain_workspace_sessions(&mut controller, &workspace_id, &client_id)?;
-                Ok(controller)
-            },
-            DashboardIoUpdate::ConfigReloaded,
-        );
+        self.refresh_quotas_if_profiles_changed();
+        // Config and session records have one owner: the runtime feed.
+        // Reloading a Controller from disk here could roll back a newer feed.
     }
 
     pub(crate) fn apply_runtime_records(
@@ -594,9 +604,18 @@ impl DashboardContext {
         while let Some(update) = self.lifecycle.next_ready() {
             self.controller_changed = true;
             let session_id = update.session_id.clone();
-            let operation = self.lifecycle_operations.remove(&session_id);
-            // A completion callback carries only the session id. If a newer
-            // daemon operation is already present in the coherent runtime
+            let operation = match take_lifecycle_completion(&mut self.lifecycle_operations, &update)
+            {
+                LifecycleCompletion::Current(operation) => operation.map(|operation| *operation),
+                LifecycleCompletion::Superseded => {
+                    if let Err(error) = &update.result {
+                        tracing::warn!(%session_id, %error, "superseded lifecycle operation failed");
+                    }
+                    continue;
+                }
+            };
+            // Local operation identity cannot retire a different daemon
+            // operation. If a newer daemon operation is already present in the coherent runtime
             // snapshot, retain its overlay; the next snapshot that removes
             // that operation will settle it. This prevents an old local
             // callback from hiding an authoritative newer operation.
@@ -614,11 +633,24 @@ impl DashboardContext {
         }
     }
 
-    pub(crate) fn drain_dashboard_io(&mut self) {
+    pub(crate) fn drain_dashboard_io(&mut self) -> bool {
+        let mut completed = false;
+        for pending in std::mem::take(&mut self.pending_runtime_updates) {
+            if !pending.update.awaiting_runtime(&self.controller) {
+                completed = true;
+                self.apply_dashboard_io_update(pending.update);
+            } else if std::time::Instant::now() >= pending.deadline {
+                completed = true;
+                self.apply_dashboard_io_update(pending.update.runtime_wait_expired());
+            } else {
+                self.pending_runtime_updates.push(pending);
+            }
+        }
         while let Some(update) = self.dashboard_io.next_ready() {
             self.controller_changed = true;
             self.apply_dashboard_io_update(update);
         }
+        completed
     }
 }
 
@@ -666,6 +698,38 @@ fn session_uses_subagents(session: &mj_core::state::SessionRecord, is_child: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_lifecycle_callback_cannot_remove_a_newer_operation() {
+        let old = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(AtomicBool::new(false));
+        let mut operations = BTreeMap::from([(
+            "session".into(),
+            ActiveLifecycleOperation {
+                retirement: None,
+                cancelled: current.clone(),
+                kind: SessionOperationKind::Resuming,
+                retry_launch: None,
+                notice_name: "session".into(),
+            },
+        )]);
+        let mut update = DashboardLifecycleUpdate {
+            session_id: "session".into(),
+            operation: old,
+            result: Ok(crate::pollers::LifecycleSuccess::Closed),
+        };
+        assert!(matches!(
+            take_lifecycle_completion(&mut operations, &update),
+            LifecycleCompletion::Superseded
+        ));
+        assert!(Arc::ptr_eq(&operations["session"].cancelled, &current));
+        update.operation = current;
+        assert!(matches!(
+            take_lifecycle_completion(&mut operations, &update),
+            LifecycleCompletion::Current(Some(_))
+        ));
+        assert!(operations.is_empty());
+    }
 
     fn claude_session(choice: Option<bool>) -> mj_core::state::SessionRecord {
         mj_core::state::SessionRecord {

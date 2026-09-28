@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use mj_core::config::{Config, TargetTemplate, raw_project_context_id};
+use mj_core::config::{TargetTemplate, raw_project_context_id};
 use mj_core::go::GoRecipe;
 
 use crate::{DashboardAction, DashboardState};
@@ -148,13 +148,7 @@ impl DashboardState {
         action
     }
 
-    pub fn go_launch_action(
-        &mut self,
-        workspace_id: String,
-        config: Config,
-        recipe: GoRecipe,
-    ) -> DashboardAction {
-        self.set_config(config);
+    pub fn go_launch_action(&mut self, workspace_id: String, recipe: GoRecipe) -> DashboardAction {
         DashboardAction::CreateSession {
             workspace_id,
             profile_id: recipe.profile_id,
@@ -402,11 +396,7 @@ mod tests {
         // Preparation from A may finish while B is selected: never overwrite B's recipe.
         let mut prepared = first.recipe.clone().unwrap();
         prepared.bundle_id = Some("prepared-a".into());
-        let action = dashboard.go_launch_action(
-            first_id.clone(),
-            dashboard.config.clone(),
-            prepared.clone(),
-        );
+        let action = dashboard.go_launch_action(first_id.clone(), prepared.clone());
         let saved = dashboard.remember_go_launch(&action).unwrap();
         assert_eq!(saved.0, first.directory);
         assert_eq!(dashboard.go_mode().unwrap().recipe, second.recipe);

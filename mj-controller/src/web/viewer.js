@@ -3896,6 +3896,9 @@ function showLogin() {
   cancelVoiceInput();
   snapshot = undefined;
   viewerState.install({ sessions: [] });
+  retireConversationRequest();
+  conversationGeneration += 1;
+  draftWriters.clear();
   currentSession = null;
   if (eventSource) {
     eventSource.close();
@@ -4284,11 +4287,10 @@ function elicitationFieldValue(field, control) {
   if (field.kind === 'number') return Number(control.value);
   return control.value;
 }
-// Builds the controls and returns collect(), which reads them back as ACP
-// content. A custom answer replaces the choice group it belongs to unless the
-// request pairs it with one specific option, which is how Mjolnir's chat form
-// submits the same request.
-function buildElicitationForm(form, request, register) {
+// Build logical question pages and collect only the requested pages as ACP
+// content. A custom answer replaces its choice group unless the request pairs
+// it with one specific option, matching the terminal form's response shape.
+function buildElicitationForm(form, request, register, onEdit) {
   const entries = [],
     customByOwner = new Map();
   for (const field of request.fields || []) {
@@ -4363,7 +4365,7 @@ function buildElicitationForm(form, request, register) {
       wrapper.append(description);
     }
     form.append(wrapper);
-    entries.push({ field, control, validateChoices });
+    entries.push({ field, control, wrapper, validateChoices });
   }
   for (const entry of entries) {
     const owner = entry.field.custom_answer_for;
@@ -4384,17 +4386,45 @@ function buildElicitationForm(form, request, register) {
       entry.control.addEventListener('change', target.validateChoices);
     }
   }
-  return () => {
-    for (const entry of entries)
+  const questions = entries
+    .filter(entry => customByOwner.get(entry.field.custom_answer_for) !== entry)
+    .map(entry => {
+      const custom = customByOwner.get(entry.field.id);
+      const group = custom ? [entry, custom] : [entry];
+      if (custom) entry.wrapper.append(custom.wrapper);
+      return { field: entry.field, wrapper: entry.wrapper, entries: group };
+    });
+  questions.forEach((question, index) => {
+    question.wrapper.addEventListener('input', () => onEdit(index));
+    question.wrapper.addEventListener('change', () => onEdit(index));
+  });
+  // Validate only participating questions. Hidden, unanswered controls must
+  // neither block the current page nor leak suggested defaults into content.
+  const collect = indices => {
+    const included = new Set(indices.flatMap(index => questions[index].entries));
+    for (const entry of included) {
       if (entry.field.kind === 'text') entry.control.value = entry.control.value.trim();
-    for (const entry of entries)
-      if (entry.field.kind === 'multi_select') entry.validateChoices();
+      entry.validateChoices();
+    }
     const active = new Map();
     for (const [owner, entry] of customByOwner)
-      if (entry.control.value !== '') active.set(owner, entry);
-    if (!form.reportValidity()) return null;
-    const content = {};
+      if (included.has(entry) && entry.control.value !== '') active.set(owner, entry);
+    const restored = [];
     for (const entry of entries) {
+      const custom = active.get(entry.field.id);
+      const omit = !included.has(entry) || (custom && custom.field.custom_answer_option == null);
+      const controls = entry.control.matches('input')
+        ? [entry.control] : [...entry.control.querySelectorAll('input')];
+      for (const input of controls) {
+        restored.push([input, input.disabled]);
+        if (omit) input.disabled = true;
+      }
+    }
+    const valid = form.reportValidity();
+    for (const [input, disabled] of restored) input.disabled = disabled;
+    if (!valid) return null;
+    const content = {};
+    for (const entry of included) {
       const { field, control } = entry;
       if (customByOwner.get(field.custom_answer_for) === entry) {
         if (active.has(field.custom_answer_for)) content[field.id] = control.value;
@@ -4407,67 +4437,132 @@ function buildElicitationForm(form, request, register) {
     }
     return content;
   };
+  return { questions, collect };
 }
 function buildElicitationCard(session, request) {
-  const card = document.createElement('section');
-  card.className = 'card elicitation';
-  const heading = document.createElement('strong');
-  heading.textContent = request.title || 'Input needed';
-  const message = document.createElement('pre');
-  message.className = 'elicitation-message';
-  message.textContent = request.message;
+  const card = el('section', 'card elicitation');
+  const heading = el('strong', '', request.title || 'Input needed');
+  const message = el('pre', 'elicitation-message', request.message);
   const form = document.createElement('form');
-  const status = document.createElement('p');
-  status.className = 'dim';
-  const gated = [],
-    register = control => {
-      gated.push(control);
-      return control;
-    };
-  const collect = buildElicitationForm(form, request, register);
-  const actions = document.createElement('div');
-  actions.className = 'row';
-  const send = document.createElement('button');
+  // Submit goes through the current question's validator, not hidden pages.
+  form.noValidate = true;
+  const status = el('p', 'dim');
+  const progress = el('p', 'elicitation-progress');
+  progress.setAttribute('aria-live', 'polite');
+  const gated = [], register = control => {
+    gated.push(control);
+    return control;
+  };
+  const confirmed = new Set();
+  let current = 0, confirming = false, sent = false;
+  const { questions, collect } = buildElicitationForm(form, request, register, index => {
+    confirmed.delete(index);
+    update();
+  });
+  const unanswered = () => questions.map((_, index) => index).filter(index => !confirmed.has(index));
+  const actions = el('div', 'row elicitation-actions');
+  const button = (label, handler, className = 'secondary') => {
+    const control = register(el('button', className, label));
+    control.type = 'button';
+    if (handler) control.addEventListener('click', handler);
+    actions.append(control);
+    return control;
+  };
+  const focusQuestion = () => questions[current]?.wrapper.querySelector('input')?.focus();
+  const navigate = index => {
+    current = index;
+    confirming = false;
+    update();
+    focusQuestion();
+  };
+  const send = button('Submit all', null, '');
   send.type = 'submit';
-  send.textContent = 'Send answer';
-  register(send);
-  const decline = document.createElement('button');
-  decline.type = 'button';
-  decline.className = 'secondary';
-  decline.textContent = 'Decline';
-  register(decline);
-  const cancel = document.createElement('button');
-  cancel.type = 'button';
-  cancel.className = 'danger';
-  cancel.textContent = 'Cancel';
-  register(cancel);
-  decline.addEventListener('click', () => {
-    submitElicitation(session.id, request.id, { action: 'decline' });
-  });
-  cancel.addEventListener('click', () => {
-    submitElicitation(session.id, request.id, { action: 'cancel' });
-  });
-  actions.append(send, decline, cancel);
-  form.append(actions);
+  const previous = button('←', () => navigate(current - 1));
+  previous.setAttribute('aria-label', 'Previous');
+  previous.title = 'Previous question';
+  const next = button('→', () => navigate(current + 1));
+  next.setAttribute('aria-label', 'Next');
+  next.title = 'Next question';
+  const decline = button('Decline', () => submitElicitation(session.id, request.id, { action: 'decline' }));
+  const cancel = button('Cancel', () => submitElicitation(session.id, request.id, { action: 'cancel' }), 'danger');
+  const warning = el('div', 'elicitation-warning');
+  warning.setAttribute('role', 'alert');
+  const warningText = el('p');
+  const warningList = el('ul');
+  warning.append(warningText, warningList);
+  const back = button('Go back', () => navigate(unanswered()[0] ?? current));
+  const proceed = button('Submit anyway', () => submit());
+  form.append(warning, actions);
+
+  function update() {
+    const missing = unanswered();
+    progress.textContent = questions.length
+      ? `Question ${current + 1}/${questions.length} · ${missing.length} unanswered` : '';
+    questions.forEach((question, index) => { question.wrapper.hidden = confirming || index !== current; });
+    warning.hidden = !confirming;
+    previous.hidden = next.hidden = confirming || questions.length <= 1;
+    send.hidden = decline.hidden = cancel.hidden = confirming;
+    back.hidden = proceed.hidden = !confirming;
+    send.textContent = current + 1 < questions.length ? 'Answer and next' : 'Submit all';
+    for (const control of gated) control.disabled = sent;
+    previous.disabled = sent || current === 0;
+    next.disabled = sent || current + 1 >= questions.length;
+  }
+  function submit() {
+    if (sent) return;
+    const content = collect([...confirmed]);
+    if (content) submitElicitation(session.id, request.id, { action: 'accept', content });
+  }
   form.addEventListener('submit', event => {
     event.preventDefault();
-    const content = collect();
-    if (content) submitElicitation(session.id, request.id, { action: 'accept', content });
+    if (sent) return;
+    if (confirming) {
+      navigate(unanswered()[0] ?? current);
+      return;
+    }
+    if (questions.length) {
+      const content = collect([current]);
+      if (!content) return;
+      if (Object.keys(content).length) confirmed.add(current);
+      else confirmed.delete(current);
+    }
+    if (current + 1 < questions.length) {
+      navigate(current + 1);
+      return;
+    }
+    const missing = unanswered();
+    const required = missing.find(index => questions[index].entries.some(entry => entry.field.required));
+    if (required !== undefined) {
+      navigate(required);
+      status.textContent = `Answer ${questions[required].field.title} before submitting.`;
+      return;
+    }
+    if (missing.length) {
+      warningText.textContent = `Submit with ${missing.length} unanswered question${missing.length === 1 ? '' : 's'}?`;
+      warningList.replaceChildren(...missing.map(index => el('li', '', questions[index].field.title)));
+      confirming = true;
+      update();
+      back.focus();
+      return;
+    }
+    submit();
   });
-  const nodes = [heading];
-  if (request.description) {
-    const description = document.createElement('p');
-    description.className = 'dim';
-    description.textContent = request.description;
-    nodes.push(description);
-  }
-  nodes.push(message, form, status);
-  card.append(...nodes);
+  form.addEventListener('keydown', event => {
+    if (confirming && event.key === 'Escape') {
+      event.preventDefault();
+      navigate(unanswered()[0] ?? current);
+    }
+  });
+  card.append(heading);
+  if (request.description) card.append(el('p', 'dim', request.description));
+  card.append(message, progress, form, status);
+  update();
   return {
     card,
-    setSent(sent) {
-      for (const control of gated) control.disabled = sent;
-      status.textContent = sent ? 'Answer sent \u2014 waiting for the session to apply it.' : '';
+    setSent(value) {
+      sent = value;
+      update();
+      status.textContent = sent ? 'Answer sent — waiting for the session to apply it.' : '';
     },
   };
 }
@@ -5333,42 +5428,76 @@ function renderAttachments() {
 
 const DRAFT_DEBOUNCE_MS = 400;
 let draftTimer = null;
-let draftSaving = false;
+let draftComposerBaseline = null;
+// A session owns its desired draft and one writer. Edits and clears arriving
+// during a PUT replace desired state; the writer drains the latest version.
+const draftWriters = new Map();
 
 function scheduleDraftSave() {
   if (draftTimer) clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, DRAFT_DEBOUNCE_MS);
 }
 
-async function saveDraft() {
+function saveDraft() {
+  if (draftTimer) clearTimeout(draftTimer);
   draftTimer = null;
-  if (!currentSession || draftSaving) return;
-  const sessionId = currentSession;
-  const draft = composerText();
-  draftSaving = true;
-  try {
-    await request(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-      method: 'PUT',
-      body: JSON.stringify({ draft }),
-    });
-  } catch {
-    // A draft that could not be stored is still in the composer, which is the
-    // copy that matters. Saying so on every keystroke would be noise.
-  } finally {
-    draftSaving = false;
+  if (!currentSession || draftComposerBaseline === composerGeneration) return Promise.resolve();
+  draftComposerBaseline = composerGeneration;
+  return queueDraftSave(currentSession, composerText());
+}
+
+function queueDraftSave(sessionId, draft) {
+  let writer = draftWriters.get(sessionId);
+  if (!writer) {
+    writer = { desired: draft, version: 0, task: null };
+    draftWriters.set(sessionId, writer);
   }
+  writer.desired = draft;
+  writer.version += 1;
+  if (writer.task) return writer.task;
+  writer.task = (async () => {
+    try {
+      for (;;) {
+        if (draftWriters.get(sessionId) !== writer) break;
+        const version = writer.version;
+        try {
+          await request(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
+            method: 'PUT',
+            body: JSON.stringify({ draft: writer.desired }),
+          });
+        } catch (error) {
+          if (currentSession === sessionId && draftWriters.get(sessionId) === writer) {
+            draftComposerBaseline = null;
+            document.querySelector('#conversation-error').textContent = `Draft was not saved: ${error.message}`;
+          }
+          // A newer edit gets its own attempt. An unchanged failure waits for
+          // the next explicit save instead of retrying without a state change.
+        }
+        if (version === writer.version) break;
+      }
+    } finally {
+      writer.task = null;
+    }
+  })();
+  return writer.task;
 }
 
 /// Put back what this viewer last typed here and did not send.
 async function restoreDraft(sessionId, generation) {
+  const revision = composerGeneration;
   try {
     const stored = await request(`/api/sessions/${encodeURIComponent(sessionId)}/client-state`);
     if (generation !== conversationGeneration) return;
     // Anything typed while the request was in flight belongs to the person,
     // not to the server.
-    if (stored.draft && !composerText()) {
-      setComposerText(stored.draft);
-      updateCommandPalette();
+    const local = draftWriters.get(sessionId);
+    const draft = local ? local.desired : stored.draft;
+    if (revision === composerGeneration) {
+      if (draft) {
+        setComposerText(draft);
+        updateCommandPalette();
+      }
+      draftComposerBaseline = composerGeneration;
     }
     if (stored.through_event_ordinal > acknowledged) {
       acknowledged = stored.through_event_ordinal;
@@ -5380,16 +5509,20 @@ async function restoreDraft(sessionId, generation) {
 }
 
 let historyOpen = false;
+let historyRequest = null;
 
 /// Search this project's earlier prompts and offer them in the palette.
 async function searchHistory(query) {
   if (!currentSession) return;
-  const generation = conversationGeneration;
+  historyRequest?.controller.abort();
+  const operation = { generation: conversationGeneration, controller: new AbortController() };
+  historyRequest = operation;
   try {
     const found = await request(
       `/api/sessions/${encodeURIComponent(currentSession)}/history?q=${encodeURIComponent(query)}&scope=project`,
+      { signal: operation.controller.signal },
     );
-    if (generation !== conversationGeneration || !historyOpen) return;
+    if (historyRequest !== operation || operation.generation !== conversationGeneration || !historyOpen) return;
     paletteMatches = found.entries.map(text => ({
       insert: text,
       label: text.length > 80 ? `${text.slice(0, 79)}…` : text,
@@ -5422,7 +5555,11 @@ async function searchHistory(query) {
     );
     commandPalette.classList.remove('hidden');
   } catch (err) {
-    document.querySelector('#conversation-error').textContent = err.message;
+    if (historyRequest === operation && operation.generation === conversationGeneration && historyOpen) {
+      document.querySelector('#conversation-error').textContent = err.message;
+    }
+  } finally {
+    if (historyRequest === operation) historyRequest = null;
   }
 }
 
@@ -6016,8 +6153,14 @@ function renderEntries(entries, replace) {
 /// carries the generation it was issued in and drops itself if that generation
 /// has moved on.
 let conversationGeneration = 0;
-let conversationInFlight = false;
-let conversationPending = false;
+let conversationRequest = null;
+
+function retireConversationRequest() {
+  conversationRequest?.controller.abort();
+  conversationRequest = null;
+  historyRequest?.controller.abort();
+  historyRequest = null;
+}
 
 function clearConversationContents() {
   entryNodes.clear();
@@ -6040,7 +6183,7 @@ function syncConversationMode(session) {
   if (next === conversationMode) return;
   conversationMode = next;
   conversationGeneration += 1;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;
@@ -6095,12 +6238,16 @@ async function loadConversation(delta = false) {
   // Revisions arrive in bursts. One load runs at a time and remembers that
   // another was asked for, so a burst costs one extra fetch rather than one
   // fetch each.
-  if (conversationInFlight) {
-    conversationPending = true;
+  if (conversationRequest?.generation === conversationGeneration) {
+    conversationRequest.pending = true;
     return;
   }
-  conversationInFlight = true;
-  const generation = conversationGeneration;
+  conversationRequest?.controller.abort();
+  const operation = {
+    generation: conversationGeneration, controller: new AbortController(), pending: false,
+  };
+  conversationRequest = operation;
+  const generation = operation.generation;
   const sessionId = currentSession;
   try {
     const query = new URLSearchParams();
@@ -6111,6 +6258,7 @@ async function loadConversation(delta = false) {
     const suffix = query.toString() ? `?${query.toString()}` : '';
     const result = await request(
       `/api/conversations/${encodeURIComponent(sessionId)}${suffix}`,
+      { signal: operation.controller.signal },
     );
     const latest = sessionById(sessionId);
     if (
@@ -6127,6 +6275,7 @@ async function loadConversation(delta = false) {
       const through = cursor;
       await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
         method: 'POST',
+        signal: operation.controller.signal,
         body: JSON.stringify({ through }),
       });
       const latest = sessionById(sessionId);
@@ -6150,16 +6299,11 @@ async function loadConversation(delta = false) {
     }
     document.querySelector('#conversation-error').textContent = err.message;
   } finally {
-    conversationInFlight = false;
-    if (conversationPending) {
-      conversationPending = false;
-      const latest = sessionById(sessionId);
-      if (
-        currentSession === sessionId
-        && latest?.capabilities?.open
-        && !isTransitioningSession(latest)
-      ) {
-        loadConversation(generation === conversationGeneration);
+    // An old generation cannot consume a replacement's pending reload.
+    if (conversationRequest === operation) {
+      conversationRequest = null;
+      if (operation.pending && generation === conversationGeneration) {
+        loadConversation(true);
       }
     }
   }
@@ -6170,10 +6314,13 @@ async function openConversation(id) {
   cancelVoiceInput();
   const session = sessionById(id);
   if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
+  saveDraft();
+  setComposerText('');
+  draftComposerBaseline = composerGeneration;
   currentSession = id;
   conversationGeneration += 1;
   conversationMode = null;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;
@@ -6368,11 +6515,13 @@ subagentsButton.onclick = () => {
 /// Leaving has to clear the keyed nodes and the pending elicitation cards, or
 /// the next conversation opens on top of the last one's rows.
 function leaveConversation() {
+  saveDraft();
+  setComposerText('');
   cancelVoiceInput();
   currentSession = null;
   conversationMode = null;
   conversationGeneration += 1;
-  conversationPending = false;
+  retireConversationRequest();
   cursor = 0;
   presentationKey = null;
   acknowledged = 0;

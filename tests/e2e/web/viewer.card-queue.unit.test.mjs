@@ -351,6 +351,7 @@ test('background task stop requests are deduplicated and retain pending state un
     pendingLifecycleActions: new Map(),
     backgroundTaskErrors: new Map(),
     activeSession: () => session,
+    sessionById: id => id === session.id ? session : undefined,
     renderQueue: () => {},
     encodeURIComponent,
     request: (url, options) => {

@@ -105,26 +105,55 @@ pub(super) fn reconcile_actors(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RemoteActorMode {
+    Transport,
+    #[cfg(test)]
+    ReplyFixture,
+}
+
 pub(super) async fn run_remote_session_actor(
     session_id: String,
     mut commands: mpsc::Receiver<ActorCommand>,
     requests: mpsc::Sender<RemoteSessionRequest>,
+    mode: RemoteActorMode,
 ) {
     while let Some(command) = commands.recv().await {
         let request = match command {
             ActorCommand::Submit {
+                durable,
                 queued_at: _,
                 command_id,
                 command,
                 admission,
                 reply,
-            } => RemoteSessionRequest::Submit {
-                session_id: session_id.clone(),
-                command_id,
-                command,
-                admission,
-                reply,
-            },
+            } => {
+                if durable && matches!(mode, RemoteActorMode::Transport) {
+                    let _ = reply.send(Err(
+                        "durable delivery requires the controller-owned session manager".into(),
+                    ));
+                    continue;
+                }
+                RemoteSessionRequest::Submit {
+                    session_id: session_id.clone(),
+                    command_id,
+                    command,
+                    admission,
+                    reply,
+                }
+            }
+            ActorCommand::CommandReceipt { reply, .. } => {
+                #[cfg(test)]
+                if matches!(mode, RemoteActorMode::ReplyFixture) {
+                    // This fake only scripts submissions, not worker retention.
+                    let _ = reply.send(Ok(None));
+                    continue;
+                }
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "command receipts require the controller-owned session manager"
+                )));
+                continue;
+            }
             ActorCommand::Sync { reply } => RemoteSessionRequest::Sync {
                 session_id: session_id.clone(),
                 reply,
@@ -197,6 +226,7 @@ pub(super) fn spawn_remote_actor(
     requests: &mpsc::Sender<RemoteSessionRequest>,
     actors: &mut BTreeMap<String, RemoteActorRegistration>,
     updates: &CoalescedUpdateSender,
+    mode: RemoteActorMode,
 ) {
     let (actor_tx, actor_rx) = mpsc::channel(32);
     let (release_tx, _release_rx) = mpsc::unbounded_channel();
@@ -205,6 +235,7 @@ pub(super) fn spawn_remote_actor(
         session_id.clone(),
         actor_rx,
         requests.clone(),
+        mode,
     ))
     .abort_handle();
     actors.insert(
@@ -224,6 +255,16 @@ pub(super) fn spawn_remote_actor(
 /// live in another process. Target updates still decide which session handles
 /// exist, while [`RemoteSessionPublisher`] supplies their latest views.
 pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
+    spawn_remote_manager(RemoteActorMode::Transport)
+}
+
+/// Script durable submissions using the request reply channel; no worker I/O.
+#[cfg(test)]
+pub(crate) fn spawn_reply_fixture_session_manager() -> Result<RemoteSessionManagerChannels> {
+    spawn_remote_manager(RemoteActorMode::ReplyFixture)
+}
+
+fn spawn_remote_manager(mode: RemoteActorMode) -> Result<RemoteSessionManagerChannels> {
     let (targets_tx, mut targets_rx) = watch::channel(Vec::<RelaySessionTarget>::new());
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
     let (updates_tx, updates_rx) = coalesced_update_channel();
@@ -266,6 +307,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                                 &requests_tx,
                                 &mut actors,
                                 &updates_tx,
+                                mode,
                             );
                         }
                     }
@@ -300,6 +342,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                         &requests_tx,
                         &mut actors,
                         &updates_tx,
+                        mode,
                     );
                 }
             }

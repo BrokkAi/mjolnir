@@ -33,6 +33,7 @@ pub struct UserShellRegistry {
     events: mpsc::Sender<RuntimeEvent>,
     cancellations: BTreeMap<String, Option<oneshot::Sender<()>>>,
     tasks: JoinSet<String>,
+    lifetimes: tokio_util::task::TaskTracker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,11 +55,22 @@ impl UserShellRegistry {
             events,
             cancellations: BTreeMap::new(),
             tasks: JoinSet::new(),
+            lifetimes: tokio_util::task::TaskTracker::new(),
         }
     }
 
     pub fn available_slots(&self) -> usize {
         MAX_CONCURRENT_USER_SHELLS.saturating_sub(self.cancellations.len())
+    }
+
+    /// Close and await this tracker after dropping the registry to wait for
+    /// cancelled shells' process cleanup, even if the coordinator failed.
+    ///
+    /// The Unix worker is the only production caller; it stays compiled on
+    /// Windows so its test still builds under `cargo test --no-run`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn completion_tracker(&self) -> tokio_util::task::TaskTracker {
+        self.lifetimes.clone()
     }
 
     pub fn start(&mut self, request_id: String, command: String) -> Result<()> {
@@ -70,17 +82,22 @@ impl UserShellRegistry {
         let (cancel, cancelled) = oneshot::channel();
         let task_id = request_id.clone();
         let task_events = self.events.clone();
-        let task = spawn_user_shell(request_id.clone(), spec, cancelled, task_events).map_err(
-            |error| {
-                tracing::warn!(
-                    %request_id,
-                    operation = "user_shell_start",
-                    %error,
-                    "could not start user shell"
-                );
-                error
-            },
-        )?;
+        let task = spawn_user_shell(
+            request_id.clone(),
+            spec,
+            cancelled,
+            task_events,
+            &self.lifetimes,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                %request_id,
+                operation = "user_shell_start",
+                %error,
+                "could not start user shell"
+            );
+            error
+        })?;
         self.cancellations.insert(task_id.clone(), Some(cancel));
         self.tasks.spawn(async move {
             if let Err(error) = task.await {
@@ -128,6 +145,7 @@ fn spawn_user_shell(
     spec: UserShellSpec,
     cancelled: oneshot::Receiver<()>,
     events: mpsc::Sender<RuntimeEvent>,
+    lifetimes: &tokio_util::task::TaskTracker,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let shell = user_shell_program(&spec.environment)?;
     let mut command = tokio::process::Command::new(&shell);
@@ -150,7 +168,7 @@ fn spawn_user_shell(
     let mut child = command
         .spawn()
         .with_context(|| format!("start shell {}", shell.display()))?;
-    let pid = child.id().and_then(|pid| i32::try_from(pid).ok());
+    let group = mj_core::subprocess::ProcessGroupGuard::new(child.id());
     let stdout = child
         .stdout
         .take()
@@ -159,12 +177,11 @@ fn spawn_user_shell(
         .stderr
         .take()
         .context("user shell stderr unavailable")?;
-    Ok(tokio::spawn(async move {
+    Ok(lifetimes.spawn(async move {
         let started = Instant::now();
-        let mut group = ProcessGroupGuard { pid };
         let stdout_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
         let stderr_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
-        let stdout_task = tokio::spawn(drain_pipe(
+        let stdout_task = drain_pipe(
             stdout,
             request_id.clone(),
             spec.command.clone(),
@@ -172,8 +189,8 @@ fn spawn_user_shell(
             stderr_buffer.clone(),
             true,
             events.clone(),
-        ));
-        let stderr_task = tokio::spawn(drain_pipe(
+        );
+        let stderr_task = drain_pipe(
             stderr,
             request_id.clone(),
             spec.command.clone(),
@@ -181,34 +198,34 @@ fn spawn_user_shell(
             stderr_buffer.clone(),
             false,
             events.clone(),
-        ));
+        );
 
         let mut cancelled = cancelled;
         let mut timed_out = false;
         let mut was_cancelled = false;
-        let waited = tokio::select! {
-            status = child.wait() => status,
+        // Leader exit does not end the command: descendants may retain pipes.
+        // Keep one cancellation owner until both streams and the child settle.
+        let completed = async { tokio::join!(child.wait(), stdout_task, stderr_task) };
+        tokio::pin!(completed);
+        let (waited, stdout_read, stderr_read) = tokio::select! {
+            result = &mut completed => result,
             _ = &mut cancelled => {
                 was_cancelled = true;
                 group.kill();
-                child.wait().await
+                completed.await
             }
             _ = tokio::time::sleep(USER_SHELL_TIMEOUT) => {
                 timed_out = true;
                 group.kill();
-                child.wait().await
+                completed.await
             }
         };
-        group.disarm();
+        drop(group);
 
-        let stdout_read = stdout_task.await;
-        let stderr_read = stderr_task.await;
         let mut read_errors = Vec::new();
         for (name, read) in [("stdout", stdout_read), ("stderr", stderr_read)] {
-            match read {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => read_errors.push(format!("read {name}: {error:#}")),
-                Err(error) => read_errors.push(format!("{name} reader task failed: {error}")),
+            if let Err(error) = read {
+                read_errors.push(format!("read {name}: {error:#}"));
             }
         }
         let (stdout, stdout_truncated) = stdout_buffer
@@ -362,31 +379,6 @@ impl HeadTailBuffer {
         }
         bytes.extend(self.tail.iter().copied());
         (String::from_utf8_lossy(&bytes).into_owned(), truncated)
-    }
-}
-
-struct ProcessGroupGuard {
-    pid: Option<i32>,
-}
-
-impl ProcessGroupGuard {
-    fn kill(&self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            mj_core::subprocess::terminate_process_group(pid, libc::SIGKILL);
-        }
-        #[cfg(not(unix))]
-        let _ = self.pid;
-    }
-
-    fn disarm(&mut self) {
-        self.pid = None;
-    }
-}
-
-impl Drop for ProcessGroupGuard {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 
@@ -594,5 +586,59 @@ mod tests {
         .await
         .expect("cancelled shell process group was not reaped");
         assert_eq!(result.status, UserShellStatus::Cancelled);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_still_owns_pipes_after_the_shell_leader_exits() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (events, mut received) = mpsc::channel(64);
+        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
+        shells
+            .start(
+                "inherited-pipes".into(),
+                "echo $$ > leader; head -c 131072 /dev/zero; (trap '' TERM; sleep 60) & exit 0"
+                    .into(),
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(cwd.path().join("leader"))
+                    && let Ok(pid) = pid.trim().parse::<i32>()
+                    // SAFETY: signal zero only checks this fixture's leader.
+                    && unsafe { libc::kill(pid, 0) } == -1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            shells.cancel("inherited-pipes"),
+            UserShellCancelOutcome::Requested
+        );
+        let result = finished(&mut received).await;
+        assert_eq!(result.status, UserShellStatus::Cancelled);
+        assert!(result.stdout_truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coordinator_drop_retains_shell_cleanup_until_processes_stop() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel(1);
+        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
+        let completion = shells.completion_tracker();
+        shells
+            .start("coordinator-drop".into(), "sleep 60 & wait".into())
+            .unwrap();
+        drop(shells);
+        drop(received);
+        completion.close();
+        tokio::time::timeout(Duration::from_secs(5), completion.wait())
+            .await
+            .expect("coordinator must retain cleanup after its registry is dropped");
     }
 }

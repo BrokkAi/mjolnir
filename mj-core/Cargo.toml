@@ -20,6 +20,8 @@ include = [
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
     "assets/skills/**/SKILL.md",
+    # Delegation guidance embedded with `include_str!` by `subagent`.
+    "assets/subagent-delegation.md",
     "Cargo.toml",
     "Cargo.lock",
     "/README.md",

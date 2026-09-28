@@ -188,7 +188,10 @@ async function renderAfterFrame(page) {
 async function refresh(page, state) {
   const previous = state.snapshots;
   state.snapshot.revision += 1;
-  await page.evaluate(() => window.fixtureEvents.dispatchEvent(new Event('revision')));
+  // The viewer reconciles a changed daemon by reconnecting and reloading the
+  // whole snapshot; the changes stream itself carries deltas this fixture
+  // does not model.
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
   await renderAfterFrame(page);
 }

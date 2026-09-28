@@ -539,6 +539,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         queued_prompts: Vec::new(),
         active_user_shells: Vec::new(),
         active_agent_terminals: Vec::new(),
+        command_ledger_seal: None,
         checkpoint_barrier: None,
         checkpoint_ready: None,
         last_acp_activity_at_ms: None,
@@ -950,8 +951,34 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
 /// R11-2: a source that cannot be resolved is retried every 30 seconds, and
 /// each retry logged the same WARN again. The failure is reported once; a
 /// retry that fails the same way is logged at debug level.
-#[tokio::test(flavor = "current_thread")]
-async fn phone_projects_warn_once_for_a_repeated_failure() {
+///
+/// Other tests reach these log lines on their own threads, and tracing decides
+/// once per process whether a line is wanted, so this runs alone in a child
+/// process with its own subscriber.
+#[test]
+fn phone_projects_warn_once_for_a_repeated_failure() {
+    const CHILD: &str = "MJ_PHONE_PROJECT_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "phone_projects_warn_once_for_a_repeated_failure",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(phone_projects_log_a_repeated_failure_once());
+}
+
+async fn phone_projects_log_a_repeated_failure_once() {
     let log = crate::test_log::CapturedLog::default();
     let _log = tracing::subscriber::set_default(log.clone());
     let root = tempfile::tempdir().unwrap();

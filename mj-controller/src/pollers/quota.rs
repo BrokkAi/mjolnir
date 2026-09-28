@@ -224,9 +224,8 @@ pub(super) async fn refresh_images(
     if plan.is_empty() {
         return;
     }
-    let Ok(_upgrade_work) = crate::upgrade::activity("image download") else {
-        return;
-    };
+    // Pulls are restartable preparation. Shutdown cancels their subprocesses;
+    // the next daemon discovers any image still missing or out of date.
     // One flag for every host, so quitting kills the pulls in flight instead of
     // waiting out a multi-gigabyte download.
     let cancelled = Arc::new(AtomicBool::new(false));

@@ -60,8 +60,9 @@ test('conversation deltas carry the last presentation key and accept older respo
   const context = vm.createContext({
     currentSession: 'session/1',
     snapshot: { sessions: [{ id: 'session/1', capabilities: { open: true } }] },
-    conversationInFlight: false,
-    conversationPending: false,
+    conversationRequest: null,
+    AbortController,
+    sessionById: id => ({ id, capabilities: { open: true } }),
     conversationGeneration: 0,
     cursor: 0,
     presentationKey: null,
