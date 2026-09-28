@@ -408,6 +408,10 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
 
 pub(super) const DOCKER_OVERLAY_SMOKE_PROBE: &str = "test \"$(cat /mnt/hel-overlay-smoke/original.txt)\" = lower && printf 'changed\\n' >/mnt/hel-overlay-smoke/original.txt && printf 'created\\n' >/mnt/hel-overlay-smoke/container-created.txt";
 
+/// The attachment a VM-hosted Docker daemon gets instead of the overlay: the
+/// container reads the host directory and cannot write to it.
+pub(super) const DOCKER_READ_ONLY_SMOKE_PROBE: &str = "test \"$(cat /mnt/hel-overlay-smoke/original.txt)\" = lower && ! printf 'created\\n' >/mnt/hel-overlay-smoke/container-created.txt 2>/dev/null";
+
 // macOS temporary directories are not normally shared into Docker VMs. The
 // home directory is shared by Colima's default configuration.
 pub(super) fn docker_overlay_smoke_directory() -> Result<tempfile::TempDir> {
@@ -440,15 +444,30 @@ pub(super) fn run_docker_overlay_smoke_test(
         fs::set_permissions(&original, fs::Permissions::from_mode(0o666))?;
     }
     let name = resource_name(smoke_id)?;
+    // Test the attachment sessions on this daemon actually get: a VM-hosted
+    // daemon cannot overlay host directories, so they mount read-only there.
+    let vm_share = local_docker_vm_share(executor)?.is_some();
+    let (access, probe_script, probe_purpose) = if vm_share {
+        (
+            MountAccess::Ro,
+            DOCKER_READ_ONLY_SMOKE_PROBE,
+            "verify Docker read-only attachment",
+        )
+    } else {
+        (
+            MountAccess::Cow,
+            DOCKER_OVERLAY_SMOKE_PROBE,
+            "verify Docker OverlayFS copy-on-write attachment",
+        )
+    };
     let mount = AdditionalMount {
         source: lower.path().to_path_buf(),
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
-        access: MountAccess::Cow,
+        access,
     };
     let create = docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?
-        .purpose("create disposable Docker OverlayFS smoke container");
-    let probe = container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE])
-        .purpose("verify Docker OverlayFS copy-on-write attachment");
+        .purpose("create disposable Docker attachment smoke container");
+    let probe = container_exec("docker", &name, ["sh", "-c", probe_script]).purpose(probe_purpose);
     let cleanup = close_plan(
         &TargetLocator::LocalDocker {
             borrowed_from: None,
@@ -479,11 +498,11 @@ pub(super) fn run_docker_overlay_smoke_test(
     ensure!(
         fs::read(&original).context("read Docker OverlayFS smoke source after container write")?
             == b"lower\n",
-        "Docker OverlayFS smoke test changed its lower source"
+        "Docker attachment smoke test changed its source directory"
     );
     ensure!(
         !added.exists(),
-        "Docker OverlayFS smoke test created a file in its lower source"
+        "Docker attachment smoke test created a file in its source directory"
     );
     Ok(())
 }

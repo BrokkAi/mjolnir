@@ -36,6 +36,7 @@ impl CodexUsageStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageReport {
+    pub banked_resets: Option<u64>,
     pub primary: Option<CodexUsageWindow>,
     pub secondary: Option<CodexUsageWindow>,
 }
@@ -425,14 +426,26 @@ fn parse_report(result: &Value) -> Result<CodexUsageReport, QueryError> {
         .and_then(Value::as_object)
         .and_then(|buckets| buckets.get("codex"));
 
-    codex_snapshot
+    let mut report = codex_snapshot
         .and_then(parse_snapshot)
         .or_else(|| result.get("rateLimits").and_then(parse_snapshot))
-        .ok_or(QueryError::NoData)
+        .ok_or(QueryError::NoData)?;
+    report.banked_resets = result
+        .get("rateLimitResetCredits")
+        .filter(|value| !value.is_null())
+        .and_then(|credits| {
+            let count = credits.get("availableCount").and_then(Value::as_u64);
+            if count.is_none() {
+                tracing::warn!("Codex usage returned malformed reset-credit metadata");
+            }
+            count
+        });
+    Ok(report)
 }
 
 fn parse_snapshot(snapshot: &Value) -> Option<CodexUsageReport> {
     let report = CodexUsageReport {
+        banked_resets: None,
         primary: snapshot.get("primary").and_then(parse_window),
         secondary: snapshot.get("secondary").and_then(parse_window),
     };
@@ -489,6 +502,35 @@ mod tests {
         (env, log)
     }
 
+    #[test]
+    fn banked_resets_use_the_account_total_not_the_capped_details() {
+        let mut response = serde_json::json!({
+            "rateLimitsByLimitId": {"codex": {"secondary": {"usedPercent": 20, "windowDurationMins": 10080}}},
+            "rateLimitResetCredits": {"availableCount": 3, "credits": [{"id": "one"}]}
+        });
+        assert_eq!(
+            super::parse_report(&response).unwrap().banked_resets,
+            Some(3)
+        );
+        for count in [
+            serde_json::json!(0),
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+        ] {
+            response["rateLimitResetCredits"]["availableCount"] = count.clone();
+            let report = super::parse_report(&response).unwrap();
+            assert_eq!(report.banked_resets, count.as_u64());
+            assert_eq!(report.secondary.unwrap().remaining_percent, 80);
+        }
+        response
+            .as_object_mut()
+            .unwrap()
+            .remove("rateLimitResetCredits");
+        assert_eq!(super::parse_report(&response).unwrap().banked_resets, None);
+        response["rateLimitResetCredits"] = serde_json::Value::Null;
+        assert_eq!(super::parse_report(&response).unwrap().banked_resets, None);
+    }
     #[test]
     fn parses_codex_bucket_and_formats_remaining_windows() {
         let report = parse_report(&json!({
@@ -596,6 +638,7 @@ mod tests {
     #[test]
     fn status_labels_available_and_unavailable_values() {
         let available = CodexUsageStatus::Available(CodexUsageReport {
+            banked_resets: None,
             primary: Some(CodexUsageWindow {
                 label: "5H".to_string(),
                 remaining_percent: 75,
@@ -605,6 +648,7 @@ mod tests {
         });
         assert_eq!(available.compact_label(), "Codex usage: 5H 75% left");
         let with_reset = CodexUsageStatus::Available(CodexUsageReport {
+            banked_resets: None,
             primary: Some(CodexUsageWindow {
                 label: "5H".to_string(),
                 remaining_percent: 75,
@@ -833,6 +877,7 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         assert!(matches!(
             first,
             CodexUsageStatus::Available(CodexUsageReport {
+                banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 75,
                     ..
@@ -843,6 +888,7 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         assert!(matches!(
             second,
             CodexUsageStatus::Available(CodexUsageReport {
+                banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 50,
                     ..
@@ -940,6 +986,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":10,"wind
         assert!(matches!(
             status,
             CodexUsageStatus::Available(CodexUsageReport {
+                banked_resets: None,
                 primary: Some(CodexUsageWindow {
                     remaining_percent: 90,
                     ..

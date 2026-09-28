@@ -176,6 +176,12 @@ impl Controller {
         // Preparation can download a managed harness. Keep the old worker and
         // its controls available for all of it; reserve only for the swap.
         let launch = self.current_worker_launch_config(session_id, &backend)?;
+        if let Some(session) = self.state.sessions.get(session_id)
+            && session.build_cache.is_some()
+        {
+            self.prepare_build_cache_links(session, &backend, &launch, executor)
+                .context("prepare shared machine cache configuration before worker upgrade")?;
+        }
         prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
             .context("prepare the current managed harness before replacing the worker")?;
         stage_worker_binary_for_upgrade(executor, &backend, session_id, &binary)

@@ -58,7 +58,7 @@ pub(super) fn repository_default() -> Value {
 }
 
 fn build_cache_defaults() -> Value {
-    json!({"enabled":null,"directory":null,"max_size":null})
+    json!({"enabled":null,"directory":null,"max_size":null,"target_max_size":null})
 }
 
 /// The fields one machine kind needs. A machine owns the host settings every
@@ -222,7 +222,8 @@ pub(super) fn label(key: &str) -> String {
         "subagents" => "Sub-agents",
         "build_cache" => "Build cache (mbx)",
         "directory" => "Cache directory",
-        "max_size" => "Cache size limit (GB)",
+        "max_size" => "Total cache budget (GB)",
+        "target_max_size" => "Worktree build budget (GB)",
         "max_concurrent" => "Maximum concurrent children",
         "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
@@ -702,7 +703,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."
         }
         "max_size" => {
-            "Largest size of the whole cache, in whole GB. Blank uses the host's mbx limits, or min(100 GB, 1/4 free)."
+            "Collection budget for the whole cache, in GB. Blank uses the machine's initial automatic budget."
+        }
+        "target_max_size" => {
+            "Budget for all worktrees' target directories together, in GB. Blank uses mbx's default; the total budget also applies."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "pull_policy" => {

@@ -1407,7 +1407,7 @@ fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
 }
 
 #[test]
-fn a_quota_reads_stale_only_once_its_next_refresh_is_overdue() {
+fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_stale() {
     let controller = controller_with_profiles(&["codex"]);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1417,15 +1417,26 @@ fn a_quota_reads_stale_only_once_its_next_refresh_is_overdue() {
         let quotas = std::collections::BTreeMap::from([(
             "codex".to_owned(),
             ProfileQuota {
+                banked_resets: Some(1),
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,
-                windows: Vec::new(),
+                windows: ["Week", "5H"]
+                    .into_iter()
+                    .map(|label| crate::quota::QuotaWindow {
+                        label: label.into(),
+                        remaining_percent: Some(70),
+                        used: None,
+                        limit: None,
+                        resets: Some("legacy time".into()),
+                        resets_at_epoch_seconds: Some(now as i64 + 3600),
+                    })
+                    .collect(),
                 extra: None,
                 error: None,
                 refreshed_at_epoch_seconds: now - age.as_secs(),
             },
         )]);
-        viewer_snapshot(
+        let projected = viewer_snapshot(
             &controller,
             &[],
             &quotas,
@@ -1451,7 +1462,28 @@ fn a_quota_reads_stale_only_once_its_next_refresh_is_overdue() {
             .quota
             .as_ref()
             .expect("the profile carries its quota")
-            .stale
+            .clone();
+        assert_eq!(projected.windows[0].banked_resets, Some(1));
+        assert_eq!(projected.windows[1].banked_resets, None);
+        assert_eq!(
+            projected.windows[0].reset_countdown_style,
+            mj_client::quota::ResetCountdownStyle::Long
+        );
+        assert_eq!(
+            projected.windows[1].reset_countdown_style,
+            mj_client::quota::ResetCountdownStyle::FiveHour
+        );
+        assert_eq!(
+            projected.windows[0].resets_at_epoch_seconds,
+            Some(now as i64 + 3600)
+        );
+        let serialized = serde_json::to_value(&projected).unwrap();
+        assert_eq!(
+            serialized["windows"][1]["reset_countdown_style"],
+            "five_hour"
+        );
+        assert!(serialized["windows"][1].get("banked_resets").is_none());
+        projected.stale
     };
 
     // A reading taken one refresh interval ago is exactly what a healthy

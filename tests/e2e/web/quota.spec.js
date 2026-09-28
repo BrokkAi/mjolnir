@@ -15,7 +15,7 @@ function between(start, end) {
 const renderSource = [
   between('function el(', '\nconst login'),
   between('function band(', '\n/// The freshness'),
-  between('function renderQuota(', '\nasync function runRefresh('),
+  between('function formatQuotaReset(', '\nasync function runRefresh('),
   between('async function runRefresh(', '\n// ---------------------------------------------------------------------------\n// Data'),
 ].join('\n');
 
@@ -49,7 +49,7 @@ async function mount(page, data) {
     workspace.textContent = 'Workspace';
     document.querySelector('#workspaces').append(workspace);
   });
-  await page.addScriptTag({ content: `const quotaPanel = document.querySelector('#quota'); let snapshot = ${JSON.stringify({ profiles: data })};\n${renderSource}\nrenderQuota();` });
+  await page.addScriptTag({ content: `const quotaPanel = document.querySelector('#quota'); function serverClockMs() { return Date.now(); } let snapshot = ${JSON.stringify({ profiles: data })};\n${renderSource}\nrenderQuota();` });
 }
 
 for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }]) {
@@ -113,4 +113,34 @@ test('failed quota refresh is visible and leaves the control available for retry
   });
   expect(result).toEqual({ sent: { action: 'refresh-quota', profile_id: 'claude' }, disabled: false });
   await expect(page.locator('.quota-error').first()).toHaveText('Refresh unavailable');
+});
+
+
+test('banked reset countdowns tick without snapshots or replacing focused controls', async ({ page }) => {
+  await page.clock.install({ time: new Date(1_000_000_000) });
+  await page.setViewportSize({ width: 320, height: 568 });
+  const data = profiles();
+  data[0].quota.windows = [
+    { label: 'Week', percent_used: 30, resets_at_epoch_seconds: 1_000_000 + 5 * 86400 + 7 * 3600, reset_countdown_style: 'long', banked_resets: 1 },
+    { label: '5H', percent_used: 20, resets_at_epoch_seconds: 1_000_060, reset_countdown_style: 'five_hour' },
+  ];
+  data[1].quota.windows = [{ label: 'Week', resets_at_epoch_seconds: 1_000_060, banked_resets: 0 }];
+  await mount(page, data);
+  const row = page.locator('[data-profile-id="claude"]');
+  await row.locator('summary').click();
+  await expect(row.locator('.quota-reset')).toHaveText(['resets 5d 7h [1]', 'resets 1m']);
+  await expect(page.locator('[data-profile-id="claude2"] .quota-reset')).toHaveText('resets 1m');
+  await row.getByRole('button', { name: 'Refresh' }).focus();
+  await page.evaluate(() => {
+    window.originalReset = document.querySelector('.quota-reset');
+    window.setInterval(updateQuotaClocks, 1000);
+  });
+  await page.clock.runFor(1000);
+  await expect(row.locator('.quota-reset')).toHaveText(['resets 5d 6h [1]', 'resets <1m']);
+  await page.clock.runFor(59000);
+  await expect(row.locator('.quota-reset').nth(1)).toHaveText('resets now');
+  await expect(row).toHaveAttribute('open', '');
+  await expect(row.getByRole('button', { name: 'Refresh' })).toBeFocused();
+  expect(await page.evaluate(() => document.querySelector('.quota-reset') === window.originalReset)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
 });

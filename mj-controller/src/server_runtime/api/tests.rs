@@ -6,6 +6,7 @@ use mj_core::state::SessionRecord;
 
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
+        banked_resets: None,
         profile_id: profile_id.into(),
         harness,
         windows: remaining
@@ -28,6 +29,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
 /// A pay-per-use profile's report: no windows, the API label instead.
 fn usage_priced(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
         windows: Vec::new(),

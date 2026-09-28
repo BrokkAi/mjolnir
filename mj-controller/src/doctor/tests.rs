@@ -827,18 +827,30 @@ fn podman_checks_cover_the_built_in_podman_target() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn docker_image_smoke_uses_managed_overlay_run_exec_and_cleanup() {
     let executor = FakeExecutor::new([
+        Ok(output(b"Docker Engine - Community\n")),
         Ok(output(b"created\n")),
         Ok(output(b"ok\n")),
         Ok(output(b"removed\n")),
+        Ok(output(b"Docker Engine - Community\n")),
     ]);
 
     let check = docker_image_check("docker", "ubuntu:24.04", &executor, true);
 
     assert_eq!(check.status, CheckStatus::Ready);
+    assert!(
+        check
+            .detail
+            .contains("OverlayFS attachment smoke test passed")
+    );
     let commands = executor.commands.borrow();
+    let commands = commands
+        .iter()
+        .filter(|command| command.purpose != "identify the Docker daemon platform")
+        .collect::<Vec<_>>();
     assert_eq!(commands.len(), 3);
     assert_eq!(commands[0].program, "sh");
     assert!(commands[0].args[1].contains("docker volume create"));
@@ -848,6 +860,60 @@ fn docker_image_smoke_uses_managed_overlay_run_exec_and_cleanup() {
     assert_eq!(commands[2].program, "sh");
     assert!(commands[2].args[1].contains("docker rm --force"));
     assert!(commands[2].args[1].contains("docker volume rm --force"));
+}
+
+/// Docker Desktop's daemon runs in a VM that cannot overlay host
+/// directories, so the smoke test checks the read-only attachment sessions
+/// get there instead of failing on the overlay mount (#1152).
+#[cfg(target_os = "linux")]
+#[test]
+fn docker_desktop_smoke_verifies_the_read_only_attachment() {
+    let executor = FakeExecutor::new([
+        Ok(output(b"Docker Desktop 4.40.0 (187762)\n")),
+        Ok(output(b"created\n")),
+        Ok(output(b"ok\n")),
+        Ok(output(b"removed\n")),
+        Ok(output(b"Docker Desktop 4.40.0 (187762)\n")),
+    ]);
+
+    let check = docker_image_check("docker", "ubuntu:24.04", &executor, true);
+
+    assert_eq!(check.status, CheckStatus::Ready, "{}", check.detail);
+    assert!(
+        check
+            .detail
+            .contains("read-only attachment smoke test passed")
+    );
+    let commands = executor.commands.borrow();
+    assert!(
+        commands
+            .iter()
+            .all(|command| !command.args.join(" ").contains("type=overlay"))
+    );
+    let probe = commands
+        .iter()
+        .find(|command| command.args.first().map(String::as_str) == Some("exec"))
+        .expect("smoke probe");
+    assert!(probe.args.last().unwrap().contains("! printf"));
+}
+
+/// A requested smoke test that fails is a fault even for the built-in
+/// `docker` target, so `mj doctor --smoke` exits non-zero (#1152).
+#[test]
+fn failed_smoke_test_of_a_builtin_target_stays_fixable() {
+    let failed = DoctorCheck::fixable(
+        "runtime.docker.image.docker",
+        "Docker image for target docker",
+        "Disposable run/exec/remove smoke test failed",
+        "Fix the configured image or Docker runtime",
+    );
+    let config = Config::default().with_local_targets();
+
+    let smoke = builtin_image_check(Ok(&config), "docker", failed.clone(), true);
+    let presence = builtin_image_check(Ok(&config), "docker", failed, false);
+
+    assert_eq!(smoke.status, CheckStatus::Fixable);
+    assert_eq!(presence.status, CheckStatus::Warning);
 }
 
 #[test]
