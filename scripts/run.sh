@@ -17,6 +17,10 @@
 # scripts/lib/build.sh, with the same default, so the two scripts reuse each
 # other's Cargo artifacts as long as their profiles match.
 #
+# The binaries run from the Cargo target directory, so they refuse to start,
+# replace, stop, or migrate the default instance. Select an isolated one:
+#   scripts/run.sh -- --instance dev
+#
 # On Linux and macOS, a daemon running this host build stays attached.
 # If Cargo replaced the executable since the daemon started, the first daemon
 # connection gracefully replaces it; detached session workers remain active and

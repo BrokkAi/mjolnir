@@ -88,6 +88,22 @@ pub struct GoalDecision {
     pub resume: bool,
 }
 
+/// The goal entry of an adapter's `_meta`: goal controls in the `initialize`
+/// reply, or a goal snapshot in a `session_info_update`.
+///
+/// Codex adapters and claude-agent-acp up to 0.81.0 put it at `_meta.goal`.
+/// From 0.84.0 claude-agent-acp puts it only under `_meta.jetbrains.air.goal`,
+/// for clients that declare the JetBrains AIR extension, as Mjolnir does.
+/// An explicit `null` is returned as `Some(Value::Null)`.
+#[must_use]
+pub fn goal_meta(meta: &serde_json::Map<String, Value>) -> Option<&Value> {
+    meta.get("goal").or_else(|| {
+        meta.get("jetbrains")
+            .and_then(|jetbrains| jetbrains.get("air"))
+            .and_then(|air| air.get("goal"))
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +188,7 @@ impl GoalState {
     }
 
     /// Missing fields are unchanged; explicit null clears a goal.
+    /// The goal is read with [`goal_meta`].
     pub fn apply(&mut self, update: &SessionUpdate) -> Result<bool> {
         let SessionUpdate::SessionInfoUpdate(info) = update else {
             return Ok(false);
@@ -185,7 +202,7 @@ impl GoalState {
                 serde_json::from_value(value.clone()).context("decode goal capability")?;
             changed = true;
         }
-        if let Some(goal) = meta.get("goal") {
+        if let Some(goal) = goal_meta(meta) {
             let was_active = self.active();
             self.snapshot =
                 serde_json::from_value(goal.clone()).context("decode ACP goal state")?;
@@ -333,6 +350,30 @@ mod tests {
         assert_eq!(state.snapshot.as_ref().unwrap().details["tokensUsed"], 42);
         state
             .apply(&update(serde_json::json!({"goal":null})))
+            .unwrap();
+        assert!(state.snapshot.is_none());
+    }
+    #[test]
+    fn reads_claude_goal_metadata_under_the_air_extension() {
+        // claude-agent-acp 0.84.0 sends goal controls and snapshots only
+        // under `_meta.jetbrains.air.goal`.
+        let controls = serde_json::json!({"jetbrains":{"air":{
+            "capabilities":["asyncTasks"],
+            "goal":{"version":1,"controlMethod":"_session/goal","actions":["set","clear"]}
+        }}});
+        let capability: GoalCapability =
+            serde_json::from_value(goal_meta(controls.as_object().unwrap()).unwrap().clone())
+                .unwrap();
+        assert!(capability.supports(GoalControlAction::Clear));
+
+        let mut state = GoalState::default();
+        state
+            .apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":
+                {"objective":"finish","status":"active","createdAt":12}}}})))
+            .unwrap();
+        assert!(state.active());
+        state
+            .apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":null}}})))
             .unwrap();
         assert!(state.snapshot.is_none());
     }

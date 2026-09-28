@@ -140,6 +140,8 @@ impl ControllerStoreGuard {
     }
 
     fn try_acquire_at(directory: &Path) -> Result<Option<Self>> {
+        // The lock holder starts the database writer, which migrates the store.
+        mj_core::config::ensure_may_control_store(directory, "own this data store")?;
         std::fs::create_dir_all(directory)
             .with_context(|| format!("create controller data directory {}", directory.display()))?;
         let path = directory.join("controller.lock");

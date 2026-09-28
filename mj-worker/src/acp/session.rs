@@ -153,7 +153,7 @@ pub(super) async fn serve_session(
     let capability = initialized
         .meta
         .as_ref()
-        .and_then(|meta| meta.get("goal"))
+        .and_then(mj_core::goal::goal_meta)
         .and_then(|value| {
             match serde_json::from_value::<mj_core::goal::GoalCapability>(value.clone()) {
                 Ok(capability) => Some(capability),

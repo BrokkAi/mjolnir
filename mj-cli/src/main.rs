@@ -1454,6 +1454,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             }
         }
         DaemonCommand::Stop => {
+            mj_core::config::ensure_may_control_store(
+                &mj_core::config::data_dir(),
+                "stop the Mjolnir daemon",
+            )?;
             let daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
