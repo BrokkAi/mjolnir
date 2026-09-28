@@ -124,7 +124,6 @@ mod tests {
         CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptBody,
         CanonicalTranscriptItem,
     };
-    use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
 
@@ -183,7 +182,7 @@ mod tests {
                 execution: CanonicalExecutionState::Idle,
                 last_activity_at_ms: None,
                 session_title: None,
-                configuration: BTreeMap::new(),
+                configuration: Default::default(),
             },
             transcript,
             queued_prompts: Vec::new(),

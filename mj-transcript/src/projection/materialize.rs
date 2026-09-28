@@ -10,7 +10,7 @@ pub fn materialized_session_from_entries(
     entries: &[ChatEntry],
     latest_seq: u64,
     phase: WorkerPhase,
-    configuration: BTreeMap<String, serde_json::Value>,
+    configuration: mj_core::state::SessionConfiguration,
     queued_prompts: Vec<MaterializedQueuedPrompt>,
     pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 ) -> MaterializedSession {
@@ -215,7 +215,7 @@ pub fn imported_materialized_session(
         &entries,
         latest_seq,
         phase,
-        BTreeMap::new(),
+        Default::default(),
         Vec::new(),
         Vec::new(),
     )

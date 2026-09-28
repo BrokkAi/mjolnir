@@ -296,10 +296,13 @@ fn input() -> ArchiveInput {
                 execution: CanonicalExecutionState::Idle,
                 last_activity_at_ms: Some(104),
                 session_title: Some("Forge Hel".into()),
-                configuration: BTreeMap::from([(
-                    "reasoning_effort".into(),
-                    serde_json::json!("high"),
-                )]),
+                configuration: mj_core::state::SessionConfiguration {
+                    values: BTreeMap::from([(
+                        "reasoning_effort".into(),
+                        serde_json::json!("high"),
+                    )]),
+                    ..Default::default()
+                },
             },
             transcript: vec![
                 CanonicalTranscriptItem {
@@ -1062,6 +1065,7 @@ fn content_matching_rejects_new_transcript_queue_or_title_content() {
     reconfigured
         .session
         .configuration
+        .values
         .insert("reasoning_effort".into(), serde_json::json!("low"));
     assert!(!archived.content_matches(&reconfigured));
 }

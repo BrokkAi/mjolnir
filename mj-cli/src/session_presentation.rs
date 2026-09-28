@@ -261,7 +261,7 @@ mod tests {
             last_activity_at_ms: None,
             execution: MaterializedExecutionState::Idle,
             session_title: None,
-            configuration: BTreeMap::new(),
+            configuration: Default::default(),
             transcript: Vec::new(),
             queued_prompts: Vec::new(),
             pending_elicitations: Vec::new(),

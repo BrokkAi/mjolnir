@@ -1,11 +1,11 @@
 use super::*;
 
 /// Marks the boundary between a provider's replay of old history and the live
-/// updates of this connection. A resumed worker starts with updates off so a
-/// `session/load` replay does not duplicate turns the durable relay already
-/// holds; every way a session opens must call this once its updates are live.
-pub(super) fn accept_live_session_updates(session_updates_enabled: &AtomicBool) {
-    session_updates_enabled.store(true, Ordering::Release);
+/// history of this connection. Loading suppresses conversation replay, while
+/// current session metadata always passes. Every open path marks this boundary
+/// before accepting new conversation content.
+pub(super) fn accept_live_history(live_history_enabled: &AtomicBool) {
+    live_history_enabled.store(true, Ordering::Release);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21,7 +21,7 @@ pub(super) async fn serve_session(
     agent_output_count: &AgentOutputCount,
     last_agent_message: &LastAgentMessage,
     claude_result_count: &ClaudeResultCount,
-    session_updates_enabled: &AtomicBool,
+    live_history_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
@@ -199,7 +199,7 @@ pub(super) async fn serve_session(
                 .is_some()
         {
             // `session/resume` does not replay, so everything it sends is live.
-            accept_live_session_updates(session_updates_enabled);
+            accept_live_history(live_history_enabled);
             let resumed = connection
                 .send_request(resume_session_request(spec, session_id.clone()))
                 .block_task()
@@ -291,7 +291,7 @@ pub(super) async fn serve_session(
                 }
                 // The response is the boundary between provider replay and
                 // future live updates for this connection.
-                accept_live_session_updates(session_updates_enabled);
+                accept_live_history(live_history_enabled);
                 Some((session_id, config_options, modes))
             }
             None => None,
@@ -307,7 +307,7 @@ pub(super) async fn serve_session(
             // first launch or a resume that replaced an unused session. Without
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
-            accept_live_session_updates(session_updates_enabled);
+            accept_live_history(live_history_enabled);
             let created = connection
                 .send_request(new_session_request(spec, true))
                 .block_task()

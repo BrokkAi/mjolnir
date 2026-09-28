@@ -574,7 +574,10 @@ impl ChatState {
             &self.entries,
             self.latest_seq,
             self.phase,
-            configuration,
+            mj_core::state::SessionConfiguration {
+                values: configuration,
+                ..Default::default()
+            },
             self.queued_prompts
                 .iter()
                 .map(|prompt| MaterializedQueuedPrompt {

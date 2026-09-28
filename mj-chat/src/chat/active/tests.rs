@@ -19,6 +19,67 @@ use ratatui::layout::{Position, Rect};
 use std::collections::BTreeMap;
 
 #[tokio::test]
+async fn live_goal_commands_follow_worker_state_despite_a_damaged_projection() {
+    let mut view = managed_view(MaterializedSession::empty("goal-commands"));
+    view.snapshot.as_mut().unwrap().operational.goal = serde_json::from_value(serde_json::json!({
+        "known": true,
+        "capability": {"version": 1, "controlMethod": "_session/goal", "actions": ["pause", "resume", "clear"]},
+        "snapshot": {"objective": "finish", "status": "paused"},
+        "execution": {"version": 1, "status": "idle"}
+    })).unwrap();
+    // Older workers can also have lost the base command advertisement.
+    assert!(
+        view.snapshot
+            .as_ref()
+            .unwrap()
+            .operational
+            .available_commands
+            .is_empty()
+    );
+    let fixture = mj_client::session::replacement_session_test_fixture("goal-commands", 12);
+    fixture.replacement_view.send_replace(view.clone());
+    let session = fixture.control.session("goal-commands").await.unwrap();
+    let mut active = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let chat = &mut active.state;
+    chat.set_input("/goal resume".into());
+    assert!(matches!(
+        chat.submit_input(),
+        ChatAction::GoalControl {
+            action: mj_core::goal::GoalControlAction::Resume
+        }
+    ));
+    for _ in 0..2 {
+        assert!(apply_session_view(chat, Ok(view.clone())));
+        chat.set_input("/goal finish the work".into());
+        assert!(
+            matches!(chat.submit_input(), ChatAction::Prompt(text) if text == "/goal finish the work")
+        );
+        chat.set_input("/goal resume".into());
+        assert!(matches!(
+            chat.submit_input(),
+            ChatAction::GoalControl {
+                action: mj_core::goal::GoalControlAction::Resume
+            }
+        ));
+        chat.set_input("/unknown-command".into());
+        assert!(matches!(chat.submit_input(), ChatAction::None));
+    }
+    // A newly connected adapter owns capabilities too; do not retain old controls.
+    view.snapshot.as_mut().unwrap().operational.goal = Default::default();
+    apply_session_view(chat, Ok(view));
+    chat.set_input("/goal finish the work".into());
+    assert!(matches!(chat.submit_input(), ChatAction::None));
+}
+
+#[tokio::test]
 async fn handle_event_result_reports_which_events_the_chat_consumed() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-event-result", 72);
     let mut chat = ActiveChat::open(
@@ -1892,17 +1953,13 @@ async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
             String::new(),
             Notices::default(),
         );
-        let mut materialized = MaterializedSession::empty("goal-interrupt");
+        let materialized = MaterializedSession::empty("goal-interrupt");
         let goal: mj_core::goal::GoalState = serde_json::from_value(serde_json::json!({
             "known": true,
             "snapshot": {"objective": "finish the work", "status": "active"},
             "execution": {"version": 1, "status": "running", "turnId": "native-turn"}
         }))
         .unwrap();
-        materialized.configuration.insert(
-            mj_core::goal::PROJECTION_KEY.into(),
-            serde_json::to_value(&goal).unwrap(),
-        );
         let mut view = managed_view(materialized);
         let operational = &mut view.snapshot.as_mut().unwrap().operational;
         operational.goal = goal;

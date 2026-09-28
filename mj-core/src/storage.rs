@@ -105,7 +105,7 @@ pub struct MaterializedSessionMutation {
     pub last_activity_at_ms: Option<i64>,
     pub execution: Option<MaterializedExecutionState>,
     pub session_title: Option<Option<String>>,
-    pub configuration: Option<BTreeMap<String, serde_json::Value>>,
+    pub configuration: Option<SessionConfiguration>,
     pub transcript: Vec<TranscriptMutation>,
     pub queued_prompts: Option<Vec<MaterializedQueuedPrompt>>,
     pub pending_elicitations: Option<Vec<crate::elicitation::ElicitationRequest>>,

@@ -19,7 +19,9 @@ pub(super) fn project_observation(
             }
         }
         RelayObservation::SessionConfigured { config_options } => {
-            mutation.configuration = Some(configuration_values(config_options));
+            let mut configuration = current.configuration.clone();
+            configuration.values = configuration_values(config_options)?;
+            mutation.configuration = Some(configuration);
         }
         RelayObservation::SessionModesConfigured { .. } => {}
         RelayObservation::SessionUpdate { update } => {
@@ -218,16 +220,12 @@ pub(super) fn project_observation(
                     mutation.active_turn = Some(None);
                     mutation.pending_elicitations = Some(Vec::new());
                     let mut configuration = current.configuration.clone();
-                    let mut goal = mj_core::goal::GoalState::from_configuration(&configuration)?;
-                    goal = mj_core::goal::GoalState {
+                    let goal = configuration.goal.take().unwrap_or_default();
+                    configuration.goal = Some(Box::new(mj_core::goal::GoalState {
                         capability: goal.capability,
                         known: true,
                         ..Default::default()
-                    };
-                    configuration.insert(
-                        mj_core::goal::PROJECTION_KEY.into(),
-                        serde_json::to_value(goal)?,
-                    );
+                    }));
                     mutation.configuration = Some(configuration);
                     upsert(
                         mutation,
@@ -252,8 +250,7 @@ pub(super) fn project_observation(
                     diagnostic,
                 } => {
                     let native_running =
-                        mj_core::goal::GoalState::from_configuration(&current.configuration)?
-                            .running();
+                        current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
                     if !native_running {
                         close_streams(index, mutation, event.recorded_at_ms);
                         mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -404,7 +401,11 @@ pub(super) fn project_observation(
                 mutation.queued_prompts = Some(queue);
             }
             if prompt_was_started
-                && !mj_core::goal::GoalState::from_configuration(&current.configuration)?.running()
+                && !current
+                    .configuration
+                    .goal
+                    .as_deref()
+                    .is_some_and(mj_core::goal::GoalState::running)
             {
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
@@ -495,7 +496,9 @@ pub(super) fn project_observation(
         }
         RelayObservation::ConfigurationUpdated { key, value } => {
             let mut configuration = current.configuration.clone();
-            configuration.insert(key.clone(), Value::String(value.clone()));
+            configuration
+                .values
+                .insert(key.clone(), Value::String(value.clone()));
             mutation.configuration = Some(configuration);
         }
         RelayObservation::CheckpointReady { .. } => {}
@@ -623,14 +626,9 @@ pub(super) fn project_observation(
             push_system(mutation, event, format!("warning: {message}"));
         }
         RelayObservation::SessionRestarted => {
-            if let Some(value) = current.configuration.get(mj_core::goal::PROJECTION_KEY) {
-                let mut goal: mj_core::goal::GoalState = serde_json::from_value(value.clone())?;
+            let mut configuration = current.configuration.clone();
+            if let Some(goal) = configuration.goal.as_mut() {
                 goal.restart();
-                let mut configuration = current.configuration.clone();
-                configuration.insert(
-                    mj_core::goal::PROJECTION_KEY.into(),
-                    serde_json::to_value(goal)?,
-                );
                 mutation.configuration = Some(configuration);
             }
             push_system_with_id(

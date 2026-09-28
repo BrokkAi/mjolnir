@@ -167,24 +167,23 @@ pub(super) fn project_session_update(
             }
         }
         SessionUpdate::ConfigOptionUpdate(update) => {
-            mutation.configuration = Some(configuration_values(&update.config_options));
+            let mut configuration = current.configuration.clone();
+            configuration.values = configuration_values(&update.config_options)?;
+            mutation.configuration = Some(configuration);
         }
         SessionUpdate::CurrentModeUpdate(update) => {
             let mut configuration = current.configuration.clone();
-            configuration.insert(
+            configuration.values.insert(
                 "mode".into(),
                 Value::String(update.current_mode_id.to_string()),
             );
             mutation.configuration = Some(configuration);
         }
         SessionUpdate::SessionInfoUpdate(update) => {
-            let mut goal = mj_core::goal::GoalState::from_configuration(&current.configuration)?;
+            let mut configuration = current.configuration.clone();
+            let mut goal = configuration.goal.take().unwrap_or_default();
             if goal.apply(&SessionUpdate::SessionInfoUpdate(update.clone()))? {
-                let mut configuration = current.configuration.clone();
-                configuration.insert(
-                    mj_core::goal::PROJECTION_KEY.into(),
-                    serde_json::to_value(&goal)?,
-                );
+                configuration.goal = Some(goal);
                 mutation.configuration = Some(configuration);
             }
             match &update.title {
@@ -398,8 +397,14 @@ pub(super) fn upsert(mutation: &mut MaterializedSessionMutation, item: Transcrip
 
 pub(super) fn configuration_values(
     options: &[agent_client_protocol::schema::v1::SessionConfigOption],
-) -> BTreeMap<String, Value> {
-    options
+) -> Result<BTreeMap<String, Value>> {
+    anyhow::ensure!(
+        options
+            .iter()
+            .all(|option| option.id.to_string() != mj_core::goal::PROJECTION_KEY),
+        "adapter configuration uses reserved goal state key"
+    );
+    Ok(options
         .iter()
         .filter_map(|option| {
             let value = match serde_json::to_value(option) {
@@ -422,5 +427,5 @@ pub(super) fn configuration_values(
             };
             Some((id, current.clone()))
         })
-        .collect()
+        .collect())
 }

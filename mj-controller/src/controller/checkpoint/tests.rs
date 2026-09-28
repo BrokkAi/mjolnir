@@ -2112,9 +2112,28 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         })
         .unwrap();
     }
-    // The archive covers the fake runtime's SessionOpened and
-    // SessionConfigured events, before any checkpoint bookkeeping.
-    let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
+    // A live relay synchronizes its empty goal before configuring the session.
+    // That state survives configuration updates and belongs in its archive.
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
+    if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_none() {
+        input.canonical_session.session.configuration.goal = Some(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "known": true,
+                "execution": {"version": 1, "status": "idle"}
+            }))
+            .unwrap(),
+        ));
+    }
+    let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        &archive_directory,
+        LATCH_RELAY_SESSION,
+        &input,
+    );
 
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();

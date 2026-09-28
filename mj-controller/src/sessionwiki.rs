@@ -1987,7 +1987,7 @@ fn snapshot_of(
             execution: CanonicalExecutionState::Idle,
             last_activity_at_ms,
             session_title: Some(session.title.clone()).filter(|title| !title.trim().is_empty()),
-            configuration: BTreeMap::new(),
+            configuration: Default::default(),
         },
         transcript,
         queued_prompts: Vec::new(),
@@ -2259,7 +2259,7 @@ mod tests {
                         execution: CanonicalExecutionState::Idle,
                         last_activity_at_ms: Some(1_700_000_000_004),
                         session_title: Some("snapshot title".into()),
-                        configuration: BTreeMap::new(),
+                        configuration: Default::default(),
                     },
                     transcript: vec![
                         item(

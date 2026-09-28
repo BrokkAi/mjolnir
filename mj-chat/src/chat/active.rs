@@ -395,10 +395,11 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     if let Some(snapshot) = view.snapshot {
         state.clear_context_supported = snapshot.operational.clear_context;
         state.set_prompt_images_supported(snapshot.operational.accepts_prompt_images());
-        state.apply_materialized(
+        state.apply_materialized_with_goal(
             &snapshot.materialized,
             &snapshot.operational.config_options,
             &snapshot.operational.available_commands,
+            &snapshot.operational.goal,
         );
         state.set_session_modes(snapshot.operational.modes.clone());
         state.set_active_user_shells(&snapshot.operational.active_user_shells);
@@ -711,6 +712,9 @@ impl ActiveChat {
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images()),
             );
+            if let Some(snapshot) = snapshot.as_ref() {
+                state.goal_state.clone_from(&snapshot.operational.goal);
+            }
             state.rebuild_command_choices();
             if let Some(harness_kind) = header
                 .harness_kind

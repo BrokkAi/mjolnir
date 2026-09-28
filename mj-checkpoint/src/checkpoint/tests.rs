@@ -2384,7 +2384,7 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
 fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_not() {
     let temp = tempfile::tempdir().unwrap();
     let (mut spec, _) = fixture(temp.path());
-    let configuration = &mut spec.canonical_session.session.configuration;
+    let configuration = &mut spec.canonical_session.session.configuration.values;
     configuration.insert("model".into(), serde_json::json!("opus[1m]"));
     configuration.insert("effort".into(), serde_json::json!("high"));
     configuration.insert("mode".into(), serde_json::json!("plan"));

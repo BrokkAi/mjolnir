@@ -517,7 +517,7 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
             execution: CanonicalExecutionState::Idle,
             last_activity_at_ms: None,
             session_title: None,
-            configuration: BTreeMap::new(),
+            configuration: Default::default(),
         },
         transcript: Vec::new(),
         queued_prompts: vec![

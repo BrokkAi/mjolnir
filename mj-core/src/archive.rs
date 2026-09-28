@@ -185,7 +185,7 @@ pub struct CanonicalSessionState {
     /// Monotonic controller projection watermark derived from relay events.
     pub last_activity_at_ms: Option<i64>,
     pub session_title: Option<String>,
-    pub configuration: BTreeMap<String, serde_json::Value>,
+    pub configuration: crate::state::SessionConfiguration,
 }
 
 impl CanonicalSessionState {

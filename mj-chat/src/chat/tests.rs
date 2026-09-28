@@ -2053,6 +2053,7 @@ fn a_current_mode_update_corrects_the_locally_tracked_plan_mode() {
     let mut session = MaterializedSession::empty("1234567890");
     session
         .configuration
+        .values
         .insert("mode".into(), serde_json::Value::String("default".into()));
     chat.apply_materialized(&session, &[], &[]);
 

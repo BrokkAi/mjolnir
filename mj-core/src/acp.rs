@@ -305,17 +305,15 @@ pub fn select_contains(kind: &SessionConfigKind, desired: &str) -> bool {
     }
 }
 
-/// Only catalogue and selector announcements can prove a thread is unused.
-/// Treat all other updates, including future ACP variants, as native history.
-pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
-    !matches!(
+/// Current session state, independent of replayed conversation history.
+/// Unknown future variants are history until explicitly classified otherwise.
+/// Usage is also history: replaying it could double-count an old turn.
+pub fn session_update_is_session_state(update: &SessionUpdate) -> bool {
+    matches!(
         update,
         SessionUpdate::AvailableCommandsUpdate(_)
             | SessionUpdate::ConfigOptionUpdate(_)
             | SessionUpdate::CurrentModeUpdate(_)
-            // Mjolnir synthesizes this variant itself, in `goal::publish`
-            // (`mj-worker/src/acp/goal.rs`), to carry its own goal metadata.
-            // It never comes from the agent, so it is not agent content.
             | SessionUpdate::SessionInfoUpdate(_)
     )
 }
@@ -435,14 +433,9 @@ pub fn prompt_is_slash_command(prompt: &[ContentBlock]) -> bool {
 /// `#[non_exhaustive]`, and reporting an answered turn as unanswered because
 /// this build is older than the harness would be worse than missing a swallow.
 pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool {
-    !matches!(
-        update,
-        SessionUpdate::AvailableCommandsUpdate(_)
-            | SessionUpdate::ConfigOptionUpdate(_)
-            | SessionUpdate::CurrentModeUpdate(_)
-            | SessionUpdate::SessionInfoUpdate(_)
-            | SessionUpdate::UsageUpdate(_)
-    ) && !session_update_is_compaction_banner(update)
+    !session_update_is_session_state(update)
+        && !matches!(update, SessionUpdate::UsageUpdate(_))
+        && !session_update_is_compaction_banner(update)
 }
 
 /// The stable part of Codex's refusal to resume a thread it never wrote to
@@ -982,13 +975,13 @@ mod missing_thread_tests {
             "_meta": {"mjGoalCapability": null},
         }))
         .unwrap();
-        assert!(!session_update_has_native_history(&mjolnir_metadata));
+        assert!(session_update_is_session_state(&mjolnir_metadata));
         let agent_content: SessionUpdate = serde_json::from_value(serde_json::json!({
             "sessionUpdate": "agent_message_chunk",
             "content": {"type": "text", "text": "hello"},
         }))
         .unwrap();
-        assert!(session_update_has_native_history(&agent_content));
+        assert!(!session_update_is_session_state(&agent_content));
     }
 }
 

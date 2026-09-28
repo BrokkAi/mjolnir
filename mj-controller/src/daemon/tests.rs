@@ -2495,7 +2495,7 @@ fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
             execution: mj_core::archive::CanonicalExecutionState::Idle,
             last_activity_at_ms: None,
             session_title: None,
-            configuration: BTreeMap::new(),
+            configuration: Default::default(),
         },
         transcript: Vec::new(),
         queued_prompts: Vec::new(),

@@ -230,7 +230,7 @@ pub(crate) fn checkpoint_archive_input(
                 execution: mj_checkpoint::archive::CanonicalExecutionState::Idle,
                 last_activity_at_ms: (event_frontier > 0).then_some(1_234),
                 session_title: None,
-                configuration: BTreeMap::new(),
+                configuration: Default::default(),
             },
             transcript: Vec::new(),
             queued_prompts: Vec::new(),

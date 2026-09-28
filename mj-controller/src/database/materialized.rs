@@ -1179,7 +1179,7 @@ pub(super) struct MaterializedSessionFields {
     pub(super) last_activity_at_ms: Option<i64>,
     pub(super) execution: MaterializedExecutionState,
     pub(super) session_title: Option<String>,
-    pub(super) configuration: BTreeMap<String, serde_json::Value>,
+    pub(super) configuration: mj_core::state::SessionConfiguration,
     pub(super) pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     pub(super) active_turn: Option<MaterializedTurn>,
     pub(super) last_turn_outcome: Option<MaterializedTurnOutcome>,

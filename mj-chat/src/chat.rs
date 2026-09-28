@@ -1018,6 +1018,26 @@ impl ChatState {
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
     ) {
+        self.apply_materialized_with_goal(
+            session,
+            config_options,
+            available_commands,
+            session
+                .configuration
+                .goal
+                .as_deref()
+                .unwrap_or(&Default::default()),
+        );
+    }
+
+    fn apply_materialized_with_goal(
+        &mut self,
+        session: &MaterializedSession,
+        config_options: &[SessionConfigOption],
+        available_commands: &[AvailableCommand],
+        goal: &mj_core::goal::GoalState,
+    ) {
+        self.goal_state.clone_from(goal);
         let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
@@ -1107,22 +1127,11 @@ impl ChatState {
         if self.queued_prompts != queued_prompts {
             self.queued_prompts = queued_prompts;
         }
-        match mj_core::goal::GoalState::from_configuration(&session.configuration) {
-            Ok(goal) => {
-                if self.goal_state != goal {
-                    self.goal_state = goal;
-                }
-            }
-            Err(error) => {
-                self.goal_state = Default::default();
-                self.set_notice(format!("Could not read goal state: {error:#}"));
-            }
-        }
         tracing::debug!(target: "mj_chat::latency", ordinal = session.applied_event_ordinal, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection applied");
         self.keep_unanswered_prompt(session);
         self.set_config_options(config_options);
         self.acp_surface
-            .apply_projected_configuration(&session.configuration);
+            .apply_projected_configuration(&session.configuration.values);
         self.acp_surface
             .set_agent_commands(available_commands.to_vec());
         self.rebuild_command_choices();

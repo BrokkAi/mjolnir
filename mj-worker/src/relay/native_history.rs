@@ -125,7 +125,7 @@ impl NativeHistoryEvidence {
                 self.commands.remove(&command_id);
             }
             RelayObservation::SessionUpdate { update } => {
-                self.used |= mj_core::acp::session_update_has_native_history(&update);
+                self.used |= !mj_core::acp::session_update_is_session_state(&update);
             }
             RelayObservation::NativeAgent {
                 event:

@@ -34,6 +34,97 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
     apply(session, next);
 }
 
+#[test]
+fn configuration_replacement_preserves_goals_and_removes_obsolete_adapter_settings() {
+    let mut session = MaterializedSession::empty("goal-config");
+    apply_observation(&mut session, RelayObservation::SessionUpdate {
+        update: Box::new(serde_json::from_value(json!({
+            "sessionUpdate": "session_info_update", "_meta": {
+                "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["pause", "resume", "clear"]},
+                "goal": {"objective": "finish", "status": "paused", "createdAt": 1, "tokensUsed": 42, "tokenBudget": 1000},
+                "execution": {"version": 1, "revision": 2, "status": "idle"},
+                "mjGoalResumeAnswered": "answered"
+            }
+        })).unwrap()),
+    });
+    let mut goal = session.configuration.goal.clone().unwrap();
+    goal.pending_resume = Some("pending".into());
+    goal.decision = Some(mj_core::goal::GoalDecision {
+        goal: goal.snapshot.clone().unwrap(),
+        resume: true,
+    });
+    session.configuration.goal = Some(goal.clone());
+    for via_notification in [false, true] {
+        session
+            .configuration
+            .values
+            .insert("obsolete".into(), json!(true));
+        let options = json!([{
+            "id": "model", "name": "Model", "type": "select", "currentValue": "astra",
+            "options": [{"value": "astra", "name": "Astra"}]
+        }]);
+        let observation = if via_notification {
+            RelayObservation::SessionUpdate {
+                update: Box::new(
+                    serde_json::from_value(json!({
+                        "sessionUpdate": "config_option_update", "configOptions": options
+                    }))
+                    .unwrap(),
+                ),
+            }
+        } else {
+            RelayObservation::SessionConfigured {
+                config_options: serde_json::from_value(options).unwrap(),
+            }
+        };
+        apply_observation(&mut session, observation);
+        assert_eq!(session.configuration.goal.as_ref(), Some(&goal));
+        assert_eq!(
+            session.configuration.values,
+            BTreeMap::from([("model".into(), json!("astra"))])
+        );
+
+        let canonical = canonical_session_from_materialized(&session).unwrap();
+        let archived = serde_json::to_value(&canonical).unwrap();
+        assert_eq!(
+            archived["session"]["configuration"]["mj_goal_state"],
+            serde_json::to_value(&goal).unwrap()
+        );
+        let restored = materialized_session_from_canonical(
+            "goal-config",
+            &serde_json::from_value(archived).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.configuration, session.configuration);
+    }
+    let mut cleared = session.clone();
+    apply_observation(
+        &mut cleared,
+        RelayObservation::CommandCompleted {
+            barrier_command_id: None,
+            command: None,
+            command_id: "clear".into(),
+            outcome: RelayCommandOutcome::ContextCleared {
+                native_session_id: "new".into(),
+                memory: None,
+            },
+        },
+    );
+    assert_eq!(
+        cleared.configuration.goal,
+        Some(Box::new(mj_core::goal::GoalState {
+            capability: goal.capability.clone(),
+            known: true,
+            ..Default::default()
+        }))
+    );
+    assert_eq!(cleared.configuration.values, session.configuration.values);
+    apply_observation(&mut session, RelayObservation::SessionRestarted);
+    goal.restart();
+    assert_eq!(session.configuration.goal, Some(goal));
+    assert_eq!(session.configuration.values["model"], json!("astra"));
+}
+
 fn apply_indexed_observation(
     session: &mut MaterializedSession,
     index: &mut ProjectionIndex,

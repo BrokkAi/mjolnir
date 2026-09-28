@@ -58,11 +58,12 @@ where
     // A provider may replay the native transcript as `session/update`
     // notifications while answering `session/load`. Hel already owns that
     // history in its durable relay, so accepting the replay would duplicate
-    // every old turn on every restart. New sessions have no old history.
-    // `session::accept_live_session_updates` turns them on however the
+    // every old turn on every restart. State announcements still pass through.
+    // New sessions have no old history.
+    // `session::accept_live_history` turns them on however the
     // session opens, including a resume that falls back to `session/new`.
-    let session_updates_enabled = Arc::new(AtomicBool::new(spec.resume_session.is_none()));
-    let notification_session_updates_enabled = session_updates_enabled.clone();
+    let live_history_enabled = Arc::new(AtomicBool::new(spec.resume_session.is_none()));
+    let notification_live_history_enabled = live_history_enabled.clone();
     // Codex can finish dispatching old tool updates after `session/load` has
     // already returned. Track only creations observed after the load boundary,
     // so those delayed updates cannot reintroduce historical tool state into
@@ -230,13 +231,14 @@ where
                         }
                     },
                 };
+                if !notification_live_history_enabled.load(Ordering::Acquire)
+                    && !session_update_is_session_state(&update) {
+                    return Ok(());
+                }
                 notification_goal.lock().expect("goal lock poisoned").state.apply(&update)
                     .map_err(|e| agent_client_protocol::Error::invalid_params().data(serde_json::json!(e.to_string())))?;
                 notification_step_clock.observe(&update);
-                if !notification_session_updates_enabled.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                if session_update_has_native_history(&update) {
+                if !session_update_is_session_state(&update) {
                     notification_resume_required.store(true, Ordering::Release);
                 }
                 notification_tool_content.observe(&update);
@@ -982,7 +984,7 @@ where
                 agent_output_count,
                 last_agent_message,
                 claude_result_count,
-                session_updates_enabled,
+                live_history_enabled,
                 resume_required,
                 native_session_used,
                 replacing_previous_bridge,
@@ -1574,7 +1576,7 @@ pub(super) async fn drive_connection(
     agent_output_count: AgentOutputCount,
     last_agent_message: LastAgentMessage,
     claude_result_count: ClaudeResultCount,
-    session_updates_enabled: Arc<AtomicBool>,
+    live_history_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
@@ -1595,7 +1597,7 @@ pub(super) async fn drive_connection(
         &agent_output_count,
         &last_agent_message,
         &claude_result_count,
-        &session_updates_enabled,
+        &live_history_enabled,
         resume_required,
         native_session_used,
         replacing_previous_bridge,

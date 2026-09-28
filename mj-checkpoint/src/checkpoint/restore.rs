@@ -67,7 +67,12 @@ pub fn restore_checkpoint_with_native_state(
             ["model", "effort"]
                 .into_iter()
                 .filter_map(|key| {
-                    let value = canonical_session.session.configuration.get(key)?.as_str()?;
+                    let value = canonical_session
+                        .session
+                        .configuration
+                        .values
+                        .get(key)?
+                        .as_str()?;
                     (!value.trim().is_empty()).then(|| (key.to_owned(), value.to_owned()))
                 })
                 .collect()

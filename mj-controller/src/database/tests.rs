@@ -504,10 +504,13 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
             started_at_ms: 1_000,
         },
         session_title: Some("Relay refactor".into()),
-        configuration: BTreeMap::from([
-            ("model".into(), serde_json::json!("gpt-5.6-sol")),
-            ("effort".into(), serde_json::json!("high")),
-        ]),
+        configuration: mj_core::state::SessionConfiguration {
+            values: BTreeMap::from([
+                ("model".into(), serde_json::json!("gpt-5.6-sol")),
+                ("effort".into(), serde_json::json!("high")),
+            ]),
+            ..Default::default()
+        },
         transcript: vec![
             Arc::new(TranscriptItem {
                 stable_id: "user:1".into(),
@@ -2299,7 +2302,10 @@ fn projection_event_application_is_atomic_ordered_and_idempotent() {
         last_activity_at_ms: Some(105),
         execution: Some(MaterializedExecutionState::Running { started_at_ms: 90 }),
         session_title: Some(Some("Testing".into())),
-        configuration: Some(BTreeMap::from([("model".into(), serde_json::json!("sol"))])),
+        configuration: Some(mj_core::state::SessionConfiguration {
+            values: BTreeMap::from([("model".into(), serde_json::json!("sol"))]),
+            ..Default::default()
+        }),
         transcript: vec![TranscriptMutation::Upsert(first_item.clone())],
         queued_prompts: Some(vec![MaterializedQueuedPrompt {
             accepted_ordinal: None,

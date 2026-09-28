@@ -2,7 +2,6 @@ use super::*;
 use mj_checkpoint::archive::{
     CanonicalExecutionState, CanonicalSessionState, CanonicalTranscriptItem,
 };
-use std::collections::BTreeMap;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -123,7 +122,7 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
             execution: CanonicalExecutionState::Idle,
             last_activity_at_ms: None,
             session_title: None,
-            configuration: BTreeMap::new(),
+            configuration: Default::default(),
         },
         transcript,
         queued_prompts: Vec::new(),

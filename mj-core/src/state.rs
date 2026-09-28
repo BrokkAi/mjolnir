@@ -21,6 +21,9 @@ pub const STATE_VERSION: u32 = 1;
 mod target_runtime;
 pub use target_runtime::{TargetConnection, TargetRuntimeSettings};
 
+mod session_configuration;
+pub use session_configuration::SessionConfiguration;
+
 mod session_move;
 pub use session_move::*;
 
@@ -333,8 +336,8 @@ pub struct MaterializedSession {
     pub execution: MaterializedExecutionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_title: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub configuration: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "SessionConfiguration::is_empty")]
+    pub configuration: SessionConfiguration,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     /// Transcript items are shared by pointer so cloning a snapshot copies
     /// handles rather than the whole conversation.
@@ -381,7 +384,7 @@ impl MaterializedSession {
             last_activity_at_ms: None,
             execution: MaterializedExecutionState::Idle,
             session_title: None,
-            configuration: BTreeMap::new(),
+            configuration: SessionConfiguration::default(),
             transcript: Vec::new(),
             queued_prompts: Vec::new(),
             pending_elicitations: Vec::new(),
