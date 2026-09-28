@@ -530,7 +530,6 @@ impl Controller {
             // cache is decided here, before the provisioning plan is built.
             let build_cache = super::mbx::prepare(
                 &target,
-                &self.config.build_cache,
                 &session,
                 bundle.as_ref(),
                 prepared_cache.as_ref(),

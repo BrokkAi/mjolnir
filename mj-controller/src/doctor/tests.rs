@@ -437,10 +437,7 @@ fn doctor_skips_disabled_or_irrelevant_build_caches_without_probing() {
             container: container("ubuntu:24.04"),
         },
     )]);
-    disabled.build_cache.enabled = false;
     let executor = FakeExecutor::new([]);
-    assert!(build_cache_checks(Ok(&disabled), &executor).is_empty());
-    disabled.build_cache.enabled = true;
     if let TargetTemplate::LocalPodman { container } = disabled.targets.get_mut("podman").unwrap() {
         container.build_cache = Some(mj_core::config::TargetBuildCache {
             enabled: Some(false),

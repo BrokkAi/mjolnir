@@ -193,7 +193,6 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 pub(crate) fn config() -> Config {
     Config {
         keys: Default::default(),
-        build_cache: Default::default(),
         jev: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,

@@ -325,23 +325,16 @@ impl SubagentConfig {
     }
 }
 
-/// Global switch for the mbx build cache shared by Rust container sessions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Read-only legacy policy, folded into machine settings when loading.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct BuildCacheConfig {
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub enabled: bool,
+struct LegacyBuildCacheConfig {
+    enabled: bool,
 }
 
-impl Default for BuildCacheConfig {
+impl Default for LegacyBuildCacheConfig {
     fn default() -> Self {
         Self { enabled: true }
-    }
-}
-
-impl BuildCacheConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
     }
 }
 
@@ -376,7 +369,7 @@ impl Config {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 13;
+pub const CONFIG_VERSION: u32 = 14;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -415,7 +408,6 @@ pub struct Config {
     pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
-    pub build_cache: BuildCacheConfig,
     pub jev: JevConfig,
     pub keys: KeysConfig,
     pub legacy_startup: (),
@@ -457,8 +449,8 @@ struct StoredConfig {
     sessionwiki: SessionWikiConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
     subagents: SubagentConfig,
-    #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
-    build_cache: BuildCacheConfig,
+    #[serde(default, skip_serializing)]
+    build_cache: LegacyBuildCacheConfig,
     #[serde(default, skip_serializing_if = "JevConfig::is_default")]
     jev: JevConfig,
     #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
@@ -635,6 +627,21 @@ impl TryFrom<StoredConfig> for Config {
             };
             runtimes.insert(id, runtime);
         }
+        // Fold the old global veto into each machine before resolving runtimes.
+        // Local is implicit even in files that only name remote machines.
+        if !build_cache.enabled {
+            machines
+                .entry(LOCAL_MACHINE_ID.to_owned())
+                .or_insert(Machine::Local { build_cache: None });
+            for machine in machines.values_mut() {
+                match machine {
+                    Machine::Local { build_cache } | Machine::Ssh { build_cache, .. } => {
+                        build_cache.get_or_insert_default().enabled = Some(false);
+                    }
+                    Machine::AwsEc2 { .. } => {}
+                }
+            }
+        }
         let mut resolved = BTreeMap::new();
         for (id, runtime) in &runtimes {
             resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
@@ -644,10 +651,11 @@ impl TryFrom<StoredConfig> for Config {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 12 acquire this build's defaults in memory
+            // Versions 1 through 13 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes; version 13 adds automatic continuation.
-            version: if matches!(version, 1..=12) {
+            // Version 14 moves the global cache opt-out onto machines.
+            version: if matches!(version, 1..=13) {
                 CONFIG_VERSION
             } else {
                 version
@@ -659,7 +667,6 @@ impl TryFrom<StoredConfig> for Config {
             continuation,
             sessionwiki,
             subagents,
-            build_cache,
             jev,
             keys,
             legacy_startup,
@@ -697,7 +704,7 @@ impl From<Config> for StoredConfig {
             continuation: config.continuation,
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
-            build_cache: config.build_cache,
+            build_cache: LegacyBuildCacheConfig::default(),
             jev: config.jev,
             keys: config.keys,
             legacy_startup: config.legacy_startup,
@@ -724,7 +731,6 @@ impl Default for Config {
             continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
-            build_cache: BuildCacheConfig::default(),
             jev: JevConfig::default(),
             keys: KeysConfig::default(),
             legacy_startup: (),

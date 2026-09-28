@@ -695,7 +695,6 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
     };
     let config = Config {
         keys: Default::default(),
-        build_cache: Default::default(),
         jev: Default::default(),
         subagents: Default::default(),
         version: mj_core::config::CONFIG_VERSION,

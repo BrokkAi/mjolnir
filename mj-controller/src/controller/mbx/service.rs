@@ -31,7 +31,6 @@ pub(crate) async fn run(
                 if active_hosts.contains("local") {
                     machines.entry("local".into()).or_insert(mj_core::config::Machine::Local { build_cache: None });
                 }
-                if !config.build_cache.enabled { continue; }
                 for machine in machines.values() {
                     let Some(host) = CacheHost::for_machine(machine) else { continue; };
                     if machine.build_cache().and_then(|settings| settings.enabled) == Some(false) { continue; }
@@ -48,13 +47,12 @@ pub(crate) async fn run(
                         && previous == &desired && Instant::now() < *next { continue; }
                     active.insert(key.clone());
                     let machine = machine.clone();
-                    let global = config.build_cache.clone();
                     let cancelled = cancelled.clone();
                     jobs.spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
                             let executor = targets::CancellableProcessExecutor::new(cancelled)
                                 .with_deadline(Duration::from_secs(30));
-                            apply_machine_build_cache(&machine, &global, &directories, &executor)
+                            apply_machine_build_cache(&machine, &directories, &executor)
                         }).await.context("machine build cache task failed").and_then(|result| result);
                         (key, desired, result)
                     });

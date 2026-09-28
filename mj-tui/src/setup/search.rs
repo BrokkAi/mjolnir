@@ -5,7 +5,7 @@
 //! row addressable by what it is called, what it does, and what it is set to,
 //! so the dialog can jump straight to one.
 
-use super::{pointer, row_label, row_summary, schema, visible_keys};
+use super::{machine_build_cache_summary, pointer, row_label, row_summary, schema, visible_keys};
 use crate::widgets::counted;
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
@@ -84,6 +84,9 @@ fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String>
     {
         return Some(summary);
     }
+    if let Some(summary) = machine_build_cache_summary(path, value) {
+        return Some(summary);
+    }
     let count = visible_keys(path, value).len();
     Some(if value.is_array() {
         format!("{}  \u{203a}", counted(count, "entry", "entries"))
@@ -105,7 +108,12 @@ pub(super) fn matches(entries: &[SearchEntry], query: &str) -> Vec<usize> {
     let prefix = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.label.to_lowercase().starts_with(&query))
+        .filter(|(_, entry)| {
+            entry.label.to_lowercase().starts_with(&query)
+                || schema::search_aliases(&entry.path)
+                    .iter()
+                    .any(|alias| alias.starts_with(&query))
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     if !prefix.is_empty() {

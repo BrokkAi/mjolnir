@@ -294,7 +294,6 @@ pub enum DashboardAction {
         generation: u64,
         key: serde_json::Value,
         machine: Box<mj_core::config::Machine>,
-        global: mj_core::config::BuildCacheConfig,
     },
     /// Measure how much disk Mjolnir's session copies use, and how much an
     /// `archive_after_days` value would free, for the SessionWiki settings

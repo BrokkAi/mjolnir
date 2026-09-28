@@ -304,7 +304,6 @@ const ROOT_GROUPS: &[(&str, &[&str])] = &[
             "continuation",
             "subagents",
             "sessionwiki",
-            "build_cache",
             "phone",
         ],
     ),
@@ -573,7 +572,27 @@ fn row_summary(
     {
         return summary;
     }
-    value_summary(path, key, value, draft, automatic)
+    let mut child_path = path.to_vec();
+    child_path.push(key.to_owned());
+    machine_build_cache_summary(&child_path, value)
+        .unwrap_or_else(|| value_summary(path, key, value, draft, automatic))
+}
+
+/// Configured policy only: opening the page resolves the host's actual defaults.
+fn machine_build_cache_summary(path: &[String], value: &Value) -> Option<String> {
+    if !matches!(path, [section, _, page] if section == "machines" && page == "build_cache") {
+        return None;
+    }
+    let enabled = match value["enabled"].as_bool() {
+        Some(false) => "Disabled",
+        Some(true) => "Enabled",
+        None => "Enabled by default",
+    };
+    let budget = value["max_size"].as_str().map_or_else(
+        || "automatic budget".to_owned(),
+        |size| format!("{} GB budget", build_cache_gigabytes_label(size)),
+    );
+    Some(format!("{enabled} · {budget}  ›"))
 }
 
 /// `automatic` replaces the placeholder for an unset value when its resolved
@@ -1202,7 +1221,6 @@ impl SetupDialog {
         }
         let key = serde_json::json!({
             "machine": self.draft["machines"][machine_id],
-            "global": self.draft["build_cache"],
         });
         Some((machine_id.clone(), key))
     }
@@ -1226,8 +1244,6 @@ impl SetupDialog {
             // A draft that does not parse yet has nothing to resolve.
             Err(_) => return DashboardAction::None,
         };
-        let global: mj_core::config::BuildCacheConfig =
-            serde_json::from_value(key["global"].clone()).unwrap_or_default();
         self.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: BuildCachePreviewResult::Resolving,
@@ -1237,7 +1253,6 @@ impl SetupDialog {
             generation: self.generation,
             key,
             machine: Box::new(machine),
-            global,
         }
     }
 

@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -26,9 +26,6 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         }
         "subagents" if path.len() == 1 => {
             json!({"max_concurrent":6,"eligible_profiles":{}})
-        }
-        "build_cache" if path.len() == 1 => {
-            json!({"enabled": true})
         }
         "profiles" if path.len() == 2 => {
             json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
@@ -443,13 +440,6 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             Some(days) => format!("Archives after {days} days"),
             None => "Keeps every session".to_owned(),
         },
-        "build_cache" => {
-            if section["enabled"].as_bool().unwrap_or(true) {
-                "Shared".to_owned()
-            } else {
-                "Off".to_owned()
-            }
-        }
         _ => return None,
     })
 }
@@ -623,6 +613,16 @@ pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
     }
 }
 
+/// Alternate names for a page participate in the search's preferred matches.
+pub(super) fn search_aliases(path: &[String]) -> &'static [&'static str] {
+    match path {
+        [section, _, page] if section == "machines" && page == "build_cache" => {
+            &["mbx", "cache", "build cache"]
+        }
+        _ => &[],
+    }
+}
+
 pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {
@@ -697,7 +697,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share one mbx build cache among Rust container sessions on each machine. Blank settings use its defaults."
+            "Share a build cache among Rust container sessions on this machine. Enabled by default where supported."
         }
         "directory" => {
             "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."

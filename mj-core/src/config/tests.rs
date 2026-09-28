@@ -587,7 +587,6 @@ fn sample_config() -> Config {
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
-        build_cache: BuildCacheConfig::default(),
         jev: Default::default(),
         legacy_startup: (),
         machines: BTreeMap::new(),
@@ -2628,4 +2627,190 @@ fn automatic_continuation_defaults_on_and_disabled_setting_survives_save() {
     config.continuation.enabled = false;
     config.save_to(&path).unwrap();
     assert!(!Config::load_from(&path).unwrap().continuation.enabled);
+}
+
+#[test]
+fn legacy_global_cache_opt_out_is_saved_on_each_machine_without_other_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for version in [12, 13] {
+        let source = format!(
+            r#"# Keep my configuration notes.
+version = {version}
+[build_cache]
+enabled = false
+[machines.builder]
+kind = "ssh"
+host = "builder.example.com" # Keep this host note.
+[machines.builder.build_cache]
+enabled = true
+max_size = "50GiB"
+target_max_size = "10GB"
+directory = "/cache"
+[machines.other]
+kind = "ssh"
+host = "other.example.com"
+[targets.podman]
+kind = "podman"
+[targets.remote]
+kind = "docker"
+machine = "builder"
+"#
+        );
+        fs::write(&path, &source).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            source,
+            "load is read-only"
+        );
+        for id in ["local", "builder", "other"] {
+            assert_eq!(
+                config.machines[id].build_cache().unwrap().enabled,
+                Some(false)
+            );
+        }
+        let cache = config.machines["builder"].build_cache().unwrap();
+        assert_eq!(cache.max_size.as_deref(), Some("50GiB"));
+        assert_eq!(cache.target_max_size.as_deref(), Some("10GB"));
+        assert_eq!(cache.directory.as_deref(), Some(Path::new("/cache")));
+        for target in config.targets.values() {
+            let (TargetTemplate::LocalPodman { container }
+            | TargetTemplate::SshDocker { container, .. }) = target
+            else {
+                panic!("container runtime")
+            };
+            assert_eq!(container.build_cache.as_ref().unwrap().enabled, Some(false));
+        }
+        config.save_to(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("[build_cache]"), "{saved}");
+        assert!(saved.contains("# Keep my configuration notes."), "{saved}");
+        assert!(saved.contains("# Keep this host note."), "{saved}");
+        assert_eq!(Config::load_from(&path).unwrap(), config, "{saved}");
+        config.save_to(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+    }
+}
+
+#[test]
+fn cache_opt_out_migration_covers_implicit_local_and_all_older_config_versions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for version in 1..=13 {
+        fs::write(
+            &path,
+            format!("version = {version}\n[build_cache]\nenabled = false\n"),
+        )
+        .unwrap();
+        let mut config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.machines["local"].build_cache().unwrap().enabled,
+            Some(false)
+        );
+        config.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path).unwrap(), config);
+        // A newly added machine uses the normal default, not a hidden veto.
+        config.machines.insert(
+            "new".into(),
+            serde_json::from_value(serde_json::json!({"kind":"ssh", "host":"new.example.com"}))
+                .unwrap(),
+        );
+        config.save_to(&path).unwrap();
+        assert!(
+            Config::load_from(&path).unwrap().machines["new"]
+                .build_cache()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn enabled_or_absent_legacy_global_cache_keeps_machine_policy() {
+    for legacy in ["", "[build_cache]\nenabled = true\n"] {
+        let config: Config = toml::from_str(&format!(
+            r#"version = 13
+{legacy}
+[machines.off]
+kind = "ssh"
+host = "off.example.com"
+[machines.off.build_cache]
+enabled = false
+[machines.on]
+kind = "ssh"
+host = "on.example.com"
+[machines.on.build_cache]
+enabled = true
+"#
+        ))
+        .unwrap();
+        assert!(!config.machines.contains_key("local"));
+        assert_eq!(
+            config.machines["off"].build_cache().unwrap().enabled,
+            Some(false)
+        );
+        assert_eq!(
+            config.machines["on"].build_cache().unwrap().enabled,
+            Some(true)
+        );
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(!saved.contains("[build_cache]"));
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+    }
+}
+
+#[test]
+fn legacy_global_cache_opt_out_is_applied_after_fused_target_conversion() {
+    let source = format!("{VERSION_TEN_CONFIG}\n[build_cache]\nenabled = false\n");
+    let config: Config = toml::from_str(&source).unwrap();
+    for id in ["local", "builder.example.com"] {
+        assert_eq!(
+            config.machines[id].build_cache().unwrap().enabled,
+            Some(false)
+        );
+    }
+    assert_eq!(
+        config.machines["local"]
+            .build_cache()
+            .unwrap()
+            .max_size
+            .as_deref(),
+        Some("50GiB")
+    );
+    assert!(config.machines["aws"].build_cache().is_none());
+    for target in config.targets.values() {
+        match target {
+            TargetTemplate::LocalPodman { container }
+            | TargetTemplate::LocalDocker { container }
+            | TargetTemplate::SshPodman { container, .. } => {
+                assert_eq!(container.build_cache.as_ref().unwrap().enabled, Some(false));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        toml::from_str::<Config>(&toml::to_string_pretty(&config).unwrap()).unwrap(),
+        config
+    );
+}
+
+#[test]
+fn saving_can_reenable_one_machine_during_global_cache_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "version = 13\n[build_cache]\nenabled = false\n").unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    config
+        .machines
+        .insert("local".into(), Machine::Local { build_cache: None });
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("build_cache"), "{saved}");
+    assert!(
+        !Config::load_from(&path)
+            .unwrap()
+            .machines
+            .contains_key("local")
+    );
 }

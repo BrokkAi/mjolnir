@@ -252,8 +252,10 @@ automatic collection inside containers are the only collectors.
 
 ### Settings
 
-There is a global switch, **Build cache (mbx)**, that turns the feature off
-everywhere. Each container target can override three values:
+Caching is enabled by default where supported. Configure it under
+**Machines → [machine] → Build cache (mbx)** in Settings, or search for
+**mbx**, **cache**, or **build cache**. Each machine controls the cache shared
+by its container runtimes:
 
 | Setting | Default when blank |
 | --- | --- |
@@ -261,7 +263,7 @@ everywhere. Each container target can override three values:
 | Cache directory | The host's native mbx cache if mbx is installed there, otherwise `~/.cache/mbx` on that host. |
 | Cache size limit | The host's own mbx limits if it has a configuration file, otherwise the smaller of 100 GB and a quarter of the free space. |
 
-Opening a target's build cache page asks its host for these values, so each
+Opening a machine's build cache page asks its host for these values, so each
 blank field shows what a session there would actually use, such as
 `/mnt/fast/mbx-cache`. When sessions on that host run without
 the cache, the page says why, for example because the host has no

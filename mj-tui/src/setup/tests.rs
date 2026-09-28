@@ -13,7 +13,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
         ("continuation", "Enabled"),
         ("jev", "Enabled"),
-        ("build_cache", "Enabled"),
         ("phone", "Enabled"),
         ("phone", "Detect Tailscale"),
         ("notify", "Ring the terminal bell"),
@@ -2865,7 +2864,7 @@ fn every_setting_description_fits_its_two_rows() {
         &["sessionwiki", "archive_after_days"],
         &["subagents"],
         &["subagents", "eligible_profiles"],
-        &["build_cache"],
+        &["machines", "m", "build_cache"],
         &["machines", "m", "build_cache", "directory"],
         &["machines", "m", "build_cache", "max_size"],
         &["targets", "t", "memory"],
@@ -3072,4 +3071,101 @@ fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
         dialog.draft["machines"]["local"]["build_cache"]["target_max_size"],
         Value::Null
     );
+}
+
+#[test]
+fn machine_cache_summary_opens_settings_by_keyboard_and_mouse() {
+    for mouse in [false, true] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        assert!(
+            !setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .keys()
+                .contains(&"build_cache".to_owned())
+        );
+        choose(&mut dashboard, "machines");
+        choose(&mut dashboard, "local");
+        let lines = drawn(&mut dashboard, 160, 40);
+        assert!(
+            lines.iter().any(|line| line.contains("Build cache (mbx)")
+                && line.contains("Enabled by default · automatic budget")),
+            "{lines:#?}"
+        );
+        if mouse {
+            let (column, row) = point(&lines, "Build cache (mbx)");
+            // Settings list entries open on double-click.
+            for _ in 0..2 {
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    dashboard.handle_mouse(MouseEvent {
+                        kind,
+                        column,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    drawn(&mut dashboard, 160, 40);
+                }
+            }
+        } else {
+            choose(&mut dashboard, "build_cache");
+        }
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["machines", "local", "build_cache"]);
+        dialog.draft["machines"]["local"]["build_cache"]["enabled"] = json!(false);
+        dialog.draft["machines"]["local"]["build_cache"]["max_size"] = json!("100GB");
+        dashboard.handle_key(key(KeyCode::Esc));
+        let lines = drawn(&mut dashboard, 160, 40);
+        assert!(
+            lines.iter().any(|line| line.contains("Build cache (mbx)")
+                && line.contains("Disabled · 100 GB budget")),
+            "{lines:#?}"
+        );
+    }
+}
+
+#[test]
+fn cache_search_aliases_find_every_machine_and_preserve_the_draft() {
+    for query in ["mbx", "cache", "build cache"] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.machines.insert("builder".into(), serde_json::from_value(json!({
+            "kind":"ssh", "host":"builder.example.com", "build_cache":{"enabled":true,"max_size":"50GB"}
+        })).unwrap());
+        dashboard.begin_setup();
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.draft["phone"]["enabled"] = json!(false);
+        search(&mut dashboard, query);
+        let paths = result_paths(&mut dashboard);
+        for machine in ["local", "builder"] {
+            assert!(
+                paths
+                    .iter()
+                    .any(|path| path == &["machines", machine, "build_cache"]),
+                "{query}: {paths:?}"
+            );
+        }
+        assert!(!paths.iter().any(|path| path == &["build_cache"]));
+        let search = search_state(&mut dashboard);
+        let index = search
+            .matches
+            .iter()
+            .position(|index| search.entries[*index].path == ["machines", "builder", "build_cache"])
+            .unwrap();
+        let entry = &search.entries[search.matches[index]];
+        assert_eq!(entry.trail, "Machines › builder");
+        assert_eq!(entry.value, "Enabled · 50 GB budget  ›");
+        setup_dialog_mut(&mut dashboard.mode)
+            .unwrap()
+            .search
+            .as_mut()
+            .unwrap()
+            .selected = index;
+        dashboard.handle_key(key(KeyCode::Enter));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.path, ["machines", "builder", "build_cache"]);
+        assert_eq!(dialog.draft["phone"]["enabled"], false);
+        assert!(dialog.is_dirty());
+    }
 }

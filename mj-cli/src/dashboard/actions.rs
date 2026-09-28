@@ -326,7 +326,6 @@ pub(crate) async fn apply_dashboard_action(
             generation,
             key,
             machine,
-            global,
         } => {
             // A stale answer is dropped by its key, so the job is not tied
             // to the path-input job that a later edit would cancel.
@@ -339,7 +338,7 @@ pub(crate) async fn apply_dashboard_action(
                     // round trip each.
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(60));
-                    mj_controller::controller::preview_build_cache(&machine, &global, &executor)
+                    mj_controller::controller::preview_build_cache(&machine, &executor)
                 },
                 move |result| DashboardIoUpdate::BuildCachePreviewed {
                     generation,

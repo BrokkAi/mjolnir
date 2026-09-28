@@ -546,7 +546,6 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
     let mut empty = DashboardState::new(
         mj_core::config::Config {
             keys: Default::default(),
-            build_cache: Default::default(),
             jev: Default::default(),
             subagents: Default::default(),
             version: mj_core::config::CONFIG_VERSION,

@@ -69,14 +69,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 13
+version = 14
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `13`. |
+| `version` | integer | yes | none | Configuration schema version; use `14`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -94,14 +94,14 @@ The only accepted top-level keys are:
 | `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
 | `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
 | `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
-| `build_cache` | table | no | default `[build_cache]` values | Global switch for the shared mbx build cache. |
+| `build_cache` | table | no | none | Legacy compatibility input. A global opt-out is migrated to the existing machines and omitted on save. |
 
 The terminal Settings screen groups the prefix key, `sessions_side`, `spinner`,
 and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 13 configuration. Older
+A missing or empty file is treated as an empty version 14 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -501,22 +501,6 @@ resumes, its agent is told which sub-agents were stopped and whether each had
 handed back, so it can start them again if it still needs their work. See
 [Sessions](/sessions/#sub-agents-and-suspend).
 
-## Shared build cache `[build_cache]`
-
-```toml
-[build_cache]
-enabled = false
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | Global switch for the mbx build cache used by supported container sessions. `false` disables it on every machine. |
-
-When enabled, each machine's settings and filesystem decide whether its cache
-can be used. Configure its directory and size under
-[`machines.<id>.build_cache`](#build-cache-machinesidbuild_cache), rather than
-under a runtime. See [Container targets](/containers/) for cache prerequisites.
-
 ## Profiles `[profiles.<id>]`
 
 Each profile names one harness installation or account on the controller:
@@ -697,7 +681,12 @@ instance. See [AWS EC2](/aws/).
 ### Build cache `[machines.<id>.build_cache]`
 
 Every container runtime on a machine shares one mbx build cache, so the
-settings belong to the machine.
+settings belong to the machine. Caching is enabled by default where supported.
+In Settings, open **Machines → [machine] → Build cache (mbx)**, or search for
+**mbx**, **cache**, or **build cache**. The machine row shows its configured
+state and total budget; opening it resolves the host's actual defaults and
+reports any compatibility limitations. See [Container targets](/containers/)
+for cache prerequisites.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -706,6 +695,13 @@ settings belong to the machine.
 | `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. Caps the whole cache: build outputs, target directories, and incremental state together. |
 
 A section with every field unset is the same as no section at all.
+
+Version 14 removes the global build-cache switch. Older configurations with
+`[build_cache] enabled = false` load with caching explicitly disabled on every
+existing local and SSH machine, including implicit `local`. This preserves the
+old global override even when a machine explicitly requested caching. The next
+save writes those machine settings and removes the global section. Machines
+added afterward use the normal enabled default.
 
 ## Runtimes `[targets.<id>]`
 
@@ -884,7 +880,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 13
+version = 14
 
 [phone]
 enabled = true

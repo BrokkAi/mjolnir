@@ -25,7 +25,24 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
         return None;
     }
     let raw = existing.parse::<toml::Table>().ok()?;
-    let loaded = loaded.parse::<toml::Table>().ok()?;
+    let mut loaded = loaded.parse::<toml::Table>().ok()?;
+    // The canonical load already folded this veto into machine settings.
+    // Compare machines against the actual file so an otherwise unchanged
+    // save writes those opt-outs before removing the obsolete global section.
+    if raw
+        .get("build_cache")
+        .and_then(|cache| cache.get("enabled"))
+        == Some(&toml::Value::Boolean(false))
+    {
+        match raw.get("machines") {
+            Some(machines) => {
+                loaded.insert("machines".into(), machines.clone());
+            }
+            None => {
+                loaded.remove("machines");
+            }
+        }
+    }
     let updated_table = updated.parse::<toml::Table>().ok()?;
     let source = updated.parse::<Document>().ok()?;
     let mut next_position = usize::MAX / 2;
