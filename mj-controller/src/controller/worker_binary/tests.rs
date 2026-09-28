@@ -5004,9 +5004,10 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
 /// entry serves delegation; a child's serves only `handback`, and the role
 /// travels in the arguments so one worker binary can serve either.
 #[test]
-fn the_staged_claude_profile_names_the_sub_agent_role() {
+fn the_staged_claude_profile_exposes_sub_agent_tools_upfront_for_each_role() {
     for role in [
         mj_core::subagent::SubagentMcpRole::Parent,
+        mj_core::subagent::SubagentMcpRole::FixedParent,
         mj_core::subagent::SubagentMcpRole::Child,
     ] {
         let stage = tempfile::tempdir().unwrap();
@@ -5014,6 +5015,7 @@ fn the_staged_claude_profile_names_the_sub_agent_role() {
         let staged: serde_json::Value =
             serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap())
                 .unwrap();
+        assert_eq!(staged["mcpServers"]["mj-agents"]["alwaysLoad"], true);
         let args = staged["mcpServers"]["mj-agents"]["args"]
             .as_array()
             .expect("the staged server has arguments")

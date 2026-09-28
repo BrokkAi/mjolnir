@@ -435,6 +435,20 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    let subagent_role = config.subagents.parent_role().or_else(|| {
+        config
+            .handback_tool
+            .then_some(mj_core::subagent::SubagentMcpRole::Child)
+    });
+    let profile_registration = if config.harness == HarnessKind::Codex {
+        let home = &credentials
+            .as_ref()
+            .map_err(|message| anyhow::anyhow!("{message}"))?
+            .home;
+        super::subagents::configure_codex_mcp(&root, home, subagent_role, config.execution_policy)?
+    } else {
+        config.harness == HarnessKind::Claude
+    };
     super::record_startup_step(&root, "harness-resolve");
     let prepared_harness = super::prepare_harness_launch(
         config.harness,
@@ -505,11 +519,6 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let dispatch_socket = serve_review_dispatch(&root, reviewer.clone())?;
     // A parent delegates through this socket and a child hands its report
     // back through it; the daemon collects both kinds of request the same way.
-    let subagent_role = config.subagents.parent_role().or_else(|| {
-        config
-            .handback_tool
-            .then_some(mj_core::subagent::SubagentMcpRole::Child)
-    });
     let (subagents, _subagent_socket_guard) = if subagent_role.is_some() {
         let (endpoint, guard) = super::subagents::serve(&root, relay.clone())?;
         (Some(endpoint), Some(guard))
@@ -577,6 +586,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
                 path: root.join(super::subagents::SUBAGENT_SOCKET),
                 role,
+                profile_registration,
             }),
             project_memory: config.project_memory,
             resume_session,

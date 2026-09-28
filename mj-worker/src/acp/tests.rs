@@ -185,7 +185,7 @@ for line in sys.stdin:
 /// thread's MCP set from the request alone (#1085), so a resume that sends
 /// none leaves the session without its delegation tools.
 #[test]
-fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
+fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -239,22 +239,38 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     let names = |request: &serde_json::Value| -> Vec<String> {
         request
             .get("mcpServers")
-            .and_then(serde_json::Value::as_array)
-            .expect("every launch request states its MCP set")
-            .iter()
+            .into_iter()
+            .flat_map(|servers| servers.as_array().expect("MCP set must be an array"))
             .map(|server| server["name"].as_str().unwrap_or_default().to_owned())
             .collect()
     };
-    for request in [
-        serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
-        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+    for (harness, profile_registration) in [
+        (HarnessKind::Codex, false),
+        (HarnessKind::Codex, true),
+        (HarnessKind::Claude, true),
+        (HarnessKind::Grok, false),
     ] {
-        assert_eq!(
-            names(&request),
-            vec!["mj-agents".to_owned()],
-            "the delegation server must survive a relaunch: {request}"
-        );
+        spec.harness = harness;
+        spec.subagent_mcp_socket
+            .as_mut()
+            .unwrap()
+            .profile_registration = profile_registration;
+        for request in [
+            serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+            serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
+            serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+        ] {
+            let expected = if profile_registration {
+                Vec::new()
+            } else {
+                vec!["mj-agents".to_owned()]
+            };
+            assert_eq!(
+                names(&request),
+                expected,
+                "only harnesses without profile registration receive the ACP server: {request}"
+            );
+        }
     }
 }
 
@@ -996,6 +1012,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
     SubagentMcpSocket {
         path: "/worker/subagents.sock".into(),
         role,
+        profile_registration: false,
     }
 }
 
@@ -5694,6 +5711,7 @@ for line in sys.stdin:
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
+            profile_registration: false,
         }),
         runtime_constraint: None,
         clear_context_request: None,

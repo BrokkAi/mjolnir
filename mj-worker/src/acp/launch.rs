@@ -6,6 +6,8 @@ use super::*;
 pub struct SubagentMcpSocket {
     pub path: PathBuf,
     pub role: mj_core::subagent::SubagentMcpRole,
+    /// False for legacy shared Codex homes, which must retain ACP delivery.
+    pub profile_registration: bool,
 }
 
 /// Approval ownership is resolved from the worker root before harness launch.
@@ -250,8 +252,11 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     } else {
         Vec::new()
     };
+    // The worker decides delivery after checking profile ownership. Legacy
+    // shared Codex homes keep ACP delivery until the controller restages them.
     if spec.harness != HarnessKind::Claude
         && let Some(socket) = &spec.subagent_mcp_socket
+        && !socket.profile_registration
     {
         let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
         servers.push(McpServer::Stdio(approve_owned_mcp(
