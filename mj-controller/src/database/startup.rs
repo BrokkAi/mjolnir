@@ -219,7 +219,7 @@ pub fn fail_unavailable_startup_groups(session_id: &str, error: &str) -> Result<
         connection.execute(
             "UPDATE startup_steps SET phase='failed',error=?2
              WHERE session_id=?1 AND group_id IS NOT NULL AND phase='pending'
-               AND NOT EXISTS (SELECT 1 FROM sessions WHERE id=?1
+               AND NOT EXISTS (SELECT 1 FROM sessions WHERE session_id=?1
                  AND state IN ('provisioning','running','disconnected','checkpointing'))",
             params![session_id, error],
         )?;

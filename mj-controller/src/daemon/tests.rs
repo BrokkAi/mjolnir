@@ -5056,6 +5056,47 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
 }
 
 #[tokio::test]
+async fn api_startup_of_a_vanished_session_is_marked_failed() {
+    let Some(_writer) =
+        startup_prompt_test_store("api_startup_of_a_vanished_session_is_marked_failed")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "api-test".into(),
+            crate::server::api::StartFollowup {
+                model: Some("model-a".into()),
+                effort: None,
+                fast_mode: false,
+                prompt: None,
+            },
+        )
+        .await
+        .unwrap();
+    // While the session is still starting, its pending input is kept.
+    crate::database::fail_unavailable_startup_groups("session-1", "gone").unwrap();
+    let rows = crate::database::load_latest_startup_group("session-1").unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.phase.as_str())
+            .collect::<Vec<_>>(),
+        ["pending"]
+    );
+    // Once the session row is gone, the pending input fails with the reason.
+    crate::database::delete_session("session-1").unwrap();
+    crate::database::fail_unavailable_startup_groups("session-1", "gone").unwrap();
+    let rows = crate::database::load_latest_startup_group("session-1").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].phase, "failed");
+    assert_eq!(rows[0].error.as_deref(), Some("gone"));
+}
+
+#[tokio::test]
 async fn api_startup_persists_the_entire_ordered_followup_before_acknowledging() {
     let Some(_writer) = startup_prompt_test_store(
         "api_startup_persists_the_entire_ordered_followup_before_acknowledging",
