@@ -171,13 +171,9 @@ impl Controller {
             effort: None,
             fast_mode: None,
             generation,
-            // A harness that reads its servers from the staged profile must
-            // not also be offered them over ACP: it would either duplicate the
-            // server or reject the request.
-            mcp_servers: match ReviewMcpDelivery::for_harness(profile.kind) {
-                ReviewMcpDelivery::Acp => mcp_servers.to_vec(),
-                ReviewMcpDelivery::HarnessProfile => Vec::new(),
-            },
+            // Keep ownership metadata for approval policy even when connection
+            // configuration lives in the staged profile. The worker owns ACP delivery.
+            mcp_servers: mcp_servers.to_vec(),
         })
     }
 }
@@ -683,6 +679,29 @@ mod tests {
                 }),
                 "staging a reviewer provisions nothing: {script:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reviewer_staging_preserves_owned_approval_for_both_mcp_delivery_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let (controller, session_id) = fixture(
+            directory.path(),
+            mj_core::state::TargetLocator::LocalBare {
+                worker_root: directory.path().join(SESSION_ID),
+            },
+        );
+        let mut servers =
+            mj_review::bifrost::review_mcp_servers(&[directory.path().to_owned()], "review");
+        servers.push(review_dispatch_server("/worker", 1));
+        for profile in ["codex", "claude"] {
+            let executor = RecordingExecutor::new();
+            let config = controller
+                .stage_reviewer_profile_controlled(&session_id, profile, 1, &servers, &executor)
+                .unwrap();
+            assert_eq!(config.mcp_servers, servers);
+            assert!(!config.mcp_servers[0].is_review_dispatch(Path::new("/worker/hel")));
+            assert!(config.mcp_servers[1].is_review_dispatch(Path::new("/worker/hel")));
         }
     }
 

@@ -294,69 +294,11 @@ pub(crate) fn five_hour_quota_bar(quota: &ProfileQuota) -> Line<'static> {
     quota_bar(five_hour)
 }
 
-pub(crate) fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
-    let Ok(reset) = u64::try_from(reset_at_epoch_seconds) else {
-        return "now".into();
-    };
-    let remaining = reset.saturating_sub(now);
-    if remaining == 0 {
-        return "now".into();
-    }
-
-    pub(crate) const MINUTE: u64 = 60;
-    pub(crate) const HOUR: u64 = 60 * MINUTE;
-    pub(crate) const DAY: u64 = 24 * HOUR;
-    if remaining >= DAY {
-        let days = remaining / DAY;
-        let hours = remaining % DAY / HOUR;
-        format!("{days}d {hours}h")
-    } else if remaining >= HOUR {
-        let hours = remaining / HOUR;
-        let minutes = remaining % HOUR / MINUTE;
-        // Under ten hours the minutes decide whether to wait, so show them.
-        if hours < 10 && minutes > 0 {
-            format!("{hours}h {minutes}m")
-        } else {
-            format!("{hours}h")
-        }
-    } else if remaining >= MINUTE {
-        format!("{}m", remaining / MINUTE)
-    } else {
-        "<1m".into()
-    }
-}
-
-pub(crate) fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
-    let Ok(reset) = u64::try_from(reset_at_epoch_seconds) else {
-        return "now".into();
-    };
-    let remaining = reset.saturating_sub(now);
-    if remaining == 0 {
-        "now".into()
-    } else if remaining < 60 {
-        "<1m".into()
-    } else if remaining < 60 * 60 {
-        format!("{}m", remaining / 60)
-    } else {
-        let hours = remaining / (60 * 60);
-        let minutes = remaining % (60 * 60) / 60;
-        format!("{hours}h {minutes}m")
-    }
-}
-
-pub(crate) fn quota_reset_cell(window: Option<&QuotaWindow>, now: u64) -> String {
-    let Some(window) = window else {
-        return String::new();
-    };
-    window
-        .resets_at_epoch_seconds
-        .map(|reset| quota_reset_countdown(now, reset))
-        .or_else(|| window.resets.clone())
-        .unwrap_or_default()
-}
-
 pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, String) {
-    let mut weekly = quota_reset_cell(quota.weekly_window(), now);
+    let mut weekly = quota
+        .weekly_window()
+        .map(|window| window.reset_display(now, quota.banked_resets_for_window(window)))
+        .unwrap_or_default();
     if let Some(extra) = quota.extra.as_deref() {
         if !weekly.is_empty() {
             weekly.push_str(" · ");
@@ -368,13 +310,7 @@ pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, Stri
     } else {
         quota
             .five_hour_window()
-            .map(|window| {
-                window
-                    .resets_at_epoch_seconds
-                    .map(|reset| five_hour_quota_reset_countdown(now, reset))
-                    .or_else(|| window.resets.clone())
-                    .unwrap_or_default()
-            })
+            .map(|window| window.reset_display(now, None))
             .unwrap_or_default()
     };
     (weekly, five_hour)

@@ -258,6 +258,115 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     }
 }
 
+#[test]
+fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
+    use mj_core::worker_launch::ReviewMcpServer;
+    for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+        for policy in [
+            ExecutionPolicy::ConfiguredApprovals,
+            ExecutionPolicy::Unconstrained,
+        ] {
+            for role in [
+                SubagentMcpRole::Parent,
+                SubagentMcpRole::FixedParent,
+                SubagentMcpRole::Child,
+            ] {
+                let mut spec = reload_fallback_spec(harness);
+                spec.execution_policy = policy;
+                spec.subagent_mcp_socket = Some(worker_socket(role));
+                spec.project_memory = Some(ProjectMemoryLaunchConfig {
+                    history_socket: Some("/worker/history.sock".into()),
+                    project_key: "project".into(),
+                    root: "/memory".into(),
+                    baseline_root: "/baseline".into(),
+                    repository_roots: BTreeMap::new(),
+                    mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+                });
+                // The running executable can have a different canonical path.
+                spec.command = "/canonical/worker/hel".into();
+                spec.extra_mcp_servers = vec![
+                    ReviewMcpServer {
+                        name: "mj-review".into(),
+                        command: "/worker/hel".into(),
+                        args: vec!["worker".into(), "review-mcp".into()],
+                    },
+                    // A name resembling our namespace must not imply ownership.
+                    ReviewMcpServer {
+                        name: "mj-third-party".into(),
+                        command: "analyzer".into(),
+                        args: vec![],
+                    },
+                ]
+                .into_iter()
+                .map(|server| ReviewerMcpServer::new(server, Path::new("/worker")))
+                .collect();
+                let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
+                for request in [
+                    serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+                    serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
+                        .unwrap(),
+                    serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
+                        .unwrap(),
+                ] {
+                    let servers = request["mcpServers"].as_array().unwrap();
+                    if harness == HarnessKind::Codex {
+                        assert_eq!(servers.len(), 4);
+                        for server in servers {
+                            let expected = (guardian && server["name"] != "mj-third-party")
+                                .then(|| serde_json::json!("approve"));
+                            assert_eq!(
+                                server.pointer("/_meta/codex/defaultToolsApprovalMode"),
+                                expected.as_ref(),
+                                "{request}"
+                            );
+                        }
+                    } else {
+                        assert_eq!(
+                            servers.len(),
+                            1,
+                            "review and delegation connections remain in the staged profile"
+                        );
+                        let allowed = request.pointer("/_meta/claudeCode/options/allowedTools");
+                        if guardian {
+                            let mut expected = vec!["mcp__mj-memory__*".to_owned()];
+                            expected.extend(
+                                role.tool_names()
+                                    .iter()
+                                    .map(|tool| format!("mcp__mj-agents__{tool}")),
+                            );
+                            expected.push("mcp__mj-review__*".into());
+                            assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
+                        } else {
+                            assert!(
+                                allowed.is_none(),
+                                "yolo must not receive new allow rules: {request}"
+                            );
+                        }
+                    }
+                }
+                spec.subagent_mcp_socket = None;
+                spec.extra_mcp_servers.clear();
+                let without_memory =
+                    serde_json::to_value(new_session_request(&spec, false)).unwrap();
+                assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
+                assert!(
+                    without_memory
+                        .pointer("/_meta/claudeCode/options/allowedTools")
+                        .is_none()
+                );
+                spec.project_memory = None;
+                let absent = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+                assert!(absent["mcpServers"].as_array().unwrap().is_empty());
+                assert!(
+                    absent
+                        .pointer("/_meta/claudeCode/options/allowedTools")
+                        .is_none()
+                );
+            }
+        }
+    }
+}
+
 /// A fake Codex bridge that titles a thread the way codex-acp 1.13.2 does:
 /// from the text blocks of the prompt, joined with spaces
 /// (`params.prompt.filter((b) => b.type === "text")` in its prompt handler,
@@ -595,7 +704,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 
         spec.subagent_policy = mj_core::subagent::SubagentPolicy::Native;
         spec.subagent_mcp_socket = None;
-        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
         assert!(
             meta.pointer("/claudeCode/options/disallowedTools")
                 .is_none(),
@@ -608,7 +717,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 
         spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
         spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
-        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
         let hidden = match harness {
             HarnessKind::Claude => meta.pointer("/claudeCode/options/disallowedTools"),
             _ => meta.pointer("/codex/options/disallowedTools"),
@@ -629,7 +738,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         ] {
             spec.subagent_policy = policy;
             spec.subagent_mcp_socket = None;
-            let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+            let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
             let path = if harness == HarnessKind::Claude {
                 "/claudeCode/options/disallowedTools"
             } else {
@@ -762,7 +871,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
         }),
         stall_policy: None,
     };
-    let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
     assert_eq!(
         meta.pointer("/claudeCode/options/sandbox/enabled"),
         Some(&serde_json::Value::Bool(false))
@@ -807,7 +916,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
     }
 
     spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    let configured_meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    let configured_meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
     assert_eq!(
         configured_meta.pointer("/claudeCode/emitRawSDKMessages"),
         Some(&filter)
@@ -840,7 +949,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
     spec.execution_policy = ExecutionPolicy::Unconstrained;
     spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
     spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
-    let claude_meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    let claude_meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
     assert_eq!(
         claude_meta.pointer("/claudeCode/options/disallowedTools"),
         Some(&serde_json::json!(["Agent", "Task"]))
@@ -851,7 +960,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_
     );
 
     spec.harness = HarnessKind::Codex;
-    let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
+    let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
     assert!(meta.get("claudeCode").is_none());
     assert_eq!(
         meta.pointer("/goal/resumePolicy"),
@@ -922,7 +1031,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     };
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
         spec.harness = harness;
-        let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap_or_default());
+        let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap_or_default());
         let (pointer, expected) = match harness {
             HarnessKind::Claude => (
                 "/claudeCode/options/disallowedTools",

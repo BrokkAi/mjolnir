@@ -1048,7 +1048,14 @@ impl ReviewerRole {
             // A reviewer reads the workspace; it never syncs project memory,
             // which belongs to the primary session alone.
             project_memory: None,
-            extra_mcp_servers: config.mcp_servers.clone(),
+            extra_mcp_servers: config
+                .mcp_servers
+                .iter()
+                .cloned()
+                .map(|server| {
+                    crate::acp::ReviewerMcpServer::new(server, &self.placement.worker_root)
+                })
+                .collect(),
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
             resume_session,

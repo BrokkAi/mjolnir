@@ -82,6 +82,7 @@ pub async fn prepare_harness_launch(
     mut spec: AcpSupervisorSpec,
 ) -> Result<PreparedHarnessLaunch> {
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
+    link_build_cache_configuration(&environment).await?;
     super::exclude_from_harness_environment(
         harness,
         &spec.excluded_environment,
@@ -201,9 +202,88 @@ pub async fn prepare_harness_launch(
     })
 }
 
+/// Reviewer homes can be created after provisioning. Link their mbx lookup to
+/// machine policy too, without changing XDG_CONFIG_HOME for any other program.
+async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) -> Result<()> {
+    let Some(source) = environment.get("MJ_MBX_CONFIG_DIR") else {
+        return Ok(());
+    };
+    let source = Path::new(source).join("config.toml");
+    let root = match environment
+        .get("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+    {
+        Some(root) => std::path::PathBuf::from(root),
+        None => Path::new(
+            environment
+                .get("HOME")
+                .context("mbx configuration needs HOME")?,
+        )
+        .join(".config"),
+    };
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        anyhow::ensure!(
+            source.is_file(),
+            "shared machine mbx configuration {} is missing",
+            source.display()
+        );
+        let directory = root.join("mbx");
+        std::fs::create_dir_all(&directory).context("create mbx configuration lookup directory")?;
+        let destination = directory.join("config.toml");
+        if std::fs::read_link(&destination).ok().as_ref() == Some(&source) {
+            return Ok(());
+        }
+        let staging = tempfile::tempdir_in(&directory).context("stage mbx configuration link")?;
+        let link = staging.path().join("config.toml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &link).context("link shared mbx configuration")?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&source, &link)
+            .context("link shared mbx configuration")?;
+        std::fs::rename(link, destination).context("publish mbx configuration link")?;
+        Ok(())
+    })
+    .await
+    .context("mbx configuration link task failed")?
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reviewer_and_primary_homes_read_the_same_replaced_machine_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let policy = shared.join("config.toml");
+        mj_core::config::atomic_write(&policy, b"[target]\nmax_size = '100GiB'\n").unwrap();
+        for home in ["primary", "reviewer"] {
+            let environment = BTreeMap::from([
+                (
+                    "MJ_MBX_CONFIG_DIR".into(),
+                    shared.to_string_lossy().into_owned(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    root.path().join(home).to_string_lossy().into_owned(),
+                ),
+            ]);
+            link_build_cache_configuration(&environment).await.unwrap();
+            assert_eq!(
+                environment["XDG_CONFIG_HOME"],
+                root.path().join(home).to_string_lossy()
+            );
+        }
+        mj_core::config::atomic_write(&policy, b"[target]\nmax_size = '300GiB'\n").unwrap();
+        for home in ["primary", "reviewer"] {
+            assert_eq!(
+                std::fs::read(root.path().join(home).join("mbx/config.toml")).unwrap(),
+                b"[target]\nmax_size = '300GiB'\n"
+            );
+        }
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]

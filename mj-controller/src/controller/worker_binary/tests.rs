@@ -3256,12 +3256,19 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         with.target_environment
             .get("MBX_GC_MAX_TOTAL_SIZE")
             .map(String::as_str),
-        Some("100000000000B")
+        None
     );
     assert_eq!(
         with.environment.get("MBX_CACHE_DIR").map(String::as_str),
         Some("/mnt/fast/mbx-cache")
     );
+    for environment in [&with.target_environment, &with.environment] {
+        assert!(!environment.contains_key("MBX_GC_MAX_TOTAL_SIZE"));
+        assert_eq!(
+            environment.get("MJ_MBX_CONFIG_DIR").map(String::as_str),
+            Some("/mnt/fast/mbx-cache/.mjolnir/config/mbx")
+        );
+    }
     // The summary and savings lines are suppressed in sessions.
     assert_eq!(
         with.target_environment
@@ -3349,7 +3356,8 @@ fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path(
         "session-1",
         "/home/hel/.hel/worker",
         binary.path(),
-        Some("[gc]\nmax_size = \"500GiB\"\n"),
+        Path::new("/cache/.mjolnir/config/mbx"),
+        &[],
     )
     .unwrap();
 
@@ -3372,7 +3380,7 @@ fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path(
         commands
             .iter()
             .any(|line| line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")),
-        "the host mbx configuration is written into the container: {commands:#?}"
+        "the machine mbx configuration is linked into the container: {commands:#?}"
     );
 }
 

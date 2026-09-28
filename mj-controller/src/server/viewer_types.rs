@@ -812,6 +812,12 @@ pub struct ViewerProfile {
 pub struct ViewerQuotaWindow {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at_epoch_seconds: Option<i64>,
+    #[serde(default)]
+    pub reset_countdown_style: mj_client::quota::ResetCountdownStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_resets: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_used: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,

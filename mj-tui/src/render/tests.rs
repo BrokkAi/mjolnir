@@ -1,3 +1,4 @@
+use mj_client::quota::{five_hour_quota_reset_countdown, quota_reset_countdown};
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
@@ -2157,6 +2158,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
 /// A profile quota with `remaining` percent of its weekly window left.
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
+        banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
         windows: vec![QuotaWindow {
@@ -2192,6 +2194,7 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
 /// label in place of one.
 fn api_quota(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
+        banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
         windows: Vec::new(),
@@ -4114,6 +4117,7 @@ fn quota_render_includes_errors_and_refresh_age_in_title() {
         BTreeMap::from([(
             "codex-1".into(),
             ProfileQuota {
+                banked_resets: None,
                 profile_id: "codex-1".into(),
                 harness: HarnessKind::Codex,
                 windows: vec![],
@@ -4151,6 +4155,7 @@ fn quota_render_shows_login_expired_without_unavailable_prefix() {
         BTreeMap::from([(
             "claude-1".into(),
             ProfileQuota {
+                banked_resets: None,
                 profile_id: "claude-1".into(),
                 harness: HarnessKind::Claude,
                 windows: vec![],
@@ -4248,6 +4253,7 @@ fn api_quota_label_uses_the_black_bordered_chart_field() {
 #[test]
 fn quota_render_hides_five_hour_bar_and_reset_when_weekly_quota_is_exhausted() {
     let quota = ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![
@@ -4338,6 +4344,7 @@ fn quota_reset_countdown_always_shows_hours() {
 #[test]
 fn weekly_and_five_hour_resets_are_independent() {
     let quota = ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![
@@ -4370,6 +4377,25 @@ fn weekly_and_five_hour_resets_are_independent() {
 }
 
 #[test]
+fn banked_resets_appear_only_beside_the_weekly_countdown() {
+    let mut quota = weekly_and_five_hour_quota("codex", 75, 80);
+    quota.windows[0].resets_at_epoch_seconds = Some(5 * 86400 + 7 * 3600);
+    quota.windows[1].resets_at_epoch_seconds = Some(4 * 3600);
+    quota.banked_resets = Some(1);
+    assert_eq!(
+        quota_reset_cells(&quota, 0),
+        ("5d 7h [1]".into(), "4h 0m".into())
+    );
+    for count in [Some(0), None] {
+        quota.banked_resets = count;
+        assert_eq!(quota_reset_cells(&quota, 0).0, "5d 7h");
+    }
+    quota.banked_resets = Some(1);
+    quota.windows[0].resets_at_epoch_seconds = None;
+    assert_eq!(quota_reset_cells(&quota, 0).0, "[1]");
+}
+
+#[test]
 fn five_hour_reset_always_uses_minutes_above_one_hour() {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
@@ -4397,6 +4423,7 @@ fn quota_render_uses_weekly_five_hour_and_reset_columns() {
         .as_secs();
     let now = i64::try_from(now).unwrap();
     let quota = ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![
@@ -4504,6 +4531,7 @@ fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
         .as_secs();
     let now = i64::try_from(now).unwrap();
     let quota = ProfileQuota {
+        banked_resets: Some(1),
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![
@@ -4543,7 +4571,7 @@ fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
         .expect("quota row");
     assert!(row.contains("73%"), "{row:?}");
     assert!(row.contains("70%"), "{row:?}");
-    assert!(row.contains("2d"), "{row:?}");
+    assert!(row.contains("2d 0h [1]"), "{row:?}");
     assert!(row.contains("1h 5m"), "{row:?}");
 }
 

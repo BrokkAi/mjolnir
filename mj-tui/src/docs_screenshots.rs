@@ -194,6 +194,7 @@ fn documentation_dashboard() -> DashboardState {
         (
             "kimi-1".into(),
             ProfileQuota {
+                banked_resets: None,
                 profile_id: "kimi-1".into(),
                 harness: HarnessKind::Kimi,
                 windows: Vec::new(),
@@ -351,6 +352,7 @@ fn profile_quota(
     refreshed: u64,
 ) -> ProfileQuota {
     ProfileQuota {
+        banked_resets: None,
         profile_id: profile_id.into(),
         harness,
         windows: vec![
