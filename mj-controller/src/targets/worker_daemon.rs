@@ -381,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn stopping_worker_waits_for_term_resistant_descendants_after_leader_exit() {
         use std::os::unix::process::CommandExt;
         let root = tempfile::tempdir().unwrap();

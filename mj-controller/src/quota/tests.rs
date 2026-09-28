@@ -6,6 +6,7 @@ use axum::{Json, Router};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
 fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
