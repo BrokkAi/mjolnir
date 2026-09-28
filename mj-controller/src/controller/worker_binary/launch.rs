@@ -602,14 +602,6 @@ pub(super) fn worker_launch_config(
     if let Some(key) = mj_core::activity::verdict::api_key() {
         target_environment.insert("TYPESAFE_API_KEY".to_owned(), key);
     }
-    // A worker process carries no other sign of which instance owns it, so
-    // `pgrep`, `/proc/<pid>/environ` and a recovery scan cannot attribute one.
-    // The worker re-execs with a cleared environment, so this has to travel in
-    // the launch config rather than by inheritance.
-    target_environment.insert(
-        "MJ_INSTANCE".to_owned(),
-        mj_core::config::instance_identity(),
-    );
     // The build cache reaches the harness, its terminals, and the reviewer
     // sidecar, all of which run Cargo through the mbx shim.
     if let Some(build_cache) = &session.build_cache {
