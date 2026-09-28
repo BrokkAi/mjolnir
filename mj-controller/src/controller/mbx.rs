@@ -46,6 +46,20 @@ const TALLY_RELATIVE: &str = "actions/savings/v1/tally.json";
 const DEFAULT_MAX_BYTES: u64 = 100_000_000_000;
 const RESOLUTION_LIFETIME: Duration = Duration::from_secs(600);
 const LABEL: &str = "hel-mbx";
+const UNSUPPORTED_HOST: &str = "Mjolnir's shared mbx cache requires a Linux host. Native mbx on macOS must be installed and configured separately.";
+
+/// Ask the cache host, not the controller or a container running on that host.
+fn host_supports_cache(host: &CacheHost, executor: &impl CommandExecutor) -> Result<bool> {
+    let command = host.command(
+        vec!["uname".into(), "-sm".into()],
+        "detect build cache host platform",
+    );
+    let output = checked(executor.execute(&command)?, &command)?;
+    let platform = targets::TargetPlatform::parse(
+        std::str::from_utf8(&output.stdout).context("decode build cache host platform")?,
+    )?;
+    Ok(platform.os == targets::TargetOs::Linux)
+}
 
 /// What a container target's host offers as a build cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,9 +320,17 @@ pub(super) fn prepare_session_configuration(
     // A disabled cache still exists in already provisioned containers. Keep
     // its policy current until the session no longer mounts it.
     settings.enabled = Some(true);
-    let cache = inspect_host(&host, &settings, executor)?
-        .cache
-        .context("build cache configuration unavailable")?;
+    let inspected = inspect_host(&host, &settings, executor)?;
+    let cache = inspected.cache.with_context(|| {
+        format!(
+            "build cache configuration unavailable: {}",
+            inspected
+                .preview
+                .off_reason
+                .map(|reason| reason.to_string())
+                .unwrap_or_else(|| "host inspection returned no cache".into())
+        )
+    })?;
     publish_at(&host, &cache, &recorded.directory, executor)
 }
 
@@ -320,6 +342,7 @@ pub(crate) struct DoctorHostMbx {
 }
 
 pub(crate) enum DoctorHostMbxStatus {
+    Unsupported(String),
     Absent,
     Compatible(String),
     TooOld(String),
@@ -368,20 +391,25 @@ pub(crate) fn doctor_host_mbx(
         }
     }
     checks.extend(hosts.into_iter().map(|(key, (host, targets))| {
-        let status = match probe_native_version(&host, executor) {
-            Ok(None) => DoctorHostMbxStatus::Absent,
-            Ok(Some(native)) if semver::Version::parse(&native.version).is_err() => {
-                DoctorHostMbxStatus::Unknown(format!(
-                    "the host reported an unrecognized mbx version {:?}",
-                    native.version
-                ))
+        let status = (|| -> Result<DoctorHostMbxStatus> {
+            if !host_supports_cache(&host, executor)? {
+                return Ok(DoctorHostMbxStatus::Unsupported(UNSUPPORTED_HOST.into()));
             }
-            Ok(Some(native)) if version_at_least(&native.version, MBX_VERSION) => {
-                DoctorHostMbxStatus::Compatible(native.version)
-            }
-            Ok(Some(native)) => DoctorHostMbxStatus::TooOld(native.version),
-            Err(error) => DoctorHostMbxStatus::Unknown(format!("{error:#}")),
-        };
+            Ok(match probe_native_version(&host, executor)? {
+                None => DoctorHostMbxStatus::Absent,
+                Some(native) if semver::Version::parse(&native.version).is_err() => {
+                    DoctorHostMbxStatus::Unknown(format!(
+                        "the host reported an unrecognized mbx version {:?}",
+                        native.version
+                    ))
+                }
+                Some(native) if version_at_least(&native.version, MBX_VERSION) => {
+                    DoctorHostMbxStatus::Compatible(native.version)
+                }
+                Some(native) => DoctorHostMbxStatus::TooOld(native.version),
+            })
+        })()
+        .unwrap_or_else(|error| DoctorHostMbxStatus::Unknown(format!("{error:#}")));
         DoctorHostMbx {
             host: key,
             targets,
@@ -405,6 +433,22 @@ fn inspect_host(
     settings: &TargetBuildCache,
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
+    if !host_supports_cache(host, executor)? {
+        return Ok(Inspection {
+            preview: BuildCachePreview {
+                native_mbx: None,
+                directory: None,
+                max_size: None,
+                target_max_size: None,
+                user_managed: false,
+                application: BuildCacheApplication::Pending,
+                budget_note: None,
+                stats: None,
+                off_reason: Some(BuildCacheOff::Unavailable(UNSUPPORTED_HOST.into())),
+            },
+            cache: None,
+        });
+    }
     let native = probe_native_version(host, executor)?;
     let native_version = native.as_ref().map(|native| native.version.clone());
     let off = |preview: BuildCachePreview| Inspection {
@@ -1179,6 +1223,7 @@ mod tests {
                 answers: answers
                     .iter()
                     .map(|(needle, status, stdout)| (*needle, *status, (*stdout).to_owned()))
+                    .chain(std::iter::once(("uname -sm", 0, "Linux x86_64\n".into())))
                     .collect(),
                 seen: Mutex::new(Vec::new()),
             }
@@ -1193,8 +1238,14 @@ mod tests {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
             self.seen.lock().unwrap().push(line.clone());
+            // Undo the quoting added by join_remote_command for fixture matching.
+            let searchable = if command.program == "ssh" {
+                line.replace("'\\''", "'").replace("' '", " ")
+            } else {
+                line.clone()
+            };
             for (needle, status, stdout) in &self.answers {
-                if line.contains(needle) {
+                if searchable.contains(needle) {
                     return Ok(CommandOutput {
                         status: *status,
                         stdout: stdout.clone().into_bytes(),
@@ -1264,6 +1315,116 @@ mod tests {
             ("mkdir -p", 0, ""),
             ("stat -f -c %T", 0, "xfs"),
         ]
+    }
+
+    #[test]
+    fn darwin_hosts_skip_cache_inspection_provisioning_and_reconciliation() {
+        let _isolated = isolated();
+        for remote in [false, true] {
+            for enabled in [None, Some(true)] {
+                let settings = TargetBuildCache {
+                    enabled,
+                    ..Default::default()
+                };
+                let machine: mj_core::config::Machine = if remote {
+                    serde_json::from_value(serde_json::json!({
+                        "kind": "ssh", "host": "mac.test", "user": "builder", "build_cache": settings,
+                    }))
+                    .unwrap()
+                } else {
+                    mj_core::config::Machine::Local {
+                        build_cache: Some(settings.clone()),
+                    }
+                };
+                let target = if remote {
+                    TargetTemplate::SshPodman {
+                        ssh: SshTarget {
+                            destination: "builder@mac.test".into(),
+                            ssh_args: vec![],
+                        },
+                        container: container(Some(settings)),
+                    }
+                } else {
+                    podman(Some(settings))
+                };
+                // An installed native mbx must not enable Mjolnir's integration.
+                let executor = ProbeExecutor::new(&[
+                    ("uname -sm", 0, "Darwin arm64\n"),
+                    ("$m\" --version", 0, "mbx\nmbx 1.16.0"),
+                ]);
+                let preview = preview_build_cache(&machine, &executor).unwrap().unwrap();
+                assert_eq!(
+                    preview.off_reason,
+                    Some(BuildCacheOff::Unavailable(UNSUPPORTED_HOST.into()))
+                );
+                assert!(preview.directory.is_none());
+                assert!(resolve(&target, &executor).is_none());
+                apply_machine_build_cache(&machine, &[PathBuf::from("/existing/cache")], &executor)
+                    .unwrap();
+                let commands = executor.ran();
+                assert!(!commands.is_empty());
+                assert!(
+                    commands
+                        .iter()
+                        .all(|command| command.contains("uname") && command.contains("-sm")),
+                    "{commands:?}"
+                );
+                assert!(
+                    commands
+                        .iter()
+                        .all(|command| command.starts_with(if remote { "ssh " } else { "uname " }))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn linux_ssh_cache_remains_available_on_any_controller_platform() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&plain_host());
+        let target = TargetTemplate::SshDocker {
+            ssh: SshTarget {
+                destination: "builder@linux.test".into(),
+                ssh_args: vec![],
+            },
+            container: container(None),
+        };
+        let cache = resolve(&target, &executor).unwrap();
+        assert_eq!(cache.directory, PathBuf::from("/home/dev/.cache/mbx"));
+        assert_eq!(cache.previous_config, cache.config_file);
+        assert!(
+            executor.ran().iter().all(
+                |command| command.starts_with("ssh ") && command.contains("builder@linux.test")
+            )
+        );
+    }
+
+    #[test]
+    fn recorded_darwin_cache_fails_explicitly_without_writing() {
+        let executor = ProbeExecutor::new(&[("uname -sm", 0, "Darwin x86_64")]);
+        let recorded = SessionBuildCache {
+            host: "local".into(),
+            directory: PathBuf::from("/existing/cache"),
+            max_size: None,
+            target_root: None,
+        };
+        let backend = targets::TargetLocator::LocalPodman {
+            container_id: "saved-container".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        };
+        let error =
+            prepare_session_configuration(&Config::default(), &backend, &recorded, &executor)
+                .unwrap_err();
+        assert!(format!("{error:#}").contains(UNSUPPORTED_HOST));
+        assert_eq!(executor.ran(), ["uname -sm"]);
+    }
+
+    #[test]
+    fn failed_platform_probe_does_not_attempt_cache_operations() {
+        let executor = ProbeExecutor::new(&[("uname -sm", 1, "")]);
+        assert!(inspect_host(&CacheHost::Local, &TargetBuildCache::default(), &executor).is_err());
+        assert_eq!(executor.ran(), ["uname -sm"]);
     }
 
     #[test]

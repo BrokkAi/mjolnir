@@ -49,3 +49,11 @@ mj-controller/src/controller/worker_binary/*
 # Native checkpoint paths include macOS's Application Support directory.
 mj-controller/src/checkpoint_transfer.rs
 mj-controller/src/checkpoint_transfer/*
+
+# Build cache host support and its settings/doctor reporting.
+mj-controller/src/controller/mbx.rs
+mj-controller/src/controller/mbx/*
+mj-controller/src/doctor.rs
+mj-controller/src/doctor/*
+mj-tui/src/setup.rs
+mj-tui/src/setup/*

@@ -697,7 +697,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share a build cache among Rust container sessions on this machine. Enabled by default where supported."
+            "Share Rust build caches on Linux hosts; on by default. On macOS, install and configure native mbx separately."
         }
         "directory" => {
             "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."

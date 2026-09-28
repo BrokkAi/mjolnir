@@ -1034,6 +1034,10 @@ impl<K: Copy + Eq> Form<K> {
                 self.focus_sibling(id, key.code == KeyCode::Right, true);
                 return Some(EventResult::handled());
             }
+            if ordinary && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                self.focus_sibling(id, key.code == KeyCode::Down, false);
+                return Some(EventResult::handled());
+            }
             return None;
         }
         // An open completion popup takes the navigation keys and Enter; every
@@ -1120,7 +1124,18 @@ impl<K: Copy + Eq> Form<K> {
                     EventResult::handled()
                 });
             }
-            if let Some(next) = self.list_selection(id, key.code, key.modifiers, selected, len) {
+            let next = self.list_selection(id, key.code, key.modifiers, selected, len);
+            // At either end, arrows leave the list for the surrounding controls.
+            // Follow selectable rows so disabled rows and section headers do
+            // not trap focus before an unreachable first or last data index.
+            if ordinary
+                && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                && next.is_none_or(|next| next == selected)
+                && self.focus_sibling(id, key.code == KeyCode::Down, false)
+            {
+                return Some(EventResult::handled());
+            }
+            if let Some(next) = next {
                 self.set_selected(id, next);
                 return Some(EventResult::with_action(Interaction::Select(id, next)));
             }

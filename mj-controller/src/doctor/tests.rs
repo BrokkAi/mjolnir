@@ -337,7 +337,7 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
             },
         ),
     ]);
-    let executor = FakeExecutor::new([Ok(output("mbx\nmbx 1.15.0"))]);
+    let executor = FakeExecutor::new([Ok(output("Linux x86_64")), Ok(output("mbx\nmbx 1.15.0"))]);
 
     let checks = build_cache_checks(Ok(&config), &executor);
 
@@ -356,7 +356,7 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
             .unwrap()
             .contains("Upgrade mbx")
     );
-    assert_eq!(executor.commands.borrow().len(), 1);
+    assert_eq!(executor.commands.borrow().len(), 2);
     assert!(
         all_ready(&checks),
         "an optional cache warning preserves doctor's exit status"
@@ -401,7 +401,7 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
             "probe timed out",
         ),
     ] {
-        let executor = FakeExecutor::new([response]);
+        let executor = FakeExecutor::new([Ok(output("Linux x86_64")), response]);
         let checks = build_cache_checks(Ok(&config), &executor);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].status, expected_status);
@@ -418,7 +418,10 @@ fn doctor_reports_remote_host_mbx_for_ssh_container_targets() {
             container: container("ubuntu:24.04"),
         },
     )]);
-    let executor = FakeExecutor::new([Ok(output("/home/dev/.cargo/bin/mbx\nmbx 1.15.0"))]);
+    let executor = FakeExecutor::new([
+        Ok(output("Linux aarch64")),
+        Ok(output("/home/dev/.cargo/bin/mbx\nmbx 1.15.0")),
+    ]);
 
     let checks = build_cache_checks(Ok(&config), &executor);
 
@@ -427,6 +430,29 @@ fn doctor_reports_remote_host_mbx_for_ssh_container_targets() {
     assert!(checks[0].id.contains("example.test"));
     assert!(checks[0].detail.contains("targets remote"));
     assert_eq!(executor.commands.borrow()[0].program, "ssh");
+}
+
+#[test]
+fn doctor_reports_darwin_cache_as_unsupported_without_mbx_remediation() {
+    for target in [
+        TargetTemplate::LocalPodman {
+            container: container("ubuntu:24.04"),
+        },
+        TargetTemplate::SshPodman {
+            ssh: ssh_connection(),
+            container: container("ubuntu:24.04"),
+        },
+    ] {
+        let config = config_with([("mac", target)]);
+        let executor = FakeExecutor::new([Ok(output("Darwin arm64"))]);
+        let checks = build_cache_checks(Ok(&config), &executor);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Unsupported);
+        assert!(checks[0].detail.contains("requires a Linux host"));
+        assert!(checks[0].remediation.is_none());
+        assert!(all_ready(&checks));
+        assert_eq!(executor.commands.borrow().len(), 1);
+    }
 }
 
 #[test]

@@ -1339,6 +1339,10 @@ impl SetupDialog {
         let Some(preview) = self.current_build_cache_preview() else {
             return Vec::new();
         };
+        // An unsupported host has no policy to apply.
+        if preview.directory.is_none() {
+            return Vec::new();
+        }
         let owner = if preview.user_managed {
             "User-managed mbx; mj budgets are inactive"
         } else {
