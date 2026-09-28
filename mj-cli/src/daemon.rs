@@ -317,6 +317,7 @@ const RESTART_ATTEMPTS: usize = 2;
 /// that, an attached client running an older build wins the gap and the
 /// restart reports someone else's daemon as the one it was asked for.
 pub async fn restart_daemon() -> Result<RestartedDaemon> {
+    mj_core::config::ensure_may_control_store(&data_dir(), "restart the Mjolnir daemon")?;
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     for attempt in 1..=RESTART_ATTEMPTS {
         if let Ok(metadata) = read_metadata_any() {
@@ -559,6 +560,13 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
 /// Automatic upgrades have no authority to cancel work, even when a daemon
 /// is slow or temporarily unreachable. Explicit restart uses `stop_daemon`.
 async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
+    mj_core::config::ensure_may_control_store(
+        &data_dir(),
+        &format!(
+            "replace Mjolnir daemon {} (build {})",
+            metadata.pid, metadata.build_version
+        ),
+    )?;
     let mut notice_at = Instant::now() + START_NOTICE_DELAY;
     loop {
         let previous = metadata.clone();

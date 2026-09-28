@@ -2206,6 +2206,56 @@ fn instance_directories_nest_under_instances_and_reject_escapes() {
     assert_eq!(with_instance_dir(base.clone(), Some("")), base);
 }
 
+#[test]
+fn development_builds_may_not_control_the_default_store() {
+    let root = tempfile::tempdir().unwrap();
+    let default_store = root.path().join("share/mjolnir");
+    let named_store = default_store.join("instances/dev");
+    fs::create_dir_all(&named_store).unwrap();
+    let profile = root
+        .path()
+        .join("checkout/target/x86_64-unknown-linux-musl/release");
+    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+    fs::create_dir_all(profile.join("deps")).unwrap();
+    let installed = root.path().join("cargo/bin/mj");
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+
+    for executable in [
+        profile.join("mj"),
+        // Linux names a rebuilt executable this way through /proc/self/exe.
+        profile.join("mj (deleted)"),
+        profile.join("deps/mj-0123456789abcdef"),
+    ] {
+        assert_eq!(
+            development_build_controlling_default_store(
+                &executable,
+                &default_store,
+                &default_store
+            ),
+            Some(profile.as_path()),
+            "{}",
+            executable.display()
+        );
+        // The same store reached through a different spelling is still the default.
+        assert!(
+            development_build_controlling_default_store(
+                &executable,
+                &default_store.join("instances/.."),
+                &default_store
+            )
+            .is_some()
+        );
+        assert_eq!(
+            development_build_controlling_default_store(&executable, &named_store, &default_store),
+            None
+        );
+    }
+    assert_eq!(
+        development_build_controlling_default_store(&installed, &default_store, &default_store),
+        None
+    );
+}
+
 fn full_container(build_cache: Option<TargetBuildCache>) -> ContainerTemplate {
     ContainerTemplate {
         image: "example.invalid/agent:latest".into(),
