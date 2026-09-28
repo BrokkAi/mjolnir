@@ -22,6 +22,9 @@ pub struct QuotaWindow {
 /// The quota report shown for one harness profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileQuota {
+    /// Unused provider-granted resets, absent when the provider cannot report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_resets: Option<u64>,
     pub profile_id: String,
     pub harness: HarnessKind,
     pub windows: Vec<QuotaWindow>,
@@ -157,4 +160,169 @@ fn projects_exhaustion_before_reset(window: &QuotaWindow, now: u64) -> bool {
     window
         .remaining_percent
         .is_some_and(|remaining| i64::from(100 - remaining) * FIVE_HOURS_SECONDS > 100 * elapsed)
+}
+
+/// Which existing TUI countdown convention applies to a quota window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetCountdownStyle {
+    #[default]
+    Long,
+    FiveHour,
+}
+
+impl QuotaWindow {
+    pub fn reset_countdown_style(&self) -> ResetCountdownStyle {
+        if is_short_quota_window(&self.label) {
+            ResetCountdownStyle::FiveHour
+        } else {
+            ResetCountdownStyle::Long
+        }
+    }
+
+    pub fn reset_display(&self, now: u64, banked_resets: Option<u64>) -> String {
+        format_quota_reset(
+            now,
+            self.resets_at_epoch_seconds,
+            self.resets.as_deref(),
+            self.reset_countdown_style(),
+            banked_resets,
+        )
+    }
+}
+
+impl ProfileQuota {
+    /// Only the long quota window carries the account's banked reset balance.
+    pub fn banked_resets_for_window(&self, window: &QuotaWindow) -> Option<u64> {
+        self.banked_resets.filter(|_| {
+            self.weekly_window()
+                .is_some_and(|weekly| weekly.label == window.label)
+        })
+    }
+}
+
+/// Render a reset time and its optional banked balance. The browser equivalent
+/// is checked against the same examples in quota/reset_display_cases.json.
+pub fn format_quota_reset(
+    now: u64,
+    reset: Option<i64>,
+    fallback: Option<&str>,
+    style: ResetCountdownStyle,
+    banked_resets: Option<u64>,
+) -> String {
+    let mut display = match reset {
+        Some(reset) => match style {
+            ResetCountdownStyle::Long => quota_reset_countdown(now, reset),
+            ResetCountdownStyle::FiveHour => five_hour_quota_reset_countdown(now, reset),
+        },
+        None => fallback.unwrap_or_default().to_owned(),
+    };
+    if let Some(count) = banked_resets.filter(|count| *count > 0) {
+        if !display.is_empty() {
+            display.push(' ');
+        }
+        display.push_str(&format!("[{count}]"));
+    }
+    display
+}
+
+pub fn quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
+    let Ok(reset) = u64::try_from(reset_at_epoch_seconds) else {
+        return "now".into();
+    };
+    let remaining = reset.saturating_sub(now);
+    if remaining == 0 {
+        return "now".into();
+    }
+
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    if remaining >= DAY {
+        let days = remaining / DAY;
+        let hours = remaining % DAY / HOUR;
+        format!("{days}d {hours}h")
+    } else if remaining >= HOUR {
+        let hours = remaining / HOUR;
+        let minutes = remaining % HOUR / MINUTE;
+        // Under ten hours the minutes decide whether to wait, so show them.
+        if hours < 10 && minutes > 0 {
+            format!("{hours}h {minutes}m")
+        } else {
+            format!("{hours}h")
+        }
+    } else if remaining >= MINUTE {
+        format!("{}m", remaining / MINUTE)
+    } else {
+        "<1m".into()
+    }
+}
+
+pub fn five_hour_quota_reset_countdown(now: u64, reset_at_epoch_seconds: i64) -> String {
+    let Ok(reset) = u64::try_from(reset_at_epoch_seconds) else {
+        return "now".into();
+    };
+    let remaining = reset.saturating_sub(now);
+    if remaining == 0 {
+        "now".into()
+    } else if remaining < 60 {
+        "<1m".into()
+    } else if remaining < 60 * 60 {
+        format!("{}m", remaining / 60)
+    } else {
+        let hours = remaining / (60 * 60);
+        let minutes = remaining % (60 * 60) / 60;
+        format!("{hours}h {minutes}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_display_matches_shared_browser_cases() {
+        #[derive(Deserialize)]
+        struct Case {
+            name: String,
+            now: u64,
+            reset: Option<i64>,
+            fallback: Option<String>,
+            style: ResetCountdownStyle,
+            banked_resets: Option<u64>,
+            expected: String,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("quota/reset_display_cases.json")).unwrap();
+        for case in cases {
+            assert_eq!(
+                format_quota_reset(
+                    case.now,
+                    case.reset,
+                    case.fallback.as_deref(),
+                    case.style,
+                    case.banked_resets
+                ),
+                case.expected,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn old_quota_reports_decode_without_a_banked_balance() {
+        let quota: ProfileQuota = serde_json::from_value(serde_json::json!({
+            "profile_id": "claude", "harness": "claude", "windows": [],
+            "extra": null, "error": null, "refreshed_at_epoch_seconds": 0
+        }))
+        .unwrap();
+        assert_eq!(quota.banked_resets, None);
+        assert!(
+            serde_json::to_value(&quota)
+                .unwrap()
+                .get("banked_resets")
+                .is_none()
+        );
+    }
 }

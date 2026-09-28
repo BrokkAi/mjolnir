@@ -1123,6 +1123,7 @@ function updateSessionActivity(card, session) {
 }
 
 function updateSessionClocks() {
+  updateQuotaClocks();
   for (const card of sessionCards.values()) {
     if (card.isConnected === false || !card._session) continue;
     // This is intentionally the only per-tick mutation: card identity and
@@ -3604,6 +3605,42 @@ function renderTargets() {
   );
 }
 
+// Keep these rules in sync with mj_client::quota through the shared
+// quota/reset_display_cases.json examples exercised by both runtimes.
+function formatQuotaReset(now, window) {
+  let display = window.resets_at || '';
+  if (Number.isSafeInteger(window.resets_at_epoch_seconds)) {
+    const remaining = Math.max(0, window.resets_at_epoch_seconds - now);
+    const hours = Math.floor(remaining / 3600);
+    const minutes = Math.floor(remaining % 3600 / 60);
+    if (remaining === 0) display = 'now';
+    else if (remaining < 60) display = '<1m';
+    else if (remaining < 3600) display = `${Math.floor(remaining / 60)}m`;
+    else if (window.reset_countdown_style === 'five_hour') display = `${hours}h ${minutes}m`;
+    else if (remaining >= 86400) display = `${Math.floor(remaining / 86400)}d ${hours % 24}h`;
+    else if (hours < 10 && minutes > 0) display = `${hours}h ${minutes}m`;
+    else display = `${hours}h`;
+  }
+  if (Number.isSafeInteger(window.banked_resets) && window.banked_resets > 0) {
+    display += `${display ? ' ' : ''}[${window.banked_resets}]`;
+  }
+  return display;
+}
+
+function quotaResetText(now, window) {
+  const display = formatQuotaReset(now, window);
+  return display && (Number.isSafeInteger(window.resets_at_epoch_seconds) || window.resets_at)
+    ? `resets ${display}` : display;
+}
+
+function updateQuotaClocks() {
+  const now = Math.floor(serverClockMs() / 1000);
+  for (const node of quotaPanel.querySelectorAll('.quota-reset')) {
+    const text = quotaResetText(now, node._quotaWindow);
+    if (node.textContent !== text) node.textContent = text;
+  }
+}
+
 function renderQuota() {
   const focused = document.activeElement;
   const focusedProfile = focused?.closest('.quota-profile')?.dataset.profileId;
@@ -3706,10 +3743,19 @@ function renderQuota() {
           meter.append(fill);
           row.append(meter);
         }
-        const notes = [];
-        if (window.resets_at) notes.push(`resets ${window.resets_at}`);
-        if (window.projects_exhaustion_before_reset) notes.push('on course to run out first');
-        if (notes.length) row.append(el('p', 'dim', notes.join(' · ')));
+        const resetText = quotaResetText(Math.floor(serverClockMs() / 1000), window);
+        if (resetText || window.projects_exhaustion_before_reset) {
+          const notes = el('p', 'dim');
+          if (resetText) {
+            const reset = el('span', 'quota-reset', resetText);
+            reset._quotaWindow = window;
+            notes.append(reset);
+          }
+          if (window.projects_exhaustion_before_reset) {
+            notes.append(`${resetText ? ' · ' : ''}on course to run out first`);
+          }
+          row.append(notes);
+        }
         card.append(row);
       }
       if (quota.refreshed_at_epoch_seconds) {

@@ -970,6 +970,7 @@ mod tests {
     #[test]
     fn zero_quota_is_excluded_and_api_is_healthy() {
         let mut report = ProfileQuota {
+            banked_resets: None,
             profile_id: "p".into(),
             harness: HarnessKind::Codex,
             windows: vec![],

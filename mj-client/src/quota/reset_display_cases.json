@@ -1,0 +1,227 @@
+[
+  {
+    "name": "banked week",
+    "now": 1000000,
+    "reset": 1457200,
+    "style": "long",
+    "banked_resets": 1,
+    "fallback": null,
+    "expected": "5d 7h [1]"
+  },
+  {
+    "name": "zero bank",
+    "now": 1000000,
+    "reset": 1457200,
+    "style": "long",
+    "banked_resets": 0,
+    "fallback": null,
+    "expected": "5d 7h"
+  },
+  {
+    "name": "day boundary",
+    "now": 1000000,
+    "reset": 1172800,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "2d 0h"
+  },
+  {
+    "name": "ten hours",
+    "now": 1000000,
+    "reset": 1036300,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "10h"
+  },
+  {
+    "name": "below ten",
+    "now": 1000000,
+    "reset": 1032700,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "9h 5m"
+  },
+  {
+    "name": "whole hour",
+    "now": 1000000,
+    "reset": 1032400,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "9h"
+  },
+  {
+    "name": "short whole hour",
+    "now": 1000000,
+    "reset": 1014400,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "4h 0m"
+  },
+  {
+    "name": "short minutes",
+    "now": 1000000,
+    "reset": 1017400,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "4h 50m"
+  },
+  {
+    "name": "long minutes",
+    "now": 1000000,
+    "reset": 1002100,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "35m"
+  },
+  {
+    "name": "long one minute",
+    "now": 1000000,
+    "reset": 1000060,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "1m"
+  },
+  {
+    "name": "long below minute",
+    "now": 1000000,
+    "reset": 1000059,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "<1m"
+  },
+  {
+    "name": "long zero",
+    "now": 1000000,
+    "reset": 1000000,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "long expired",
+    "now": 1000000,
+    "reset": 999999,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "long negative timestamp",
+    "now": 1000000,
+    "reset": -1,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "five_hour minutes",
+    "now": 1000000,
+    "reset": 1002100,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "35m"
+  },
+  {
+    "name": "five_hour one minute",
+    "now": 1000000,
+    "reset": 1000060,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "1m"
+  },
+  {
+    "name": "five_hour below minute",
+    "now": 1000000,
+    "reset": 1000059,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "<1m"
+  },
+  {
+    "name": "five_hour zero",
+    "now": 1000000,
+    "reset": 1000000,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "five_hour expired",
+    "now": 1000000,
+    "reset": 999999,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "five_hour negative timestamp",
+    "now": 1000000,
+    "reset": -1,
+    "style": "five_hour",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": "now"
+  },
+  {
+    "name": "several banked",
+    "now": 1000000,
+    "reset": 1000060,
+    "style": "long",
+    "banked_resets": 12,
+    "fallback": null,
+    "expected": "1m [12]"
+  },
+  {
+    "name": "legacy text",
+    "now": 1000000,
+    "reset": null,
+    "style": "long",
+    "banked_resets": 1,
+    "fallback": "tomorrow",
+    "expected": "tomorrow [1]"
+  },
+  {
+    "name": "unknown time",
+    "now": 1000000,
+    "reset": null,
+    "style": "long",
+    "banked_resets": 1,
+    "fallback": null,
+    "expected": "[1]"
+  },
+  {
+    "name": "unknown all",
+    "now": 1000000,
+    "reset": null,
+    "style": "long",
+    "banked_resets": null,
+    "fallback": null,
+    "expected": ""
+  },
+  {
+    "name": "zero and unknown time",
+    "now": 1000000,
+    "reset": null,
+    "style": "long",
+    "banked_resets": 0,
+    "fallback": null,
+    "expected": ""
+  }
+]

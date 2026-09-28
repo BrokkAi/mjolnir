@@ -330,6 +330,7 @@ fn a_feed_update_redraws_without_a_dirty_mark() {
     let before = terminal.backend().buffer().clone();
 
     dashboard.apply_quota(mj_client::quota::ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: mj_core::config::HarnessKind::Codex,
         windows: vec![mj_client::quota::QuotaWindow {

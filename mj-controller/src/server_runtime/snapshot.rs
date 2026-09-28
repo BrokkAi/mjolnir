@@ -465,6 +465,9 @@ pub(super) fn viewer_snapshot_selected(
                 .iter()
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
+                    resets_at_epoch_seconds: window.resets_at_epoch_seconds,
+                    reset_countdown_style: window.reset_countdown_style(),
+                    banked_resets: quota.banked_resets_for_window(window),
                     // The controller reports headroom; a bar fills as a limit
                     // is consumed, so the phone is given the complement.
                     percent_used: window

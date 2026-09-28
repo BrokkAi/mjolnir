@@ -49,6 +49,7 @@ fn a_custom_provider_profile_asks_its_provider_for_quota_not_chatgpt() {
             api_key: "coding-plan-key".to_owned(),
         })
     );
+    assert!(!request.native_openai);
     assert!(crate::zai_usage::serves_quota(
         &request.provider.unwrap().host
     ));
@@ -68,6 +69,23 @@ fn a_custom_provider_profile_asks_its_provider_for_quota_not_chatgpt() {
         native.path().to_path_buf(),
     );
     assert_eq!(request.provider, None);
+    assert!(request.native_openai);
+}
+
+#[test]
+fn inline_custom_provider_credentials_do_not_enable_openai_banked_resets() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = zai_profile(home.path(), "https://example.invalid/v1");
+    let path = home.path().join("config.toml");
+    let config = std::fs::read_to_string(&path).unwrap().replace(
+        "env_key = \"ZAI_API_KEY\"",
+        "experimental_bearer_token = \"inline-key\"",
+    );
+    std::fs::write(path, config).unwrap();
+    profile.environment.clear();
+    let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
+    assert_eq!(request.provider, None);
+    assert!(!request.native_openai);
 }
 
 #[tokio::test]
@@ -134,6 +152,7 @@ fn kimi_quota_reports_an_unrecognized_vendor_response() {
 #[test]
 fn compact_includes_reset_and_error_states() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![QuotaWindow {
@@ -155,6 +174,7 @@ fn compact_includes_reset_and_error_states() {
 #[test]
 fn compact_shows_login_expired_without_unavailable_prefix() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "claude2".into(),
         harness: HarnessKind::Claude,
         windows: vec![],
@@ -172,6 +192,7 @@ fn compact_shows_login_expired_without_unavailable_prefix() {
 #[test]
 fn compact_shows_other_errors_as_unavailable() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "claude2".into(),
         harness: HarnessKind::Claude,
         windows: vec![],
@@ -186,6 +207,7 @@ fn compact_shows_other_errors_as_unavailable() {
 #[test]
 fn compact_displays_a_shared_reset_once() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         windows: vec![
@@ -219,6 +241,7 @@ fn compact_displays_a_shared_reset_once() {
 #[test]
 fn compact_hides_claude_short_window_when_week_is_exhausted() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "claude".into(),
         harness: HarnessKind::Claude,
         windows: vec![
@@ -270,6 +293,7 @@ async fn a_grok_profile_reports_its_billing_period_as_one_quota_window() {
 
     let (outcome, _) = refresh_profile(
         QuotaRefreshRequest {
+            native_openai: true,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
             source_home: directory.path().to_path_buf(),
@@ -363,6 +387,7 @@ async fn poll_codex_profile(
 ) -> QuotaRefreshOutcome {
     let (outcome, client) = refresh_profile(
         QuotaRefreshRequest {
+            native_openai: true,
             profile_id: "codex".into(),
             harness: HarnessKind::Codex,
             source_home: directory.to_path_buf(),
@@ -405,13 +430,14 @@ printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
 printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt"}}}'
 read_and_log
-printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+printf '%s\n' '{"id":4,"result":{"rateLimitResetCredits":{"availableCount":1},"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
 "#,
     );
 
     let outcome = poll_codex_profile(directory.path(), environment).await;
 
     assert_eq!(outcome.report.error, None);
+    assert_eq!(outcome.report.banked_resets, Some(1));
     assert_eq!(
         outcome.report.five_hour_window().unwrap().remaining_percent,
         Some(75)
@@ -544,6 +570,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
 
     let (outcome, _) = refresh_profile(
         QuotaRefreshRequest {
+            native_openai: true,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
             source_home: directory.path().to_path_buf(),
@@ -606,6 +633,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
+        native_openai: true,
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
         source_home: directory.path().to_path_buf(),
@@ -707,6 +735,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = QuotaRefreshRequest {
+        native_openai: true,
         profile_id: "muse".into(),
         harness: HarnessKind::Muse,
         source_home: directory.path().to_path_buf(),
@@ -793,6 +822,7 @@ async fn expired_claude_credentials_report_login_expired() {
 
     let (outcome, _) = refresh_profile(
         QuotaRefreshRequest {
+            native_openai: true,
             profile_id: "claude2".into(),
             harness: HarnessKind::Claude,
             source_home: directory.path().to_path_buf(),
@@ -814,6 +844,7 @@ async fn expired_claude_credentials_report_login_expired() {
 fn a_monthly_window_shares_the_long_window_column_with_a_weekly_one() {
     for label in ["Week", "Month"] {
         let report = ProfileQuota {
+            banked_resets: None,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
             windows: vec![QuotaWindow {
@@ -837,6 +868,7 @@ fn a_monthly_window_shares_the_long_window_column_with_a_weekly_one() {
 #[test]
 fn kimi_uses_percent_left_and_hides_a_short_window_on_sustainable_pace() {
     let report = ProfileQuota {
+        banked_resets: None,
         profile_id: "kimi".into(),
         harness: HarnessKind::Kimi,
         windows: vec![
@@ -914,6 +946,7 @@ while IFS= read -r line; do :; done
 "#,
     );
     let request = QuotaRefreshRequest {
+        native_openai: true,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
         source_home: directory.path().to_path_buf(),

@@ -54,6 +54,7 @@ mod tests {
         let path = dir.path().join("quota.sqlite3");
         let mut connection = open(&path).unwrap();
         let mut report = ProfileQuota {
+            banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
             windows: vec![crate::quota::QuotaWindow {
@@ -69,6 +70,17 @@ mod tests {
             refreshed_at_epoch_seconds: 1,
         };
         save(&mut connection, "account-a", &report).unwrap();
+        for banked in [Some(2), Some(0), Some(1), None] {
+            report.banked_resets = banked;
+            save(&mut connection, "account-a", &report).unwrap();
+            assert_eq!(
+                load(&connection, "account-a")
+                    .unwrap()
+                    .unwrap()
+                    .banked_resets,
+                banked
+            );
+        }
         report.error = Some("rate limited".into());
         report.windows.clear();
         save(&mut connection, "account-a", &report).unwrap();

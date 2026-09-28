@@ -18,12 +18,15 @@ use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput,
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+// The reset-grant endpoint uses the CLI surface to determine eligibility.
+const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
 
 /// Quota-row copy when the stored Claude OAuth access token is past `expiresAt`.
 pub(crate) const LOGIN_EXPIRED: &str = "login expired";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageReport {
+    pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
     pub week: Option<ClaudeUsageWindow>,
 }
@@ -160,6 +163,8 @@ async fn query_api(
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let response = client
         .get(usage_url)
+        .query(&[("cedar_ember", "1"), ("skip_spend", "1")])
+        .header(reqwest::header::USER_AGENT, USAGE_USER_AGENT)
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
@@ -326,7 +331,47 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
     let week = weekly
         .into_iter()
         .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport { five_hour, week })
+    (five_hour.is_some() || week.is_some()).then(|| ClaudeUsageReport {
+        banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
+        five_hour,
+        week,
+    })
+}
+
+fn parse_banked_resets(payload: &Value, now: i64) -> Option<u64> {
+    let block = payload
+        .get("cedar_ember")
+        .filter(|value| !value.is_null())?;
+    let parsed = (|| {
+        if !block.get("eligible")?.as_bool()? {
+            return Some(0);
+        }
+        let mut total = 0_u64;
+        for grant in block.get("grants")?.as_array()? {
+            let remaining = grant.get("resets_left")?.as_u64()?;
+            let timestamp = |key| -> Option<Option<i64>> {
+                match grant.get(key).filter(|value| !value.is_null()) {
+                    None => Some(None),
+                    Some(value) => chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+                        .ok()
+                        .map(|date| Some(date.timestamp())),
+                }
+            };
+            if timestamp("starts_at")?.is_some_and(|start| start > now)
+                || timestamp("ends_at")?.is_some_and(|end| end <= now)
+            {
+                continue;
+            }
+            // A banked reset can require reaching a limit before use.
+            // `usable_now` is not the balance of unused resets.
+            total = total.checked_add(remaining)?;
+        }
+        Some(total)
+    })();
+    if parsed.is_none() {
+        tracing::warn!("Claude usage returned malformed reset-grant metadata");
+    }
+    parsed
 }
 
 fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
@@ -384,7 +429,11 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
     let week = weekly
         .into_iter()
         .min_by_key(|window| window.remaining_percent);
-    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport { five_hour, week })
+    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport {
+        banked_resets: None,
+        five_hour,
+        week,
+    })
 }
 
 /// One window from the text after a `/usage` line's label.
@@ -485,6 +534,49 @@ Last 7d · 5966 requests · 78 sessions
 ";
 
     #[test]
+    fn banked_resets_count_unspent_grants_without_requiring_immediate_use() {
+        let payload = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+            {"resets_left": 1, "usable_now": false, "use_requires_limit": true},
+            {"resets_left": 2, "starts_at": "1970-01-01T00:01:40Z", "ends_at": "1970-01-01T00:03:20Z"},
+            {"resets_left": 5, "ends_at": "1970-01-01T00:01:40Z"},
+            {"resets_left": 7, "starts_at": "1970-01-01T00:03:20Z"}
+        ]}});
+        assert_eq!(super::parse_banked_resets(&payload, 100), Some(3));
+        assert_eq!(
+            super::parse_banked_resets(
+                &serde_json::json!({"cedar_ember": {"eligible": false}}),
+                100
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            super::parse_banked_resets(
+                &serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}}),
+                100
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unknown_reset_metadata_does_not_discard_claude_usage() {
+        for block in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"eligible": true}),
+            serde_json::json!({"eligible": true, "grants": [{"resets_left": -1}]}),
+            serde_json::json!({"eligible": true, "grants": [{"resets_left": "1"}]}),
+            serde_json::json!({"eligible": true, "grants": [{"resets_left": 1, "ends_at": "invalid"}]}),
+        ] {
+            let report = super::parse_api_usage(&serde_json::json!({
+                "five_hour": {"utilization": 25}, "cedar_ember": block
+            }))
+            .unwrap();
+            assert_eq!(report.banked_resets, None);
+            assert_eq!(report.five_hour.unwrap().remaining_percent, 75);
+        }
+    }
+    #[test]
     fn cli_usage_reports_both_windows_and_the_binding_weekly_limit() {
         let report = parse_cli_usage(CLI_USAGE).expect("the captured output parses");
 
@@ -564,8 +656,15 @@ Last 7d · 5966 requests · 78 sessions
 
     async fn test_usage(
         State(state): State<UsageServerState>,
+        axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
         headers: HeaderMap,
     ) -> (StatusCode, Json<Value>) {
+        assert_eq!(query.get("cedar_ember").map(String::as_str), Some("1"));
+        assert_eq!(query.get("skip_spend").map(String::as_str), Some("1"));
+        assert_eq!(
+            headers.get(reqwest::header::USER_AGENT).unwrap(),
+            USAGE_USER_AGENT
+        );
         let authorization = headers
             .get(reqwest::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -582,7 +681,8 @@ Last 7d · 5966 requests · 78 sessions
             StatusCode::OK,
             Json(serde_json::json!({
                 "five_hour": {"utilization": 25.0, "resets_at": "2026-08-23T00:00:00Z"},
-                "seven_day": {"utilization": 40.0, "resets_at": "2026-08-29T00:00:00Z"}
+                "seven_day": {"utilization": 40.0, "resets_at": "2026-08-29T00:00:00Z"},
+                "cedar_ember": {"eligible": true, "grants": [{"resets_left": 1}]}
             })),
         )
     }
@@ -652,6 +752,7 @@ Last 7d · 5966 requests · 78 sessions
         .await
         .unwrap();
 
+        assert_eq!(report.banked_resets, Some(1));
         assert_eq!(report.five_hour.unwrap().remaining_percent, 75);
         let commands = commands.lock().unwrap();
         assert_eq!(commands.len(), 1);

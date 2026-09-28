@@ -20,6 +20,8 @@ pub use mj_client::quota::{API_LABEL, ProfileQuota, QuotaWindow, projects_exhaus
 
 #[derive(Debug, Clone)]
 pub struct QuotaRefreshRequest {
+    /// Provider configuration selected native OpenAI, not merely a Codex harness.
+    pub native_openai: bool,
     pub profile_id: String,
     pub harness: HarnessKind,
     pub source_home: std::path::PathBuf,
@@ -73,13 +75,19 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
+        let configured_provider = profile.codex_provider();
         Self {
+            native_openai: profile.kind == HarnessKind::Codex
+                && matches!(configured_provider, Ok(None)),
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             source_home: profile.home.clone(),
             environment,
             cwd,
-            provider: provider_credential(profile),
+            provider: provider_credential_from(
+                profile,
+                configured_provider.ok().flatten().as_ref(),
+            ),
         }
     }
 }
@@ -88,7 +96,14 @@ impl QuotaRefreshRequest {
 /// when the profile uses ChatGPT's own login. `mj doctor` reads the same
 /// answer to say where each profile's quota comes from.
 pub(crate) fn provider_credential(profile: &HarnessProfile) -> Option<ProviderCredential> {
-    let provider = profile.codex_provider().ok().flatten()?;
+    provider_credential_from(profile, profile.codex_provider().ok().flatten().as_ref())
+}
+
+fn provider_credential_from(
+    profile: &HarnessProfile,
+    provider: Option<&mj_core::codex_provider::CodexProvider>,
+) -> Option<ProviderCredential> {
+    let provider = provider?;
     let env_key = provider.env_key.as_deref()?;
     let api_key = profile.environment.get(env_key)?;
     Some(ProviderCredential {
@@ -230,6 +245,7 @@ async fn refresh_profile(
     };
     let credential_before = credential_marker_fingerprint(&fingerprint_path).await;
     let QuotaRefreshRequest {
+        native_openai,
         profile_id,
         harness,
         source_home,
@@ -253,6 +269,7 @@ async fn refresh_profile(
                 crate::zai_usage::query(&provider.host, &provider.api_key)
                     .await
                     .map(|windows| ProfileQuota {
+                        banked_resets: None,
                         profile_id: profile_id.clone(),
                         harness,
                         windows: windows
@@ -277,6 +294,7 @@ async fn refresh_profile(
                 // as unavailable and lets the utility ranker treat it as
                 // healthy, which matches how it actually behaves.
                 Ok(ProfileQuota {
+                    banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
                     windows: Vec::new(),
@@ -309,6 +327,7 @@ async fn refresh_profile(
             let status = codex_usage::refresh(&mut codex_client, cwd, environment).await;
             match status {
                 CodexUsageStatus::Available(report) => Ok(ProfileQuota {
+                    banked_resets: report.banked_resets.filter(|_| native_openai),
                     profile_id: profile_id.clone(),
                     harness,
                     windows: [report.primary, report.secondary]
@@ -333,6 +352,7 @@ async fn refresh_profile(
         HarnessKind::Claude => claude_usage::query(source_home, environment)
             .await
             .map(|report| ProfileQuota {
+                banked_resets: report.banked_resets,
                 profile_id: profile_id.clone(),
                 harness,
                 windows: [
@@ -365,6 +385,7 @@ async fn refresh_profile(
             query_kimi(&source_home, &environment)
                 .await
                 .map(|(windows, extra)| ProfileQuota {
+                    banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
                     windows,
@@ -379,6 +400,7 @@ async fn refresh_profile(
             grok_usage::query(source_home.clone(), cwd, environment)
                 .await
                 .map(|report| ProfileQuota {
+                    banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
                     windows: vec![QuotaWindow {
@@ -400,6 +422,7 @@ async fn refresh_profile(
         HarnessKind::Muse => crate::muse_usage::query(&source_home, &environment)
             .await
             .map(|report| ProfileQuota {
+                banked_resets: None,
                 profile_id: profile_id.clone(),
                 harness,
                 windows: report
@@ -420,6 +443,7 @@ async fn refresh_profile(
             }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
+        banked_resets: None,
         profile_id,
         harness,
         windows: Vec::new(),
