@@ -94,19 +94,6 @@ pub enum WorkerRunMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PreparedHarnessInfo {
-    pub version: u32,
-    pub command: PathBuf,
-    pub environment: std::collections::BTreeMap<String, String>,
-    pub lease_path: PathBuf,
-}
-
-impl PreparedHarnessInfo {
-    pub const VERSION: u32 = 1;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,

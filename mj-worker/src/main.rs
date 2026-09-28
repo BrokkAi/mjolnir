@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use mj_checkpoint::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use mj_core::worker_launch::WorkerLaunchConfig;
 use mj_worker::worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, prepare_managed_harness_for_transfer, proxy,
-    record_startup_step, run_acp_supervisor, run_daemon,
+    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, record_startup_step,
+    run_acp_supervisor, run_daemon,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -60,11 +60,6 @@ enum WorkerCommand {
     PrepareHarness {
         #[arg(long)]
         config: PathBuf,
-        /// Publish private runtime configuration while retaining its lease.
-        #[arg(long, requires = "runtime_ack")]
-        runtime_info: Option<PathBuf>,
-        #[arg(long, requires = "runtime_info")]
-        runtime_ack: Option<PathBuf>,
     },
     /// Proxy JSON-lines between stdio and a detached worker.
     Proxy {
@@ -274,7 +269,7 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         } else {
             mj_core::login_environment::bootstrap()?
         };
-        if let WorkerCommand::Run { config, .. } | WorkerCommand::PrepareHarness { config, .. } =
+        if let WorkerCommand::Run { config, .. } | WorkerCommand::PrepareHarness { config } =
             &args.command
         {
             let launch = WorkerLaunchConfig::read(config)?;
@@ -413,15 +408,8 @@ async fn run_command(command: Command) -> Result<()> {
             // every error this returns.
             run_daemon(root, WorkerLaunchConfig::read(&config)?).await
         }
-        WorkerCommand::PrepareHarness {
-            config,
-            runtime_info,
-            runtime_ack,
-        } => {
-            // clap requires the two transfer paths together, so zipping them
-            // is the whole request.
-            let transfer = runtime_info.zip(runtime_ack);
-            prepare_managed_harness_for_transfer(WorkerLaunchConfig::read(&config)?, transfer).await
+        WorkerCommand::PrepareHarness { config } => {
+            prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
         }
         WorkerCommand::Proxy { root } => proxy(root).await,
         WorkerCommand::DiscoverConfig { spec } => {

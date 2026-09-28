@@ -602,7 +602,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             let auth = Arc::new(crate::kimi_auth::KimiAuth::new(
                 &profile.home,
                 profile.environment.clone(),
-            ));
+            )?);
             config.build_with_token_provider(auth).map(Some)
         }
         HarnessKind::Muse => {

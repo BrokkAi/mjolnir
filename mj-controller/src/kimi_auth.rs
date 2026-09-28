@@ -1,89 +1,84 @@
-//! Profile-local access to the vendor-owned Kimi credential service.
+//! One Kimi OAuth refresher per profile, shared by quota and inference.
+//!
+//! Anvil's inference client used to refresh the profile's OAuth credential
+//! on its own, racing this daemon's quota poller and the Kimi CLI for the
+//! single-use refresh token. Inference now borrows the poller's refresher
+//! through Anvil's token-provider hook: every refresh in this process takes
+//! the vendor's lock, re-reads the credential once the lock is held, and only
+//! then spends the refresh token. Profiles with `KIMI_API_KEY` never touch
+//! the credential file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::time::Duration;
 
-use anvil_client::kimi_auth::{KimiService, KimiServiceConfig};
 use anvil_client::llm_client::BearerTokenProvider;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 use mj_core::config::{HarnessHost, HarnessKind};
-use serde_json::Value;
-use tokio::sync::OnceCell;
 
-/// Both quota and inference select authentication through this adapter. Anvil
-/// shares the vendor service by canonical home, including across daemon handoff.
 pub(crate) struct KimiAuth {
     home: PathBuf,
-    environment: BTreeMap<String, String>,
-    initialized: OnceCell<InitializedService>,
-}
-
-struct InitializedService {
-    service: Arc<KimiService>,
-    // Keep the managed installation leased until the service inherits its lease.
-    _lease: Option<std::fs::File>,
+    credentials_path: PathBuf,
+    environment: HashMap<String, String>,
+    api_key: Option<String>,
+    http: reqwest::Client,
 }
 
 impl KimiAuth {
-    pub(crate) fn new(home: &Path, mut environment: BTreeMap<String, String>) -> Self {
+    pub(crate) fn new(home: &Path, mut environment: BTreeMap<String, String>) -> Result<Self> {
         HarnessKind::Kimi.configure_profile_home_environment(
             home,
             HarnessHost::current(),
             &mut environment,
         );
-        Self {
+        let api_key = environment
+            .get("KIMI_API_KEY")
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty());
+        Ok(Self {
             home: home.to_path_buf(),
-            environment,
-            initialized: OnceCell::new(),
+            credentials_path: home.join("credentials/kimi-code.json"),
+            environment: environment.into_iter().collect(),
+            api_key,
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .context("build Kimi OAuth client")?,
+        })
+    }
+
+    async fn token(&self, force: bool, rejected: Option<String>) -> Result<Option<String>> {
+        if let Some(api_key) = &self.api_key {
+            return Ok(if force { None } else { Some(api_key.clone()) });
         }
-    }
-
-    async fn service(&self) -> Result<&Arc<KimiService>> {
-        let initialized = self
-            .initialized
-            .get_or_try_init(|| async {
-                let mut config = KimiServiceConfig::from_home(&self.home);
-                config.environment = self.environment.clone();
-                let launch = if config.uses_api_key() {
-                    None
-                } else {
-                    let (prepared, lease) = crate::controller::prepare_local_managed_harness(
-                        HarnessKind::Kimi,
-                        self.home.clone(),
-                        self.environment.clone(),
-                    )
-                    .await?;
-                    config.executable = prepared.command;
-                    config.lease_path = Some(prepared.lease_path);
-                    config.environment.extend(prepared.environment);
-                    Some(lease)
-                };
-                Ok::<_, anyhow::Error>(InitializedService {
-                    service: KimiService::new(config)?,
-                    _lease: launch,
-                })
-            })
-            .await?;
-        Ok(&initialized.service)
-    }
-
-    pub(crate) async fn usage(&self) -> Result<Value> {
-        self.service().await?.usage().await
+        crate::quota::ensure_fresh_kimi_token(
+            &self.http,
+            &self.home,
+            &self.credentials_path,
+            &self.environment,
+            force,
+            rejected,
+        )
+        .await
+        .map(Some)
     }
 }
 
 impl BearerTokenProvider for KimiAuth {
     fn bearer_token(&self) -> BoxFuture<'_, Result<Option<String>>> {
-        Box::pin(async { self.service().await?.bearer_token().await })
+        Box::pin(self.token(false, None))
     }
 
+    /// After an explicit 401, refresh under the vendor lock unless another
+    /// process already replaced the rejected token; either way the caller
+    /// retries only if the token it gets back differs from the rejected one.
     fn rejected_bearer_token<'a>(
         &'a self,
         rejected: &'a str,
     ) -> BoxFuture<'a, Result<Option<String>>> {
-        Box::pin(async move { self.service().await?.rejected_bearer_token(rejected).await })
+        Box::pin(self.token(true, Some(rejected.to_owned())))
     }
 }
 
@@ -92,7 +87,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn profile_api_key_needs_no_runtime_and_does_not_touch_oauth_credentials() {
+    async fn profile_api_key_does_not_touch_oauth_credentials() {
         let home = tempfile::tempdir().unwrap();
         let credentials = home.path().join("credentials/kimi-code.json");
         std::fs::create_dir(credentials.parent().unwrap()).unwrap();
@@ -100,15 +95,37 @@ mod tests {
         std::fs::write(&credentials, original).unwrap();
         let auth = KimiAuth::new(
             home.path(),
-            BTreeMap::from([
-                ("KIMI_API_KEY".into(), "profile-api-key".into()),
-                ("PATH".into(), "/missing-kimi-runtime".into()),
-            ]),
-        );
+            BTreeMap::from([("KIMI_API_KEY".into(), "profile-api-key".into())]),
+        )
+        .unwrap();
         assert_eq!(
             auth.bearer_token().await.unwrap().as_deref(),
             Some("profile-api-key")
         );
+        assert_eq!(
+            auth.rejected_bearer_token("profile-api-key").await.unwrap(),
+            None,
+            "a static key has no replacement to retry with"
+        );
         assert_eq!(std::fs::read(credentials).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_oauth_token_is_read_without_refreshing() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = home.path().join("credentials/kimi-code.json");
+        std::fs::create_dir(credentials.parent().unwrap()).unwrap();
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        let original = format!(
+            r#"{{"access_token":"fresh","refresh_token":"single-use","expires_at":{far_future},"expires_in":86400}}"#
+        );
+        std::fs::write(&credentials, &original).unwrap();
+        let auth = KimiAuth::new(home.path(), BTreeMap::new()).unwrap();
+        assert_eq!(auth.bearer_token().await.unwrap().as_deref(), Some("fresh"));
+        assert_eq!(std::fs::read_to_string(credentials).unwrap(), original);
     }
 }

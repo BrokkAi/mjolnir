@@ -2,10 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::claude_usage;
@@ -235,15 +236,7 @@ async fn refresh_profile(
 ) -> (QuotaRefreshOutcome, Option<CodexUsageClient>) {
     let cache_identity = request.cache_identity();
     let credential_path = harness_authentication_marker(request.harness, &request.source_home);
-    let fingerprint_path = if request.harness == HarnessKind::Kimi {
-        let mut config =
-            anvil_client::kimi_auth::KimiServiceConfig::from_home(&request.source_home);
-        config.environment = request.environment.clone();
-        config.credentials_path()
-    } else {
-        Ok(credential_path.clone())
-    };
-    let credential_before = credential_marker_fingerprint(&fingerprint_path).await;
+    let credential_before = credential_marker_fingerprint(&credential_path).await;
     let QuotaRefreshRequest {
         native_openai,
         profile_id,
@@ -476,11 +469,11 @@ async fn refresh_profile(
             );
         }
     }
-    let credential_after = credential_marker_fingerprint(&fingerprint_path).await;
+    let credential_after = credential_marker_fingerprint(&credential_path).await;
     let credentials_changed = match (credential_before, credential_after) {
         (Ok(before), Ok(after)) => before != after,
         (Err(error), _) | (_, Err(error)) => {
-            tracing::warn!(profile_id = %report.profile_id, %error, "could not fingerprint quota credentials");
+            tracing::warn!(path = %credential_path.display(), %error, "could not fingerprint quota credentials");
             false
         }
     };
@@ -536,12 +529,7 @@ fn codex_login_needs_refresh(
     expiry.saturating_sub(now_millis) < margin
 }
 
-async fn credential_marker_fingerprint(
-    path: &Result<std::path::PathBuf>,
-) -> Result<Option<String>> {
-    let path = path
-        .as_ref()
-        .map_err(|error| anyhow::anyhow!("resolve credential marker: {error}"))?;
+async fn credential_marker_fingerprint(path: &Path) -> Result<Option<String>> {
     let metadata = match tokio::fs::metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -563,63 +551,447 @@ async fn query_kimi(
     home: &Path,
     environment: &HashMap<String, String>,
 ) -> Result<(Vec<QuotaWindow>, Option<String>)> {
-    let auth = crate::kimi_auth::KimiAuth::new(
-        home,
-        environment
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    );
-    let payload = auth.usage().await?;
-    parse_kimi_usage(&payload)
+    let base = environment
+        .get("KIMI_CODE_BASE_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.kimi.com/coding/v1")
+        .trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("build Kimi quota client")?;
+    let credentials_path = home.join("credentials/kimi-code.json");
+    let usage_url = format!("{base}/usages");
+    let response = fetch_bearer_with_auth_retry(&client, &usage_url, |force, rejected_token| {
+        ensure_fresh_kimi_token(
+            &client,
+            home,
+            &credentials_path,
+            environment,
+            force,
+            rejected_token,
+        )
+    })
+    .await?;
+    if !response.status().is_success() {
+        bail!("Kimi Code quota returned HTTP {}", response.status());
+    }
+    let payload: Value = response.json().await.context("decode Kimi Code quota")?;
+    Ok(parse_kimi_usage(&payload))
 }
 
-fn parse_kimi_usage(payload: &Value) -> Result<(Vec<QuotaWindow>, Option<String>)> {
-    if payload.get("kind").and_then(Value::as_str) == Some("api_key") {
-        return Ok((Vec::new(), Some(API_LABEL.to_owned())));
+const KIMI_OAUTH_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct KimiCredentials {
+    #[serde(alias = "accessToken")]
+    access_token: String,
+    #[serde(default, alias = "refreshToken")]
+    refresh_token: String,
+    #[serde(default, alias = "expiresAt")]
+    expires_at: i64,
+    #[serde(default)]
+    scope: String,
+    #[serde(default, alias = "tokenType")]
+    token_type: String,
+    #[serde(default, alias = "expiresIn")]
+    expires_in: i64,
+}
+
+impl KimiCredentials {
+    /// Whether this is a different pair from `other`. A refresh rotates the
+    /// access token, the refresh token and the expiry together, so those three
+    /// fields are what tells two pairs apart; the rest only describes them.
+    fn differs_from(&self, other: &Self) -> bool {
+        self.access_token != other.access_token
+            || self.refresh_token != other.refresh_token
+            || self.expires_at != other.expires_at
     }
-    let usages = payload
-        .pointer("/quota/usages")
-        .and_then(Value::as_object)
-        .context("Kimi vendor usage response is missing quota.usages")?;
-    let mut windows = Vec::new();
-    for (key, label) in [
-        ("limit7d", "Week"),
-        ("limit5h", "5H"),
-        ("monthTotal", "Month"),
-        ("monthCode", "Monthly code"),
-    ] {
-        let Some(value) = usages.get(key) else {
-            continue;
-        };
-        let ratio = value
-            .get("usedRatio")
-            .and_then(Value::as_f64)
-            .with_context(|| format!("Kimi vendor usage {key} is missing usedRatio"))?;
-        let reset = value.get("resetAt");
-        windows.push(QuotaWindow {
-            label: label.to_owned(),
-            remaining_percent: Some(((1.0 - ratio.clamp(0.0, 1.0)) * 100.0).round() as u8),
-            used: None,
-            limit: None,
-            resets: reset.and_then(normalize_kimi_reset),
-            resets_at_epoch_seconds: reset.and_then(kimi_reset_epoch_seconds),
+
+    fn needs_refresh(&self) -> bool {
+        if self.expires_at == 0 {
+            return false;
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let threshold = 300.max(self.expires_in / 2);
+        self.expires_at - now < threshold
+    }
+}
+
+async fn read_kimi_credentials(path: &Path) -> Result<KimiCredentials> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .context("Kimi Code credentials are unavailable")?;
+    let credentials: KimiCredentials =
+        serde_json::from_slice(&bytes).context("Kimi Code credentials are invalid")?;
+    if credentials.access_token.is_empty() {
+        bail!("Kimi Code access token is missing");
+    }
+    Ok(credentials)
+}
+
+async fn fetch_bearer_with_auth_retry<F, Fut>(
+    client: &reqwest::Client,
+    url: &str,
+    mut authenticate: F,
+) -> Result<reqwest::Response>
+where
+    F: FnMut(bool, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let token = authenticate(false, None).await?;
+    let response = client
+        .get(url)
+        .bearer_auth(&token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .context("query quota")?;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+
+    let refreshed = authenticate(true, Some(token)).await?;
+    client
+        .get(url)
+        .bearer_auth(refreshed)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .context("retry quota after authentication refresh")
+}
+
+/// Hand back a usable Kimi Code access token, refreshing the stored pair when
+/// it is stale or when the server rejected it. The refresh runs under the
+/// lock the Kimi Code CLI also takes, and the pair is re-read once the lock is
+/// held, so a refresh another process just finished is used instead of
+/// spending its new refresh token again.
+pub(crate) async fn ensure_fresh_kimi_token(
+    client: &reqwest::Client,
+    home: &Path,
+    credentials_path: &Path,
+    environment: &HashMap<String, String>,
+    force: bool,
+    rejected_token: Option<String>,
+) -> Result<String> {
+    let initial = read_kimi_credentials(credentials_path).await?;
+    if !force && !initial.needs_refresh() {
+        return Ok(initial.access_token);
+    }
+
+    // Held until this function returns, released on drop.
+    let _refresh_lock = KimiRefreshLock::acquire(home, KIMI_LOCK_WAIT).await?;
+    let active = read_kimi_credentials(credentials_path).await?;
+    let changed_while_waiting = active.differs_from(&initial);
+    if (!force && !active.needs_refresh())
+        || (force
+            && (changed_while_waiting
+                || rejected_token.is_some_and(|token| token != active.access_token)))
+    {
+        return Ok(active.access_token);
+    }
+    if active.refresh_token.is_empty() {
+        bail!("Kimi Code refresh token is missing; run `kimi login`");
+    }
+
+    let oauth_host = environment
+        .get("KIMI_CODE_OAUTH_HOST")
+        .or_else(|| environment.get("KIMI_OAUTH_HOST"))
+        .map(String::as_str)
+        .unwrap_or("https://auth.kimi.com")
+        .trim_end_matches('/');
+    let response = client
+        .post(format!("{oauth_host}/api/oauth/token"))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .form(&[
+            ("client_id", KIMI_OAUTH_CLIENT_ID),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", active.refresh_token.as_str()),
+        ])
+        .send()
+        .await
+        .context("refresh Kimi Code access token")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let recovery = read_kimi_credentials(credentials_path).await?;
+            if recovery.refresh_token != active.refresh_token && !recovery.access_token.is_empty() {
+                return Ok(recovery.access_token);
+            }
+        }
+        bail!("Kimi Code token refresh returned HTTP {status}");
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .context("decode Kimi Code token refresh")?;
+    let access_token = required_string(&payload, "access_token", "Kimi Code token refresh")?;
+    let refresh_token = required_string(&payload, "refresh_token", "Kimi Code token refresh")?;
+    let expires_in = payload
+        .get("expires_in")
+        .and_then(value_i64)
+        .filter(|value| *value > 0)
+        .context("Kimi Code token refresh is missing expires_in")?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let refreshed = KimiCredentials {
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+        expires_at: now + expires_in,
+        scope: payload
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        token_type: payload
+            .get("token_type")
+            .and_then(Value::as_str)
+            .unwrap_or("Bearer")
+            .to_string(),
+        expires_in,
+    };
+    save_kimi_credentials(credentials_path, &refreshed)?;
+    Ok(refreshed.access_token)
+}
+
+fn save_kimi_credentials(path: &Path, credentials: &KimiCredentials) -> Result<()> {
+    let mut body = serde_json::to_vec_pretty(credentials)?;
+    body.push(b'\n');
+    mj_core::config::atomic_write(path, &body).context("save refreshed Kimi Code credentials")
+}
+
+fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("{context} is missing {key}"))
+}
+
+/// The Kimi Code CLI serializes token refreshes with `proper-lockfile` on the
+/// directory `oauth/kimi-code.lock` (`stale: 5_000`): a holder keeps the
+/// directory's modification time moving, and a lock whose time stopped for
+/// longer than the stale window is abandoned and may be removed. Mjolnir takes
+/// the same directory the same way, so its refresh and the CLI's never spend
+/// the same single-use refresh token.
+struct KimiRefreshLock {
+    path: std::path::PathBuf,
+    heartbeat: tokio::task::JoinHandle<()>,
+}
+
+/// How often a holder republishes the lock's modification time. It fits inside
+/// the CLI's 5 second stale window several times over.
+const KIMI_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a lock's modification time must be still before Mjolnir removes
+/// it as abandoned. Longer than the CLI's own 5 seconds, so Mjolnir never
+/// breaks a lock the CLI would still consider live.
+const KIMI_LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
+const KIMI_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const KIMI_LOCK_WAIT: Duration = Duration::from_secs(60);
+
+impl KimiRefreshLock {
+    async fn acquire(home: &Path, wait: Duration) -> Result<Self> {
+        let oauth_dir = home.join("oauth");
+        tokio::fs::create_dir_all(&oauth_dir)
+            .await
+            .context("prepare Kimi Code OAuth lock")?;
+        // proper-lockfile locks `<file>.lock` for a file that must exist.
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(oauth_dir.join("kimi-code"))
+            .await
+            .context("prepare Kimi Code OAuth lock sentinel")?;
+        let path = oauth_dir.join("kimi-code.lock");
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::fs::create_dir(&path).await {
+                Ok(()) => return Ok(Self::held(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "timed out waiting for Kimi Code OAuth refresh lock {}",
+                            path.display()
+                        );
+                    }
+                    if !break_stale_kimi_lock(&path).await {
+                        tokio::time::sleep(KIMI_LOCK_RETRY_INTERVAL).await;
+                    }
+                }
+                Err(error) => return Err(error).context("acquire Kimi Code OAuth refresh lock"),
+            }
+        }
+    }
+
+    fn held(path: std::path::PathBuf) -> Self {
+        let heartbeat_path = path.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(KIMI_LOCK_HEARTBEAT_INTERVAL).await;
+                if let Err(error) = touch_kimi_lock(&heartbeat_path, SystemTime::now()) {
+                    tracing::debug!(path = %heartbeat_path.display(), %error, "heartbeat Kimi Code OAuth refresh lock");
+                }
+            }
         });
+        Self { path, heartbeat }
+    }
+}
+
+impl Drop for KimiRefreshLock {
+    fn drop(&mut self) {
+        self.heartbeat.abort();
+        match std::fs::remove_dir(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
+            }
+        }
+    }
+}
+
+/// The lock directory's modification time, or `None` when it is gone.
+fn kimi_lock_mtime(path: &Path) -> std::io::Result<Option<SystemTime>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.modified().map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Publish a lock directory's modification time. Windows opens a directory
+/// handle only under backup semantics.
+fn touch_kimi_lock(path: &Path, modified: SystemTime) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options
+        .open(path)?
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+}
+
+/// Remove a lock whose holder stopped heartbeating, so a holder killed
+/// mid-refresh cannot block every later refresh. Returns whether the caller
+/// should retry the create at once.
+async fn break_stale_kimi_lock(path: &Path) -> bool {
+    let modified = match kimi_lock_mtime(path) {
+        Ok(Some(modified)) => modified,
+        Ok(None) => return true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "inspect Kimi Code OAuth refresh lock");
+            return false;
+        }
+    };
+    // A modification time in the future (the CLI rounds its writes up) is not
+    // stale.
+    let Some(age) = SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .filter(|age| *age >= KIMI_LOCK_STALE_AFTER)
+    else {
+        return false;
+    };
+    match tokio::fs::remove_dir(path).await {
+        Ok(()) => {
+            tracing::warn!(
+                path = %path.display(),
+                age_seconds = age.as_secs(),
+                "removed a Kimi Code OAuth refresh lock whose holder stopped heartbeating"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "remove stale Kimi Code OAuth refresh lock");
+            false
+        }
+    }
+}
+
+fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
+    let mut windows = Vec::new();
+    if let Some(summary) = payload.get("usage")
+        && let Some(window) = parse_kimi_window(summary, "Weekly limit")
+    {
+        windows.push(window);
+    }
+    if let Some(limits) = payload.get("limits").and_then(Value::as_array) {
+        for (index, item) in limits.iter().enumerate() {
+            let detail = item.get("detail").unwrap_or(item);
+            if let Some(window) = parse_kimi_window(detail, &format!("Limit #{}", index + 1)) {
+                windows.push(window);
+            }
+        }
     }
     let extra = payload
-        .pointer("/quota/extraUsage/balanceCents")
-        .and_then(Value::as_i64)
-        .map(|value| {
-            format!(
-                "extra {:.2} {} remaining",
-                value as f64 / 100.0,
-                payload
-                    .pointer("/quota/extraUsage/currency")
-                    .and_then(Value::as_str)
-                    .unwrap_or("USD")
-            )
-        });
-    Ok((windows, extra))
+        .pointer("/boosterWallet/balance/amountLeft")
+        .and_then(value_i64)
+        .map(|value| format!("booster {} remaining", value / 1_000_000));
+    (windows, extra)
+}
+
+fn parse_kimi_window(value: &Value, fallback: &str) -> Option<QuotaWindow> {
+    let limit = value.get("limit").and_then(value_i64);
+    let used = value.get("used").and_then(value_i64).or_else(|| {
+        let remaining = value.get("remaining").and_then(value_i64)?;
+        Some(limit? - remaining)
+    });
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
+    let provider_label = value
+        .get("name")
+        .or_else(|| value.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback);
+    let label = if provider_label.to_ascii_lowercase().contains("week") {
+        "Week".to_string()
+    } else if provider_label.to_ascii_lowercase().contains("5h") || fallback.starts_with("Limit #")
+    {
+        "5H".to_string()
+    } else {
+        provider_label.to_string()
+    };
+    let reset_value = ["resetAt", "reset_at", "resetTime", "reset_time"]
+        .iter()
+        .find_map(|key| value.get(*key));
+    let resets = reset_value.and_then(normalize_kimi_reset);
+    let resets_at_epoch_seconds = reset_value.and_then(kimi_reset_epoch_seconds);
+    let remaining_percent = match (used, limit) {
+        (Some(used), Some(limit)) if limit > 0 => {
+            Some((100 - used.clamp(0, limit) * 100 / limit) as u8)
+        }
+        _ => None,
+    };
+    Some(QuotaWindow {
+        label,
+        remaining_percent,
+        used,
+        limit,
+        resets,
+        resets_at_epoch_seconds,
+    })
+}
+
+fn value_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
 }
 
 fn normalize_kimi_reset(value: &Value) -> Option<String> {

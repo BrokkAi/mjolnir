@@ -389,8 +389,7 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 #[cfg(unix)]
 pub use unix::{
     SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
-    lead_process_group, prepare_managed_harness, prepare_managed_harness_for_transfer, proxy,
-    run_acp_supervisor, run_daemon,
+    lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
 };
 
 #[cfg(not(unix))]
@@ -408,14 +407,6 @@ pub async fn proxy(_root: std::path::PathBuf) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Result<()> {
-    anyhow::bail!("managed target harnesses require Unix")
-}
-
-#[cfg(not(unix))]
-pub async fn prepare_managed_harness_for_transfer(
-    _config: WorkerLaunchConfig,
-    _transfer: Option<(std::path::PathBuf, std::path::PathBuf)>,
-) -> anyhow::Result<()> {
     anyhow::bail!("managed target harnesses require Unix")
 }
 
