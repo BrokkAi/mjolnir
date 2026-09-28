@@ -2,15 +2,17 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::controller::{CheckpointArtifact, Controller, checkpoint_was_deferred};
-use crate::database::record_recovery_failure;
-use crate::recovery_gate::{RecoveryGate, RecoveryObserver};
+use crate::database::record_recovery_failure_if_current;
+use crate::recovery_gate::{
+    ObservationReceiver, RecoveryGate, RecoveryObserver, observation_channel,
+};
 use crate::session_manager::SessionManagerControl;
 use crate::targets::CancellableProcessExecutor;
 use mj_core::state::{CheckpointMetadata, RecoveryObservation, State};
@@ -54,66 +56,68 @@ pub struct RecoveryResult {
 }
 
 pub struct RecoveryCoordinator {
+    supervisor: Option<tokio::task::JoinHandle<()>>,
     observer: RecoveryObserver,
-    results: mpsc::UnboundedReceiver<RecoveryResult>,
-    cancelled: Arc<AtomicBool>,
+    results: ObservationReceiver<RecoveryResult>,
 }
 
 impl Drop for RecoveryCoordinator {
     fn drop(&mut self) {
-        // Stop the coordinator loop, then cancel every copy already running.
-        // A copy registers its flag with the gate before it starts, so no
-        // in-flight copy can miss this.
-        self.cancelled.store(true, Ordering::Release);
-        self.observer.gate.cancel_all();
+        // Admission and cancellation share one transition. The supervisor
+        // keeps running until every admitted executor and settlement finishes.
+        self.observer.gate.close();
     }
 }
 
 impl RecoveryCoordinator {
     pub fn spawn(session_manager: SessionManagerControl) -> Self {
         let (observations_tx, mut observations_rx) =
-            mpsc::unbounded_channel::<RecoveryObservation>();
-        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<RecoveryResult>();
-        let (results_tx, results_rx) = mpsc::unbounded_channel();
+            observation_channel::<crate::recovery_gate::PendingRecoveryObservation>();
+        let (results_tx, results_rx) = observation_channel();
         let gate = Arc::new(RecoveryGate::default());
         let coordinator_gate = gate.clone();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let coordinator_cancelled = cancelled.clone();
-        tokio::spawn(async move {
+        let supervisor = tokio::spawn(async move {
             let mut policies = BTreeMap::<String, PolicyState>::new();
+            let mut attempts = JoinSet::new();
+            let mut closing = false;
             loop {
+                if closing && attempts.is_empty() {
+                    break;
+                }
                 tokio::select! {
-                    observed = observations_rx.recv() => {
-                        let Some(observation) = observed else { break };
-                        if coordinator_cancelled.load(Ordering::Acquire) {
-                            break;
-                        }
+                    _ = coordinator_gate.closed(), if !closing => { closing = true; }
+                    observed = observations_rx.recv(), if !closing => {
+                        let Some(pending) = observed else { coordinator_gate.close(); closing = true; continue; };
+                        let observation = pending.observation;
                         let session_id = observation.session.id.clone();
                         let policy = policies.entry(session_id.clone()).or_default();
                         policy.observe_checkpoint(observation.session.checkpoint.as_ref());
                         policy.observe_completed_turn(observation.latest_completed_turn_ordinal);
-                        policy.observe_wait(observation.checkpoint_wait);
+                        policy.observe_wait(pending.observed_wait);
                         if checkpoint_due(policy, &observation, Utc::now())
                             && let Some(expected_target) = observation.session.target.clone()
                             && let Some(copy_cancelled) = coordinator_gate.try_start(&session_id)
                         {
                             policy.start_attempt();
-                            let completed_tx = completed_tx.clone();
                             let session_manager = session_manager.clone();
-                            let cancelled = copy_cancelled.clone();
+                            let cancelled = copy_cancelled.cancellation();
+                            let expected_checkpoint = observation.session.checkpoint.clone();
                             let task_session_id = session_id.clone();
-                            tokio::spawn(async move {
-                                let joined = tokio::task::spawn_blocking(move || {
+                            attempts.spawn(async move {
+                                let (joined, admission) = copy_cancelled.run_blocking(move |task_cancelled| {
+                                    let Some(session) = crate::recovery_gate::current_background_session(&observation.session)
+                                        .map_err(|error| (format!("read current recovery placement: {error:#}"), false))?
+                                    else { return Err(("recovery observation belongs to an earlier session placement".into(), true)); };
+                                    if session.checkpoint != observation.session.checkpoint {
+                                        return Err(("recovery observation belongs to an earlier checkpoint".into(), true));
+                                    }
                                     let mut state = State::default();
-                                    state.sessions.insert(
-                                        task_session_id.clone(),
-                                        observation.session,
-                                    );
+                                    state.sessions.insert(task_session_id.clone(), session);
                                     let controller = Controller {
                                         config: observation.config,
                                         state,
                                     };
-                                    let executor = CancellableProcessExecutor::new(cancelled)
+                                    let executor = CancellableProcessExecutor::new(task_cancelled)
                                         .with_deadline(RECOVERY_CHECKPOINT_TIMEOUT);
                                     mj_core::runtime::block_on(
                                         controller
@@ -144,29 +148,44 @@ impl RecoveryCoordinator {
                                     session_id,
                                     expected_target,
                                     outcome: outcome.map_err(|(detail, _)| detail),
-                                    cancelled: copy_cancelled.load(Ordering::Acquire),
+                                    cancelled: cancelled.load(Ordering::Acquire),
                                     deferred,
                                 };
-                                let result_session_id = result.session_id.clone();
-                                if let Err(error) = completed_tx.send(result) {
-                                    tracing::debug!(
-                                        session_id = %result_session_id,
-                                        %error,
-                                        "recovery result dropped because the coordinator stopped"
-                                    );
+                                if let Err(detail) = &result.outcome
+                                    && !result.cancelled && !result.deferred
+                                {
+                                    tracing::warn!(session_id = %result.session_id, %detail, "background recovery checkpoint failed");
+                                    let session_id = result.session_id.clone();
+                                    let target = result.expected_target.clone();
+                                    let detail = detail.clone();
+                                    let settling = admission.clone();
+                                    let persisted = tokio::task::spawn_blocking(move || {
+                                        let result = record_recovery_failure_if_current(&session_id, &target, expected_checkpoint.as_ref(), &detail);
+                                        drop(settling);
+                                        result
+                                    }).await;
+                                    match persisted {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(error)) => tracing::warn!(session_id = %result.session_id, %error, "could not persist recovery failure"),
+                                        Err(error) => tracing::warn!(session_id = %result.session_id, %error, "recovery settlement task failed"),
+                                    }
                                 }
+                                (result, admission)
                             });
                         }
                     }
-                    completed = completed_rx.recv() => {
-                        let Some(result) = completed else { break };
-                        coordinator_gate.finish(&result.session_id);
+                    completed = attempts.join_next(), if !attempts.is_empty() => {
+                        let Some(completed) = completed else { continue };
+                        let (result, _admission) = match completed {
+                            Ok(completed) => completed,
+                            Err(error) => { tracing::error!(%error, "recovery attempt supervisor failed"); continue; }
+                        };
                         let policy = policies.entry(result.session_id.clone()).or_default();
                         match &result.outcome {
                             Ok(artifact) => {
                                 policy.record_success(artifact.metadata.clone());
                             }
-                            Err(detail) => {
+                            Err(_) => {
                                 if result.cancelled || result.deferred {
                                     // Neither is a checkpoint failure against
                                     // the session. A preempted copy was
@@ -181,50 +200,37 @@ impl RecoveryCoordinator {
                                     } else {
                                         policy.record_deferral(Utc::now());
                                     }
-                                    let result_session_id = result.session_id.clone();
-                                    if let Err(error) = results_tx.send(result) {
-                                        tracing::debug!(
-                                            session_id = %result_session_id,
-                                            %error,
-                                            "abandoned recovery result dropped because its consumer stopped"
-                                        );
-                                    }
+                                    results_tx.send(result.session_id.clone(), result, |_, _| {});
                                     continue;
                                 }
                                 policy.record_failure(Utc::now());
-                                let session_id = result.session_id.clone();
-                                let detail = detail.clone();
-                                let persisted = tokio::task::spawn_blocking(move || {
-                                    record_recovery_failure(&session_id, &detail)
-                                })
-                                .await
-                                .map_err(anyhow::Error::from)
-                                .and_then(|result| result);
-                                if let Err(error) = persisted {
-                                    tracing::warn!(session_id = %result.session_id, "could not persist recovery failure: {error:#}");
-                                }
                             }
                         }
-                        let result_session_id = result.session_id.clone();
-                        if let Err(error) = results_tx.send(result) {
-                            tracing::debug!(
-                                session_id = %result_session_id,
-                                %error,
-                                "recovery result dropped because its consumer stopped"
-                            );
-                        }
+                        results_tx.send(result.session_id.clone(), result, |_, _| {});
                     }
                 }
             }
         });
         Self {
+            supervisor: Some(supervisor),
             observer: RecoveryObserver {
                 observations: observations_tx,
                 gate,
             },
             results: results_rx,
-            cancelled,
         }
+    }
+
+    /// Close admission and wait for every admitted executor and durable
+    /// settlement. The daemon applies its shared shutdown watchdog outside.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.observer.gate.close();
+        if let Some(supervisor) = self.supervisor.take() {
+            supervisor.await.map_err(|error| {
+                anyhow::anyhow!("background coordinator supervisor failed: {error}")
+            })?;
+        }
+        Ok(())
     }
 
     pub fn observer(&self) -> RecoveryObserver {
@@ -232,7 +238,7 @@ impl RecoveryCoordinator {
     }
 
     pub fn try_result(&mut self) -> Option<RecoveryResult> {
-        self.results.try_recv().ok()
+        self.results.try_recv()
     }
 
     /// Waits for the next finished recovery copy.
@@ -374,8 +380,8 @@ impl PolicyState {
     /// deferred copy waits for: the deferral was the session starting work
     /// after an observation, and the next observation that says a copy may
     /// start can retry at once.
-    fn observe_wait(&mut self, wait: Option<mj_core::activity::CheckpointWait>) {
-        if wait.is_some()
+    fn observe_wait(&mut self, observed_wait: bool) {
+        if observed_wait
             && let Some(Attempt {
                 outcome: AttemptOutcome::Deferred { .. },
                 ..
@@ -551,11 +557,10 @@ mod tests {
     }
 
     /// The dashboard reports activity from its event loop, so observing must
-    /// hand the work off and return. Every observation still has to arrive:
-    /// the last one of a turn is the one that makes a copy due.
+    /// hand the work off and return. Coalescing retains the final state and the completed-turn frontier.
     #[test]
-    fn observing_hands_off_without_waiting_and_keeps_every_observation() {
-        let (observations, mut queued) = mpsc::unbounded_channel();
+    fn observing_coalesces_without_losing_the_completed_turn_frontier() {
+        let (observations, mut queued) = observation_channel();
         let observer = RecoveryObserver {
             observations,
             gate: Arc::new(RecoveryGate::default()),
@@ -566,17 +571,27 @@ mod tests {
             observer.observe(observation(position));
         }
 
-        let received = std::iter::from_fn(|| queued.try_recv().ok())
-            .map(|observation| observation.latest_completed_turn_ordinal)
-            .collect::<Vec<_>>();
-        assert_eq!(received, (1..=64).map(Some).collect::<Vec<_>>());
+        let mut busy = observation(1);
+        busy.checkpoint_wait = Some(mj_core::activity::CheckpointWait::WorkInFlight);
+        observer.observe(busy);
+        let mut idle = observation(1);
+        idle.latest_completed_turn_ordinal = None;
+        observer.observe(idle);
+        let received = queued.try_recv().unwrap();
+        assert_eq!(received.observation.latest_completed_turn_ordinal, Some(64));
+        assert!(received.observation.checkpoint_wait.is_none());
+        assert!(
+            received.observed_wait,
+            "coalescing must retain the deferral-release edge"
+        );
+        assert!(queued.try_recv().is_none());
     }
 
     /// A stopped coordinator leaves observing harmless rather than blocking a
     /// caller that can no longer be answered.
     #[test]
     fn observing_a_stopped_coordinator_is_a_no_op() {
-        let (observations, queued) = mpsc::unbounded_channel();
+        let (observations, queued) = observation_channel();
         let observer = RecoveryObserver {
             observations,
             gate: Arc::new(RecoveryGate::default()),
@@ -594,10 +609,10 @@ mod tests {
         assert!(gate.try_start("session-1").is_none());
 
         drop(reservation);
-        assert!(gate.try_start("session-1").is_some());
+        let attempt = gate.try_start("session-1").unwrap();
         assert!(gate.is_busy("session-1"));
         assert!(gate.try_start("session-1").is_none());
-        gate.finish("session-1");
+        drop(attempt);
         assert!(!gate.is_busy("session-1"));
     }
 
@@ -612,7 +627,7 @@ mod tests {
         gate.cancel_busy("session-1");
         assert!(copy_cancelled.load(Ordering::Acquire));
 
-        gate.finish("session-1");
+        drop(copy_cancelled);
         assert!(!gate.is_busy("session-1"));
         // The finished copy's flag is gone, so a later cancellation cannot
         // reach it and the next copy starts with a fresh flag.
@@ -638,7 +653,7 @@ mod tests {
         let first = gate.try_start("session-1").unwrap();
         let second = gate.try_start("session-2").unwrap();
 
-        gate.cancel_all();
+        gate.close();
 
         assert!(first.load(Ordering::Acquire));
         assert!(second.load(Ordering::Acquire));
@@ -703,7 +718,7 @@ mod tests {
         // starts over.
         policy.start_attempt();
         policy.record_deferral(again);
-        policy.observe_wait(Some(mj_core::activity::CheckpointWait::WorkInFlight));
+        policy.observe_wait(true);
         assert!(checkpoint_due(&policy, &ready, again + second));
         policy.start_attempt();
         policy.record_deferral(again);
@@ -739,11 +754,15 @@ mod tests {
     async fn dropping_coordinator_cancels_its_background_copies() {
         let channels = crate::session_manager::spawn_session_manager().unwrap();
         let coordinator = RecoveryCoordinator::spawn(channels.control);
-        let cancelled = coordinator.cancelled.clone();
+        let gate = coordinator.observer.gate.clone();
+        let attempt = gate.try_start("dropping-coordinator").unwrap();
 
         drop(coordinator);
 
-        assert!(cancelled.load(Ordering::Acquire));
+        assert!(attempt.load(Ordering::Acquire));
+        assert!(gate.try_start("after-drop").is_none());
+        drop(attempt);
+        assert!(gate.busy_sessions().is_empty());
     }
 
     #[test]

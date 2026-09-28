@@ -376,6 +376,7 @@ fn call_with_budget(
     let request_id = mj_core::state::new_session_id()?;
     let timeout = budget(&action);
     let request = SubagentToolRequest {
+        originating_command_id: None,
         request_id: request_id.clone(),
         created_at_ms: mj_core::clock::epoch_millis(),
         action,

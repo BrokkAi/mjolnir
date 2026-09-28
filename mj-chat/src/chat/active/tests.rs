@@ -323,6 +323,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 queued_prompts: Vec::new(),
                 active_user_shells: Vec::new(),
                 active_agent_terminals: Vec::new(),
+                command_ledger_seal: None,
                 checkpoint_barrier: None,
                 checkpoint_ready: None,
                 last_acp_activity_at_ms: None,

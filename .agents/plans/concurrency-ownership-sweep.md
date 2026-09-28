@@ -13,14 +13,16 @@ The audit found concrete failure sequences: Move checks two independently locked
 - [x] (2026-09-27) Completed read-only Astra audit across daemon, persistence, worker, resources, UI, desktop, proxy, and Anvil authentication.
 - [x] (2026-09-27) User approved the plan, proactive Kimi refresh, and changes to sibling Anvil.
 - [x] (2026-09-27) Fetched origin/master; current mjolnir hel2 at 33c2011d contains all fetched master commits. Both repositories initially clean; Anvil is on master, version 0.28.5.
-- [ ] Session admission, Move ownership, recovery settlement, and field-owned persistence.
-- [ ] Durable startup/delegation requests and guarded reminder delivery.
-- [ ] Durable review orchestration and worker reviewer lifetime.
-- [ ] Process-group and pipe supervision, cancellable SSH admission, bounded daemon handoff.
-- [ ] Bounded observation/command queues and supervised request dispatch.
-- [ ] Browser/TUI/SSE/desktop asynchronous ownership.
-- [ ] Shared vendor-owned Kimi authentication and Anvil integration.
-- [ ] Integrated isolated regressions, dev-profile tests, Clippy, reviewed commits.
+- [x] (2026-09-27) Session admission, Move ownership, recovery settlement, and field-owned persistence.
+- [x] (2026-09-27) Durable startup/delegation requests and guarded reminder delivery.
+- [x] (2026-09-27) Durable review orchestration and worker reviewer lifetime.
+- [x] (2026-09-27) Process-group and pipe supervision, cancellable SSH admission, bounded daemon handoff.
+- [x] (2026-09-27) Bounded observation/command queues and supervised request dispatch.
+- [x] (2026-09-27) Browser/TUI/SSE/desktop asynchronous ownership.
+- [x] (2026-09-27) Shared vendor-owned Kimi authentication and Anvil integration.
+- [x] (2026-09-27) Integrated isolated regressions, dev-profile tests, Clippy, formatting and reviewed changes; final commit/push follows.
+
+Implementation checkpoint (2026-09-27): all milestone owners have changes in the shared tree; integration is in progress. Core executor tests (5) and SSH tests (37) pass, including inherited pipes and admission cancellation. Browser deferred-operation regressions and existing viewer unit files pass. Desktop exact-module tests (2) and Clippy pass; full native desktop compilation is unavailable because GTK/GLib development packages are absent. Worker lib/binary cargo check passed before subsequent integration edits. Dashboard Rust tests now pass (109), all viewer unit files pass, and core focused coverage totals 53 passing tests with core Clippy clean. Controller Kimi tests pass (24); the actual pinned Kimi 2.0.2 contract test passes against isolated fake OAuth endpoints. Anvil client tests pass (399), and Anvil root tests pass (953 unit plus 35 integration, with documented ignored tests); final Clippy remains pending. These are focused results, not a completed full-suite validation.
 
 ## Surprises & Discoveries
 
@@ -28,7 +30,7 @@ The database writer already serializes commit and publication correctly; preserv
 
 Kimi quota freshness affects profile ranking and automatic quota recovery, not only display. Making quota polling read-only would permit an idle account to remain unavailable indefinitely, and Anvil would still independently rotate the same credentials. The user explicitly rejected that simplification.
 
-The pinned Kimi 2.0.2 executable supports `kimi web --no-open --host 127.0.0.1 --port 0 --log-level silent`. Its authenticated `/api/v1/oauth/usage` calls the vendor freshness mechanism without a model turn. Its response has `kind`, `summary`, `limits`, and `extra_usage`; current online documentation has a newer shape. Even silent startup prints a bearer-bearing URL: never log or persist raw stdout. The actual port is registered under the profile home at `server/instances`, and authentication uses `server.token`. No supported forced-refresh endpoint was found. Vendor ACP processes still coordinate through vendor locking; consolidating our clients does not prove all vendor processes race-free.
+The pinned Kimi 2.0.2 executable supports `kimi web --no-open --host 127.0.0.1 --port 0 --log-level silent`. Its authenticated `/api/v1/oauth/usage` calls the vendor freshness mechanism without a model turn. The actual pinned-binary contract test found quota at `quota.usages`, including `limit5h`, `limit7d`, `monthTotal`, and `monthCode` with `usedRatio`; earlier source research alone gave the wrong response shape. Process registration and authenticated HTTP metadata also use different service IDs, so both identities must be validated separately. Even silent startup prints a bearer-bearing URL: never log or persist raw stdout. The actual port is registered under the profile home at `server/instances`, and authentication uses `server.token`. No supported forced-refresh endpoint was found. Vendor ACP processes still coordinate through vendor locking; consolidating our clients does not prove all vendor processes race-free.
 
 ## Decision Log
 
@@ -39,6 +41,26 @@ The pinned Kimi 2.0.2 executable supports `kimi web --no-open --host 127.0.0.1 -
 2026-09-27, root: use Astra agents for disjoint implementation boundaries, authorized explicitly by the user. Root owns integration, migration revision coordination, final validation, plan maintenance, and commits. Agents must not stage or commit other agents' files.
 
 2026-09-27, root: use `concurrency-sweep` as the isolated test instance with `/tmp/mj-concurrency-sweep-tests/config` and `/tmp/mj-concurrency-sweep-tests/data`. These are configuration/data fixtures, never Cargo build storage. Use existing mbx build layout. Never install or run the new build against the live/default instance.
+
+2026-09-27, root: worker command-ID deduplication was pruned by journal acknowledgement, so stable IDs alone could not make durable outbox replay safe. Protocol 26 adds explicitly retained command receipts with outcome lookup and idempotent release. New receipts are bounded, with pre-acceptance refusal when full. Startup, review/config delivery, and delegation share this mechanism. Daemon protocol advances to 41; database migrations 59–63 cover startup, delegation, reviews, worker restart intents, and execution incarnation identities, each breaking because older actors would violate durable ownership semantics.
+
+2026-09-27, root: Mjolnir initially consumed sibling Anvil through a local path dependency during coordinated tests. Final integration pins the tested and pushed Git revision 8248f521c0f99b456b4c48353b7e4993675e137e. A future crates.io release must publish the new Anvil API and replace the Git pin before packaging Mjolnir against registry dependencies. The user explicitly authorized pushing completed commits to origin/master; live upgrades and registry/tag publication are not part of that instruction.
+
+2026-09-27, root: ordinary API followup startup and daemon startup are being unified into one durable ordered queue; no second task/status map survives. Persistent group IDs retain deduplication, and only pending rows are indexed and read for frequent draining.
+
+2026-09-27, root: an absent receipt is not a cancellation barrier across separate network connections; an older buffered submission may arrive later. Cancellation therefore asks the worker owner to atomically return the accepted receipt or retain a cancellation tombstone. Receipt release cannot erase that tombstone. Checkpoint Move must carry this deduplication ledger into the replacement worker.
+
+2026-09-27, root: a durable CloseAgent effect selects a database-owned execution incarnation in the same transaction that prepares its effect. Resume rotates this identity; close preserves it. Lifecycle admission precedes checking that identity, so a delayed old close cannot stop a newly resumed child or write failure bookkeeping against it. Worker delegation requests also stamp their originating turn under relay ownership; daemon delay cannot retarget an old handback.
+
+2026-09-27, root: reviewer processes must participate in the primary worker's atomic idle reservation. Their admission leases are acquired under the relay owner and retained through preparation and stopping. Final worker exit must join retained cleanup owners, even when ordinary bounded pause has timed out.
+
+2026-09-27, root: automatic vendor-service launch requires Unix, where launch registration and inherited lease ownership are implemented and tested. Unsupported platforms fail visibly instead of silently using a weaker detached-process lifetime. API keys and injected providers remain portable.
+
+2026-09-27, root: the integration run exposed that an ownerless checkpoint recovery path cleared a Move seal. A sealed close now survives disconnect and process restart; the current durable Closing lifecycle adopts its existing barrier. Internal worker startup observations refresh the exact ready cursor under that same seal, and stale paged exports are refused. Ordinary background checkpoints cannot adopt this durable close owner.
+
+2026-09-27, root: review persistence must itself have one in-flight owner. An acknowledgement of an older saved snapshot cannot dispatch a newer outbox, and retry timers cannot send captured stale snapshots directly to the database. Coalesce newer desired state, identify acknowledgements by review epoch and save revision, and send retries back through the review owner.
+
+2026-09-27, root: merged origin/master through 3b604eed, retaining the user's native-goal Esc fix and newer delegation guidance. The three overlapping local files were temporarily preserved and restored cleanly; the task-specific stash was removed after restoration.
 
 ## Context and Orientation
 
@@ -130,6 +152,10 @@ Keep resource-specific state machines local to their owning modules. Use existin
 
 ## Outcomes & Retrospective
 
-Implementation started; no milestone is yet claimed complete. This document will record validated commits, discovered constraints, and any remaining external publication dependency.
+Implementation and validation are complete. Commit 138020d7 establishes subprocess/SSH ownership with focused tests. Anvil commits 585ebf2 and 8248f52 are pushed to origin/master; Mjolnir pins exact revision 8248f521c0f99b456b4c48353b7e4993675e137e, so the sibling checkout is not required. Anvil root tests (988), client tests (401), final queued-cancellation regressions (17), both Clippy checks, and the pinned vendor contract pass. The full Mjolnir integration run exercised all default workspace targets and all historical migrations through revision 63. It exposed lifecycle/test-fixture mismatches, now corrected, and prompted deterministic regressions for review save acknowledgement ordering, failed-save retries, and cancellation cleanup. The final full workspace run passed every target except two controller test fixtures; after correcting those fixtures, the entire controller library passed (1,950 passed, zero failed, eight ignored). Worker library passed 665 tests, and all 11 isolated daemon-upgrade regressions passed. Browser viewer tests passed all five files. An isolated `--instance concurrency-sweep` smoke test passed startup, readiness, and graceful shutdown with fresh temporary configuration/data. Final `cargo clippy --all-targets -- -D warnings`, formatting, and diff checks pass. Clippy cleanup only boxed the lifecycle completion payload and removed unnecessary test borrows; the dashboard regression rerun passed all 111 tests. No live instance was upgraded or used.
 
-Revision note (2026-09-27): created from the approved cross-repository plan and audit evidence before implementation.
+Revision note (2026-09-27): created from the approved cross-repository plan and audit evidence before implementation; updated with receipt-retention discovery, coordinated schema/protocol revisions, startup unification, publication boundary, and focused validation evidence.
+
+Validation note (2026-09-27): final logs are `/tmp/mj-concurrency-final-tests.log` (workspace), `/tmp/mj-concurrency-controller-final.log` (complete corrected controller rerun), `/tmp/mj-concurrency-clippy.log`, `/tmp/mj-concurrency-fmt.log`, and `/tmp/mj-concurrency-browser-tests.log`. The final two fixture corrections retain the preparation owner until settlement and use the existing checked-in fake-command dispatcher to avoid the documented fork/exec ETXTBSY race; production code was unchanged by those corrections.
+
+Final publication note: the requested current-branch commits are being pushed to `origin/master`; no release tag, registry publication, installation, or live-instance upgrade is part of this change. The Anvil automatic vendor-service launcher remains explicitly Unix-only, and native desktop integration validation remains limited by missing GTK/GLib development packages.

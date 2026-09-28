@@ -1,7 +1,7 @@
 use super::*;
 
 enum LifecycleCompletion {
-    Current(Option<ActiveLifecycleOperation>),
+    Current(Option<Box<ActiveLifecycleOperation>>),
     Superseded,
 }
 
@@ -13,7 +13,7 @@ fn take_lifecycle_completion(
         std::collections::btree_map::Entry::Occupied(entry)
             if Arc::ptr_eq(&entry.get().cancelled, &update.operation) =>
         {
-            LifecycleCompletion::Current(Some(entry.remove()))
+            LifecycleCompletion::Current(Some(Box::new(entry.remove())))
         }
         std::collections::btree_map::Entry::Occupied(_) => LifecycleCompletion::Superseded,
         std::collections::btree_map::Entry::Vacant(_) => LifecycleCompletion::Current(None),
@@ -606,7 +606,7 @@ impl DashboardContext {
             let session_id = update.session_id.clone();
             let operation = match take_lifecycle_completion(&mut self.lifecycle_operations, &update)
             {
-                LifecycleCompletion::Current(operation) => operation,
+                LifecycleCompletion::Current(operation) => operation.map(|operation| *operation),
                 LifecycleCompletion::Superseded => {
                     if let Err(error) = &update.result {
                         tracing::warn!(%session_id, %error, "superseded lifecycle operation failed");

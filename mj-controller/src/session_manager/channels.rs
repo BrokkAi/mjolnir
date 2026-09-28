@@ -102,63 +102,184 @@ impl RemoteSessionRequest {
     }
 }
 
-/// Keeps each session's relay requests in the order they were made, while
-/// letting different sessions overlap.
-///
-/// A bridge that spawns every request concurrently loses the order the caller
-/// submitted them in, and the order is load-bearing: `/effort` followed by a
-/// prompt has to reach the relay that way round, or the prompt runs under the
-/// old setting. Awaiting each request inline would restore the order but would
-/// also make one slow session block every other one, so instead each request
-/// waits on its own session's previous request and nothing else.
-#[derive(Default)]
+/// Admission bounds include running work, queued work, and dispatcher messages.
+const REQUESTS_PER_STREAM: usize = 32;
+const REQUESTS_TOTAL: usize = 256;
+type ForwardRequest = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+type RequestBudgets = Arc<Mutex<std::collections::HashMap<SessionRequestStream, usize>>>;
+
+/// One supervisor drains accepted requests even when its bridge disconnects.
+/// Each primary/reviewer stream runs in order, independently of other streams.
+/// Dropping the bridge closes admission but leaves its supervisor draining:
+/// disconnecting a caller cannot cancel a mutation that may already be accepted.
+/// Owners that can await shutdown use `drain` to observe that completion.
 pub struct SessionRequestOrder {
-    pub(super) latest: std::collections::HashMap<SessionRequestStream, tokio::task::JoinHandle<()>>,
+    sender: mpsc::Sender<OrderedRequest>,
+    budgets: RequestBudgets,
+    supervisor: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum SessionRequestStream {
     Primary(String),
     Reviewer(String, Option<String>),
 }
 
+struct RequestPermit {
+    budgets: RequestBudgets,
+    stream: SessionRequestStream,
+}
+
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        let mut budgets = self.budgets.lock().expect("request budgets poisoned");
+        let count = budgets.get_mut(&self.stream).expect("admitted request");
+        *count -= 1;
+        if *count == 0 {
+            budgets.remove(&self.stream);
+        }
+    }
+}
+
+struct OrderedRequest {
+    permit: RequestPermit,
+    forward: ForwardRequest,
+}
+
+impl RemoteSessionRequest {
+    pub(crate) fn reject(self, message: &str) {
+        match self {
+            Self::Submit { reply, .. } => {
+                let _ = reply.send(Err(message.to_owned().into()));
+            }
+            Self::Sync { reply, .. }
+            | Self::RespondElicitation { reply, .. }
+            | Self::StopBackgroundTask { reply, .. } => {
+                let _ = reply.send(Err(message.to_owned()));
+            }
+            Self::Reviewer { reply, .. } => {
+                let _ = reply.send(Err(message.to_owned()));
+            }
+        }
+    }
+}
+
+impl Default for SessionRequestOrder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionRequestOrder {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let (sender, receiver) = mpsc::channel(REQUESTS_TOTAL);
+        Self {
+            sender,
+            budgets: Default::default(),
+            supervisor: tokio::spawn(supervise_requests(receiver)),
+        }
     }
 
-    /// Runs `forward` for `request` after everything already queued for the
-    /// same primary or reviewer role has finished. Independent reviewers
-    /// must not delay primary controls or one another.
+    /// Overload is an explicit non-admission, never ambiguous delivery.
     pub fn dispatch<F, Fut>(&mut self, request: RemoteSessionRequest, forward: F)
     where
         F: FnOnce(RemoteSessionRequest) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        // Sessions that have gone quiet leave a finished handle behind; drop
-        // them here so the map tracks live work rather than every session the
-        // bridge has ever served.
-        self.latest.retain(|_, handle| !handle.is_finished());
         let stream = match &request {
             RemoteSessionRequest::Reviewer {
                 session_id, role, ..
             } => SessionRequestStream::Reviewer(session_id.clone(), role.clone()),
             _ => SessionRequestStream::Primary(request.session_id().to_owned()),
         };
-        let previous = self.latest.remove(&stream);
-        let handle = tokio::spawn(async move {
-            if let Some(previous) = previous {
-                // A panicked predecessor still releases its successor: the
-                // request behind it is the user's, and dropping it silently
-                // would be worse than running it late.
-                if let Err(error) = previous.await {
-                    tracing::error!(%error, "previous session request task failed");
+        let mut budgets = self.budgets.lock().expect("request budgets poisoned");
+        if budgets.get(&stream).copied().unwrap_or(0) >= REQUESTS_PER_STREAM
+            || budgets.values().sum::<usize>() >= REQUESTS_TOTAL
+        {
+            drop(budgets);
+            request.reject("session request queue is full; request was not accepted");
+            return;
+        }
+        // Reserve the bounded channel before constructing the forwarded future,
+        // so even a failed supervisor can refuse with a definite non-delivery.
+        let Ok(slot) = self.sender.try_reserve() else {
+            drop(budgets);
+            request.reject("session request dispatcher is unavailable; request was not accepted");
+            return;
+        };
+        *budgets.entry(stream.clone()).or_default() += 1;
+        drop(budgets);
+        slot.send(OrderedRequest {
+            permit: RequestPermit {
+                budgets: self.budgets.clone(),
+                stream,
+            },
+            forward: Box::pin(async move { forward(request).await }),
+        });
+    }
+
+    /// Close admission and wait for all admitted work, including queued work.
+    pub async fn drain(self) -> Result<()> {
+        drop(self.sender);
+        self.supervisor
+            .await
+            .context("session request supervisor failed")
+    }
+}
+
+async fn supervise_requests(mut requests: mpsc::Receiver<OrderedRequest>) {
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut running = std::collections::HashMap::new();
+    let mut pending =
+        std::collections::HashMap::<SessionRequestStream, VecDeque<OrderedRequest>>::new();
+    let mut closed = false;
+    loop {
+        tokio::select! {
+            // Reap ready tasks before accepting another message; completed task
+            // records cannot accumulate behind a continuously busy producer.
+            biased;
+            completed = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let task_id = match completed.expect("nonempty request tasks") {
+                    Ok((id, ())) => id,
+                    Err(error) => {
+                        tracing::error!(stream = ?running.get(&error.id()), %error, "session request task failed");
+                        error.id()
+                    }
+                };
+                let stream = running.remove(&task_id).expect("registered request task");
+                if let Some(queue) = pending.get_mut(&stream) {
+                    if let Some(request) = queue.pop_front() {
+                        let handle = tasks.spawn(async move {
+                            let _permit = request.permit;
+                            request.forward.await;
+                        });
+                        running.insert(handle.id(), stream.clone());
+                    }
+                    if queue.is_empty() { pending.remove(&stream); }
                 }
             }
-            forward(request).await;
-        });
-        self.latest.insert(stream, handle);
+            request = requests.recv(), if !closed => {
+                match request {
+                    Some(request) => {
+                        let stream = request.permit.stream.clone();
+                        if running.values().any(|active| active == &stream) {
+                            pending.entry(stream).or_default().push_back(request);
+                        } else {
+                            let handle = tasks.spawn(async move {
+                                let _permit = request.permit;
+                                request.forward.await;
+                            });
+                            running.insert(handle.id(), stream);
+                        }
+                    }
+                    None => closed = true,
+                }
+            }
+        }
+        if closed && tasks.is_empty() {
+            break;
+        }
     }
 }
 

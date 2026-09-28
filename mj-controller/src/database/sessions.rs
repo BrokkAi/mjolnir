@@ -1,5 +1,19 @@
 use super::*;
 
+/// Identity of the execution lifetime selected by a durable lifecycle effect.
+/// The database rotates it when a stopped session starts a new lifetime.
+pub fn session_incarnation(session_id: &str) -> Result<Option<String>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT identity FROM session_incarnations WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
@@ -492,6 +506,79 @@ pub fn save_session_with_container_size(
     submit_database_write("save_session_with_container_size", move |_| {
         save_session_with_container_size_to(&database_path(), &session, Some((&host, size)))
     })
+}
+
+/// Resume owns the target, checkout and attached resources, never a client's
+/// title, draft, archive visibility or the worker's current display title.
+pub fn save_resumed_session(
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+) -> Result<()> {
+    let session = session.clone();
+    let container_size = container_size.map(|(host, size)| (host.to_owned(), size));
+    submit_database_write("save_resumed_session", move |_| {
+        save_resumed_session_to(
+            &database_path(),
+            &session,
+            container_size
+                .as_ref()
+                .map(|(host, size)| (host.as_str(), *size)),
+        )
+    })
+}
+
+pub(super) fn save_resumed_session_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+) -> Result<()> {
+    validate_session_record(session)?;
+    let mut connection = open(path)?;
+    let tx = connection.transaction()?;
+    let (bundle, workspace): (String, String) = tx.query_row(
+        "SELECT bundle_id, workspace_id FROM session_contexts WHERE session_id = ?1",
+        [&session.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        bundle == session.bundle_id && workspace == session.workspace_id,
+        "session {} context changed before resume publication",
+        session.id
+    );
+    update_lifecycle_fields(&tx, session)?;
+    tx.execute(
+        "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
+             container_memory = ?4, container_workspace = ?5,
+             create_managed_worktree = ?6, launch_base = ?7, launch_branch = ?8,
+             checkout_json = ?9, expected_runtime_identity = ?10
+         WHERE session_id = ?1",
+        params![
+            session.id,
+            session.native_session_id,
+            session.container_cpus,
+            session.container_memory,
+            session
+                .container_workspace
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            session.create_managed_worktree,
+            session.launch_base,
+            session.launch_branch,
+            session
+                .checkout
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            session.expected_runtime_identity,
+        ],
+    )?;
+    replace_mounts(&tx, &session.id, &session.additional_mounts)?;
+    replace_checkpoint(&tx, session)?;
+    if let Some((host, size)) = container_size {
+        write_host_container_size(&tx, host, size)?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Update only the fields a lifecycle transition owns on a session that
@@ -1205,12 +1292,111 @@ pub(super) fn record_recovery_success_to(
     Ok(())
 }
 
+pub fn record_recovery_success_if_current(
+    session_id: &str,
+    expected_target: &TargetLocator,
+    expected_checkpoint: Option<&CheckpointMetadata>,
+    native_session_id: &str,
+    checkpoint: &CheckpointMetadata,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_target = expected_target.clone();
+    let expected_checkpoint = expected_checkpoint.cloned();
+    let native_session_id = native_session_id.to_owned();
+    let checkpoint = checkpoint.clone();
+    submit_database_write("record_recovery_success_if_current", move |connection| {
+        record_recovery_success_if_current_with(
+            connection,
+            &session_id,
+            &expected_target,
+            expected_checkpoint.as_ref(),
+            &native_session_id,
+            &checkpoint,
+        )
+    })
+}
+
+fn record_recovery_success_if_current_with(
+    connection: &mut Connection,
+    session_id: &str,
+    expected_target: &TargetLocator,
+    expected_checkpoint: Option<&CheckpointMetadata>,
+    native_session_id: &str,
+    checkpoint: &CheckpointMetadata,
+) -> Result<bool> {
+    let tx = connection.transaction()?;
+    let Some(mut current) = load_session_with(&tx, session_id)? else {
+        return Ok(false);
+    };
+    if current.target.as_ref() != Some(expected_target)
+        || current.checkpoint.as_ref() != expected_checkpoint
+    {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE sessions SET native_session_id = ?2, last_checkpoint_error = NULL
+         WHERE session_id = ?1",
+        params![session_id, native_session_id],
+    )?;
+    current.checkpoint = Some(checkpoint.clone());
+    replace_checkpoint(&tx, &current)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn record_recovery_failure(session_id: &str, detail: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     let detail = detail.to_owned();
     submit_database_write("record_recovery_failure", move |_| {
         record_recovery_failure_to(&database_path(), &session_id, &detail)
     })
+}
+
+/// A completed copy can report only against the target and checkpoint it
+/// observed. A later successful checkpoint or target replacement wins.
+pub fn record_recovery_failure_if_current(
+    session_id: &str,
+    expected_target: &TargetLocator,
+    expected_checkpoint: Option<&CheckpointMetadata>,
+    detail: &str,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_target = expected_target.clone();
+    let expected_checkpoint = expected_checkpoint.cloned();
+    let detail = detail.to_owned();
+    submit_database_write("record_recovery_failure_if_current", move |connection| {
+        record_recovery_failure_if_current_with(
+            connection,
+            &session_id,
+            &expected_target,
+            expected_checkpoint.as_ref(),
+            &detail,
+        )
+    })
+}
+
+fn record_recovery_failure_if_current_with(
+    connection: &mut Connection,
+    session_id: &str,
+    expected_target: &TargetLocator,
+    expected_checkpoint: Option<&CheckpointMetadata>,
+    detail: &str,
+) -> Result<bool> {
+    let tx = connection.transaction()?;
+    let Some(current) = load_session_with(&tx, session_id)? else {
+        return Ok(false);
+    };
+    if current.target.as_ref() != Some(expected_target)
+        || current.checkpoint.as_ref() != expected_checkpoint
+    {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE sessions SET last_checkpoint_error = ?2 WHERE session_id = ?1",
+        params![session_id, detail],
+    )?;
+    tx.commit()?;
+    Ok(true)
 }
 
 pub(super) fn record_recovery_failure_to(
@@ -1262,4 +1448,241 @@ pub(super) fn rebind_session_bundle_to(
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_identity_survives_close_but_rotates_before_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("incarnation.sqlite3");
+        let mut session = super::super::tests::session("incarnation", "project");
+        session.state = SessionState::Running;
+        save_session_to(&path, &session).unwrap();
+        let connection = open(&path).unwrap();
+        let identity = || {
+            connection
+                .query_row(
+                    "SELECT identity FROM session_incarnations WHERE session_id = ?1",
+                    [&session.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let original = identity();
+        for state in ["disconnected", "running", "closing", "stopped"] {
+            connection
+                .execute(
+                    "UPDATE sessions SET state = ?2 WHERE session_id = ?1",
+                    params![session.id, state],
+                )
+                .unwrap();
+            assert_eq!(
+                identity(),
+                original,
+                "close must keep its execution identity"
+            );
+        }
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'provisioning' WHERE session_id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        let resumed = identity();
+        assert_ne!(resumed, original);
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'running' WHERE session_id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert_eq!(
+            identity(),
+            resumed,
+            "publishing a resume keeps its admitted identity"
+        );
+    }
+
+    #[test]
+    fn resume_and_rollback_preserve_edits_committed_after_their_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume.sqlite3");
+        let original = super::super::tests::session("resume-owner", "project");
+        save_session_to(&path, &original).unwrap();
+        let connection = open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET session_title_override = 'renamed during resume',
+                 acp_session_title = 'new worker title', draft_input = 'new draft',
+                 archived = 1, viewed_through_event_ordinal = 99 WHERE session_id = ?1",
+                [&original.id],
+            )
+            .unwrap();
+        let mut provisioning = original.clone();
+        provisioning.state = SessionState::Provisioning;
+        provisioning.target = None;
+        provisioning.native_session_id = Some("resumed-native".into());
+        provisioning.additional_mounts.clear();
+        save_resumed_session_to(&path, &provisioning, None).unwrap();
+        let current = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.state, SessionState::Provisioning);
+        assert_eq!(current.native_session_id, provisioning.native_session_id);
+        assert!(current.additional_mounts.is_empty());
+        assert_eq!(
+            current.session_title_override.as_deref(),
+            Some("renamed during resume")
+        );
+        assert_eq!(
+            current.acp_session_title.as_deref(),
+            Some("new worker title")
+        );
+        assert_eq!(current.draft_input, "new draft");
+        assert!(current.archived);
+        assert_eq!(current.viewed_through_event_ordinal, 99);
+
+        // Failure restores a snapshot captured before those independent edits.
+        save_resumed_session_to(&path, &original, None).unwrap();
+        let rolled_back = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rolled_back.state, original.state);
+        assert_eq!(rolled_back.additional_mounts, original.additional_mounts);
+        assert_eq!(
+            rolled_back.session_title_override,
+            current.session_title_override
+        );
+        assert_eq!(rolled_back.acp_session_title, current.acp_session_title);
+        assert_eq!(rolled_back.draft_input, current.draft_input);
+        assert_eq!(rolled_back.archived, current.archived);
+        assert_eq!(rolled_back.viewed_through_event_ordinal, 99);
+    }
+
+    #[test]
+    fn recovery_completion_cannot_replace_a_newer_checkpoint_or_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recovery.sqlite3");
+        let original = super::super::tests::session("recovery-owner", "project");
+        save_session_to(&path, &original).unwrap();
+        let target = original.target.as_ref().unwrap();
+        let previous = original.checkpoint.as_ref().unwrap();
+        let mut next = previous.clone();
+        next.sha256 = "b".repeat(64);
+        next.event_frontier += 1;
+        let mut connection = open(&path).unwrap();
+        assert!(
+            record_recovery_success_if_current_with(
+                &mut connection,
+                &original.id,
+                target,
+                Some(previous),
+                "new-native",
+                &next,
+            )
+            .unwrap()
+        );
+        assert!(
+            !record_recovery_failure_if_current_with(
+                &mut connection,
+                &original.id,
+                target,
+                Some(previous),
+                "old failure",
+            )
+            .unwrap()
+        );
+        assert!(
+            !record_recovery_success_if_current_with(
+                &mut connection,
+                &original.id,
+                target,
+                Some(previous),
+                "old-native",
+                previous,
+            )
+            .unwrap()
+        );
+        let current = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.checkpoint.as_ref(), Some(&next));
+        assert_eq!(current.native_session_id.as_deref(), Some("new-native"));
+        assert_eq!(current.last_checkpoint_error, None);
+
+        let mut replacement = current.clone();
+        replacement.target = None;
+        replacement.state = SessionState::Stopped;
+        save_resumed_session_to(&path, &replacement, None).unwrap();
+        assert!(
+            !record_recovery_failure_if_current_with(
+                &mut connection,
+                &original.id,
+                target,
+                Some(&next),
+                "old target failure",
+            )
+            .unwrap()
+        );
+        assert!(
+            !record_recovery_success_if_current_with(
+                &mut connection,
+                &original.id,
+                target,
+                Some(&next),
+                "old-native",
+                previous,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn current_recovery_failure_settles_without_resurrecting_a_removed_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recovery.sqlite3");
+        let original = super::super::tests::session("recovery-owner", "project");
+        save_session_to(&path, &original).unwrap();
+        let mut connection = open(&path).unwrap();
+        assert!(
+            record_recovery_failure_if_current_with(
+                &mut connection,
+                &original.id,
+                original.target.as_ref().unwrap(),
+                original.checkpoint.as_ref(),
+                "current failure",
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            load_session_with(&connection, &original.id)
+                .unwrap()
+                .unwrap()
+                .last_checkpoint_error
+                .as_deref(),
+            Some("current failure")
+        );
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = ?1", [&original.id])
+            .unwrap();
+        assert!(
+            !record_recovery_failure_if_current_with(
+                &mut connection,
+                &original.id,
+                original.target.as_ref().unwrap(),
+                original.checkpoint.as_ref(),
+                "late failure",
+            )
+            .unwrap()
+        );
+        assert!(
+            load_session_with(&connection, &original.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(save_resumed_session_to(&path, &original, None).is_err());
+    }
 }

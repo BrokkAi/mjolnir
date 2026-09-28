@@ -170,13 +170,16 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<CheckpointArtifact> {
-        let previous_checkpoint = self
+        let observed = self
             .state
             .sessions
             .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .checkpoint
-            .clone();
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let expected_target = observed
+            .target
+            .as_ref()
+            .context("recovery session has no target")?;
+        let previous_checkpoint = observed.checkpoint.clone();
         let latched = self
             .checkpoint_session_latched_with_recovery_stage(
                 session_id,
@@ -210,14 +213,30 @@ impl Controller {
             ));
         }
         let persist_started = Instant::now();
-        if let Err(error) = crate::database::record_recovery_success(
+        let installed = crate::database::record_recovery_success_if_current(
             session_id,
+            expected_target,
+            previous_checkpoint.as_ref(),
             &artifact.native_session_id,
             &artifact.metadata,
-        ) {
-            latched.abandon(session_id).await;
-            return Err(error
-                .context("persist verified recovery checkpoint before releasing relay history"));
+        );
+        match installed {
+            Ok(true) => {}
+            Ok(false) => {
+                latched.abandon(session_id).await;
+                return Err(remove_uninstalled_checkpoint(
+                    &artifact.metadata.archive_path,
+                    anyhow::anyhow!(
+                        "recovery checkpoint belongs to an earlier session or checkpoint generation"
+                    ),
+                ));
+            }
+            Err(error) => {
+                latched.abandon(session_id).await;
+                return Err(error.context(
+                    "persist verified recovery checkpoint before releasing relay history",
+                ));
+            }
         }
         tracing::info!(
             session_id,

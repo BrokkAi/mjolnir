@@ -152,7 +152,7 @@ impl Controller {
             record.updated_at = now();
             record.last_error = None;
         }
-        crate::database::save_session(&self.state.sessions[session_id])?;
+        crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
 
         let result = async {
             // A cross-harness swap has no provisioning to overlap with, so the

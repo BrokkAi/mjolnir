@@ -424,14 +424,16 @@ pub(super) async fn handle_action(
                 !text.trim().is_empty(),
                 "a queued startup prompt needs text to send"
             );
-            state.queue_startup_step(
-                &session_id,
-                StartupStep::Prompt {
-                    text,
-                    inherited_draft,
-                },
-                cancellation,
-            )?;
+            state
+                .queue_startup_step(
+                    &session_id,
+                    StartupStep::Prompt {
+                        text,
+                        inherited_draft,
+                    },
+                    cancellation,
+                )
+                .await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::ReviewerAction {

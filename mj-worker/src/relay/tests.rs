@@ -5556,3 +5556,43 @@ fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inferen
         assert_eq!(relay.operational_state().turn_completion, Some(completion));
     }
 }
+
+#[test]
+fn durable_archive_context_retry_after_consumption_does_not_reinstall_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let install = || RelayRequest::SubmitDurable {
+        command_id: "archive-context".into(),
+        command: RelayCommand::InstallPromptContext {
+            text: "archived context".into(),
+        },
+    };
+    let accepted = relay.handle(relay_request("install", install()));
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+    submit_relay(&mut relay, "first-prompt", prompt("start"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some("archived context")
+    );
+    relay
+        .record_command_completed(
+            "first-prompt",
+            RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let repeated = relay.handle(relay_request("retry-install", install()));
+    assert!(matches!(repeated.body, RelayResponseBody::Ok { .. }));
+    submit_relay(&mut relay, "second-prompt", prompt("continue"));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        claimed[0].hidden_prompt_context, None,
+        "retry reinstalled consumed context"
+    );
+}

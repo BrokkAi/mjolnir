@@ -48,12 +48,45 @@ pub(super) fn spawn_remote_request_bridge(
         // made; different sessions still overlap.
         let mut request_order = crate::session_manager::SessionRequestOrder::new();
         while let Some(request) = requests.recv().await {
-            let manager = manager.clone();
-            request_order.dispatch(request, move |request| {
-                forward_in_process_session_request(request, manager)
-            });
+            dispatch_in_process_request(
+                &mut request_order,
+                request,
+                manager.clone(),
+                crate::upgrade::gate(),
+            );
+        }
+        if let Err(error) = request_order.drain().await {
+            tracing::error!(%error, "remote request bridge drain failed");
         }
     })
+}
+
+/// Only daemon-owned mutations hold replacement admission. Reviewer operations
+/// live in workers, and synchronization is a repeatable read of their journals.
+fn dispatch_in_process_request(
+    order: &mut crate::session_manager::SessionRequestOrder,
+    request: RemoteSessionRequest,
+    manager: SessionManagerControl,
+    gate: &Arc<crate::upgrade::Gate>,
+) {
+    let label = match &request {
+        RemoteSessionRequest::Submit { .. } => Some("web relay submit"),
+        RemoteSessionRequest::RespondElicitation { .. } => Some("web elicitation response"),
+        RemoteSessionRequest::StopBackgroundTask { .. } => Some("web background task stop"),
+        RemoteSessionRequest::Sync { .. } | RemoteSessionRequest::Reviewer { .. } => None,
+    };
+    let work = match label.map(|label| gate.enter(label)).transpose() {
+        Ok(work) => work,
+        Err(error) => {
+            request.reject(&format!("request was not accepted: {error:#}"));
+            return;
+        }
+    };
+    order.dispatch(request, move |request| async move {
+        // Queue ownership includes the reply, even if its receiver disconnects.
+        let _work = work;
+        forward_in_process_session_request(request, manager).await;
+    });
 }
 
 pub(super) async fn forward_in_process_session_request(
@@ -331,4 +364,71 @@ pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {
     #[cfg(not(feature = "test-hooks"))]
     let _ = name;
     Ok(())
+}
+
+#[cfg(test)]
+mod bridge_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_web_mutations_hold_handoff_until_reply_and_late_requests_are_refused() {
+        let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "bridge-test".into(),
+            spec: CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        remote
+            .publisher
+            .publish("bridge-test".into(), ManagedSessionView::default())
+            .await
+            .unwrap();
+        remote
+            .control
+            .wait_for_session("bridge-test", Duration::from_secs(5))
+            .await
+            .unwrap();
+        let gate = Arc::new(crate::upgrade::Gate::default());
+        let mut order = crate::session_manager::SessionRequestOrder::new();
+        let request = |id: &str| {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            (
+                RemoteSessionRequest::Submit {
+                    session_id: "bridge-test".into(),
+                    command_id: id.into(),
+                    command: mj_core::relay::RelayCommand::Cancel,
+                    admission: None,
+                    reply,
+                },
+                response,
+            )
+        };
+        let (first, disconnected) = request("first");
+        dispatch_in_process_request(&mut order, first, remote.control.clone(), &gate);
+        let (second, completed) = request("second");
+        dispatch_in_process_request(&mut order, second, remote.control.clone(), &gate);
+        assert_eq!(gate.active_labels(), ["web relay submit x2"]);
+        assert!(!gate.try_close());
+        drop(disconnected);
+        for ordinal in 1..=2 {
+            let RemoteSessionRequest::Submit { reply, .. } = remote.requests.recv().await.unwrap()
+            else {
+                panic!("expected submit");
+            };
+            assert!(!gate.try_close());
+            reply.send(Ok(ordinal)).unwrap();
+        }
+        assert_eq!(completed.await.unwrap().unwrap(), 2);
+        order.drain().await.unwrap();
+        assert!(gate.try_close());
+        let mut order = crate::session_manager::SessionRequestOrder::new();
+        let (late, refused) = request("late");
+        dispatch_in_process_request(&mut order, late, remote.control.clone(), &gate);
+        let refused = refused.await.unwrap().unwrap_err();
+        assert!(!refused.unconfirmed);
+        assert!(refused.message.contains("not accepted"));
+        order.drain().await.unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
 }

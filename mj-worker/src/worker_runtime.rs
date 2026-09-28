@@ -42,10 +42,17 @@ pub fn record_startup_step(root: &Path, step: &str) {
         steps.drain(..steps.len() - 63);
     }
     steps.push(serde_json::json!({"step": step, "at": at}));
+    static PROCESS_BIRTH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let process_birth = PROCESS_BIRTH.get_or_init(|| {
+        mj_core::subprocess::process_birth_identity(std::process::id())
+            .map_err(|error| eprintln!("Mjolnir: could not record process identity: {error:#}"))
+            .ok()
+    });
     let record = serde_json::json!({
         "step": step,
         "at": at,
         "pid": std::process::id(),
+        "process_birth": process_birth,
         "version": env!("CARGO_PKG_VERSION"),
         "steps": steps,
     });
@@ -382,7 +389,8 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 #[cfg(unix)]
 pub use unix::{
     SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
-    lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
+    lead_process_group, prepare_managed_harness, prepare_managed_harness_for_transfer, proxy,
+    run_acp_supervisor, run_daemon,
 };
 
 #[cfg(not(unix))]
@@ -400,6 +408,13 @@ pub async fn proxy(_root: std::path::PathBuf) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Result<()> {
+    anyhow::bail!("managed target harnesses require Unix")
+}
+
+#[cfg(not(unix))]
+pub async fn prepare_managed_harness_for_transfer(
+    _config: WorkerLaunchConfig,
+) -> anyhow::Result<Option<PreparedHarnessLaunch>> {
     anyhow::bail!("managed target harnesses require Unix")
 }
 

@@ -220,6 +220,7 @@ struct Fixture {
     /// staged profile directory.
     profile_home: PathBuf,
     sidecar: Arc<ReviewerSidecar>,
+    primary_relay: Arc<std::sync::Mutex<crate::relay::DurableRelay>>,
 }
 
 impl Fixture {
@@ -236,22 +237,39 @@ impl Fixture {
             std::fs::create_dir_all(&profile_home).unwrap();
         }
         let bridge = bridge_script(temp.path());
-        let sidecar = Arc::new(ReviewerSidecar::new(ReviewerPlacement {
-            target_environment: Default::default(),
-            worker_root: worker_root.clone(),
-            session_id: SESSION_ID.to_owned(),
-            cwd: workspace,
-            additional_directories: Vec::new(),
-            worker_executable: bridge,
-            harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-            review_capture: true,
-            untracked_at_start: Default::default(),
-        }));
+        let primary_relay = Arc::new(std::sync::Mutex::new(
+            crate::relay::DurableRelay::open(temp.path().join("primary-relay"), SESSION_ID, "test")
+                .unwrap(),
+        ));
+        {
+            let mut relay = primary_relay.lock().unwrap();
+            relay.set_turn_verdict_harness(HarnessKind::Claude);
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+        }
+        let sidecar = Arc::new(ReviewerSidecar::new(
+            ReviewerPlacement {
+                target_environment: Default::default(),
+                worker_root: worker_root.clone(),
+                session_id: SESSION_ID.to_owned(),
+                cwd: workspace,
+                additional_directories: Vec::new(),
+                worker_executable: bridge,
+                harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+                review_capture: true,
+                untracked_at_start: Default::default(),
+            },
+            primary_relay.clone(),
+        ));
         Self {
             _temp: temp,
             worker_root,
             profile_home,
             sidecar,
+            primary_relay,
         }
     }
 
@@ -286,6 +304,26 @@ impl Fixture {
             .trim()
             .parse()
             .expect("the recorded process id is a number")
+    }
+
+    fn reserve_worker(&self, command_id: &str) -> bool {
+        let response = self
+            .primary_relay
+            .lock()
+            .unwrap()
+            .handle(RelayRequestEnvelope {
+                request_id: "idle-reservation-test".into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request: RelayRequest::ReserveIdle {
+                    command_id: command_id.into(),
+                },
+            });
+        match response.body {
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::IdleReservation { ordinal },
+            } => ordinal.is_some(),
+            other => panic!("unexpected idle reservation response {other:?}"),
+        }
     }
 
     async fn request(&mut self, request: ReviewerRequest) -> RelayResponseBody {
@@ -421,14 +459,13 @@ fn error_message(body: &RelayResponseBody) -> String {
 async fn reviewer_socket(
     fixture: &Fixture,
 ) -> (UnixStream, tokio::task::JoinHandle<anyhow::Result<()>>) {
-    let relay_root = fixture.script_directory().join("primary-relay");
-    let relay = crate::relay::DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap();
+    let relay = fixture.primary_relay.clone();
     let (dispatch_wake, _dispatch_wake_rx) = tokio::sync::mpsc::channel(1);
     let (fatal, _fatal_rx) = tokio::sync::mpsc::channel(1);
     let (client, server) = UnixStream::pair().unwrap();
     let server = tokio::spawn(unix::serve_client_with_reviewer(
         server,
-        Arc::new(std::sync::Mutex::new(relay)),
+        relay,
         dispatch_wake,
         Err("test has no credentials".to_owned()),
         None,
@@ -788,7 +825,7 @@ async fn a_new_generation_replaces_the_running_reviewer() {
 async fn a_new_generation_starts_a_fresh_native_conversation() {
     let mut fixture = Fixture::new(true);
     fixture.start(config(0)).await;
-    fixture.sidecar.pause_all().await;
+    fixture.request(ReviewerRequest::Pause).await;
 
     fixture.stage_generation(1);
     fixture.start(config(1)).await;
@@ -828,7 +865,16 @@ async fn a_failed_model_start_can_retry_with_a_corrected_model() {
         matches!(body, RelayResponseBody::Error { .. }),
         "the unsupported first model must fail: {body:?}"
     );
-    fixture.sidecar.pause_all().await;
+    let body = fixture.request(ReviewerRequest::Pause).await;
+    assert!(
+        matches!(
+            body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewerPaused
+            }
+        ),
+        "unexpected pause response: {body:?}"
+    );
 
     std::fs::remove_file(directory.join("reject-opus")).unwrap();
     fixture.stage_generation(1);
@@ -1133,9 +1179,18 @@ async fn a_resumed_reviewer_reloads_its_native_session() {
     let mut fixture = Fixture::new(true);
     write_options(&fixture.script_directory(), "options.json", &[]);
 
-    fixture.start(config(0)).await;
-    fixture.sidecar.pause_all().await;
-    fixture.start(config(0)).await;
+    started_options(&fixture.start(config(0)).await);
+    let body = fixture.request(ReviewerRequest::Pause).await;
+    assert!(
+        matches!(
+            body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewerPaused
+            }
+        ),
+        "unexpected pause response: {body:?}"
+    );
+    started_options(&fixture.start(config(0)).await);
 
     let resumes = fixture
         .reviewer_events()
@@ -1179,13 +1234,22 @@ async fn a_relaunched_codex_reviewer_pins_the_model_it_accepted() {
     let mut first = config(0);
     first.harness = HarnessKind::Codex;
     first.model = Some("flash".into());
-    fixture.start(first).await;
-    fixture.sidecar.pause_all().await;
+    started_options(&fixture.start(first).await);
+    let body = fixture.request(ReviewerRequest::Pause).await;
+    assert!(
+        matches!(
+            body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewerPaused
+            }
+        ),
+        "unexpected pause response: {body:?}"
+    );
 
     let mut second = config(0);
     second.harness = HarnessKind::Codex;
     second.model = Some("flash".into());
-    fixture.start(second).await;
+    started_options(&fixture.start(second).await);
 
     let spec = super::AcpSupervisorSpec::read(
         &fixture
@@ -1490,17 +1554,23 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     let temp = tempfile::tempdir().unwrap();
     let worker_root = temp.path().join("worker");
     std::fs::create_dir_all(&worker_root).unwrap();
-    let sidecar = std::sync::Arc::new(ReviewerSidecar::new(ReviewerPlacement {
-        target_environment: Default::default(),
-        worker_root: worker_root.clone(),
-        session_id: SESSION_ID.to_owned(),
-        cwd: temp.path().to_path_buf(),
-        additional_directories: Vec::new(),
-        worker_executable: PathBuf::from("/bin/false"),
-        harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-        review_capture: true,
-        untracked_at_start: Default::default(),
-    }));
+    let sidecar = std::sync::Arc::new(ReviewerSidecar::new(
+        ReviewerPlacement {
+            target_environment: Default::default(),
+            worker_root: worker_root.clone(),
+            session_id: SESSION_ID.to_owned(),
+            cwd: temp.path().to_path_buf(),
+            additional_directories: Vec::new(),
+            worker_executable: PathBuf::from("/bin/false"),
+            harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+            review_capture: true,
+            untracked_at_start: Default::default(),
+        },
+        Arc::new(std::sync::Mutex::new(
+            crate::relay::DurableRelay::open(temp.path().join("primary-relay"), SESSION_ID, "test")
+                .unwrap(),
+        )),
+    ));
     let _guard = unix::serve_review_dispatch(&worker_root, sidecar.clone()).unwrap();
     let socket = worker_root
         .join("reviewer")
@@ -1521,7 +1591,7 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     let socket_for_call = socket.clone();
     let dispatch_for_call = dispatch.clone();
     let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch_for_call)
+        crate::review::mcp::send_dispatch(&socket_for_call, 7, &dispatch_for_call)
     })
     .await
     .unwrap()
@@ -1533,24 +1603,34 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     // coming, and a second copy would double the container's load.
     let socket_for_call = socket.clone();
     let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch)
+        crate::review::mcp::send_dispatch(&socket_for_call, 7, &dispatch)
     })
     .await
     .unwrap()
     .expect("the worker answers a repeat dispatch");
     assert!(reply.started.is_empty());
 
-    // The controller collects the queue once, and it is empty afterwards.
-    let collected = sidecar.take_dispatches();
+    // Reading is replayable until the controller acknowledges durable acceptance.
+    let collected = sidecar.read_dispatches().unwrap();
     assert_eq!(collected.len(), 2);
-    assert_eq!(collected[0].agent_type, "tests");
-    assert!(sidecar.take_dispatches().is_empty());
+    assert_eq!(collected[0].request.agent_type, "tests");
+    assert_eq!(sidecar.read_dispatches().unwrap(), collected);
+    sidecar
+        .acknowledge_dispatches(
+            &collected
+                .iter()
+                .map(|dispatch| dispatch.id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert!(sidecar.read_dispatches().unwrap().is_empty());
 
     // An invalid dispatch is refused with a message the supervisor can act on.
     let socket_for_call = socket.clone();
     let reply = tokio::task::spawn_blocking(move || {
         crate::review::mcp::send_dispatch(
             &socket_for_call,
+            7,
             &LaneDispatch {
                 reviewers: vec![ReviewSubagentRequest {
                     agent_type: "not_a_lane".to_owned(),
@@ -1637,4 +1717,237 @@ async fn reviewer_fast_mode_is_applied_when_advertised_and_optional_otherwise() 
         }
         fixture.sidecar.pause_all().await;
     }
+}
+
+#[tokio::test]
+async fn disconnected_preparation_keeps_the_role_until_its_blocking_copy_finishes() {
+    let mut fixture = Fixture::new(true);
+    std::fs::write(fixture.profile_home.join("identity"), b"old profile").unwrap();
+    fixture.stage_generation(1);
+    std::fs::write(
+        fixture.worker_root.join("reviewer/profile-1/identity"),
+        b"new profile",
+    )
+    .unwrap();
+    let (entered, release) = fixture
+        .sidecar
+        .pause_preparation_for_test(super::reviewer::DEFAULT_ROLE)
+        .await;
+    let (mut client, server) = reviewer_socket(&fixture).await;
+    send_reviewer_request(
+        &mut client,
+        None,
+        ReviewerRequest::Start {
+            config: Box::new(config(0)),
+        },
+    )
+    .await;
+    entered.await.unwrap();
+    assert!(
+        !fixture.reserve_worker("upgrade-before-disconnect"),
+        "admitted preparation excludes idle reservation"
+    );
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("disconnect releases the socket wait")
+        .unwrap()
+        .ok();
+
+    let sidecar = fixture.sidecar.clone();
+    let replacement = tokio::spawn(async move {
+        let request = ReviewerRequest::Start {
+            config: Box::new(config(1)),
+        };
+        sidecar
+            .handle(
+                RelayRequestEnvelope {
+                    request_id: "replacement".into(),
+                    protocol_version: RELAY_PROTOCOL_VERSION,
+                    request: RelayRequest::Reviewer {
+                        role: None,
+                        request: request.clone(),
+                    },
+                },
+                None,
+                request,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !replacement.is_finished(),
+        "a replacement cannot pass the admitted blocking preparation"
+    );
+    assert!(
+        !fixture.marker("harness-pid").exists(),
+        "neither generation launches before preparation settles"
+    );
+    assert!(
+        !fixture.reserve_worker("upgrade-during-disconnect"),
+        "disconnection cannot release a still-mutating preparation"
+    );
+    release.send(()).unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(10), replacement)
+        .await
+        .unwrap()
+        .unwrap();
+    started_options(&response.body);
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .worker_root
+                .join("reviewer/runtime-profile/identity")
+        )
+        .unwrap(),
+        b"new profile"
+    );
+    assert!(
+        std::fs::read_to_string(
+            fixture
+                .worker_root
+                .join("reviewer/.hel-reviewer-generation")
+        )
+        .unwrap()
+        .starts_with("1:")
+    );
+    assert!(
+        !fixture.reserve_worker("upgrade-running-reviewer"),
+        "a running sidecar keeps the otherwise idle worker busy"
+    );
+    fixture.request(ReviewerRequest::Pause).await;
+    assert!(fixture.reserve_worker("upgrade-after-reviewer-stop"));
+    let refused = fixture.start(config(1)).await;
+    assert!(
+        error_message(&refused).contains("reserved"),
+        "idle reservation fences new reviewer launch"
+    );
+    fixture
+        .primary_relay
+        .lock()
+        .unwrap()
+        .cancel_checkpoint_barrier_on_disconnect("upgrade-after-reviewer-stop")
+        .unwrap();
+    started_options(&fixture.start(config(1)).await);
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn generation_retired_before_start_cannot_launch_from_a_late_connection() {
+    let mut fixture = Fixture::new(true);
+    fixture.stage_generation(900);
+    fixture.stage_generation(3);
+    let retired = fixture
+        .request(ReviewerRequest::PauseGeneration { generation: 900 })
+        .await;
+    assert!(matches!(
+        retired,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewerPaused
+        }
+    ));
+    let refused = fixture.start(config(900)).await;
+    assert!(error_message(&refused).contains("retired"));
+    assert!(!fixture.marker("harness-pid").exists());
+    started_options(&fixture.start(config(3)).await);
+    let current = fixture.harness_pid();
+    assert!(error_message(&fixture.start(config(900)).await).contains("retired"));
+    assert!(
+        process_alive(current),
+        "stale generations cannot replace a newer selected identity"
+    );
+    fixture.sidecar.pause_all().await;
+}
+
+#[tokio::test]
+async fn reviewer_receipt_fences_delayed_submission_and_survives_retirement_until_acknowledged() {
+    let mut fixture = Fixture::new(true);
+    fixture.stage_generation(7);
+    fixture.stage_generation(8);
+    started_options(&fixture.start(config(7)).await);
+    let cancelled = fixture
+        .request(ReviewerRequest::CancelCommandAdmission {
+            generation: 7,
+            command_id: "cancel-before-submission".into(),
+        })
+        .await;
+    assert!(matches!(
+        cancelled,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CommandReceipt { receipt: None }
+        }
+    ));
+    let delayed = fixture
+        .request(ReviewerRequest::SubmitDurable {
+            generation: 7,
+            command_id: "cancel-before-submission".into(),
+            command: RelayCommand::RecordNotice {
+                text: "must never be accepted".into(),
+            },
+        })
+        .await;
+    assert!(matches!(delayed, RelayResponseBody::Error { .. }));
+
+    let accepted = fixture
+        .request(ReviewerRequest::SubmitDurable {
+            generation: 7,
+            command_id: "retained-role-notice".into(),
+            command: RelayCommand::RecordNotice {
+                text: "accepted once".into(),
+            },
+        })
+        .await;
+    assert!(matches!(
+        accepted,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Accepted { .. }
+        }
+    ));
+    assert!(error_message(&fixture.start(config(8)).await).contains("unsettled command receipts"));
+    fixture
+        .request(ReviewerRequest::PauseGeneration { generation: 7 })
+        .await;
+    let receipt = fixture
+        .request(ReviewerRequest::CommandReceipt {
+            generation: 7,
+            command_id: "retained-role-notice".into(),
+        })
+        .await;
+    assert!(matches!(
+        receipt,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CommandReceipt { receipt: Some(_) }
+        }
+    ));
+    let stale = fixture
+        .request(ReviewerRequest::SubmitDurable {
+            generation: 7,
+            command_id: "after-role-retirement".into(),
+            command: RelayCommand::RecordNotice {
+                text: "stale".into(),
+            },
+        })
+        .await;
+    assert!(error_message(&stale).contains("retired"));
+    let released = fixture
+        .request(ReviewerRequest::ReleaseCommandReceipt {
+            generation: 7,
+            command_id: "retained-role-notice".into(),
+        })
+        .await;
+    assert!(matches!(
+        released,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::CommandReceiptReleased
+        }
+    ));
+    started_options(&fixture.start(config(8)).await);
+    let stale_cancel = fixture
+        .request(ReviewerRequest::CancelCommandAdmission {
+            generation: 7,
+            command_id: "retained-role-notice".into(),
+        })
+        .await;
+    assert!(error_message(&stale_cancel).contains("generation changed"));
+    fixture.sidecar.pause_all().await;
 }

@@ -27,7 +27,7 @@ use crate::server::api::{
     TranscriptPage, TurnSpan, TurnState, TurnSummary,
 };
 use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandOutput};
-use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, new_command_id};
+use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
 mod subagent_input;
@@ -35,19 +35,49 @@ mod subagent_input;
 use crate::daemon::RuntimeState;
 use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo};
 
-/// How the follow-up task learns whether a session is still on its way up.
-///
-/// It is a function rather than the daemon runtime itself because that is all
-/// the follow-up needs, and a test can supply the states it wants to drive.
+/// Legacy constructor input. Startup state now comes from the durable owner;
+/// retain the argument so existing backend callers do not need a second path.
 pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + Sync>;
 
 /// What the export operations need from the daemon beyond a session's live
 /// actor: the durable record, and a checkpoint on demand.
 ///
 /// It is a trait rather than the daemon runtime itself so the backend can be
-/// built in a test without one, the same reason the follow-up reads session
-/// state through a function.
+/// built in a test without one. Startup admission and status also go through
+/// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn queue_startup(
+        self: Arc<Self>,
+        _session_id: String,
+        _group_id: String,
+        _followup: StartFollowup,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { bail!("durable startup delivery is unavailable") })
+    }
+
+    fn startup_status(&self, _session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn startup_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<(Option<String>, Option<StartStatus>)>> {
+        Box::pin(async move { Ok((None, self.startup_status(session_id).await?)) })
+    }
+
+    fn dismiss_startup_status(
+        &self,
+        _session_id: String,
+        _group_id: Option<String>,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn cancel_startup(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
@@ -80,6 +110,16 @@ pub trait ExportRuntime: Send + Sync {
         _request: crate::controller::RegisterSubagentRequest,
     ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
         Box::pin(async { anyhow::bail!("sub-agent creation is unavailable") })
+    }
+
+    fn close_subagent_request(
+        self: Arc<Self>,
+        _session_id: String,
+        _parent: String,
+        _request: String,
+        _expected_incarnation: String,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async { anyhow::bail!("durable sub-agent close admission is unavailable") })
     }
 
     fn close_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
@@ -155,6 +195,49 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn queue_startup(
+        self: Arc<Self>,
+        session_id: String,
+        group_id: String,
+        followup: StartFollowup,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            self.queue_api_followup(&session_id, group_id, followup)
+                .await
+        })
+    }
+
+    fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
+        Box::pin(load_startup_status(session_id))
+    }
+
+    fn startup_context(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<(Option<String>, Option<StartStatus>)>> {
+        Box::pin(load_startup_context(session_id))
+    }
+
+    fn dismiss_startup_status(
+        &self,
+        session_id: String,
+        group_id: Option<String>,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if let Some(group_id) = group_id {
+                blocking("dismiss completed startup status", move || {
+                    crate::database::dismiss_startup_group(&session_id, &group_id)
+                })
+                .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn cancel_startup(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move { self.cancel_api_followup(&session_id).await })
+    }
+
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
     }
@@ -182,6 +265,25 @@ impl ExportRuntime for RuntimeState {
         request: crate::controller::RegisterSubagentRequest,
     ) -> BoxFuture<'static, Result<mj_core::subagent::SubagentRecord>> {
         Box::pin(async move { self.start_subagent_session(request).await })
+    }
+
+    fn close_subagent_request(
+        self: Arc<Self>,
+        session_id: String,
+        parent: String,
+        request: String,
+        expected_incarnation: String,
+    ) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            RuntimeState::close_subagent_request(
+                &self,
+                session_id,
+                parent,
+                request,
+                expected_incarnation,
+            )
+            .await
+        })
     }
 
     fn close_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
@@ -258,10 +360,6 @@ impl ExportRuntime for RuntimeState {
     }
 }
 
-/// How long the follow-up waits for a session to become usable before giving
-/// up. Provisioning a container or an SSH host can take many minutes, and the
-/// record state is what ends the wait early when the launch fails.
-const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long each attempt to reach the session actor, or to observe a view
 /// change, blocks before the record state is re-read.
 const START_POLL: Duration = Duration::from_secs(5);
@@ -276,26 +374,12 @@ const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
 
-/// How far one created session's follow-up has got, and the task driving it.
-struct Start {
-    status: StartStatus,
-    /// Kept so the task is cancelled when the entry is pruned; a dropped
-    /// handle would leave the task running against a session that is gone.
-    task: Option<tokio::task::JoinHandle<()>>,
-    cancel: tokio_util::sync::CancellationToken,
-}
-
 /// The backend the `/api/v1` routes drive sessions through.
 pub struct ApiBackend {
     sessions: SessionControl,
-    session_states: SessionStateSource,
     /// The daemon operations the export path needs: session records, and the
     /// checkpoint a bundle export is read from.
     exports: Arc<dyn ExportRuntime>,
-    /// How far each created session's follow-up configuration and first prompt
-    /// have got.
-    starts: Arc<Mutex<BTreeMap<String, Start>>>,
-    starts_changed: Arc<tokio::sync::Notify>,
     /// Latest background-refreshed quota reports, used to rank the profiles a
     /// sub-agent may run on so a child lands on the login with the most quota
     /// left, without making the parent reason about credential aliases.
@@ -310,17 +394,28 @@ pub struct ApiBackend {
 }
 
 impl ApiBackend {
+    pub(crate) async fn start_followup_with_id(
+        &self,
+        session_id: String,
+        followup: StartFollowup,
+        group_id: String,
+    ) -> Result<()> {
+        if followup == StartFollowup::default() {
+            return Ok(());
+        }
+        Arc::clone(&self.exports)
+            .queue_startup(session_id, group_id, followup)
+            .await
+    }
+
     pub fn new(
         sessions: SessionControl,
-        session_states: SessionStateSource,
+        _session_states: SessionStateSource,
         exports: Arc<dyn ExportRuntime>,
     ) -> Self {
         Self {
             sessions,
-            session_states,
             exports,
-            starts: Arc::new(Mutex::new(BTreeMap::new())),
-            starts_changed: Arc::default(),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
             rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
@@ -357,13 +452,133 @@ impl ApiBackend {
         self
     }
 
+    /// Recover the immutable effect selection before doing any external work.
+    pub(crate) async fn execute_subagent_tool_durable(
+        self: &Arc<Self>,
+        parent: String,
+        request: mj_core::subagent::SubagentToolRequest,
+    ) -> Result<mj_core::subagent::SubagentToolResult> {
+        let stored = blocking("load delegation effect", {
+            let parent = parent.clone();
+            let id = request.request_id.clone();
+            move || crate::database::load_delegation(&parent, &id)
+        })
+        .await?;
+        let prepared = if let Some((prepared, result)) = stored {
+            if let Some(result) = result {
+                return Ok(result);
+            }
+            prepared
+        } else {
+            let turn_session = match &request.action {
+                mj_core::subagent::SubagentToolAction::InterruptAgent { child_session_id } => {
+                    Some(child_session_id.clone())
+                }
+                mj_core::subagent::SubagentToolAction::Handback { .. } => None,
+                _ => None,
+            };
+            let turn_target = if matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::Handback { .. }
+            ) {
+                request.originating_command_id.clone()
+            } else if let Some(session) = turn_session {
+                self.session_handle(session)
+                    .await?
+                    .and_then(|handle| handle.view().snapshot)
+                    .and_then(|snapshot| snapshot.materialized.active_turn)
+                    .map(|turn| turn.command_id)
+            } else {
+                None
+            };
+            blocking("prepare delegation effect", {
+                let parent = parent.clone();
+                move || {
+                    crate::database::prepare_delegation(
+                        parent,
+                        crate::database::PreparedDelegation {
+                            request,
+                            turn_target,
+                            spawn: None,
+                            close_incarnation: None,
+                        },
+                    )
+                }
+            })
+            .await?
+        };
+        blocking("mark delegation delivering", {
+            let parent = parent.clone();
+            let id = prepared.request.request_id.clone();
+            move || crate::database::delegation_delivering(parent, id)
+        })
+        .await?;
+        let result = self
+            .execute_subagent_tool_prepared(
+                parent.clone(),
+                prepared.request.clone(),
+                Some(&prepared),
+            )
+            .await;
+        blocking("persist delegation result", {
+            let result = result.clone();
+            move || crate::database::record_delegation_result(parent, result)
+        })
+        .await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn release_delegation_receipt(
+        &self,
+        request: &mj_core::subagent::SubagentToolRequest,
+    ) -> Result<()> {
+        use mj_core::subagent::SubagentToolAction;
+        let (child, prefix) = match &request.action {
+            SubagentToolAction::SendInput {
+                child_session_id, ..
+            } => (child_session_id, "subagent-input"),
+            SubagentToolAction::InterruptAgent { child_session_id } => {
+                (child_session_id, "subagent-interrupt")
+            }
+            _ => return Ok(()),
+        };
+        if self.exports.session_record(child).is_none() {
+            return Ok(());
+        }
+        let result = async {
+            let handle = self
+                .session_handle(child.clone())
+                .await?
+                .context("waiting for delegation receipt owner")?;
+            handle
+                .release_command_receipt(format!("{prefix}-{}", request.request_id))
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        result.context(
+            "delegation result is durable; retrying receipt release without repeating the effect",
+        )
+    }
+
+    #[cfg(test)]
     pub async fn execute_subagent_tool(
         self: &Arc<Self>,
         parent_session_id: String,
         request: mj_core::subagent::SubagentToolRequest,
     ) -> mj_core::subagent::SubagentToolResult {
+        self.execute_subagent_tool_prepared(parent_session_id, request, None)
+            .await
+    }
+
+    async fn execute_subagent_tool_prepared(
+        self: &Arc<Self>,
+        parent_session_id: String,
+        request: mj_core::subagent::SubagentToolRequest,
+        prepared: Option<&crate::database::PreparedDelegation>,
+    ) -> mj_core::subagent::SubagentToolResult {
         let outcome = self
-            .execute_subagent_tool_inner(&parent_session_id, &request)
+            .execute_subagent_tool_inner(&parent_session_id, &request, prepared)
             .await;
         if let mj_core::subagent::SubagentToolAction::SendInput {
             child_session_id, ..
@@ -405,6 +620,7 @@ impl ApiBackend {
         self: &Arc<Self>,
         parent_session_id: &str,
         request: &mj_core::subagent::SubagentToolRequest,
+        prepared: Option<&crate::database::PreparedDelegation>,
     ) -> Result<serde_json::Value> {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
@@ -459,44 +675,67 @@ impl ApiBackend {
                 context,
                 files,
             } => {
-                let parent = self
-                    .exports
-                    .session_record(parent_session_id)
-                    .context("parent session disappeared")?;
-                let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
-                let selection = crate::server::api::resolve_subagent_policy_selection(
-                    &backend,
-                    parent_session_id,
-                    &parent.last_profile,
-                    &parent.subagents.clone().unwrap_or_default(),
-                    profile_id.as_deref(),
-                    model.as_deref(),
-                    effort.as_deref(),
-                )
-                .await
-                .map_err(|failure| anyhow::anyhow!(failure.message))?;
-                let ranges = files
-                    .iter()
-                    .flat_map(|entry| {
-                        let file = entry.file.clone();
-                        entry.ranges.iter().map(move |range| {
-                            crate::server::api::SubagentSourceRange {
-                                file: file.clone(),
-                                start: range.start,
-                                end: range.end,
+                let selection = if let Some(selection) = prepared.and_then(|p| p.spawn.clone()) {
+                    selection
+                } else {
+                    let parent = self
+                        .exports
+                        .session_record(parent_session_id)
+                        .context("parent session disappeared")?;
+                    let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
+                    let selection = crate::server::api::resolve_subagent_policy_selection(
+                        &backend,
+                        parent_session_id,
+                        &parent.last_profile,
+                        &parent.subagents.clone().unwrap_or_default(),
+                        profile_id.as_deref(),
+                        model.as_deref(),
+                        effort.as_deref(),
+                    )
+                    .await
+                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                    let ranges = files
+                        .iter()
+                        .flat_map(|entry| {
+                            let file = entry.file.clone();
+                            entry.ranges.iter().map(move |range| {
+                                crate::server::api::SubagentSourceRange {
+                                    file: file.clone(),
+                                    start: range.start,
+                                    end: range.end,
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let prompt = crate::server::api::build_subagent_prompt(
+                        &backend,
+                        parent_session_id,
+                        instructions,
+                        context.as_deref(),
+                        &ranges,
+                    )
+                    .await
+                    .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                    let selected = crate::database::PreparedSpawn {
+                        profile_id: selection.profile_id,
+                        model: selection.model,
+                        effort: selection.effort,
+                        fast_mode: selection.fast_mode,
+                        prompt,
+                    };
+                    if prepared.is_some() {
+                        blocking("persist selected spawn", {
+                            let parent = parent_session_id.to_owned();
+                            let request = request.request_id.clone();
+                            move || {
+                                crate::database::prepare_delegation_spawn(parent, request, selected)
                             }
                         })
-                    })
-                    .collect::<Vec<_>>();
-                let prompt = crate::server::api::build_subagent_prompt(
-                    &backend,
-                    parent_session_id,
-                    instructions,
-                    context.as_deref(),
-                    &ranges,
-                )
-                .await
-                .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                        .await?
+                    } else {
+                        selected
+                    }
+                };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
                         parent_session_id: parent_session_id.to_owned(),
@@ -505,14 +744,14 @@ impl ApiBackend {
                         model: Some(selection.model.clone()),
                         effort: selection.effort.clone(),
                         working_directory: working_directory.clone(),
-                        initial_prompt: prompt,
+                        initial_prompt: selection.prompt,
                         request_key: request.request_id.clone(),
                         report_root: None,
                     })
                     .await?;
                 // Registration completes the first prompt (it names the
                 // handback tool when the child gets one), so send what it kept.
-                self.start_followup(
+                self.start_followup_with_id(
                     relation.child_session_id.clone(),
                     crate::server::api::StartFollowup {
                         model: Some(selection.model),
@@ -520,6 +759,7 @@ impl ApiBackend {
                         prompt: Some(relation.initial_prompt.clone()),
                         fast_mode: selection.fast_mode,
                     },
+                    format!("subagent-spawn-{}", request.request_id),
                 )
                 .await?;
                 let report_dir = blocking("load sub-agent report directory", {
@@ -771,21 +1011,25 @@ impl ApiBackend {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
                 let handle = self.session_handle(child_session_id.clone()).await?;
-                let active = handle
-                    .as_ref()
-                    .and_then(|handle| handle.view().snapshot)
-                    .and_then(|snapshot| snapshot.materialized.active_turn);
-                let Some(active) = active else {
+                let target = match prepared {
+                    Some(prepared) => prepared.turn_target.clone(),
+                    None => handle
+                        .as_ref()
+                        .and_then(|handle| handle.view().snapshot)
+                        .and_then(|snapshot| snapshot.materialized.active_turn)
+                        .map(|turn| turn.command_id),
+                };
+                let Some(target) = target else {
                     return Ok(
                         serde_json::json!({"child_session_id":child_session_id,"interrupted":false}),
                     );
                 };
-                let handle = handle.expect("active turn came from this handle");
+                let handle = handle.context("interrupt target worker is unavailable")?;
                 let result = handle
-                    .submit(
+                    .submit_durable(
                         format!("subagent-interrupt-{}", request.request_id),
                         RelayCommand::CancelTurnFor {
-                            active_prompt_id: active.command_id.clone(),
+                            active_prompt_id: target.clone(),
                         },
                     )
                     .await;
@@ -803,7 +1047,7 @@ impl ApiBackend {
                         .view()
                         .snapshot
                         .and_then(|s| s.materialized.active_turn)
-                        .is_some_and(|turn| turn.command_id == active.command_id);
+                        .is_some_and(|turn| turn.command_id == target);
                     if still_active {
                         return Err(error);
                     }
@@ -816,9 +1060,22 @@ impl ApiBackend {
             SubagentToolAction::CloseAgent { child_session_id } => {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
-                Arc::clone(&self.exports)
-                    .close_subagent(child_session_id.clone())
-                    .await?;
+                if let Some(prepared) = prepared {
+                    Arc::clone(&self.exports)
+                        .close_subagent_request(
+                            child_session_id.clone(),
+                            parent_session_id.to_owned(),
+                            request.request_id.clone(),
+                            prepared.close_incarnation.clone().context(
+                                "child incarnation was unavailable at request preparation",
+                            )?,
+                        )
+                        .await?;
+                } else {
+                    Arc::clone(&self.exports)
+                        .close_subagent(child_session_id.clone())
+                        .await?;
+                }
                 Ok(serde_json::json!({"child_session_id":child_session_id,"closed":true}))
             }
             // The requester is the child itself: only a child's worker serves
@@ -846,30 +1103,38 @@ impl ApiBackend {
                     record.is_some_and(|record| record.handback_tool),
                     "handback is only for a Mjolnir sub-agent that was given the tool"
                 );
-                // The live view knows the running turn first; the store
-                // catches up a moment later.
-                let live_turn = self
-                    .session_handle(child_id.clone())
-                    .await?
-                    .and_then(|handle| handle.view().snapshot)
-                    .and_then(|snapshot| snapshot.materialized.active_turn);
-                let active_turn = match live_turn {
-                    Some(turn) => Some(turn),
-                    None => blocking("load child turn", {
-                        let child_id = child_id.clone();
-                        move || crate::database::load_materialized_turn_outcome(&child_id)
-                    })
-                    .await?
-                    .and_then(|(_, active, _)| active),
-                };
-                let turn = active_turn.context(
+                let command_id = if let Some(prepared) = prepared {
+                    prepared
+                        .turn_target
+                        .clone()
+                        .context("no turn was running when this report was prepared")?
+                } else {
+                    // The live view knows the running turn first; the store
+                    // catches up a moment later.
+                    let live_turn = self
+                        .session_handle(child_id.clone())
+                        .await?
+                        .and_then(|handle| handle.view().snapshot)
+                        .and_then(|snapshot| snapshot.materialized.active_turn);
+                    let active_turn = match live_turn {
+                        Some(turn) => Some(turn),
+                        None => blocking("load child turn", {
+                            let child_id = child_id.clone();
+                            move || crate::database::load_materialized_turn_outcome(&child_id)
+                        })
+                        .await?
+                        .and_then(|(_, active, _)| active),
+                    };
+                    let turn = active_turn.context(
                     "no turn is running, so there is nothing to report on; hand back your report \
                      during the turn that did the work",
                 )?;
+                    turn.command_id
+                };
                 let recorded = blocking("record sub-agent report", {
                     let child_id = child_id.clone();
                     let handback = mj_core::subagent::SubagentHandback {
-                        command_id: turn.command_id,
+                        command_id,
                         message: message.clone(),
                         recorded_at_ms: mj_core::clock::epoch_millis(),
                     };
@@ -1000,8 +1265,8 @@ impl ApiBackend {
     }
 
     /// Remind a child that ended its turn without handing back a report,
-    /// once, and say whether a reminder went out. The parent's completion
-    /// notice waits for the reminder turn when one did.
+    /// once, and say whether its reminder is pending. The parent's completion
+    /// notice waits for that reminder turn, including after daemon recovery.
     ///
     /// The caller passes the turn and what is queued or running from the live
     /// snapshot it just saw: the store's copy can lag it, and deciding from an
@@ -1023,6 +1288,15 @@ impl ApiBackend {
             move || crate::database::load_subagent_report(&child_id)
         })
         .await?;
+        if let Some(reminder) = &report.reminder {
+            // The durable report is the receipt-release outbox. A crash after
+            // recording it retries cleanup before marking this turn noticed.
+            self.sessions
+                .session(child_session_id.to_owned())
+                .await?
+                .release_command_receipt(reminder.command_id.clone())
+                .await?;
+        }
         let state = mj_core::subagent::report_state(
             handback_tool,
             &report,
@@ -1031,9 +1305,13 @@ impl ApiBackend {
             mj_core::clock::epoch_millis(),
         );
         if state != (ReportState::Pending { remind: true }) {
-            return Ok(false);
+            return Ok(state == (ReportState::Pending { remind: false }));
         }
-        let command_id = new_command_id(mj_core::subagent::HANDBACK_REMINDER_PREFIX)?;
+        let command_id = format!(
+            "{}-{}",
+            mj_core::subagent::HANDBACK_REMINDER_PREFIX,
+            last_turn.completed_ordinal
+        );
         let submitted = async {
             let handle = self
                 .sessions
@@ -1041,12 +1319,11 @@ impl ApiBackend {
                 .await
                 .with_context(|| format!("session {child_session_id} is not running"))?;
             handle
-                .submit(
+                .submit_durable(
                     command_id.clone(),
-                    RelayCommand::Prompt {
-                        prompt: vec![ContentBlock::Text(TextContent::new(
-                            mj_core::subagent::HANDBACK_REMINDER_TEXT,
-                        ))],
+                    RelayCommand::HandbackReminder {
+                        completed_command_id: last_turn.command_id.clone(),
+                        completed_ordinal: last_turn.completed_ordinal,
                     },
                 )
                 .await
@@ -1057,7 +1334,7 @@ impl ApiBackend {
         match submitted {
             Ok(_) => {
                 let reminder = mj_core::subagent::HandbackReminder {
-                    command_id,
+                    command_id: command_id.clone(),
                     for_command_id,
                     sent_at_ms: mj_core::clock::epoch_millis(),
                 };
@@ -1065,9 +1342,22 @@ impl ApiBackend {
                     crate::database::record_handback_reminder(&child_id, &reminder)
                 })
                 .await?;
+                self.sessions
+                    .session(child_session_id.to_owned())
+                    .await?
+                    .release_command_receipt(command_id)
+                    .await?;
                 Ok(true)
             }
             Err(error) => {
+                if error
+                    .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
+                    .is_some()
+                {
+                    // Retry the same guarded command and retained receipt. A lost
+                    // acknowledgement does not prove the reminder was refused.
+                    return Err(error);
+                }
                 tracing::warn!(
                     child_session_id,
                     error = format!("{error:#}"),
@@ -1093,25 +1383,6 @@ impl ApiBackend {
         Arc::clone(&self.exports)
             .park_subagent(child_session_id.to_owned())
             .await
-    }
-
-    /// Forget sessions the daemon no longer holds a record for, so a
-    /// long-running daemon does not accumulate one entry per session ever
-    /// created through the API.
-    fn prune_starts(&self) {
-        let mut starts = self.starts.lock().expect("api start status mutex poisoned");
-        starts.retain(|session_id, start| {
-            let present = (self.session_states)(session_id).is_some();
-            if !present && let Some(task) = &start.task {
-                start.cancel.cancel();
-                tracing::debug!(
-                    session_id,
-                    task_finished = task.is_finished(),
-                    "cancel forgotten API start"
-                );
-            }
-            present
-        });
     }
 
     /// Refuse an export that needs the target when the session no longer has
@@ -1429,134 +1700,55 @@ fn report_source(state: &str, report: &ReportState) -> Option<&'static str> {
     })
 }
 
-/// Whether a session is still on its way to being usable.
-///
-/// Any other state means the launch ended — stopped, closing, lost or failed —
-/// so the follow-up stops rather than waiting out its deadline. A record that
-/// is not published yet is treated as still starting; the deadline bounds it.
-///
-/// A session that failed to start already stored why, so the message carries
-/// that cause. Without it the caller is told the symptom it can already see
-/// and nothing about the reason, which is what #1065 reported.
-fn still_starting(
-    states: &SessionStateSource,
-    exports: &Arc<dyn ExportRuntime>,
-    session_id: &str,
-) -> Result<()> {
-    match states(session_id) {
-        Some(
-            SessionState::Provisioning
-            | SessionState::Running
-            | SessionState::Disconnected
-            | SessionState::Checkpointing,
-        )
-        | None => Ok(()),
-        Some(state) => match exports
-            .session_record(session_id)
-            .and_then(|record| record.last_error)
-        {
-            Some(cause) => {
-                bail!("session {session_id} is {state:?} and will not take a first prompt: {cause}")
-            }
-            None => {
-                bail!("session {session_id} is {state:?} and will not take a first prompt")
-            }
-        },
-    }
+async fn load_startup_status(session_id: String) -> Result<Option<StartStatus>> {
+    Ok(load_startup_context(session_id).await?.1)
 }
 
-/// Apply model, effort, and the first prompt to a session that is still coming
-/// up, returning the turn the prompt was accepted as.
-async fn apply_followup(
-    sessions: SessionControl,
-    states: SessionStateSource,
-    exports: Arc<dyn ExportRuntime>,
-    session_id: String,
-    followup: StartFollowup,
-) -> Result<Option<u64>> {
-    let deadline = tokio::time::Instant::now() + START_DEADLINE;
-    let mut handle = loop {
-        still_starting(&states, &exports, &session_id)?;
-        ensure!(
-            tokio::time::Instant::now() < deadline,
-            "session {session_id} had no live actor within 30 minutes"
-        );
-        if let Ok(handle) = sessions.wait_for_session(&session_id, START_POLL).await {
-            break handle;
-        }
+async fn load_startup_context(session_id: String) -> Result<(Option<String>, Option<StartStatus>)> {
+    let steps = blocking("read durable startup status", move || {
+        crate::database::load_latest_startup_group(&session_id)
+    })
+    .await?;
+    let group_id = steps.last().and_then(|step| step.group_id.clone());
+    if let Some(step) = steps
+        .iter()
+        .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+    {
+        return Ok((
+            group_id,
+            Some(StartStatus::Failed {
+                message: step
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "session startup was rejected".to_owned()),
+            }),
+        ));
+    }
+    if steps
+        .iter()
+        .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted"))
+    {
+        return Ok((group_id, Some(StartStatus::Pending)));
+    }
+    let Some(last) = steps.last() else {
+        return Ok((group_id, None));
     };
-
-    // Setting a configuration option needs the harness's own session, not just
-    // a connected worker: the options it accepts arrive with it.
-    let needs_config = followup.model.is_some() || followup.effort.is_some() || followup.fast_mode;
-    loop {
-        let view = handle.view();
-        if let Some(ViewError::TargetMissing(detail)) = &view.error {
-            bail!("session {session_id} lost its target: {detail}");
-        }
-        match &view.snapshot {
-            Some(snapshot)
-                if view.connected
-                    && (!needs_config || snapshot.operational.native_session_is_ready()) =>
-            {
-                break;
-            }
-            _ => {}
-        }
-        still_starting(&states, &exports, &session_id)?;
-        ensure!(
-            tokio::time::Instant::now() < deadline,
-            "session {session_id} was not ready for its first prompt within 30 minutes"
-        );
-        // Bounded so a session that dies quietly is still noticed by the
-        // record check above rather than waiting for a change that never comes.
-        let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
+    if last.phase == "done"
+        && matches!(
+            serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)?,
+            crate::daemon::StartupStep::ApiPrompt { .. }
+        )
+    {
+        return Ok((
+            group_id,
+            Some(StartStatus::Submitted {
+                turn_id: last
+                    .accepted_ordinal
+                    .context("completed startup prompt has no acceptance ordinal")?,
+            }),
+        ));
     }
-
-    for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
-        let Some(value) = value else {
-            continue;
-        };
-        let snapshot = handle
-            .view()
-            .snapshot
-            .context("session configuration is unavailable")?;
-        let choices =
-            mj_core::acp::session_config_choices(&snapshot.operational.config_options, key);
-        ensure!(
-            choices.iter().any(|choice| choice.value == value),
-            "this agent does not offer {value} as a {key}"
-        );
-        handle.set_config(key.to_owned(), value).await?;
-    }
-
-    // Fast mode is best effort: a Luna sub-agent should start fast, but a
-    // spawn must not fail just because the agent does not offer the option
-    // or the set_config call itself fails.
-    if followup.fast_mode {
-        let offers_on = handle.view().snapshot.is_some_and(|snapshot| {
-            mj_core::acp::session_config_choices(&snapshot.operational.config_options, "fast-mode")
-                .iter()
-                .any(|choice| choice.value == "on")
-        });
-        if offers_on
-            && let Err(error) = handle
-                .set_config("fast-mode".to_owned(), "on".to_owned())
-                .await
-        {
-            tracing::warn!(
-                %session_id,
-                %error,
-                "could not turn on Codex fast mode for a Luna sub-agent"
-            );
-        }
-    }
-
-    still_starting(&states, &exports, &session_id)?;
-    match followup.prompt {
-        Some(text) => Ok(Some(submit_prompt(&handle, text).await?)),
-        None => Ok(None),
-    }
+    Ok((group_id, None))
 }
 
 /// Submit one prompt as a single text block, returning its acceptance ordinal.
@@ -2087,17 +2279,7 @@ impl SubagentBackend for ApiBackend {
     }
 
     fn cancel_start(&self, session_id: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            if let Some(start) = self
-                .starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .remove(&session_id)
-            {
-                start.cancel.cancel();
-            }
-            Ok(())
-        })
+        Arc::clone(&self.exports).cancel_startup(session_id)
     }
 
     fn set_config(
@@ -2107,19 +2289,16 @@ impl SubagentBackend for ApiBackend {
         value: String,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            let (group_id, status) = self.exports.startup_context(session_id.clone()).await?;
             ensure!(
-                !matches!(
-                    self.start_status(session_id.clone()).await?,
-                    Some(StartStatus::Pending)
-                ),
+                !matches!(status, Some(StartStatus::Pending)),
                 "session initialization is still running"
             );
             let handle = self.sessions.session(session_id.clone()).await?;
             handle.set_config(key, value).await?;
-            self.starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .remove(&session_id);
+            self.exports
+                .dismiss_startup_status(session_id, group_id)
+                .await?;
             Ok(())
         })
     }
@@ -2130,11 +2309,9 @@ impl SubagentBackend for ApiBackend {
 
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async move {
+            let (group_id, status) = self.exports.startup_context(session_id.clone()).await?;
             ensure!(
-                !matches!(
-                    self.start_status(session_id.clone()).await?,
-                    Some(StartStatus::Pending)
-                ),
+                !matches!(status, Some(StartStatus::Pending)),
                 "session initialization is still running"
             );
             let handle = self
@@ -2143,10 +2320,9 @@ impl SubagentBackend for ApiBackend {
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
             let turn = submit_prompt(&handle, text).await?;
-            self.starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .remove(&session_id);
+            self.exports
+                .dismiss_startup_status(session_id, group_id)
+                .await?;
             Ok(turn)
         })
     }
@@ -2203,123 +2379,13 @@ impl SubagentBackend for ApiBackend {
         followup: StartFollowup,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            if followup == StartFollowup::default() {
-                return Ok(());
-            }
-            self.prune_starts();
-            let sessions = self.sessions.clone();
-            let states = self.session_states.clone();
-            let exports = Arc::clone(&self.exports);
-            let starts = Arc::clone(&self.starts);
-            let starts_changed = Arc::clone(&self.starts_changed);
-            let id = session_id.clone();
-            let cancel = tokio_util::sync::CancellationToken::new();
-            // Recorded before the work starts: a follow-up that finishes
-            // immediately must find its entry to write its outcome into.
-            self.starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .insert(
-                    session_id.clone(),
-                    Start {
-                        status: StartStatus::Pending,
-                        task: None,
-                        cancel: cancel.clone(),
-                    },
-                );
-            let followup_id = session_id.clone();
-            let upgrade_work = crate::upgrade::activity("API startup followup")?;
-            let work = tokio::spawn(async move {
-                tokio::select! {
-                    result = apply_followup(sessions, states, exports, followup_id, followup) => result,
-                    () = cancel.cancelled() => anyhow::bail!("session startup cancelled"),
-                }
-            });
-            // A second task supervises the first so a panic in the follow-up
-            // becomes a failure the caller's wait reports, rather than an
-            // entry that stays Pending for as long as the daemon runs.
-            let task = tokio::spawn(async move {
-                let _upgrade_work = upgrade_work;
-                let status = match work.await {
-                    Ok(Ok(Some(turn_id))) => {
-                        // A sub-agent child's wait must not read it as done
-                        // before a finished turn reaches its first prompt. A
-                        // session that is not a child records nothing.
-                        let child_id = id.clone();
-                        match tokio::task::spawn_blocking(move || {
-                            crate::database::record_subagent_prompt(&child_id, turn_id)
-                        })
-                        .await
-                        {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => {
-                                tracing::warn!(%error, "record a sub-agent's first prompt")
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "sub-agent prompt recorder task failed")
-                            }
-                        }
-                        Some(StartStatus::Submitted { turn_id })
-                    }
-                    // Configuration applied and nothing to submit: there is no
-                    // turn to report, so the session is an ordinary one again.
-                    Ok(Ok(None)) => None,
-                    Ok(Err(error)) => Some(StartStatus::Failed {
-                        message: format!("{error:#}"),
-                    }),
-                    Err(error) => Some(StartStatus::Failed {
-                        message: format!("starting session {id} failed: {error}"),
-                    }),
-                };
-                if let Some(StartStatus::Failed { message }) = &status {
-                    let failed_id = id.clone();
-                    let message = message.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        crate::database::record_startup_fault(failed_id, message)
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => tracing::warn!(%error, "persist startup API error"),
-                        Err(error) => {
-                            tracing::error!(%error, "startup API error recorder task failed")
-                        }
-                    }
-                }
-                let mut starts = starts.lock().expect("api start status mutex poisoned");
-                match status {
-                    Some(status) => {
-                        if let Some(start) = starts.get_mut(&id) {
-                            start.status = status;
-                        }
-                    }
-                    None => {
-                        starts.remove(&id);
-                    }
-                }
-                starts_changed.notify_waiters();
-            });
-            if let Some(start) = self
-                .starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .get_mut(&session_id)
-            {
-                start.task = Some(task);
-            }
-            Ok(())
+            self.start_followup_with_id(session_id, followup, new_command_id("api-startup")?)
+                .await
         })
     }
 
     fn start_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
-        Box::pin(async move {
-            Ok(self
-                .starts
-                .lock()
-                .expect("api start status mutex poisoned")
-                .get(&session_id)
-                .map(|start| start.status.clone()))
-        })
+        self.exports.startup_status(session_id)
     }
 
     fn transcript(

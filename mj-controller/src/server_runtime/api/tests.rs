@@ -193,6 +193,7 @@ fn spawn_with(
     effort: Option<&str>,
 ) -> mj_core::subagent::SubagentToolRequest {
     mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
         request_id: "request-1".into(),
         created_at_ms: 0,
         action: mj_core::subagent::SubagentToolAction::Spawn {
@@ -319,6 +320,7 @@ async fn list_profiles_merges_profiles_offering_the_same_models() {
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "request-1".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::ListProfiles,
@@ -349,6 +351,7 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "request-1".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::ListProfiles,
@@ -525,6 +528,23 @@ struct FakeSession {
 }
 
 impl SessionHandleBackend for FakeSession {
+    fn submit_durable(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move { self.enqueue_submit(command_id, command).await?.wait().await })
+    }
+    fn command_receipt(
+        &self,
+        _: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn release_command_receipt(&self, _: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn search_prompts(
         &self,
         _bundle_id: String,
@@ -690,6 +710,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         queued_prompts: Vec::new(),
         active_user_shells: Vec::new(),
         active_agent_terminals: Vec::new(),
+        command_ledger_seal: None,
         checkpoint_barrier: None,
         checkpoint_ready: None,
         last_acp_activity_at_ms: None,
@@ -843,6 +864,7 @@ async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "request-1".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::ListProfiles,
@@ -1061,266 +1083,267 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
     );
 }
 
-#[tokio::test]
-async fn the_start_follow_up_configures_the_model_before_it_prompts() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 12,
-            submitted: submitted_tx,
-            view: Some(ready_view("gpt-5-codex")),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
+#[derive(Clone)]
+struct ConfigSession {
+    inner: FakeSession,
+    receipt: Arc<Mutex<Option<mj_core::relay::HandledRelayCommand>>>,
+}
 
-    backend
-        .start_followup(
-            "session-1".into(),
-            StartFollowup {
-                model: Some("gpt-5-codex".into()),
-                effort: None,
-                prompt: Some("add a README line".into()),
-                ..Default::default()
+impl SessionHandleBackend for ConfigSession {
+    fn search_prompts(
+        &self,
+        bundle: String,
+        scope: mj_core::storage::HistoryScope,
+        query: String,
+    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.search_prompts(bundle, scope, query)
+    }
+    fn review_state(&self) -> BoxFuture<'_, Result<mj_client::session::ReviewState>> {
+        self.inner.review_state()
+    }
+    fn config_result(&self, id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
+        self.inner.config_result(id)
+    }
+    fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
+        Box::new(self.clone())
+    }
+    fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+    fn view(&self) -> ManagedSessionView {
+        self.inner.view()
+    }
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn has_changed(&self) -> Result<bool> {
+        Ok(false)
+    }
+    fn changed(&mut self) -> BoxFuture<'_, Result<ManagedSessionView>> {
+        self.inner.changed()
+    }
+    fn enqueue_submit(
+        &self,
+        id: String,
+        command: RelayCommand,
+    ) -> BoxFuture<'_, Result<PendingRelaySubmit>> {
+        self.inner.enqueue_submit(id, command)
+    }
+    fn submit_durable(&self, id: String, command: RelayCommand) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move {
+            let existing = self.receipt.lock().unwrap().clone();
+            if let Some(receipt) = existing {
+                return Ok(receipt.accepted_ordinal);
+            }
+            let ordinal = self.inner.submit_durable(id, command.clone()).await?;
+            *self.receipt.lock().unwrap() = Some(mj_core::relay::HandledRelayCommand {
+                command,
+                accepted_ordinal: ordinal,
+                terminal_ordinal: Some(ordinal + 1),
+                outcome: Some(mj_core::relay::RelayCommandOutcome::Configured),
+                failure: None,
+            });
+            Ok(ordinal)
+        })
+    }
+    fn command_receipt(
+        &self,
+        _: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
+        Box::pin(async { Ok(self.receipt.lock().unwrap().clone()) })
+    }
+    fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>> {
+        self.inner.enqueue_sync()
+    }
+    fn respond_elicitation(
+        &self,
+        id: String,
+        response: mj_core::elicitation::ElicitationResponse,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.inner.respond_elicitation(id, response)
+    }
+    fn stop_background_task(&self, id: String) -> BoxFuture<'_, Result<()>> {
+        self.inner.stop_background_task(id)
+    }
+    fn reviewer(
+        &self,
+        role: Option<String>,
+        action: mj_client::session::ReviewerAction,
+    ) -> BoxFuture<'_, Result<mj_client::session::ReviewerOutcome>> {
+        self.inner.reviewer(role, action)
+    }
+}
+
+fn config_session(
+    view: ManagedSessionView,
+) -> (
+    SessionHandle,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
+    let (submitted, received) = mpsc::unbounded_channel();
+    (
+        SessionHandle::new(ConfigSession {
+            inner: FakeSession {
+                session_id: "session-1".into(),
+                accepted_ordinal: 12,
+                submitted,
+                view: Some(view),
             },
-        )
-        .await
-        .unwrap();
-
-    let (_, first) = submitted.recv().await.unwrap();
-    assert_eq!(
-        first,
-        RelayCommand::SetConfig {
-            key: "model".into(),
-            value: "gpt-5-codex".into(),
-        },
-        "the model must be set before the prompt runs under the old one"
-    );
-    let (_, second) = submitted.recv().await.unwrap();
-    assert!(matches!(second, RelayCommand::Prompt { .. }));
-
-    // The status the follow-up records is what a wait blocks on, so it has
-    // to name the turn the prompt was accepted as.
-    let status = loop {
-        match backend.start_status("session-1".into()).await.unwrap() {
-            Some(StartStatus::Pending) | None => tokio::task::yield_now().await,
-            Some(status) => break status,
-        }
-    };
-    assert_eq!(status, StartStatus::Submitted { turn_id: 12 });
+            receipt: Arc::default(),
+        }),
+        received,
+    )
 }
 
 #[tokio::test]
-async fn the_start_follow_up_turns_on_fast_mode_after_model_when_offered() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 12,
-            submitted: submitted_tx,
-            view: Some(ready_view_offering_fast_mode("gpt-5.10-luna")),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-
-    backend
-        .start_followup(
-            "session-1".into(),
-            StartFollowup {
-                model: Some("gpt-5.10-luna".into()),
-                effort: None,
-                prompt: Some("add a README line".into()),
-                fast_mode: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let (_, first) = submitted.recv().await.unwrap();
-    assert_eq!(
-        first,
-        RelayCommand::SetConfig {
-            key: "model".into(),
-            value: "gpt-5.10-luna".into(),
-        }
-    );
-    let (_, second) = submitted.recv().await.unwrap();
-    assert_eq!(
-        second,
-        RelayCommand::SetConfig {
-            key: "fast-mode".into(),
-            value: "on".into(),
-        },
-        "fast mode must be turned on after the model, before the prompt"
-    );
-    let (_, third) = submitted.recv().await.unwrap();
-    assert!(matches!(third, RelayCommand::Prompt { .. }));
-}
-
-#[tokio::test]
-async fn the_start_follow_up_skips_fast_mode_silently_when_not_offered() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 12,
-            submitted: submitted_tx,
-            // This agent offers a model but not fast mode.
-            view: Some(ready_view("gpt-5.10-luna")),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-
-    backend
-        .start_followup(
-            "session-1".into(),
-            StartFollowup {
-                model: Some("gpt-5.10-luna".into()),
-                effort: None,
-                prompt: Some("add a README line".into()),
-                fast_mode: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let (_, first) = submitted.recv().await.unwrap();
-    assert_eq!(
-        first,
-        RelayCommand::SetConfig {
-            key: "model".into(),
-            value: "gpt-5.10-luna".into(),
-        }
-    );
-    // No fast-mode SetConfig: the option is not offered, so it is skipped
-    // silently and the prompt still goes out.
-    let (_, second) = submitted.recv().await.unwrap();
-    assert!(
-        matches!(second, RelayCommand::Prompt { .. }),
-        "a spawn must not fail or stall just because fast mode is unavailable"
-    );
-}
-
-#[tokio::test]
-async fn the_start_follow_up_refuses_a_model_the_agent_does_not_offer() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 12,
-            submitted: submitted_tx,
-            view: Some(ready_view("gpt-5-codex")),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-
-    backend
-        .start_followup(
-            "session-1".into(),
-            StartFollowup {
-                model: Some("no-such-model".into()),
-                effort: None,
-                prompt: Some("add a README line".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    let status = loop {
-        match backend.start_status("session-1".into()).await.unwrap() {
-            Some(StartStatus::Pending) | None => tokio::task::yield_now().await,
-            Some(status) => break status,
-        }
-    };
-    let StartStatus::Failed { message } = status else {
-        panic!("an unavailable model must fail the start, not submit the prompt");
-    };
-    assert!(message.contains("no-such-model"), "unexpected: {message}");
-    assert!(
-        submitted.try_recv().is_err(),
-        "nothing may be submitted once the configuration is refused"
-    );
-    backend
-        .set_config("session-1".into(), "model".into(), "gpt-5-codex".into())
-        .await
-        .unwrap();
-    assert!(
-        backend
-            .start_status("session-1".into())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(matches!(
-        submitted.recv().await.unwrap().1,
-        RelayCommand::SetConfig { .. }
-    ));
-    assert!(
-        submitted.try_recv().is_err(),
-        "repair must not replay the abandoned initial prompt"
-    );
-    assert_eq!(
-        backend
-            .prompt("session-1".into(), "repaired prompt".into())
+async fn startup_configuration_uses_stable_receipts_across_retries() {
+    let (handle, mut submitted) = config_session(ready_view("gpt-5-codex"));
+    for _ in 0..2 {
+        assert_eq!(
+            crate::daemon::startup_followup::configure_startup(
+                &handle,
+                "startup:model",
+                "model",
+                "gpt-5-codex",
+                false,
+            )
             .await
             .unwrap(),
-        12
+            Some(12)
+        );
+    }
+    assert_eq!(
+        submitted.recv().await.unwrap(),
+        (
+            "startup:model".into(),
+            RelayCommand::SetConfig {
+                key: "model".into(),
+                value: "gpt-5-codex".into(),
+            }
+        )
     );
-    assert!(matches!(
-        submitted.recv().await.unwrap().1,
-        RelayCommand::Prompt { .. }
-    ));
+    assert!(
+        submitted.try_recv().is_err(),
+        "recovery must not reapply an accepted setting"
+    );
 }
 
 #[tokio::test]
-async fn closing_cancels_the_supervised_start_before_any_prompt() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 1,
-            submitted: submitted_tx,
-            view: None,
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-    backend
-        .start_followup(
-            "session-1".into(),
-            StartFollowup {
-                prompt: Some("must not run".into()),
-                ..Default::default()
-            },
+async fn startup_configuration_rejects_unoffered_models_before_submission() {
+    let (handle, mut submitted) = config_session(ready_view("gpt-5-codex"));
+    let error = crate::daemon::startup_followup::configure_startup(
+        &handle,
+        "startup:model",
+        "model",
+        "unavailable",
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("does not offer unavailable"));
+    assert!(submitted.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn optional_startup_fast_mode_is_applied_only_when_offered() {
+    for offered in [false, true] {
+        let view = if offered {
+            ready_view_offering_fast_mode("luna")
+        } else {
+            ready_view("luna")
+        };
+        let (handle, mut submitted) = config_session(view);
+        let ordinal = crate::daemon::startup_followup::configure_startup(
+            &handle,
+            "startup:fast-mode",
+            "fast-mode",
+            "on",
+            true,
         )
         .await
         .unwrap();
-    let task = backend
-        .starts
-        .lock()
-        .unwrap()
-        .get_mut("session-1")
-        .unwrap()
-        .task
-        .take()
+        assert_eq!(ordinal, offered.then_some(12));
+        assert_eq!(submitted.try_recv().is_ok(), offered);
+    }
+}
+
+#[tokio::test]
+async fn startup_status_survives_backend_recreation_and_keeps_acceptance_ordinal() {
+    if !isolated_parked_test(
+        "startup_status_survives_backend_recreation_and_keeps_acceptance_ordinal",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "child-1".into(),
+        command_id: "startup:prompt".into(),
+        step_json: serde_json::to_string(&crate::daemon::StartupStep::ApiPrompt {
+            text: "first prompt".into(),
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: Some("startup".into()),
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    assert_eq!(
+        load_startup_status("child-1".into()).await.unwrap(),
+        Some(StartStatus::Pending)
+    );
+    crate::database::set_startup_delivery_phase("startup:prompt", "delivering", None).unwrap();
+    crate::database::set_startup_delivery_accepted("startup:prompt", Some(73)).unwrap();
+    crate::database::set_startup_delivery_phase("startup:prompt", "done", None).unwrap();
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, _) = parking_backend(exports, &[], Arc::new(|| {}));
+    assert_eq!(
+        backend.start_status("child-1".into()).await.unwrap(),
+        Some(StartStatus::Submitted { turn_id: 73 })
+    );
+    crate::database::cancel_startup_groups("child-1").unwrap();
+    assert_eq!(backend.start_status("child-1".into()).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dismissing_observed_startup_preserves_a_newer_followup() {
+    if !isolated_parked_test("dismissing_observed_startup_preserves_a_newer_followup") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    for group in ["old", "new"] {
+        crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+            session_id: "child-1".into(),
+            command_id: format!("{group}:prompt"),
+            step_json: serde_json::to_string(&crate::daemon::StartupStep::ApiPrompt {
+                text: group.into(),
+            })
+            .unwrap(),
+            phase: "pending".into(),
+            group_id: Some(group.into()),
+            accepted_ordinal: None,
+            error: None,
+        }])
         .unwrap();
-    backend.cancel_start("session-1".into()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(submitted.try_recv().is_err());
-    assert!(
-        backend
-            .start_status("session-1".into())
-            .await
+        if group == "old" {
+            crate::database::set_startup_delivery_phase("old:prompt", "delivering", None).unwrap();
+            crate::database::set_startup_delivery_accepted("old:prompt", Some(1)).unwrap();
+            crate::database::set_startup_delivery_phase("old:prompt", "done", None).unwrap();
+        }
+    }
+    crate::database::dismiss_startup_group("child-1", "old").unwrap();
+    assert_eq!(
+        load_startup_status("child-1".into()).await.unwrap(),
+        Some(StartStatus::Pending)
+    );
+    assert_eq!(
+        crate::database::next_startup_delivery("child-1")
             .unwrap()
-            .is_none()
+            .unwrap()
+            .command_id,
+        "new:prompt"
     );
 }
 
@@ -1708,13 +1731,13 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
         mj_core::subagent::is_handback_reminder(&command_id),
         "{command_id}"
     );
-    let RelayCommand::Prompt { prompt } = command else {
-        panic!("the reminder is an ordinary prompt, not {command:?}");
-    };
-    let [ContentBlock::Text(text)] = prompt.as_slice() else {
-        panic!("the reminder is one text block");
-    };
-    assert_eq!(text.text, mj_core::subagent::HANDBACK_REMINDER_TEXT);
+    assert_eq!(
+        command,
+        RelayCommand::HandbackReminder {
+            completed_command_id: "task".into(),
+            completed_ordinal: turn.completed_ordinal,
+        }
+    );
     let recorded = crate::database::load_subagent_report("child-1").unwrap();
     assert_eq!(
         recorded.reminder.as_ref().map(|reminder| (
@@ -1725,11 +1748,11 @@ async fn a_child_that_owes_its_report_is_reminded_once() {
     );
 
     assert!(
-        !backend
+        backend
             .remind_subagent_to_hand_back("child-1", true, &turn, &[])
             .await
             .unwrap(),
-        "one reminder per turn"
+        "the already admitted reminder still owns the pending report"
     );
     assert!(submitted.try_recv().is_err());
 }
@@ -1802,6 +1825,7 @@ async fn a_child_hands_back_one_report_per_turn() {
                 .execute_subagent_tool(
                     session,
                     mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
                         request_id: "request".into(),
                         created_at_ms: 0,
                         action: mj_core::subagent::SubagentToolAction::Handback { message },
@@ -2050,6 +2074,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "request-2".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::ListProfiles,
@@ -2141,6 +2166,10 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
+    fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
+        Box::pin(load_startup_status(session_id))
+    }
+
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         self.records.lock().unwrap().get(session_id).cloned()
     }
@@ -2177,6 +2206,23 @@ struct ScriptedSession {
 }
 
 impl SessionHandleBackend for ScriptedSession {
+    fn submit_durable(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> BoxFuture<'_, Result<u64>> {
+        Box::pin(async move { self.enqueue_submit(command_id, command).await?.wait().await })
+    }
+    fn command_receipt(
+        &self,
+        _: String,
+    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn release_command_receipt(&self, _: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn search_prompts(
         &self,
         bundle_id: String,
@@ -2325,6 +2371,7 @@ async fn send_input(
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "request".into(),
                 created_at_ms: mj_core::clock::epoch_millis(),
                 action: mj_core::subagent::SubagentToolAction::SendInput {
@@ -2336,15 +2383,22 @@ async fn send_input(
         .await
 }
 
-fn hold_child_start(backend: &ApiBackend) {
-    backend.starts.lock().unwrap().insert(
-        "child-1".into(),
-        Start {
-            status: StartStatus::Pending,
-            task: None,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        },
-    );
+fn hold_child_start(_backend: &ApiBackend) -> String {
+    let command_id = new_command_id("held-startup").unwrap();
+    crate::database::enqueue_startup_deliveries(vec![crate::database::StartupDelivery {
+        session_id: "child-1".into(),
+        command_id: command_id.clone(),
+        step_json: serde_json::to_string(&crate::daemon::StartupStep::ApiPrompt {
+            text: "initial".into(),
+        })
+        .unwrap(),
+        phase: "pending".into(),
+        group_id: Some(command_id.clone()),
+        accepted_ordinal: None,
+        error: None,
+    }])
+    .unwrap();
+    command_id
 }
 
 #[tokio::test]
@@ -2356,7 +2410,7 @@ async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
     store_parent_and_child("child-1");
     let exports = ParkingExports::new(SessionState::Running, None);
     let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
-    hold_child_start(&backend);
+    let startup_id = hold_child_start(&backend);
     let mut pending = tokio::spawn({
         let backend = backend.clone();
         async move { send_input(&backend, "follow-up").await }
@@ -2375,6 +2429,7 @@ async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
     let interrupt = backend.execute_subagent_tool(
         "parent-1".into(),
         mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
             request_id: "interrupt-start".into(),
             created_at_ms: mj_core::clock::epoch_millis(),
             action: mj_core::subagent::SubagentToolAction::InterruptAgent {
@@ -2393,14 +2448,9 @@ async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
     assert!(!pending.is_finished());
     let handle = backend.sessions.session("child-1").await.unwrap();
     let turn = submit_prompt(&handle, "initial".into()).await.unwrap();
-    backend
-        .starts
-        .lock()
-        .unwrap()
-        .get_mut("child-1")
-        .unwrap()
-        .status = StartStatus::Submitted { turn_id: turn };
-    backend.starts_changed.notify_waiters();
+    crate::database::set_startup_delivery_phase(&startup_id, "delivering", None).unwrap();
+    crate::database::set_startup_delivery_accepted(&startup_id, Some(turn)).unwrap();
+    crate::database::set_startup_delivery_phase(&startup_id, "done", None).unwrap();
     let answer = tokio::time::timeout(Duration::from_secs(1), pending)
         .await
         .unwrap()
@@ -2420,7 +2470,7 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
     for closed in [false, true] {
         let exports = ParkingExports::new(SessionState::Running, None);
         let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
-        hold_child_start(&backend);
+        let startup_id = hold_child_start(&backend);
         let mut pending = tokio::spawn({
             let backend = backend.clone();
             async move { send_input(&backend, "must not run").await }
@@ -2433,17 +2483,9 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
         if closed {
             exports.set_child_state(SessionState::Stopped);
         } else {
-            backend
-                .starts
-                .lock()
-                .unwrap()
-                .get_mut("child-1")
-                .unwrap()
-                .status = StartStatus::Failed {
-                message: "provider login refused".into(),
-            };
+            crate::database::fail_startup_group("child-1", &startup_id, "provider login refused")
+                .unwrap();
         }
-        backend.starts_changed.notify_waiters();
         let answer = tokio::time::timeout(Duration::from_secs(1), pending)
             .await
             .unwrap()
@@ -2535,6 +2577,7 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
     snapshot
         .subagent_requests
         .push(mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
             request_id: "input".into(),
             created_at_ms: 1,
             action: mj_core::subagent::SubagentToolAction::SendInput {
@@ -2610,6 +2653,7 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
             snapshot
                 .subagent_requests
                 .push(mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
                     request_id: "follow-up".into(),
                     created_at_ms: 1,
                     action: mj_core::subagent::SubagentToolAction::SendInput {
@@ -2642,6 +2686,7 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
                 .execute_subagent_tool(
                     "parent-1".into(),
                     mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
                         request_id: "observe".into(),
                         created_at_ms: 0,
                         action,
@@ -2699,6 +2744,7 @@ async fn child_interrupt_is_bound_to_the_observed_turn() {
         .execute_subagent_tool(
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
                 request_id: "interrupt".into(),
                 created_at_ms: 1,
                 action: mj_core::subagent::SubagentToolAction::InterruptAgent {
@@ -2715,6 +2761,154 @@ async fn child_interrupt_is_bound_to_the_observed_turn() {
         }
     );
     assert!(delivered.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_executes() {
+    if !isolated_parked_test(
+        "recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_executes",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "restart-interrupt".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+            child_session_id: "child-1".into(),
+        },
+    };
+    crate::database::prepare_delegation(
+        "parent-1".into(),
+        crate::database::PreparedDelegation {
+            request: request.clone(),
+            turn_target: Some("original-turn".into()),
+            spawn: None,
+            close_incarnation: None,
+        },
+    )
+    .unwrap();
+    crate::database::delegation_delivering("parent-1".into(), request.request_id.clone()).unwrap();
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "newer-turn".into(),
+            accepted_ordinal: Some(10),
+            turn_start_position: 11,
+            started_at_ms: 10,
+            steered_into: None,
+        });
+    let (submitted, mut delivered) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 12,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let result = backend
+        .execute_subagent_tool_durable("parent-1".into(), request.clone())
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        delivered.recv().await.unwrap().1,
+        RelayCommand::CancelTurnFor {
+            active_prompt_id: "original-turn".into()
+        }
+    );
+    let cached = backend
+        .execute_subagent_tool_durable("parent-1".into(), request)
+        .await
+        .unwrap();
+    assert_eq!(cached.message, result.message);
+    assert!(delivered.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
+    if !isolated_parked_test("delayed_handback_uses_worker_origin_instead_of_current_turn") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "newer-turn".into(),
+            accepted_ordinal: Some(10),
+            turn_start_position: 11,
+            started_at_ms: 10,
+            steered_into: None,
+        });
+    let (submitted, _) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 12,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: Some("original-turn".into()),
+        request_id: "delayed-report".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::Handback {
+            message: "original report".into(),
+        },
+    };
+    let result = backend
+        .execute_subagent_tool_durable("child-1".into(), request)
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.message);
+    let report = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(report.handback.unwrap().command_id, "original-turn");
+}
+
+#[test]
+fn prepared_close_keeps_original_incarnation_after_child_resume() {
+    if !isolated_parked_test("prepared_close_keeps_original_incarnation_after_child_resume") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let prepared = crate::database::PreparedDelegation {
+        request: mj_core::subagent::SubagentToolRequest {
+            originating_command_id: None,
+            request_id: "close-request".into(),
+            created_at_ms: 1,
+            action: mj_core::subagent::SubagentToolAction::CloseAgent {
+                child_session_id: "child-1".into(),
+            },
+        },
+        turn_target: None,
+        spawn: None,
+        close_incarnation: None,
+    };
+    let original =
+        crate::database::prepare_delegation("parent-1".into(), prepared.clone()).unwrap();
+    let mut child = crate::database::load_session_record("child-1")
+        .unwrap()
+        .unwrap();
+    child.state = SessionState::Parked;
+    crate::database::save_session(&child).unwrap();
+    child.state = SessionState::Running;
+    crate::database::save_session(&child).unwrap();
+    assert_ne!(
+        crate::database::session_incarnation("child-1").unwrap(),
+        original.close_incarnation
+    );
+    let recovered = crate::database::prepare_delegation("parent-1".into(), prepared).unwrap();
+    assert_eq!(recovered.close_incarnation, original.close_incarnation);
 }
 
 /// The prompts that reached the child's relay, by text.
@@ -2883,6 +3077,7 @@ async fn wait_and_list_agents_report_a_parked_child_with_its_report() {
                 .execute_subagent_tool(
                     "parent-1".into(),
                     mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
                         request_id: "request".into(),
                         created_at_ms: mj_core::clock::epoch_millis(),
                         action,

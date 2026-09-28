@@ -204,6 +204,7 @@ pub(crate) fn checkpoint_archive_input(
             primary_repository: "project".into(),
         },
         canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
+            command_ledger: None,
             assessment_state: Some(
                 serde_json::to_value(mj_core::assessment::Checkpoint {
                     version: 1,

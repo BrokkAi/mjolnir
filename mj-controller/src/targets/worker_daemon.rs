@@ -5,7 +5,8 @@ use super::*;
 /// select itself, and `worker proxy` command lines cannot match either.
 pub fn worker_daemon_identity_script(worker_root: &str) -> String {
     format!(
-        r#"hel_root={root}
+        r#"{process_birth_script}
+hel_root={root}
 hel_match="hel worker run --root $hel_root"
 hel_match_home="hel worker run --root $HOME/$hel_root"
 hel_ps() {{
@@ -31,20 +32,26 @@ hel_recorded_worker() {{
             return 0
         fi
     fi
-    # A worker records its pid in its startup file from its first moment, long
-    # before it writes a pidfile, and the launch clears that file, so a pid
-    # found here can only be this launch's. Existence is therefore the whole
-    # check: a worker does not have to be recognisable by its command line to
-    # be this session's worker.
+    # Startup records survive process death. Match the process birth as well
+    # as its PID before treating a breadcrumb as authority to signal it.
     [ -f "$hel_root/{startup_file}" ] || return 1
     hel_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
     case "$hel_pid" in
         '' | *[!0-9]*) return 1 ;;
     esac
-    kill -0 "$hel_pid" 2>/dev/null || return 1
+    hel_birth=$(sed -n 's/.*"process_birth"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
+    if [ -n "$hel_birth" ]; then
+        hel_current_birth=$(mj_process_birth "$hel_pid") || return 1
+        [ "$hel_birth" = "$hel_current_birth" ] || return 1
+    else
+        # Older workers have no birth record; only their exact command line
+        # can identify them. PID existence alone cannot identify a worker.
+        hel_is_worker "$hel_pid" || return 1
+    fi
     printf '%s\n' "$hel_pid"
 }}"#,
         root = posix_quote(worker_root),
+        process_birth_script = mj_core::subprocess::PROCESS_BIRTH_SCRIPT,
         pid_file = mj_core::relay::WORKER_PID_FILE,
         startup_file = mj_core::relay::WORKER_STARTUP_FILE,
     )
@@ -96,29 +103,48 @@ pub fn stop_worker_daemon_script(worker_root: &str) -> String {
     script.push_str(
         r#"
 hel_signal() {
-    kill -"$1" -- "-$2" 2>/dev/null && return 0
-    kill -"$1" "-$2" 2>/dev/null && return 0
+    if [ "$hel_group" = "$2" ]; then
+        kill -"$1" -- "-$2" 2>/dev/null && return 0
+        kill -"$1" "-$2" 2>/dev/null
+        return $?
+    fi
     kill -"$1" "$2" 2>/dev/null
 }
+hel_running() {
+    if [ "$hel_group" = "$1" ]; then
+        hel_processes=$(hel_ps -eo pgid=,stat=) || return 2
+        printf '%s\n' "$hel_processes" | awk -v group="$1" '$1 == group && $2 !~ /^Z/ {found=1} END {exit !found}'
+    else
+        hel_process_state=$(hel_ps -o stat= -p "$1") || return 1
+        printf '%s\n' "$hel_process_state" | awk '$1 !~ /^Z/ && NF {found=1} END {exit !found}'
+    fi
+}
 hel_stop() {
-    hel_signal TERM "$1" || return 0
+    hel_group=$1
+    hel_running "$1" || {
+        hel_status=$?
+        [ "$hel_status" -eq 1 ] || return "$hel_status"
+        hel_group=legacy
+    }
+    hel_signal TERM "$1" || true
     hel_waited=0
     while [ "$hel_waited" -lt 2 ]; do
-        kill -0 "$1" 2>/dev/null || return 0
+        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
         sleep 1
         hel_waited=$((hel_waited + 1))
     done
-    kill -0 "$1" 2>/dev/null || return 0
     hel_signal KILL "$1" || true
     hel_waited=0
     while [ "$hel_waited" -lt 3 ]; do
-        kill -0 "$1" 2>/dev/null || return 0
+        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
         sleep 1
         hel_waited=$((hel_waited + 1))
     done
+    echo "worker process group still running after stop: $1" >&2
+    return 1
 }
 if hel_pid=$(hel_recorded_worker); then
-    hel_stop "$hel_pid"
+    hel_stop "$hel_pid" || exit $?
 fi
 hel_ps -eo pid=,args= | while read -r hel_pid hel_args; do
     case "$hel_pid" in
@@ -126,9 +152,9 @@ hel_ps -eo pid=,args= | while read -r hel_pid hel_args; do
     esac
     [ "$hel_pid" -eq $$ ] && continue
     case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*) hel_stop "$hel_pid" ;;
+        *"$hel_match"*|*"$hel_match_home"*) hel_stop "$hel_pid" || exit $? ;;
     esac
-done
+done || exit $?
 hel_left=0
 while read -r hel_pid hel_args; do
     case "$hel_pid" in
@@ -271,10 +297,12 @@ mod tests {
         // binary, which matches nothing the probe looks for.
         std::fs::write(
             root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
-            format!(
-                "{{\n  \"step\": \"review-baseline\",\n  \"pid\": {},\n  \"steps\": []\n}}",
-                std::process::id()
-            ),
+            serde_json::to_vec(&serde_json::json!({
+                "step": "review-baseline",
+                "pid": std::process::id(),
+                "process_birth": mj_core::subprocess::process_birth_identity(std::process::id()).unwrap(),
+                "steps": [],
+            })).unwrap(),
         )
         .unwrap();
 
@@ -322,5 +350,61 @@ mod tests {
 
         assert_ne!(status, 0);
         assert!(stdout.is_empty(), "{stdout}");
+    }
+
+    #[test]
+    fn a_recycled_startup_pid_never_identifies_or_stops_an_unrelated_process() {
+        let root = tempfile::tempdir().unwrap();
+        for birth in [
+            serde_json::Value::Null,
+            serde_json::json!("previous-process-birth"),
+        ] {
+            std::fs::write(
+                root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
+                serde_json::to_vec(
+                    &serde_json::json!({"pid": std::process::id(), "process_birth": birth}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let script = format!(
+                "{}\nhel_recorded_worker",
+                worker_daemon_identity_script(&root.path().to_string_lossy())
+            );
+            let (status, stdout) = run_script(&script);
+            assert_ne!(status, 0);
+            assert!(stdout.is_empty());
+            let (status, _) =
+                run_script(&stop_worker_daemon_script(&root.path().to_string_lossy()));
+            assert_eq!(status, 0);
+        }
+    }
+
+    #[test]
+    fn stopping_worker_waits_for_term_resistant_descendants_after_leader_exit() {
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sh -c 'trap \"\" TERM; echo ready > ready; while :; do sleep 1; done' & echo $! > descendant; wait"])
+            .current_dir(root.path()).process_group(0)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let _group = mj_core::subprocess::ProcessGroupGuard::new(Some(child.id()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::write(root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
+            serde_json::to_vec(&serde_json::json!({"pid": child.id(), "process_birth": mj_core::subprocess::process_birth_identity(child.id()).unwrap()})).unwrap()).unwrap();
+        let (status, _) = run_script(&stop_worker_daemon_script(&root.path().to_string_lossy()));
+        assert_eq!(status, 0);
+        assert!(child.wait().is_ok());
+        let descendant = std::fs::read_to_string(root.path().join("descendant")).unwrap();
+        let (_, state) = run_script(&format!("ps -o stat= -p {}", descendant.trim()));
+        assert!(
+            state.is_empty() || state.starts_with('Z'),
+            "descendant survived: {state}"
+        );
     }
 }

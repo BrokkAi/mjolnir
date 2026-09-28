@@ -175,6 +175,7 @@ mod tests {
             })
             .collect();
         CanonicalSessionSnapshot {
+            command_ledger: None,
             assessment_state: None,
             event_frontier: 0,
             event_frontier_digest: "0".repeat(64),

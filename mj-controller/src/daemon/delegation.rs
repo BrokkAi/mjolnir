@@ -43,6 +43,9 @@ async fn run(
     cancellation: CancellationToken,
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
+    let mut receipt_cleanup = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        cleanup_receipts(backend.clone(), cancellation.clone()),
+    )));
     let mut revisions = state.revisions();
     let mut dispatch = SubagentDispatch::default();
     let mut jobs = tokio::task::JoinSet::new();
@@ -69,6 +72,7 @@ async fn run(
                                 request.action,
                                 SubagentToolAction::WaitAgents { .. }
                                     | SubagentToolAction::SendInput { .. }
+                                    | SubagentToolAction::Spawn { .. }
                             ) {
                                 None
                             } else {
@@ -79,16 +83,17 @@ async fn run(
                                 };
                                 Some(work)
                             };
-                            let result = backend.execute_subagent_tool(parent.clone(), request).await;
-                            // Keep execution admitted through the first delivery attempt.
-                            let delivered = deliver(&runtime, &parent, result.clone(), false).await;
+                            let result = backend.execute_subagent_tool_durable(parent.clone(), request).await?;
+                            // Durable results can wait for the replacement daemon.
+                            drop(_admission);
+                            let delivered = deliver(&runtime, &parent, result.clone()).await;
                             if let Err(error) = &delivered {
                                 tracing::warn!(parent_session_id = %parent, request_id = %result.request_id, %error, "delegation delivery failed; retaining result for retry");
                             }
                             Ok(Completed::Executed(result, delivered.is_ok()))
                         }
                         Job::Deliver(result) => {
-                            deliver(&runtime, &parent, result, true).await?;
+                            deliver(&runtime, &parent, result).await?;
                             Ok(Completed::Delivered)
                         }
                     }
@@ -96,6 +101,9 @@ async fn run(
                 identities.insert(task.id(), id);
             }
             for (child, observation) in &observations {
+                if completion_ids.len() >= 32 {
+                    break;
+                }
                 let Some(outcome) = observation.outcome.as_ref().filter(|_| observation.idle)
                 else {
                     continue;
@@ -124,6 +132,12 @@ async fn run(
         }
         tokio::select! {
             _ = cancellation.cancelled() => break,
+            ended = receipt_cleanup.as_mut().expect("cleanup is supervised until shutdown") => {
+                receipt_cleanup.take();
+                ended.context("delegation receipt cleanup panicked")??;
+                if cancellation.is_cancelled() { break; }
+                anyhow::bail!("delegation receipt cleanup stopped unexpectedly");
+            }
             update = updates.recv() => {
                 let Some((id, observation)) = update else { anyhow::bail!("delegation observation feed stopped") };
                 if let Some(observation) = observation {
@@ -158,7 +172,7 @@ async fn run(
                         Ok(Completed::Unaccepted) => dispatch.unaccepted(&id),
                         Err(error) => {
                             tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
-                            dispatch.failed_task(&id, format!("{error:#}"));
+                            dispatch.failed_task(&id);
                         }
                     }
                 }
@@ -191,6 +205,14 @@ async fn run(
         // Coalesced receives can be immediately ready without Tokio's channel budget.
         tokio::task::yield_now().await;
     }
+    if let Some(receipt_cleanup) = receipt_cleanup {
+        receipt_cleanup.abort();
+        if let Err(error) = receipt_cleanup.await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "delegation receipt cleanup failed during shutdown");
+        }
+    }
     jobs.abort_all();
     completions.abort_all();
     while let Some(result) = jobs.join_next().await {
@@ -208,6 +230,44 @@ async fn run(
         }
     }
     Ok(())
+}
+
+/// Receipt release is durable housekeeping, independent of parent result delivery.
+async fn cleanup_receipts(backend: Arc<ApiBackend>, cancellation: CancellationToken) -> Result<()> {
+    let mut cursor = None;
+    loop {
+        let after = cursor.take();
+        let rows =
+            tokio::task::spawn_blocking(move || crate::database::delegation_receipts_after(after))
+                .await??;
+        let mut releases = tokio::task::JoinSet::new();
+        for (parent, prepared) in rows {
+            cursor = Some((parent.clone(), prepared.request.request_id.clone()));
+            let backend = backend.clone();
+            releases.spawn(async move {
+                let id = prepared.request.request_id.clone();
+                let released = tokio::time::timeout(Duration::from_secs(10), backend.release_delegation_receipt(&prepared.request)).await;
+                match released {
+                    Ok(Ok(())) => {
+                        tokio::task::spawn_blocking(move || crate::database::delegation_receipt_released(parent, id)).await??;
+                    }
+                    Ok(Err(error)) => tracing::debug!(%parent, request_id=%id, %error, "retaining delegation receipt cleanup for retry"),
+                    Err(_) => tracing::debug!(%parent, request_id=%id, "delegation receipt cleanup timed out; retaining retry"),
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+        }
+        while !releases.is_empty() {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                result = releases.join_next() => { result.context("receipt release task disappeared")???; }
+            }
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+    }
 }
 
 async fn complete_child(
@@ -276,25 +336,36 @@ async fn complete_child(
     }
 }
 
-async fn deliver(
+async fn deliver(runtime: &RuntimeState, parent: &str, result: SubagentToolResult) -> Result<()> {
+    let _work = crate::upgrade::activity_unless_draining("delegation result delivery")?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        deliver_result(runtime, parent, result),
+    )
+    .await
+    .context("delegation result delivery timed out; durable result retained")?
+}
+
+async fn deliver_result(
     runtime: &RuntimeState,
     parent: &str,
     result: SubagentToolResult,
-    retry: bool,
 ) -> Result<()> {
-    let _work = if retry {
-        crate::upgrade::activity_unless_draining("delegation result retry")?
-    } else {
-        crate::upgrade::activity("delegation result delivery")?
-    };
     let handle = runtime.workspace_session_handle(parent).await?;
     let mut lease = handle.lease_connection().await?;
+    let request_id = result.request_id.clone();
     let delivered = lease
         .connection_mut()
         .complete_subagent_request(result)
         .await;
     lease.release();
-    delivered
+    delivered?;
+    let parent = parent.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::database::acknowledge_delegation(parent, request_id)
+    })
+    .await??;
+    Ok(())
 }
 
 #[cfg(test)]

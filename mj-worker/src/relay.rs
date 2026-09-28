@@ -22,6 +22,8 @@ mod journal;
 mod native_history;
 mod replay;
 mod requests;
+mod reviewer_admission;
+pub(crate) use reviewer_admission::ReviewerAdmission;
 mod serving;
 mod verdict;
 use background::{KimiProvisionalTask, KimiTaskEntry, is_agent_output};
@@ -107,11 +109,15 @@ pub struct DurableRelay {
     /// journal: every bridge start records its own `AgentInitialized`.
     session_setup: bool,
     checkpoint_only: bool,
+    /// Live reviewer leases share this owner's atomic checkpoint decision.
+    reviewer_admissions: BTreeMap<u64, String>,
+    next_reviewer_admission: u64,
     /// Optional extension advertised by the current ACP process.
     steering_supported: Option<bool>,
     /// The connected bridge returns steers it cannot inject, so the relay may
     /// steer queued prompts on its own. Belongs to the bridge, like readiness.
     automatic_steering: bool,
+    checkpoint_command_ledger: Option<(String, Vec<u8>)>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -202,6 +208,10 @@ pub struct DurableRelay {
 }
 
 impl DurableRelay {
+    pub(crate) fn has_retained_command_receipts(&self) -> bool {
+        !self.snapshot.retained_command_receipts.is_empty()
+    }
+
     pub fn open(
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,
@@ -342,6 +352,8 @@ impl DurableRelay {
                             command: command.clone(),
                             accepted_ordinal: restored.event_frontier,
                             terminal_ordinal: None,
+                            outcome: None,
+                            failure: None,
                         },
                     );
                     snapshot.dispatches.insert(
@@ -356,6 +368,30 @@ impl DurableRelay {
                         payload,
                         created_at_ms: queued.queued_at_ms,
                     });
+                }
+                if let Some(value) = &restored.command_ledger {
+                    let ledger = mj_core::relay::CheckpointCommandLedger::decode(
+                        value,
+                        restored.event_frontier,
+                    )?;
+                    snapshot.latest_prompt_accepted_ordinal = ledger.latest_prompt_accepted_ordinal;
+                    for (id, receipt) in ledger.handled_commands {
+                        anyhow::ensure!(
+                            receipt.terminal_ordinal.is_some()
+                                || snapshot.handled_commands.contains_key(&id),
+                            "restored nonterminal receipt has no queued command {id}"
+                        );
+                        if let Some(queued) = snapshot.handled_commands.get(&id) {
+                            anyhow::ensure!(
+                                queued.command == receipt.command
+                                    && receipt.terminal_ordinal.is_none(),
+                                "restored receipt conflicts with queued command {id}"
+                            );
+                        }
+                        snapshot.handled_commands.insert(id, receipt);
+                    }
+                    snapshot.retained_command_receipts = ledger.retained_command_receipts;
+                    snapshot.cancelled_command_admissions = ledger.cancelled_command_admissions;
                 }
             }
             snapshot
@@ -417,8 +453,11 @@ impl DurableRelay {
             expected_runtime_identity: None,
             session_setup: false,
             checkpoint_only,
+            reviewer_admissions: BTreeMap::new(),
+            next_reviewer_admission: 0,
             steering_supported: None,
             automatic_steering: false,
+            checkpoint_command_ledger: None,
             snapshot,
             journal_spans,
             hot_events,
@@ -548,6 +587,7 @@ impl DurableRelay {
             };
             let payload = match &dispatch.command {
                 command @ (RelayCommand::Prompt { .. }
+                | RelayCommand::HandbackReminder { .. }
                 | RelayCommand::ContinueAuthorizedWork { .. }
                 | RelayCommand::ResumeAfterQuota { .. }) => StoredQueuedRelayPayload::Prompt {
                     prompt: command
@@ -589,6 +629,14 @@ impl DurableRelay {
         ordered.sort_by_key(|(accepted, _)| *accepted);
         self.snapshot.queued_prompts = ordered.into_iter().map(|(_, queued)| queued).collect();
         self.persist_snapshot()
+    }
+
+    /// Called while the worker owner is held through durable tool admission.
+    pub(crate) fn originating_command_id(&self) -> Option<String> {
+        self.snapshot
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.command_id.clone())
     }
 
     pub fn operational_state(&self) -> RelayOperationalState {

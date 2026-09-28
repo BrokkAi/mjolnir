@@ -1486,17 +1486,14 @@ impl Controller {
         {
             crate::database::rebind_session_bundle(session_id, &conversion.bundle_id)?;
         }
-        // Resume rewrites the record it resumes, including the attached
-        // directories and the harness session id, so it writes the whole row.
-        if let Some((host, size)) = selected_container_size.as_ref() {
-            crate::database::save_session_with_container_size(
-                &self.state.sessions[session_id],
-                host,
-                *size,
-            )?;
-        } else {
-            crate::database::save_session(&self.state.sessions[session_id])?;
-        }
+        // Resume changes target resources, while titles and drafts remain
+        // owned by their independent writers throughout provisioning.
+        crate::database::save_resumed_session(
+            &self.state.sessions[session_id],
+            selected_container_size
+                .as_ref()
+                .map(|(host, size)| (host.as_str(), *size)),
+        )?;
         if let Some((host, size)) = selected_container_size.as_ref() {
             self.state.remember_container_size(host, *size);
         }
@@ -1609,17 +1606,12 @@ impl Controller {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.checkpoint = Some(written);
                 record.updated_at = now();
-                // The whole row again: provisioning must read the converted
-                // archive even if this process dies right here.
-                if let Some((host, size)) = selected_container_size.as_ref() {
-                    crate::database::save_session_with_container_size(
-                        &self.state.sessions[session_id],
-                        host,
-                        *size,
-                    )?;
-                } else {
-                    crate::database::save_session(&self.state.sessions[session_id])?;
-                }
+                // Persist the converted archive before provisioning without
+                // restoring client-owned fields from this earlier snapshot.
+                crate::database::save_resumed_session(
+                    &self.state.sessions[session_id],
+                    selected_container_size.as_ref().map(|(host, size)| (host.as_str(), *size)),
+                )?;
             }
             let utility_handoff = {
                 let _provisioning = ResumePhaseTimer::new(session_id, "provision destination");
@@ -1813,9 +1805,9 @@ impl Controller {
             let bundle_id = record.bundle_id.clone();
             crate::database::rebind_session_bundle(session_id, &bundle_id)?;
         }
-        // The rollback restores the record the resume replaced, attached
-        // directories included, so it writes the whole row back.
-        crate::database::save_session(&self.state.sessions[session_id])?;
+        // Rollback restores only resources owned by this attempt, preserving
+        // client edits committed while provisioning was in flight.
+        crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
         Ok(failure)
     }
 }

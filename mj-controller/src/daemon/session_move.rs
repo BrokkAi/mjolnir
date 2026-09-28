@@ -27,7 +27,7 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
             record.container_cpus = previous.container_cpus;
             record.container_memory = previous.container_memory;
         }
-        crate::database::save_session(record)?;
+        crate::database::save_resumed_session(record, None)?;
     }
     Ok(controller)
 }

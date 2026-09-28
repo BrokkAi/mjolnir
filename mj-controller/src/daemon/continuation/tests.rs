@@ -1079,3 +1079,69 @@ fn distant_quota_reset_records_the_wait_instead_of_scheduling_one() {
     assert_eq!((reset, retry), (None, None));
     assert!(notice.contains("No reliable reset time"), "{notice}");
 }
+
+#[tokio::test]
+async fn handoff_defers_a_completion_without_consuming_its_trigger() {
+    let remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let environment = Environment {
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+        profile: Arc::new(|_| Some("test".into())),
+        log: None,
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        live: Arc::new(|| ["one".into()].into()),
+        review: Arc::new(|_, _| {}),
+    };
+    let (calls, mut requests) = mpsc::unbounded_channel();
+    let classifier: Classifier = Arc::new(move |_, _| {
+        calls.send(()).unwrap();
+        Box::pin(async {
+            Ok(ContinuationVerdict {
+                quota_limit: 0.0,
+                unfinished: 0.0,
+                no_input_needed: 0.0,
+            })
+        })
+    });
+    let gate = Arc::new(crate::upgrade::Gate::default());
+    let blocker = gate.enter("accepted operation").unwrap();
+    assert!(!gate.try_close());
+    let cancellation = CancellationToken::new();
+    let (mut updates, task) = spawn_with_gate(
+        environment,
+        remote.updates,
+        cancellation.clone(),
+        classifier,
+        gate.clone(),
+    );
+    remote
+        .publisher
+        .publish("one".into(), view("one", false))
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    remote
+        .publisher
+        .publish("one".into(), view("one", true))
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    assert!(requests.try_recv().is_err());
+    // When the upgrading client goes away, draining lapses. No new worker
+    // publication is needed to recover the refused completed-turn trigger.
+    drop(blocker);
+    tokio::time::timeout(Duration::from_secs(12), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!gate.is_draining());
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}

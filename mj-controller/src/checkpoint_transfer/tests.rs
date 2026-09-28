@@ -160,6 +160,7 @@ fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
                 origin_override: None,
             }],
             canonical_session: CanonicalSessionSnapshot {
+                command_ledger: None,
                 assessment_state: None,
                 event_frontier: 1,
                 event_frontier_digest: "a".repeat(64),

@@ -1,12 +1,12 @@
 use super::*;
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
     std::fs::write(
@@ -85,21 +85,49 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
 }
 
 #[test]
-fn parses_kimi_summary_limits_and_booster_without_credentials() {
+fn parses_vendor_kimi_windows_and_extra_usage_without_credentials() {
     let payload = serde_json::json!({
-        "usage": {"name":"Weekly", "used":40, "limit":1000, "resetAt":"tomorrow"},
-        "limits": [{"detail":{"remaining":"90", "limit":"100", "name":"5h"}}],
-        "boosterWallet": {"balance":{"amountLeft":42000000}}
+        "kind": "ok", "quota": {
+            "usages": {
+                "limit7d": {"usedRatio": 0.04},
+                "limit5h": {"usedRatio": 0.10, "resetAt":"2026-10-01T12:00:00Z"},
+                "monthTotal": {"usedRatio": 0.25},
+                "monthCode": {"usedRatio": 0.50}
+            },
+            "extraUsage": {"balanceCents":4200, "currency":"USD"}
+        }
     });
-    let (windows, extra) = parse_kimi_usage(&payload);
-    assert_eq!(windows.len(), 2);
-    assert_eq!(windows[0].used, Some(40));
-    assert_eq!(windows[1].used, Some(10));
+    let (windows, extra) = parse_kimi_usage(&payload).unwrap();
+    assert_eq!(windows.len(), 4);
+    assert_eq!(windows[0].used, None);
+    assert_eq!(windows[0].limit, None);
     assert_eq!(windows[0].label, "Week");
     assert_eq!(windows[0].remaining_percent, Some(96));
     assert_eq!(windows[1].label, "5H");
     assert_eq!(windows[1].remaining_percent, Some(90));
-    assert_eq!(extra.as_deref(), Some("booster 42 remaining"));
+    assert_eq!(windows[1].resets_at_epoch_seconds, Some(1790856000));
+    assert_eq!(windows[2].remaining_percent, Some(75));
+    assert_eq!(windows[3].remaining_percent, Some(50));
+    assert_eq!(extra.as_deref(), Some("extra 42.00 USD remaining"));
+}
+
+#[tokio::test]
+async fn kimi_api_key_quota_does_not_require_an_oauth_login_or_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    let environment = HashMap::from([
+        ("KIMI_API_KEY".into(), "profile-key".into()),
+        ("PATH".into(), "/missing-kimi-runtime".into()),
+    ]);
+    let (windows, extra) = query_kimi(home.path(), &environment).await.unwrap();
+    assert!(windows.is_empty());
+    assert_eq!(extra.as_deref(), Some(API_LABEL));
+    assert!(!home.path().join("credentials/kimi-code.json").exists());
+}
+
+#[test]
+fn kimi_quota_reports_an_unrecognized_vendor_response() {
+    let error = parse_kimi_usage(&serde_json::json!({"kind":"ok"})).unwrap_err();
+    assert!(error.to_string().contains("quota.usages"));
 }
 
 #[test]
@@ -853,195 +881,6 @@ fn short_window_is_shown_only_when_burn_rate_projects_early_exhaustion() {
         ..window
     };
     assert!(!projects_exhaustion(&sustainable, 0));
-}
-
-#[derive(Clone, Default)]
-struct KimiServerState {
-    refresh_forms: Arc<Mutex<Vec<String>>>,
-}
-
-async fn test_kimi_usage(headers: HeaderMap) -> (StatusCode, Json<Value>) {
-    let accepted = headers
-        .get(reqwest::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        == Some("Bearer fresh-access");
-    if accepted {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "usage": {"name": "Weekly", "used": 1, "limit": 100}
-            })),
-        )
-    } else {
-        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})))
-    }
-}
-
-async fn test_kimi_refresh(State(state): State<KimiServerState>, body: Bytes) -> Json<Value> {
-    state
-        .refresh_forms
-        .lock()
-        .unwrap()
-        .push(String::from_utf8(body.to_vec()).unwrap());
-    Json(serde_json::json!({
-        "access_token": "fresh-access",
-        "refresh_token": "fresh-refresh",
-        "expires_in": 900,
-        "scope": "kimi-code",
-        "token_type": "Bearer"
-    }))
-}
-
-#[tokio::test]
-async fn kimi_quota_refreshes_after_unauthorized_and_retries() {
-    let state = KimiServerState::default();
-    let app = Router::new()
-        .route("/coding/v1/usages", get(test_kimi_usage))
-        .route("/api/oauth/token", post(test_kimi_refresh))
-        .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let home = tempfile::tempdir().unwrap();
-    let credentials_path = home.path().join("credentials/kimi-code.json");
-    tokio::fs::create_dir_all(credentials_path.parent().unwrap())
-        .await
-        .unwrap();
-    let future_expiry = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3_600;
-    tokio::fs::write(
-        &credentials_path,
-        serde_json::to_vec(&serde_json::json!({
-            "access_token": "rejected-access",
-            "refresh_token": "old-refresh",
-            "expires_at": future_expiry,
-            "scope": "kimi-code",
-            "token_type": "Bearer",
-            "expires_in": 900
-        }))
-        .unwrap(),
-    )
-    .await
-    .unwrap();
-    let endpoint = format!("http://{address}");
-    let environment = HashMap::from([
-        ("KIMI_CODE_BASE_URL".into(), format!("{endpoint}/coding/v1")),
-        ("KIMI_CODE_OAUTH_HOST".into(), endpoint),
-    ]);
-
-    let (windows, _) = query_kimi(home.path(), &environment).await.unwrap();
-
-    assert_eq!(windows[0].used, Some(1));
-    let form = {
-        let forms = state.refresh_forms.lock().unwrap();
-        assert_eq!(forms.len(), 1);
-        url::form_urlencoded::parse(forms[0].as_bytes())
-            .into_owned()
-            .collect::<HashMap<_, _>>()
-    };
-    assert_eq!(
-        form.get("grant_type").map(String::as_str),
-        Some("refresh_token")
-    );
-    assert_eq!(
-        form.get("refresh_token").map(String::as_str),
-        Some("old-refresh")
-    );
-    let saved = read_kimi_credentials(&credentials_path).await.unwrap();
-    assert_eq!(saved.access_token, "fresh-access");
-    assert_eq!(saved.refresh_token, "fresh-refresh");
-    assert!(!home.path().join("oauth/kimi-code.lock").exists());
-    server.abort();
-}
-
-/// Backdate the lock directory the way a holder that stopped heartbeating
-/// leaves it behind.
-fn age_kimi_lock(path: &Path, age: Duration) {
-    touch_kimi_lock(path, SystemTime::now() - age).expect("backdate lock directory");
-}
-
-#[tokio::test]
-async fn a_kimi_refresh_lock_left_by_a_crashed_holder_is_broken_and_reacquired() {
-    let home = tempfile::tempdir().unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-    std::fs::create_dir_all(&lock).unwrap();
-    age_kimi_lock(&lock, KIMI_LOCK_STALE_AFTER + Duration::from_secs(60));
-
-    let started = std::time::Instant::now();
-    let held = KimiRefreshLock::acquire(home.path(), Duration::from_secs(10))
-        .await
-        .expect("an orphaned lock must not block a refresh");
-    let waited = started.elapsed();
-
-    assert!(
-        waited < Duration::from_secs(5),
-        "acquisition waited {waited:?}"
-    );
-    drop(held);
-    assert!(!lock.exists(), "the released lock must be gone");
-}
-
-#[tokio::test]
-async fn a_heartbeating_kimi_refresh_lock_is_not_broken_by_a_waiter() {
-    let home = tempfile::tempdir().unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-    std::fs::create_dir_all(&lock).unwrap();
-
-    let error = KimiRefreshLock::acquire(home.path(), Duration::from_millis(600))
-        .await
-        .err()
-        .expect("a lock with a live holder must be waited out, not stolen");
-
-    assert!(
-        error.to_string().contains("kimi-code.lock"),
-        "the timeout must name the lock: {error}"
-    );
-    assert!(lock.exists(), "a live holder's lock must survive a waiter");
-}
-
-/// The Kimi Code CLI breaks a lock whose modification time is more than
-/// five seconds old, so Mjolnir's beats have to be frequent enough that a
-/// stalled heartbeat task still cannot cost it a live lock.
-#[tokio::test]
-async fn a_held_kimi_lock_republishes_its_mtime_several_times_per_cli_break_window() {
-    let home = tempfile::tempdir().unwrap();
-    let held = KimiRefreshLock::acquire(home.path(), KIMI_LOCK_WAIT)
-        .await
-        .unwrap();
-    let lock = home.path().join("oauth/kimi-code.lock");
-
-    // Half the peer's break window: two beats have to land inside it, so
-    // Mjolnir publishes at least four times per window and can miss several in
-    // a row and still hold the lock.
-    const KIMI_CLI_LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
-    let watched = KIMI_CLI_LOCK_STALE_AFTER / 2;
-    let deadline = tokio::time::Instant::now() + watched;
-    let mut published = vec![kimi_lock_mtime(&lock).unwrap().expect("the created lock")];
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let observed = kimi_lock_mtime(&lock).unwrap().expect("a held lock");
-        if published.last() != Some(&observed) {
-            published.push(observed);
-        }
-        assert_eq!(
-            std::fs::read_dir(&lock).unwrap().count(),
-            0,
-            "the CLI releases this lock with a plain rmdir, so it must stay empty"
-        );
-    }
-
-    assert!(
-        published.len() >= 3,
-        "the lock's modification time moved {} times in {watched:?}; the Kimi Code CLI breaks a lock after {KIMI_CLI_LOCK_STALE_AFTER:?} without a beat",
-        published.len() - 1
-    );
-    drop(held);
 }
 
 #[cfg(unix)]

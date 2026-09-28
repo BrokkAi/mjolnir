@@ -5,7 +5,7 @@
 //! digest machinery that keeps events and snapshots bounded and verifiable.
 //! Nothing in this module touches the filesystem.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -45,6 +45,10 @@ pub use digest::*;
     deny_unknown_fields
 )]
 pub enum RelayCommand {
+    /// Durable installation of hidden context before the first prompt.
+    InstallPromptContext {
+        text: String,
+    },
     /// Seed exact retained authorization history at the controller's verified frontier.
     SeedAssessmentContext {
         expected: RelayCursor,
@@ -54,6 +58,11 @@ pub enum RelayCommand {
     ClearContext,
     Prompt {
         prompt: Vec<ContentBlock>,
+    },
+    /// Deliver the fixed reminder only while this completed turn is still current.
+    HandbackReminder {
+        completed_command_id: String,
+        completed_ordinal: u64,
     },
     /// A fixed prompt admitted only against the exact classified state.
     ContinueAuthorizedWork {
@@ -145,6 +154,11 @@ impl RelayCommand {
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
+            Self::HandbackReminder { .. } => {
+                Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                    crate::subagent::HANDBACK_REMINDER_TEXT.to_owned(),
+                )]))
+            }
             Self::ContinueAuthorizedWork { .. } | Self::ResumeAfterQuota { .. } => {
                 Some(std::borrow::Cow::Owned(crate::continuation::prompt_blocks()))
             }
@@ -154,6 +168,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
             Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
             Self::ContinueAuthorizedWork { .. } => 18,
@@ -180,6 +195,7 @@ impl RelayCommand {
         matches!(
             self,
             Self::Prompt { .. }
+                | Self::HandbackReminder { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
@@ -198,6 +214,7 @@ impl RelayCommand {
                 | Self::RecordNotice { .. }
                 | Self::SetQuotaRecovery { .. }
                 | Self::SeedAssessmentContext { .. }
+                | Self::InstallPromptContext { .. }
         )
     }
 
@@ -206,6 +223,7 @@ impl RelayCommand {
             self,
             Self::ClearContext
                 | Self::Prompt { .. }
+                | Self::HandbackReminder { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
@@ -230,6 +248,7 @@ impl RelayCommand {
         match self {
             Self::ClearContext => RelayCommandKind::ClearContext,
             Self::Prompt { .. }
+            | Self::HandbackReminder { .. }
             | Self::ContinueAuthorizedWork { .. }
             | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
@@ -251,7 +270,8 @@ impl RelayCommand {
             Self::AdvanceRecoveryFloor { .. } => RelayCommandKind::AdvanceRecoveryFloor,
             Self::RecordNotice { .. }
             | Self::SetQuotaRecovery { .. }
-            | Self::SeedAssessmentContext { .. } => RelayCommandKind::RecordNotice,
+            | Self::SeedAssessmentContext { .. }
+            | Self::InstallPromptContext { .. } => RelayCommandKind::RecordNotice,
         }
     }
 }
@@ -620,6 +640,8 @@ pub struct RelayOperationalState {
     pub active_user_shells: Vec<ActiveUserShell>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_agent_terminals: Vec<ActiveAgentTerminal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_ledger_seal: Option<String>,
     pub checkpoint_barrier: Option<String>,
     pub checkpoint_ready: Option<RelayCursor>,
     /// When anything at all last arrived over ACP. This is the liveness
@@ -1152,11 +1174,98 @@ pub struct HandledRelayCommand {
     pub command: RelayCommand,
     pub accepted_ordinal: u64,
     pub terminal_ordinal: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RelayCommandOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// Command identity survives moving the conversation to another worker store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointCommandLedger {
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_prompt_accepted_ordinal: Option<u64>,
+    pub retained_command_receipts: BTreeSet<String>,
+    pub cancelled_command_admissions: BTreeSet<String>,
+    pub handled_commands: BTreeMap<String, HandledRelayCommand>,
+}
+
+impl CheckpointCommandLedger {
+    pub fn is_empty(&self) -> bool {
+        self.retained_command_receipts.is_empty()
+            && self.cancelled_command_admissions.is_empty()
+            && self.handled_commands.is_empty()
+            && self.latest_prompt_accepted_ordinal.is_none()
+    }
+
+    pub fn from_snapshot(snapshot: &RelaySnapshot) -> Self {
+        Self {
+            version: 1,
+            latest_prompt_accepted_ordinal: snapshot.latest_prompt_accepted_ordinal,
+            retained_command_receipts: snapshot.retained_command_receipts.clone(),
+            cancelled_command_admissions: snapshot.cancelled_command_admissions.clone(),
+            handled_commands: snapshot
+                .handled_commands
+                .iter()
+                .filter(|(id, _)| snapshot.retained_command_receipts.contains(*id))
+                .map(|(id, receipt)| (id.clone(), receipt.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn decode(value: &serde_json::Value, frontier: u64) -> anyhow::Result<Self> {
+        let ledger: Self = serde_json::from_value(value.clone())?;
+        anyhow::ensure!(ledger.version == 1, "unsupported command ledger version");
+        anyhow::ensure!(
+            ledger
+                .latest_prompt_accepted_ordinal
+                .is_none_or(|ordinal| ordinal <= frontier),
+            "latest accepted prompt exceeds checkpoint frontier"
+        );
+        anyhow::ensure!(
+            ledger.retained_command_receipts.len() <= 4096
+                && ledger.cancelled_command_admissions.len() <= 4096,
+            "command ledger exceeds admission capacity"
+        );
+        for id in ledger
+            .retained_command_receipts
+            .iter()
+            .chain(&ledger.cancelled_command_admissions)
+        {
+            anyhow::ensure!(
+                !id.trim().is_empty() && id.len() <= 256,
+                "invalid command ledger identity"
+            );
+        }
+        for (id, receipt) in &ledger.handled_commands {
+            anyhow::ensure!(
+                ledger.retained_command_receipts.contains(id),
+                "unretained checkpoint command receipt"
+            );
+            anyhow::ensure!(
+                !ledger.cancelled_command_admissions.contains(id),
+                "accepted command has cancelled admission"
+            );
+            anyhow::ensure!(
+                receipt.accepted_ordinal <= frontier
+                    && receipt
+                        .terminal_ordinal
+                        .is_none_or(|ordinal| ordinal <= frontier),
+                "command receipt exceeds checkpoint frontier"
+            );
+        }
+        Ok(ledger)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    /// Survives queue removal and receipt GC, fencing reminders for older turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_prompt_accepted_ordinal: Option<u64>,
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1255,6 +1364,8 @@ pub struct RelaySnapshot {
     pub pending_user_shell_contexts: Vec<PendingUserShellContext>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub active_user_shells: BTreeMap<String, ActiveUserShell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_ledger_seal: Option<String>,
     pub checkpoint_barrier: Option<String>,
     pub checkpoint_ready_through: Option<u64>,
     pub checkpoint_ready_digest: Option<String>,
@@ -1262,6 +1373,12 @@ pub struct RelaySnapshot {
     pub harness_turn: Option<StoredHarnessTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
+    /// Caller-owned receipts survive event acknowledgement and journal GC.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retained_command_receipts: BTreeSet<String>,
+    /// Admission tombstones cannot be removed while old connections may submit.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cancelled_command_admissions: BTreeSet<String>,
     pub handled_commands: BTreeMap<String, HandledRelayCommand>,
     pub dispatches: BTreeMap<String, RelayDispatchRecord>,
 }
@@ -1272,6 +1389,7 @@ impl RelaySnapshot {
             assessment_questions: Default::default(),
             assessment: None,
             assessment_context: Some(Default::default()),
+            latest_prompt_accepted_ordinal: None,
             turn_completion: None,
             continuation: Default::default(),
             steering: None,
@@ -1312,11 +1430,14 @@ impl RelaySnapshot {
             pending_prompt_context: None,
             pending_user_shell_contexts: Vec::new(),
             active_user_shells: BTreeMap::new(),
+            command_ledger_seal: None,
             checkpoint_barrier: None,
             checkpoint_ready_through: None,
             checkpoint_ready_digest: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            retained_command_receipts: BTreeSet::new(),
+            cancelled_command_admissions: BTreeSet::new(),
             handled_commands: BTreeMap::new(),
             dispatches: BTreeMap::new(),
         }
@@ -1396,6 +1517,10 @@ impl RelaySnapshot {
                 .collect(),
             active_user_shells: self.active_user_shells.values().cloned().collect(),
             active_agent_terminals: Vec::new(),
+            command_ledger_seal: self
+                .command_ledger_seal
+                .clone()
+                .filter(|id| self.checkpoint_barrier.as_ref() == Some(id)),
             checkpoint_barrier: self.checkpoint_barrier.clone(),
             checkpoint_ready: self
                 .checkpoint_ready_through

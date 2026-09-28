@@ -102,7 +102,7 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
     let row = connection
         .query_row(
             "SELECT baselines, reviewed_through_ordinal, prior_review, active,
-                    pending_forward
+                    pending_forward, orchestration
              FROM turn_review_state WHERE session_id = ?1",
             [session_id],
             |row| {
@@ -112,11 +112,12 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((baselines, ordinal, prior, active, pending_forward)) = row else {
+    let Some((baselines, ordinal, prior, active, pending_forward, orchestration)) = row else {
         return Ok(TurnReviewState::default());
     };
     Ok(TurnReviewState {
@@ -131,6 +132,10 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
             .map(|pending| serde_json::from_str(&pending))
             .transpose()
             .context("parse the stored pending review handoff")?,
+        orchestration: orchestration
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .context("parse durable review orchestration")?,
     })
 }
 
@@ -152,14 +157,15 @@ pub(super) fn save_turn_review_state_in(
     connection.execute(
         "INSERT INTO turn_review_state(
              session_id, baselines, reviewed_through_ordinal, prior_review, active,
-             pending_forward
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             pending_forward, orchestration
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(session_id) DO UPDATE SET
              baselines = excluded.baselines,
              reviewed_through_ordinal = excluded.reviewed_through_ordinal,
              prior_review = excluded.prior_review,
              active = excluded.active,
-             pending_forward = excluded.pending_forward",
+             pending_forward = excluded.pending_forward,
+             orchestration = excluded.orchestration",
         params![
             session_id,
             serde_json::to_string(&state.baselines)?,
@@ -175,31 +181,30 @@ pub(super) fn save_turn_review_state_in(
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            state
+                .orchestration
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     Ok(())
 }
 
-/// Clears every session's in-flight review flag.
-///
-/// A review that was running when the daemon stopped is not resumed: the
-/// baseline never advanced, so the next review covers the same change, and
-/// half a multi-agent fan-out is not worth rebuilding. A pending corrective
-/// handoff is returned as well so the host can retry its exact command id.
-/// Baselines are deliberately left alone, which is what makes interruption
-/// lossless. Returns the sessions whose review or handoff was interrupted.
-pub fn clear_interrupted_turn_reviews() -> Result<Vec<String>> {
-    submit_database_write("clear_interrupted_turn_reviews", move |_| {
-        clear_interrupted_turn_reviews_in(&database_path())
+/// Lists reviews that must be reattached after daemon replacement.
+/// Reading recovery candidates never changes their durable ownership.
+pub fn recoverable_turn_reviews() -> Result<Vec<String>> {
+    submit_database_write("recoverable_turn_reviews", move |_| {
+        recoverable_turn_reviews_in(&database_path())
     })
 }
 
-pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<String>> {
+pub(super) fn recoverable_turn_reviews_in(path: &Path) -> Result<Vec<String>> {
     let connection = open(path)?;
     let interrupted = {
         let mut statement = connection.prepare(
             "SELECT session_id FROM turn_review_state
-                 WHERE active IS NOT NULL OR pending_forward IS NOT NULL",
+                 WHERE active IS NOT NULL OR pending_forward IS NOT NULL OR orchestration IS NOT NULL",
         )?;
         let mut rows = statement.query([])?;
         let mut interrupted = Vec::new();
@@ -208,10 +213,7 @@ pub(super) fn clear_interrupted_turn_reviews_in(path: &Path) -> Result<Vec<Strin
         }
         interrupted
     };
-    connection.execute(
-        "UPDATE turn_review_state SET active = NULL WHERE active IS NOT NULL",
-        [],
-    )?;
+
     Ok(interrupted)
 }
 

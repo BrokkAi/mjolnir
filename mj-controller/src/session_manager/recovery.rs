@@ -152,7 +152,16 @@ pub(crate) fn recover_worker_controlled(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    // A replacement may still be replaying its journal after the daemon
+    // that launched it has exited. A lost handshake is not permission to kill
+    // that live process; only a liveness probe proving death permits restart.
+    let restart_pending = session_id
+        .map(crate::database::load_worker_restart)
+        .transpose()?
+        .flatten()
+        .is_some_and(|intent| intent.target == plan.source_target);
     match String::from_utf8_lossy(&output.stdout).trim() {
+        "alive" if restart_pending => Ok(WorkerRecoveryOutcome::Starting),
         "starting" => Ok(WorkerRecoveryOutcome::Starting),
         "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
         "alive" => {

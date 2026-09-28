@@ -148,6 +148,7 @@ for line in sys.stdin:
             std::fs::write(
                 mj_core::relay::restored_relay_seed_path(&root),
                 serde_json::to_vec(&mj_core::relay::RestoredRelaySeed {
+                    command_ledger: None,
                     assessment_state: None,
                     event_frontier: 4,
                     event_frontier_digest: "c".repeat(64),

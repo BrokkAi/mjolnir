@@ -219,15 +219,27 @@ impl Controller {
             )
             .await?;
         let (barrier, barrier_command_id) = loop {
+            let snapshot = relay.connection_mut().sync().await?;
+            if let Some(sealed) = snapshot.operational.command_ledger_seal.clone() {
+                ensure!(
+                    exclusivity == LatchExclusivity::HoldThroughClose
+                        && session.state == SessionState::Closing,
+                    "a sealed checkpoint belongs to the admitted closing lifecycle"
+                );
+                ensure!(
+                    snapshot.operational.checkpoint_barrier.as_ref() == Some(&sealed)
+                        && snapshot.operational.checkpoint_ready.is_some(),
+                    "sealed checkpoint has no ready barrier"
+                );
+                // This connection was opened against the admitted Closing
+                // record's current target. Only that lifecycle may finish the
+                // worker's durable cut after its former connection vanished.
+                break (snapshot, sealed);
+            }
             // Restored native identity is not current-process readiness.
             // Startup gets its own cancellable budget; its timeout must not
             // enter the wedged-checkpoint worker-restart path below.
-            let checkpoint_only = relay
-                .connection_mut()
-                .sync()
-                .await?
-                .operational
-                .checkpoint_only;
+            let checkpoint_only = snapshot.operational.checkpoint_only;
             if !checkpoint_only {
                 wait_for_native_session_in_stage(
                     relay.connection_mut(),
@@ -402,6 +414,20 @@ impl Controller {
         );
         ensure_exact_checkpoint_cut(&cursor, expected_ordinal, &expected_digest)?;
         let mut canonical_session = canonical_session_from_materialized(&materialized)?;
+        if barrier
+            .operational
+            .relay_protocol_version
+            .is_some_and(|version| version >= 26)
+        {
+            canonical_session.command_ledger = relay
+                .connection_mut()
+                .checkpoint_command_ledger(
+                    &cursor,
+                    exclusivity == LatchExclusivity::HoldThroughClose,
+                )
+                .await
+                .context("capture checkpoint command ledger")?;
+        }
         if barrier
             .operational
             .relay_protocol_version

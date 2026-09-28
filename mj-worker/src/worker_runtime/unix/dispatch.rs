@@ -745,6 +745,7 @@ pub(crate) fn record_runtime_event(
             }
         }
     }
+    relay.refresh_sealed_checkpoint()?;
     Ok(stopped)
 }
 
@@ -995,6 +996,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
     match &claimed.command {
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
         command @ (RelayCommand::Prompt { .. }
+        | RelayCommand::HandbackReminder { .. }
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {
             let mut prompt = command
@@ -1051,6 +1053,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::CompleteCheckpoint { .. }
         | RelayCommand::ReleaseCheckpoint { .. }
         | RelayCommand::AdvanceRecoveryFloor { .. }
+        | RelayCommand::InstallPromptContext { .. }
         | RelayCommand::RecordNotice { .. }
         | RelayCommand::SeedAssessmentContext { .. }
         | RelayCommand::SetQuotaRecovery { .. }
