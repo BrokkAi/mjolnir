@@ -1204,8 +1204,8 @@ pub struct SessionBuildCache {
     /// different host cannot reuse it, so the decision is made again there.
     pub host: String,
     pub directory: PathBuf,
-    /// An mbx size string passed as `MBX_GC_MAX_TOTAL_SIZE`, or `None` when
-    /// the host's own mbx configuration file already carries the budget.
+    /// Read compatibility for old records only. Launch never uses this value;
+    /// budgets belong to the shared machine configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// A `[target] root` the host's mbx configuration relocates outside the
@@ -1240,6 +1240,12 @@ pub struct BuildCachePreview {
     pub directory: Option<PathBuf>,
     /// The budget sessions would run with, once known.
     pub max_size: Option<BuildCacheLimit>,
+    pub target_max_size: Option<BuildCacheLimit>,
+    /// True when a general-purpose host installation owns the configuration.
+    pub user_managed: bool,
+    pub application: BuildCacheApplication,
+    /// Other mbx limits can further reduce the space available to worktrees.
+    pub budget_note: Option<String>,
     /// What the cache on that host has done so far, when it has a tally.
     pub stats: Option<BuildCacheStats>,
     /// Why sessions on this target run without a cache, or `None` when they
@@ -1285,14 +1291,26 @@ impl std::fmt::Display for BuildCacheOff {
     }
 }
 
-/// Where a build cache session's size budget comes from.
+/// Where a machine build cache budget comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildCacheLimit {
-    /// An mbx size string passed as `MBX_GC_MAX_TOTAL_SIZE`.
+    /// An explicit mj machine setting written to shared mbx configuration.
     Size(String),
     /// The host's own `~/.config/mbx/config.toml` carries the budget. The
     /// total it sets, when it sets one.
     HostConfiguration(Option<String>),
+    /// An automatic total initialized by mj, independent of later disk growth.
+    MjDefault(String),
+    /// The pinned mbx's disk-scaled default, or no combined limit.
+    MbxDefault(Option<String>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BuildCacheApplication {
+    #[default]
+    Pending,
+    Applied,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -169,6 +169,60 @@ fn the_build_cache_is_mounted_read_write_at_its_host_path() {
     }
 }
 
+/// Answers the Docker platform query as Docker Desktop and the host
+/// filesystem probe as ext4, which alone would keep the overlay.
+struct DockerDesktopExecutor;
+
+impl CommandExecutor for DockerDesktopExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let stdout = match command.program.as_str() {
+            "docker" => "Docker Desktop 4.40.0 (187762)\n",
+            "stat" => "ext4\n",
+            other => panic!("unexpected command {other}"),
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// Docker Desktop's VM cannot overlay host directories whatever filesystem
+/// holds them on the host, so its attachments mount read-only (#1152).
+#[test]
+fn docker_desktop_attachments_are_mounted_read_only_and_reported() {
+    let docker = targets::TargetTemplate::LocalDocker(ContainerTemplate {
+        build_cache: None,
+        image: "ubuntu:24.04".into(),
+        pull_policy: Default::default(),
+        extra_run_args: Vec::new(),
+        workspace_storage: Default::default(),
+    });
+    let mut mounts = vec![
+        AdditionalMount {
+            source: PathBuf::from("/Users/dev/project"),
+            destination: PathBuf::from("/mnt/project"),
+            access: crate::targets::MountAccess::Cow,
+        },
+        AdditionalMount {
+            source: PathBuf::from("/Users/dev/scratch"),
+            destination: PathBuf::from("/mnt/scratch"),
+            access: crate::targets::MountAccess::Rw,
+        },
+    ];
+
+    let notices = enforce_overlay_capable_mounts(&docker, &mut mounts, &DockerDesktopExecutor);
+
+    assert_eq!(mounts[0].access, targets::MountAccess::Ro);
+    assert_eq!(mounts[1].access, targets::MountAccess::Rw);
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].starts_with("Mounted /Users/dev/project read-only: Docker runs in a VM"),
+        "{notices:?}"
+    );
+}
+
 #[test]
 fn a_source_that_cannot_overlay_is_mounted_read_only_and_reported() {
     let executor = ProbeExecutor::answering("nfs");

@@ -1669,6 +1669,10 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         generation,
         &preview_key,
         Ok(Some(BuildCachePreview {
+            target_max_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
             native_mbx: Some("1.12.0".into()),
             directory: Some("/mnt/fast/mbx-cache".into()),
             max_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
@@ -1687,7 +1691,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         "☐",
         "Off: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
         "/mnt/fast/mbx-cache",
-        "537, host mbx config",
+        "537 GB, host mbx config",
         "run without the build cache: the filesystem under",
     ] {
         assert!(
@@ -1754,6 +1758,10 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
         generation,
         &preview_key,
         Ok(Some(BuildCachePreview {
+            target_max_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
             native_mbx: Some("1.12.0".into()),
             directory: Some("/home/dev/.cache/mbx".into()),
             max_size: Some(BuildCacheLimit::Size("100000000000B".into())),
@@ -1835,7 +1843,7 @@ fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
     );
     let drawn = drawn(&mut dashboard, 140, 30).join("\n");
     assert!(
-        drawn.contains("Cache size limit (GB)") && drawn.contains("25"),
+        drawn.contains("Total cache budget (GB)") && drawn.contains("25"),
         "the row reports the number of GB:\n{drawn}"
     );
 
@@ -1857,7 +1865,7 @@ fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
         ("GiB", "Enter a whole number of gigabytes."),
         (
             "",
-            "Enter at least 1 GB, or clear the field to use the host's own limits.",
+            "Enter at least 1 GB, or clear the field to use the default.",
         ),
     ] {
         let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
@@ -1879,10 +1887,10 @@ fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
 }
 
 /// The saved file keeps only the build cache fields that are set, so the page
-/// has to fill the rest back in: all three stay listed and editable after a
+/// has to fill the rest back in: all four stay listed and editable after a
 /// save, and each one can still be handed back to the host.
 #[test]
-fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
+fn a_saved_build_cache_field_leaves_the_other_fields_on_the_page() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
@@ -1905,7 +1913,7 @@ fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
         );
     };
     let saved: Config = serde_json::from_str(&updated).unwrap();
-    // What the file now holds: the size alone, with the two unset fields gone.
+    // What the file now holds: the size alone, with the three unset fields gone.
     assert_eq!(
         serde_json::to_value(&saved.machines["local"]).unwrap(),
         json!({"kind":"local","build_cache":{"max_size":"12GB"}})
@@ -1918,14 +1926,19 @@ fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
     choose(&mut dashboard, "build_cache");
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     let keys = dialog.keys();
-    for expected in ["enabled", "directory", "max_size"] {
+    for expected in ["enabled", "directory", "max_size", "target_max_size"] {
         assert!(
             keys.iter().any(|key| key == expected),
             "{expected:?} is missing from the reopened page: {keys:?}"
         );
     }
     let text = drawn(&mut dashboard, 140, 30).join("\n");
-    for expected in ["Enabled", "Cache directory", "Cache size limit (GB)", "12"] {
+    for expected in [
+        "Enabled",
+        "Cache directory",
+        "Total cache budget (GB)",
+        "12",
+    ] {
         assert!(text.contains(expected), "missing {expected:?} in\n{text}");
     }
 
@@ -2920,7 +2933,7 @@ fn a_page_lists_its_settings_in_a_fixed_order() {
             json!({"machines": {"local": {"kind": "local", "build_cache": {"max_size": "20GB", "enabled": false}}}}),
             &["machines", "local", "build_cache"],
         ),
-        ["enabled", "directory", "max_size"],
+        ["enabled", "directory", "max_size", "target_max_size"],
     );
     assert_eq!(
         order(
@@ -2995,4 +3008,68 @@ fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
             "{section}.{key}: the field stays open"
         );
     }
+}
+
+#[test]
+fn worktree_budget_is_an_ordinary_editable_machine_setting() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "target_max_size");
+    for digit in ['2', '5', '0'] {
+        dashboard.handle_key(key(KeyCode::Char(digit)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["target_max_size"],
+        "250GB"
+    );
+    assert!(
+        drawn(&mut dashboard, 140, 30)
+            .join("\n")
+            .contains("Worktree build budget (GB)")
+    );
+}
+
+#[test]
+fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    let (_, preview_key) = dialog.build_cache_page().unwrap();
+    dialog.build_cache_preview = Some(BuildCachePreviewState {
+        key: preview_key,
+        result: BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.16.0".into()),
+            directory: Some("/native/cache".into()),
+            max_size: Some(mj_core::state::BuildCacheLimit::HostConfiguration(Some(
+                "500GB".into(),
+            ))),
+            target_max_size: Some(mj_core::state::BuildCacheLimit::HostConfiguration(Some(
+                "200GB".into(),
+            ))),
+            user_managed: true,
+            application: mj_core::state::BuildCacheApplication::Applied,
+            budget_note: None,
+            stats: None,
+            off_reason: None,
+        }))),
+    });
+    dialog.prepare();
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(text.contains("User-managed mbx"), "{text}");
+    assert!(text.contains("200 GB, host mbx config"), "{text}");
+    choose(&mut dashboard, "target_max_size");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(dialog.editor.is_none());
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["target_max_size"],
+        Value::Null
+    );
 }

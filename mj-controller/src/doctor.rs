@@ -15,9 +15,10 @@ use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
     ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable, PODMAN_DOCUMENTATION_URL,
     PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
-    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, podman_probe_observation,
-    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
-    verify_local_docker, verify_local_podman, verify_ssh_docker, verify_ssh_podman,
+    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, local_docker_vm_share,
+    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
+    ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_docker,
+    verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -432,8 +433,9 @@ Muse needs curl and tar. Mjolnir does not install these prerequisites.\n\n\
 ## Docker Desktop\n\n\
 Start Docker Desktop and wait for its Linux daemon to be ready before setup\n\
 or the smoke test. `mj doctor --json --smoke` checks the container image and\n\
-the OverlayFS copy-on-write attachment, including disposable container cleanup.\n\
-A connected daemon alone does not establish that these operations work.\n\n\
+a host directory attachment, including disposable container cleanup. Docker\n\
+Desktop's VM cannot overlay host directories, so attachments mount read-only\n\
+there. A connected daemon alone does not establish that these operations work.\n\n\
 ## Apple container runtime\n\n\
 Mjolnir's Apple container target requires Apple silicon and macOS 26 or newer.\n\
 On an Intel Mac or an older macOS release, the target is unsupported; use the\n\
@@ -848,7 +850,7 @@ fn podman_checks(
         checks.extend(
             podman_image_checks(effective, executor, smoke)
                 .into_iter()
-                .map(|(id, check)| builtin_image_check(config, &id, check)),
+                .map(|(id, check)| builtin_image_check(config, &id, check, smoke)),
         );
     }
     checks
@@ -861,9 +863,12 @@ fn builtin_image_check(
     config: ConfigStatus<'_>,
     target_id: &str,
     check: DoctorCheck,
+    smoke: bool,
 ) -> DoctorCheck {
     let explicit = config.is_ok_and(|config| config.configures_target(target_id));
-    if explicit || check.status != CheckStatus::Fixable {
+    // A requested smoke test that fails is a runtime fault, not a missing
+    // image the dashboard would download (#1152).
+    if smoke || explicit || check.status != CheckStatus::Fixable {
         return check;
     }
     DoctorCheck::warning(
@@ -1110,6 +1115,7 @@ fn docker_checks(
             Ok(config),
             id,
             docker_image_check(id, &container.image, executor, smoke),
+            smoke,
         )
     }));
     checks
@@ -1173,9 +1179,14 @@ fn docker_image_check(
             Ok(()) => DoctorCheck::ready(
                 check_id,
                 title,
-                format!(
-                    "Disposable run/exec/remove and OverlayFS attachment smoke test passed for image {image}."
-                ),
+                match local_docker_vm_share(executor) {
+                    Ok(Some(reason)) => format!(
+                        "Disposable run/exec/remove and read-only attachment smoke test passed for image {image}. {reason}, so attached directories mount read-only instead of copy-on-write."
+                    ),
+                    _ => format!(
+                        "Disposable run/exec/remove and OverlayFS attachment smoke test passed for image {image}."
+                    ),
+                },
             ),
             Err(error) => DoctorCheck::fixable(
                 check_id,

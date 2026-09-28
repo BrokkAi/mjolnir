@@ -49,6 +49,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
             enabled: Some(true),
             directory: None,
             max_size: None,
+            target_max_size: None,
         }),
     };
     let serialized = serde_json::to_value(&every_setting).unwrap();
@@ -1664,6 +1665,33 @@ fn build_cache_sizes_accept_the_spellings_mbx_accepts() {
 }
 
 #[test]
+fn machine_worktree_budget_round_trips_and_validates_independently() {
+    let cache: TargetBuildCache = serde_json::from_value(serde_json::json!({
+        "max_size": "500GiB", "target_max_size": "250GiB"
+    }))
+    .unwrap();
+    cache.validate("builder").unwrap();
+    assert_eq!(
+        serde_json::to_value(&cache).unwrap()["target_max_size"],
+        "250GiB"
+    );
+    let cleared: TargetBuildCache =
+        serde_json::from_value(serde_json::json!({"target_max_size": null})).unwrap();
+    assert!(cleared.is_default());
+    let invalid = TargetBuildCache {
+        target_max_size: Some("lots".into()),
+        ..Default::default()
+    };
+    assert!(
+        invalid
+            .validate("builder")
+            .unwrap_err()
+            .to_string()
+            .contains("worktree build budget")
+    );
+}
+
+#[test]
 fn build_cache_sizes_convert_to_and_from_whole_gigabytes() {
     for (text, gigabytes) in [
         ("20GB", 20),
@@ -2197,11 +2225,13 @@ fn every_kind_config() -> Config {
         enabled: Some(true),
         directory: Some(PathBuf::from("/var/cache/mbx")),
         max_size: Some("50GiB".into()),
+        target_max_size: None,
     };
     let builder_cache = TargetBuildCache {
         enabled: Some(false),
         directory: Some(PathBuf::from("/srv/cache/mbx")),
         max_size: Some("20GB".into()),
+        target_max_size: None,
     };
     let ssh = SshConnection {
         host: "builder.example.com".into(),
@@ -2391,6 +2421,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
         enabled: None,
         directory: None,
         max_size: Some("50GiB".into()),
+        target_max_size: None,
     };
     assert_eq!(
         config.machines["local"],

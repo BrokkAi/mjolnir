@@ -16,7 +16,7 @@ use mj_core::subagent::{
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the children still running. A child may take longer than any single wait. Every wait call costs you a request that carries your whole context, so call wait once with every child you are waiting for and the largest timeout you can afford rather than polling. Use children for exploration, research, validation, implementation, and artifact creation. Give each child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. Leave routine decisions and necessary supporting work within that scope to the child; you own consequential design decisions and final acceptance. A child's report is short and names files in its report_dir; read those files for details instead of asking the child to repeat them, and do not redo work you delegated. When a child's turn ends and you are told so, Mjolnir parks it: its processes stop, and it keeps its conversation and report. send_input starts a parked child again. Only children that hold processes count toward this session's limit on children; a parked child does not. The user can see every child in the Sub-agents workspace.";
+const SERVER_INSTRUCTIONS: &str = "Use Mjolnir children for broad exploration and research before gathering that context yourself. Tracing unfamiliar behavior, comparing sources, mapping constraints, and questions requiring several searches belong with a child; a known-file lookup or one narrow check can stay local. Judge the whole investigation, not just the next command. Discover these tools if deferred. You own design decisions and final acceptance; children supply evidence and implement agreed decisions. Dispatch independent questions together and do not repeat their searches. Give each child a bounded outcome, starting pointers, constraints, explicit exclusions and ownership boundaries; leave routine details and necessary supporting work to it. spawn returns a child_session_id immediately, not a finished result. Collect results or startup errors with wait. wait blocks until the requested children finish or its timeout; status complete supplies results, while still_running means wait again when needed. Use the default maximum timeout and return_when any if one result lets you advance; avoid short polling because each call carries the parent's context. Read the short handback and cited report_dir files instead of duplicating work or importing every log. Finished children are parked and hold no process slots. send_input resumes one for related follow-up; close cancels or retires it. Only children holding processes count toward the live-child limit. The user can see children in the Sub-agents workspace.";
 
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
@@ -632,7 +632,8 @@ mod tests {
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("parks it"), "{spawn}");
-        assert!(SERVER_INSTRUCTIONS.contains("send_input starts a parked child again"));
+        assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
+        assert!(SERVER_INSTRUCTIONS.contains("send_input resumes one"));
     }
 
     #[test]
@@ -657,10 +658,10 @@ mod tests {
         // Each wait call resends the parent's whole context, so the parent is
         // told to wait long and once, and to read details from files.
         for needed in [
-            "rather than polling",
-            "largest timeout",
+            "avoid short polling",
+            "default maximum timeout",
             "report_dir",
-            "do not redo",
+            "instead of duplicating work",
         ] {
             assert!(
                 SERVER_INSTRUCTIONS.contains(needed),

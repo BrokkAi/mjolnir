@@ -1241,6 +1241,30 @@ pub(super) fn enforce_overlay_capable_mounts(
     if overlaid.is_empty() {
         return Vec::new();
     }
+    // `stat` on this host cannot see what a VM-hosted Docker daemon mounts.
+    if matches!(target, targets::TargetTemplate::LocalDocker(_)) {
+        match targets::local_docker_vm_share(executor) {
+            Ok(Some(reason)) => {
+                return mounts
+                    .iter_mut()
+                    .filter(|mount| mount.access == targets::MountAccess::Cow)
+                    .map(|mount| {
+                        mount.access = mount.access.without_overlay();
+                        format!(
+                            "Mounted {} read-only: {reason}, which cannot back the \
+                             copy-on-write overlay.",
+                            mount.source.display()
+                        )
+                    })
+                    .collect();
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                error = format!("{error:#}"),
+                "could not identify the Docker daemon platform; probing this host's filesystems"
+            ),
+        }
+    }
     let filesystems = match targets::probe_filesystem_types(ssh, &overlaid, executor) {
         Ok(filesystems) => filesystems,
         Err(error) => {
