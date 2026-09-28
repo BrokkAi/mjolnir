@@ -999,21 +999,33 @@ impl DestinationGate {
     }
 
     fn acquire(self: &Arc<Self>) -> SshPermit {
+        self.acquire_unless(&|| false)
+            .expect("unconditional SSH admission cannot be cancelled")
+    }
+
+    fn acquire_unless(self: &Arc<Self>, cancelled: &dyn Fn() -> bool) -> Result<SshPermit> {
         let mut in_flight = self
             .in_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *in_flight >= self.limit {
-            in_flight = self
+        loop {
+            ensure!(
+                !cancelled(),
+                "operation cancelled while waiting for SSH admission"
+            );
+            if *in_flight < self.limit {
+                break;
+            }
+            (in_flight, _) = self
                 .released
-                .wait(in_flight)
+                .wait_timeout(in_flight, Duration::from_millis(25))
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         *in_flight += 1;
         drop(in_flight);
-        SshPermit {
+        Ok(SshPermit {
             gate: Arc::clone(self),
-        }
+        })
     }
 }
 
@@ -1049,6 +1061,11 @@ impl SshAdmission {
     /// `destination`. The returned permit holds the slot until it is dropped.
     pub fn acquire(destination: &str) -> SshPermit {
         Self::gate(destination).acquire()
+    }
+
+    /// Wait for admission without outliving the command's cancellation or deadline.
+    pub fn acquire_unless(destination: &str, cancelled: &dyn Fn() -> bool) -> Result<SshPermit> {
+        Self::gate(destination).acquire_unless(cancelled)
     }
 
     fn gate(destination: &str) -> Arc<DestinationGate> {
@@ -1173,9 +1190,19 @@ impl SessionLedger {
             socket: dir.join(control_socket_name(ssh, shard)),
         };
         if slot.needs_check() {
-            let _opening = opening
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _opening = loop {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "operation cancelled while waiting for SSH master"
+                );
+                match opening.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            };
             // Another lease may have checked or opened the master while this
             // one waited for the lock.
             if slot.needs_check() {
@@ -1226,7 +1253,7 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
     // background connection that no ControlPersist ever closes (J-18). The
     // lock also keeps one process from removing, as stale, a socket the
     // other has just bound.
-    let _opening = lock_master_opening(socket)?;
+    let _opening = lock_master_opening_unless(socket, &|| executor.cancellation_requested())?;
     if master_running(ssh, socket, executor)? {
         return Ok(());
     }
@@ -1268,20 +1295,38 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
 /// `socket` across processes. It is held until the returned file is dropped.
 /// The lock file sits beside the socket as `<socket>.lock`; `ssh` binds a
 /// new master at `<socket>.<16 random characters>`, so the names never meet.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn lock_master_opening(socket: &Path) -> Result<fs::File> {
+    lock_master_opening_unless(socket, &|| false)
+}
+
+#[cfg(unix)]
+fn lock_master_opening_unless(socket: &Path, cancelled: &dyn Fn() -> bool) -> Result<fs::File> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
     loop {
+        ensure!(
+            !cancelled(),
+            "operation cancelled while waiting for SSH master lock"
+        );
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
             .with_context(|| format!("open SSH master lock {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock SSH master lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("lock SSH master lock {}", path.display()));
+            }
+        }
         // The daemon removes stale locks when it starts. A lock taken on a
         // file removed meanwhile serializes nothing, so take the one at the
         // path now.
@@ -3022,5 +3067,37 @@ mod tests {
             .join()
             .expect("waiter must be admitted once a permit frees");
         drop(second);
+    }
+
+    #[test]
+    fn cancelled_admission_does_not_wait_for_the_holder_or_consume_a_slot() {
+        let gate = DestinationGate::new(1);
+        let held = gate.acquire();
+        let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
+        let error = gate
+            .acquire_unless(&|| executor.is_cancelled())
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(*gate.in_flight.lock().unwrap(), 1);
+        drop(held);
+        assert!(gate.acquire_unless(&|| false).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn master_file_and_thread_admission_honor_the_executor_deadline() {
+        let dir = sharing_socket_dir();
+        let socket = dir.path().join("held-master");
+        let _held = lock_master_opening(&socket).unwrap();
+        let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
+        assert!(lock_master_opening_unless(&socket, &|| executor.is_cancelled()).is_err());
+
+        let ledger = SessionLedger::new(2);
+        let ssh = plain_target("cancelled-master-host");
+        let (_, opening) = ledger.reserve(&connection_key(&ssh));
+        let _opening = opening.lock().unwrap();
+        let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
+        assert!(ledger.lease(&ssh, dir.path(), &executor).is_err());
+        assert_eq!(ledger.connections()[&connection_key(&ssh)][0].leased, 1);
     }
 }
