@@ -109,7 +109,10 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
 async function refresh(page, state) {
   const previous = state.snapshots;
   state.snapshot.revision++;
-  await page.evaluate(() => window.fixtureEvents.dispatchEvent(new Event('revision')));
+  // The viewer reconciles a changed daemon by reconnecting and reloading the
+  // whole snapshot; the changes stream itself carries deltas this fixture
+  // does not model.
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
   // Wait for the render associated with the completed response, not just its request.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));

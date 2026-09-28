@@ -415,17 +415,10 @@ async fn run_command(command: Command) -> Result<()> {
             runtime_info,
             runtime_ack,
         } => {
-            let prepared =
-                prepare_managed_harness_for_transfer(WorkerLaunchConfig::read(&config)?).await?;
-            if let (Some(info), Some(ack)) = (runtime_info, runtime_ack) {
-                prepared
-                    .as_ref()
-                    .context("runtime transfer requires a managed harness")?
-                    .transfer_runtime(info, ack)
-                    .await?;
-            }
-            drop(prepared);
-            Ok(())
+            // clap requires the two transfer paths together, so zipping them
+            // is the whole request.
+            let transfer = runtime_info.zip(runtime_ack);
+            prepare_managed_harness_for_transfer(WorkerLaunchConfig::read(&config)?, transfer).await
         }
         WorkerCommand::Proxy { root } => proxy(root).await,
         WorkerCommand::DiscoverConfig { spec } => {

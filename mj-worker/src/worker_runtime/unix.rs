@@ -735,27 +735,41 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
 /// Install or validate the managed harness named by a proposed launch config
 /// without starting, stopping, or otherwise touching the session worker.
 pub async fn prepare_managed_harness(config: WorkerLaunchConfig) -> Result<()> {
-    let _prepared = prepare_managed_harness_for_transfer(config).await?;
-    Ok(())
+    prepare_managed_harness_for_transfer(config, None).await
 }
 
+/// Install or validate the managed harness named by a proposed launch config.
+///
+/// The preparation owns the runtime lease for the whole call, so preparation
+/// and the supervisor that later uses the same runtime never overlap. When
+/// `transfer` names the private info and acknowledgement files, the lease is
+/// published and the receiving process must acquire it before this returns.
 pub async fn prepare_managed_harness_for_transfer(
     mut config: WorkerLaunchConfig,
-) -> Result<Option<super::PreparedHarnessLaunch>> {
+    transfer: Option<(PathBuf, PathBuf)>,
+) -> Result<()> {
     let mut environment = config.target_environment.clone();
     environment.extend(config.environment);
     config.environment = environment;
-    if config.requires_harness_preparation() {
-        let prepared = super::prepare_harness_launch(
-            config.harness,
-            config.harness_runtime,
-            config.execution_policy,
-            AcpSupervisorSpec::from(&config),
+    let prepared = if config.requires_harness_preparation() {
+        Some(
+            super::prepare_harness_launch(
+                config.harness,
+                config.harness_runtime,
+                config.execution_policy,
+                AcpSupervisorSpec::from(&config),
+            )
+            .await?,
         )
-        .await?;
-        return Ok(Some(prepared));
+    } else {
+        None
+    };
+    match (prepared.as_ref(), transfer) {
+        (Some(prepared), Some((info, ack))) => prepared.transfer_runtime(info, ack).await?,
+        (None, Some(_)) => bail!("runtime transfer requires a managed harness"),
+        _ => {}
     }
-    Ok(None)
+    Ok(())
 }
 
 pub(super) async fn serve_terminal_relay(

@@ -22,7 +22,9 @@ mod journal;
 mod native_history;
 mod replay;
 mod requests;
+#[cfg(unix)]
 mod reviewer_admission;
+#[cfg(unix)]
 pub(crate) use reviewer_admission::ReviewerAdmission;
 mod serving;
 mod verdict;

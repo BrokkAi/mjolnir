@@ -414,7 +414,8 @@ pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Res
 #[cfg(not(unix))]
 pub async fn prepare_managed_harness_for_transfer(
     _config: WorkerLaunchConfig,
-) -> anyhow::Result<Option<PreparedHarnessLaunch>> {
+    _transfer: Option<(std::path::PathBuf, std::path::PathBuf)>,
+) -> anyhow::Result<()> {
     anyhow::bail!("managed target harnesses require Unix")
 }
 

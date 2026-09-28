@@ -31,8 +31,18 @@ import urllib.request
 
 
 TIMEOUT = 20.0
-# Match the Codex spec in mj-core/src/harness_runtime.rs when updating that pin.
-MANAGED_CODEX_INSTALL_ID = "brokkai-codex-acp-1.13.3_codex-0.156.1"
+# The worker validates a seeded managed Codex install by the install id in the
+# compiler's pin, so the fixture derives it from that same source instead of
+# repeating the version. A repeated literal silently stops matching when the
+# pin moves, and the worker then tries to install a harness the fixture never
+# provided.
+_HARNESS_PINS = (
+    pathlib.Path(__file__).resolve().parents[2] / "mj-core/src/harness_runtime.rs"
+).read_text()
+MANAGED_CODEX_INSTALL_ID = re.search(
+    r'install_id: "(brokkai-codex-acp-[^"]+)"', _HARNESS_PINS
+).group(1)
+CODEX_ACP_VERSION = MANAGED_CODEX_INSTALL_ID.split("-acp-")[1].split("_")[0]
 
 
 def render_terminal(raw: bytes, rows: int = 32, columns: int = 140) -> str:
@@ -481,8 +491,7 @@ class Lab:
             tool = fixture_bin / name
             tool.write_text("#!/bin/sh\nexit 0\n")
             tool.chmod(0o700)
-        bridge.write_text(
-            """#!/usr/bin/env python3
+        bridge_script = """#!/usr/bin/env python3
 import json
 import os
 import select
@@ -493,7 +502,7 @@ session_id = "reliability-native"
 prompts = 0
 
 if sys.argv[1:] == ["--version"]:
-    print("@brokkai/codex-acp 1.13.3")
+    print("@@CODEX_ACP_VERSION@@")
     raise SystemExit(0)
 
 log_path = os.environ["MJ_FAKE_ACP_LOG"]
@@ -647,6 +656,10 @@ for line in sys.stdin:
     if method in ("session/new", "session/load"):
         report_execution("idle", goal_cleared=True)
 """
+        bridge.write_text(
+            bridge_script.replace(
+                "@@CODEX_ACP_VERSION@@", f"@brokkai/codex-acp {CODEX_ACP_VERSION}"
+            )
         )
         bridge.chmod(0o700)
         # The local bare runtime now resolves the exact managed Codex harness
