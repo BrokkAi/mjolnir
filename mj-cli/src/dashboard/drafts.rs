@@ -131,9 +131,13 @@ impl DashboardContext {
                 self.chats.remove(&outgoing);
             }
         }
+        self.dashboard.set_pane_session(pane, Some(session_id));
+        let assignment = self.dashboard.pane_assignment(pane);
+        if self.attachments.entry(pane).or_default().bind(assignment) {
+            self.opening_chat_sessions.remove(&pane);
+        }
         if native {
             self.cancel_chat_open_in(pane);
-            self.dashboard.set_pane_session(pane, Some(session_id));
             return;
         }
         // A stopped sub-agent has no worker to attach to, and an attach would
@@ -141,7 +145,6 @@ impl DashboardContext {
         // stored, so read that instead.
         if self.dashboard.is_stopped_subagent(session_id) {
             self.cancel_chat_open_in(pane);
-            self.dashboard.set_pane_session(pane, Some(session_id));
             if self.dashboard.begin_stopped_subagent(session_id) {
                 spawn_stopped_subagent_transcript(
                     session_id.to_owned(),
@@ -161,7 +164,6 @@ impl DashboardContext {
             || self.dashboard.session_failed(session_id)
         {
             self.defer_chat_open_in(pane);
-            self.dashboard.set_pane_session(pane, Some(session_id));
             return;
         }
         // A suspended session has no worker to attach to; an attach would
@@ -177,7 +179,6 @@ impl DashboardContext {
             .is_some_and(mj_chat::chat::ActiveChat::session_feed_open)
         {
             self.cancel_chat_open_in(pane);
-            self.dashboard.set_pane_session(pane, Some(session_id));
             self.acknowledge_visible_chats();
             return;
         }
@@ -273,7 +274,6 @@ impl DashboardContext {
             }
         });
         self.opening_chat_sessions.insert(pane, session_id.clone());
-        self.dashboard.set_pane_session(pane, Some(&session_id));
         self.sync_opening_session();
         let detach = self
             .dashboard
@@ -286,6 +286,7 @@ impl DashboardContext {
         ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();
+        let assignment = assignment.expect("opening an assigned conversation pane");
         self.attachments.entry(pane).or_default().spawn(
             &attachment_session_id,
             attachment::ATTACH_TIMEOUT,
@@ -321,6 +322,7 @@ impl DashboardContext {
                     &updates,
                     DashboardIoUpdate::ChatOpened {
                         generation,
+                        assignment,
                         pane,
                         session_id: reported_session_id.clone(),
                         result: Box::new(result),

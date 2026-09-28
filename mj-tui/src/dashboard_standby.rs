@@ -9,29 +9,14 @@ impl DashboardState {
     /// Records the conversation the focused pane shows, which decides which
     /// project the compact Sessions list belongs to.
     pub fn set_current_session(&mut self, session_id: Option<&str>) {
-        self.set_pane_session(self.conversation_layout.focused(), session_id);
+        self.set_pane_session(self.navigation.layout().focused(), session_id);
     }
 
-    /// Records the conversation one named pane shows. An attach that started
-    /// for a pane lands in that pane, whichever one has the focus by the time
-    /// it arrives.
+    /// Assigns the conversation a pane should show before background loading.
+    /// Background completion never changes this assignment.
     pub fn set_pane_session(&mut self, pane: crate::tile_layout::PaneId, session_id: Option<&str>) {
-        if self.pane_sessions.get(&pane).map(String::as_str) == session_id {
+        if !self.navigation.assign(pane, session_id) {
             return;
-        }
-        // A session belongs to one pane, so moving it into this one takes it
-        // out of any other.
-        if let Some(session_id) = session_id {
-            self.pane_sessions
-                .retain(|other, shown| *other == pane || shown != session_id);
-        }
-        match session_id {
-            Some(session_id) => {
-                self.pane_sessions.insert(pane, session_id.to_owned());
-            }
-            None => {
-                self.pane_sessions.remove(&pane);
-            }
         }
         self.reconcile_pins();
         self.mark_layout_modified();
@@ -49,9 +34,7 @@ impl DashboardState {
 
     /// The session the focused pane shows, if it is not empty.
     pub fn current_session_id(&self) -> Option<&str> {
-        self.pane_sessions
-            .get(&self.conversation_layout.focused())
-            .map(String::as_str)
+        self.navigation.selected()
     }
 
     /// Records the session an attach is running for, or clears it when the
@@ -72,7 +55,7 @@ impl DashboardState {
     /// The session the Sessions pane has selected. The conversation on screen
     /// follows this, so moving the selection moves the transcript.
     pub fn selected_session_id(&self) -> Option<&str> {
-        self.selected_session_id.as_deref()
+        self.current_session_id()
     }
 
     /// The operation that owns a session's conversation, if any. A local or
@@ -222,7 +205,6 @@ impl DashboardState {
             header,
             self.notices.clone(),
         ));
-        self.launch_standby_anchor = self.selected_session_id.clone();
         self.focus_pane(self.browse_pane());
         self.set_current_session(None);
         self.focus_prompt();
@@ -240,7 +222,7 @@ impl DashboardState {
     pub fn launch_standby_capturing(&self) -> bool {
         self.launch_standby.is_some()
             && self.focused_pane() == self.browse_pane()
-            && self.selected_session_id == self.launch_standby_anchor
+            && self.current_session_id().is_none()
     }
 
     /// Hands the launch standby to the session that has just registered: it
@@ -248,7 +230,6 @@ impl DashboardState {
     /// are returned oldest first so the host can have the daemon deliver
     /// each one.
     pub fn adopt_launch_standby(&mut self, session_id: &str) -> Vec<String> {
-        self.launch_standby_anchor = None;
         let Some(mut standby) = self.launch_standby.take() else {
             return Vec::new();
         };

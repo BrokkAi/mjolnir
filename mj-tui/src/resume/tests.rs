@@ -1673,6 +1673,7 @@ fn dashboard_with_live_attention_mix() -> DashboardState {
 #[test]
 fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
     let mut dashboard = dashboard_with_live_attention_mix();
+    dashboard.select_active_session("live-alpha");
     dashboard.show_resume_dialog(1, Vec::new());
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");

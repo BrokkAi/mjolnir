@@ -111,33 +111,26 @@ impl DashboardContext {
         self.maybe_open_startup_session();
     }
 
-    /// Follow a changed selection once. A failed open needs an explicit retry,
-    /// rather than another attempt on every render or background completion.
-    pub(crate) fn follow_selected_session(&mut self) {
-        // Until the startup pick has run, the highlighted row is only where
-        // the clamp left it, not a choice anyone made. Restore the saved
-        // arrangement before processing deliberate browsing requests.
-        // Any user input cancels the startup pick.
+    /// Attach to the conversations assigned by navigation. A failed open needs
+    /// an explicit retry, not another attempt on every background completion.
+    pub(crate) fn reconcile_conversation_attachments(&mut self) {
+        // Startup chooses only once; after that the layout already owns every
+        // selection. Attachment work follows it without choosing anything.
         if self.startup.pick_pending() {
             return;
         }
-        if let Some(selected) = self.dashboard.take_browse_request() {
-            let target = self
-                .dashboard
-                .pane_for_session(&selected)
-                .unwrap_or(self.dashboard.browse_pane());
-            self.dashboard.reveal_pane(target);
-            if target == self.dashboard.browse_pane() {
-                self.open_chat_session_into(target, &selected);
-            }
-        }
         // A transition finishing may make an assigned conversation attachable.
         // Selection changes from refresh never assign a different session. A
-        // suspend also finishes a transition, but leaves no worker to attach
-        // to (R4-11), so its pane lets the session go instead.
+        // lifecycle release already emptied its pane. A historical session
+        // selected deliberately has no worker and must not start an attach.
         for (pane, session) in self.dashboard.pane_sessions() {
+            let assignment = self.dashboard.pane_assignment(pane);
+            if self.attachments.entry(pane).or_default().bind(assignment) {
+                self.selection.clear();
+                self.opening_chat_sessions.remove(&pane);
+            }
             if self.dashboard.pane_session_is_suspended(&session) {
-                self.release_suspended_pane(pane, &session);
+                self.cancel_chat_open_in(pane);
                 continue;
             }
             if self.dashboard.pane_session_can_attach(&session)
@@ -156,6 +149,7 @@ impl DashboardContext {
             self.cancel_chat_open_in(pane);
         }
         self.retire_chats_outside_the_layout();
+        self.sync_opening_session();
     }
 
     /// Stops the focused pane's attach. A failed or cancelled open stays
@@ -410,9 +404,6 @@ impl DashboardContext {
                 self.open_chat_session_into(pane, &session_id);
             }
             self.dashboard.focus_pane(focused);
-            if let Some(session_id) = self.dashboard.pane_session(focused).map(str::to_owned) {
-                self.dashboard.select_active_session(&session_id);
-            }
             self.sync_opening_session();
             return true;
         }

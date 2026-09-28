@@ -3,7 +3,7 @@ use super::*;
 use mj_core::workspace::ConversationLayout;
 use ratatui::layout::Direction;
 
-use crate::tile_layout::{NavDirection, PaneId, TileLayout, find_in_direction};
+use crate::tile_layout::{NavDirection, PaneId, find_in_direction};
 
 /// The notice a refused split leaves on the bar. A later split that succeeds
 /// clears it, because it no longer describes the last split attempt.
@@ -24,17 +24,23 @@ const UNMEASURED_CONVERSATION_AREA: Rect = Rect {
 impl DashboardState {
     /// The pane the keyboard belongs to.
     pub fn focused_pane(&self) -> PaneId {
-        self.conversation_layout.focused()
+        self.navigation.layout().focused()
     }
 
     /// The session a pane shows, if it is not empty.
     pub fn pane_session(&self, pane: PaneId) -> Option<&str> {
-        self.pane_sessions.get(&pane).map(String::as_str)
+        self.navigation.sessions().get(&pane).map(String::as_str)
+    }
+
+    /// Identity captured by background work for the session assigned to a pane.
+    pub fn pane_assignment(&self, pane: PaneId) -> Option<PaneAssignment> {
+        self.navigation.assignment(pane)
     }
 
     /// The pane showing `session_id`. A session is in at most one pane.
     pub fn pane_for_session(&self, session_id: &str) -> Option<PaneId> {
-        self.pane_sessions
+        self.navigation
+            .sessions()
             .iter()
             .find(|(_, session)| session.as_str() == session_id)
             .map(|(pane, _)| *pane)
@@ -42,7 +48,8 @@ impl DashboardState {
 
     /// Each pane that shows a session, with the session it shows.
     pub fn pane_sessions(&self) -> Vec<(PaneId, String)> {
-        self.pane_sessions
+        self.navigation
+            .sessions()
             .iter()
             .map(|(pane, session_id)| (*pane, session_id.clone()))
             .collect()
@@ -50,16 +57,16 @@ impl DashboardState {
 
     /// Every session the layout currently shows.
     pub fn pane_session_ids(&self) -> BTreeSet<String> {
-        self.pane_sessions.values().cloned().collect()
+        self.navigation.sessions().values().cloned().collect()
     }
 
-    /// Move keyboard focus without changing the Sessions cursor or Browse.
+    /// Activate a conversation; the Sessions marker derives from this pane.
     pub fn focus_pane(&mut self, pane: PaneId) {
-        if self.conversation_layout.focused() == pane {
+        if self.navigation.layout().focused() == pane {
             return;
         }
-        self.conversation_layout.focus_pane(pane);
-        if self.conversation_layout.focused() != pane {
+        self.navigation.focus_pane(pane);
+        if self.navigation.layout().focused() != pane {
             return;
         }
         self.mark_layout_modified();
@@ -72,26 +79,26 @@ impl DashboardState {
     /// others keep their place in the arrangement but are not on screen, so
     /// nothing may be drawn for them or pointed at in them.
     pub fn conversation_panes(&self, area: Rect) -> Vec<crate::tile_layout::PaneInfo> {
-        if self.conversation_zoomed && self.conversation_layout.pane_count() > 1 {
+        if self.conversation_zoomed && self.navigation.layout().pane_count() > 1 {
             return vec![crate::tile_layout::PaneInfo {
-                id: self.conversation_layout.focused(),
+                id: self.navigation.layout().focused(),
                 rect: area,
                 is_focused: true,
             }];
         }
-        self.conversation_layout.panes(area)
+        self.navigation.layout().panes(area)
     }
 
     /// Whether the focused pane is filling the band on its own.
     pub fn conversation_zoomed(&self) -> bool {
-        self.conversation_zoomed && self.conversation_layout.pane_count() > 1
+        self.conversation_zoomed && self.navigation.layout().pane_count() > 1
     }
 
     /// Toggle the zoom on the focused pane. With nothing to hide there is
     /// nothing to zoom, and the surface says so rather than changing how it
     /// already looks.
     pub(crate) fn zoom_pane_command(&mut self) -> DashboardAction {
-        if self.conversation_layout.pane_count() < 2 {
+        if self.navigation.layout().pane_count() < 2 {
             self.set_notice("Only one pane; nothing to zoom");
             return DashboardAction::None;
         }
@@ -116,7 +123,7 @@ impl DashboardState {
     }
 
     pub fn has_conversation_pane(&self, pane: PaneId) -> bool {
-        self.conversation_layout.pane_ids().contains(&pane)
+        self.navigation.layout().pane_ids().contains(&pane)
     }
 
     pub fn split_conversation_pane(
@@ -125,7 +132,7 @@ impl DashboardState {
         direction: Direction,
     ) -> Option<PaneId> {
         let Some(pane) =
-            self.conversation_layout
+            self.navigation
                 .split_pane(target, direction, 0.5, self.conversation_area())
         else {
             self.set_notice(SPLIT_REFUSED_NOTICE);
@@ -136,8 +143,7 @@ impl DashboardState {
         }
         self.conversation_zoomed = false;
         self.browse_pane = Some(pane);
-        self.conversation_layout.focus_pane(pane);
-        self.pending_browse = None;
+        self.navigation.focus_pane(pane);
         self.reconcile_pins();
         self.focus_sessions();
         self.mark_layout_modified();
@@ -159,8 +165,7 @@ impl DashboardState {
             return None;
         }
         self.conversation_zoomed = false;
-        let session = self.pane_sessions.remove(&pane);
-        self.conversation_layout.close_pane(pane);
+        let session = self.navigation.close_pane(pane);
         self.reconcile_pins();
         self.mark_layout_modified();
         self.clamp_selections();
@@ -169,7 +174,7 @@ impl DashboardState {
 
     pub fn browse_pane(&self) -> PaneId {
         self.browse_pane
-            .unwrap_or_else(|| self.conversation_layout.pane_ids()[0])
+            .unwrap_or_else(|| self.navigation.layout().pane_ids()[0])
     }
 
     pub fn pin_id(&self, session: &str) -> Option<u32> {
@@ -179,11 +184,12 @@ impl DashboardState {
     pub(crate) fn reconcile_pins(&mut self) {
         let browse = self.browse_pane();
         self.pin_ids.retain(|session, _| {
-            self.pane_sessions
+            self.navigation
+                .sessions()
                 .iter()
                 .any(|(pane, shown)| *pane != browse && shown == session)
         });
-        for (pane, session) in &self.pane_sessions {
+        for (pane, session) in self.navigation.sessions() {
             if *pane == browse || self.pin_ids.contains_key(session) {
                 continue;
             }
@@ -194,22 +200,8 @@ impl DashboardState {
         }
     }
 
-    pub fn request_selected_browse(&mut self) {
-        self.pending_browse = self.selected_session_id.clone();
-        if let Some(id) = &self.pending_browse {
-            let target = self.pane_for_session(id).unwrap_or(self.browse_pane());
-            if target != self.focused_pane() {
-                self.conversation_zoomed = false;
-            }
-        }
-    }
-
     pub fn take_navigation_session(&mut self) -> Option<String> {
         self.navigation_session.take()
-    }
-
-    pub fn take_browse_request(&mut self) -> Option<String> {
-        self.pending_browse.take()
     }
 
     pub fn reveal_pane(&mut self, pane: PaneId) {
@@ -219,7 +211,7 @@ impl DashboardState {
     }
 
     pub fn swap_conversation_panes(&mut self, source: PaneId, target: PaneId) {
-        if self.conversation_layout.swap_panes(source, target) {
+        if self.navigation.swap_panes(source, target) {
             self.conversation_zoomed = false;
             self.mark_layout_modified();
         }
@@ -231,7 +223,7 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_resize_mode(&mut self) -> DashboardAction {
-        if self.conversation_layout.pane_count() < 2 {
+        if self.navigation.layout().pane_count() < 2 {
             self.set_notice("Only one pane; nothing to resize");
             return DashboardAction::None;
         }
@@ -241,7 +233,7 @@ impl DashboardState {
     }
 
     pub(crate) fn swap_pane_command(&mut self, nav: NavDirection) -> DashboardAction {
-        let panes = self.conversation_layout.panes(self.conversation_area());
+        let panes = self.navigation.layout().panes(self.conversation_area());
         let Some(focused) = panes.iter().find(|pane| pane.is_focused) else {
             return DashboardAction::None;
         };
@@ -249,7 +241,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         self.conversation_zoomed = false;
-        self.conversation_layout.swap_panes(focused.id, target);
+        self.navigation.swap_panes(focused.id, target);
         self.mark_layout_modified();
         DashboardAction::ConversationPanesChanged { focus_moved: false }
     }
@@ -257,15 +249,14 @@ impl DashboardState {
     /// Grow or shrink the focused pane toward `nav` by one step.
     pub fn resize_focused_pane(&mut self, nav: NavDirection) {
         let area = self.conversation_area();
-        self.conversation_layout
-            .resize_focused(nav, RESIZE_STEP, area);
+        self.navigation.resize_focused(nav, RESIZE_STEP, area);
         self.mark_layout_modified();
     }
 
     /// Move the focus to the nearest pane toward `nav`. Reports whether a
     /// pane was there to move to.
     pub fn focus_pane_toward(&mut self, nav: NavDirection) -> bool {
-        let panes = self.conversation_layout.panes(self.conversation_area());
+        let panes = self.navigation.layout().panes(self.conversation_area());
         let Some(focused) = panes.iter().find(|pane| pane.is_focused) else {
             return false;
         };
@@ -294,10 +285,11 @@ impl DashboardState {
     /// the keyboard somewhere the user did not ask for.
     pub(crate) fn focus_last_pane_command(&mut self) -> DashboardAction {
         let previous = self
-            .conversation_layout
+            .navigation
+            .layout()
             .previous_focus()
-            .filter(|pane| *pane != self.conversation_layout.focused())
-            .filter(|pane| self.conversation_layout.pane_ids().contains(pane));
+            .filter(|pane| *pane != self.navigation.layout().focused())
+            .filter(|pane| self.navigation.layout().pane_ids().contains(pane));
         let Some(previous) = previous else {
             self.set_notice("No previous pane");
             return DashboardAction::None;
@@ -333,8 +325,9 @@ impl DashboardState {
     /// The live arrangement in the form the workspace store keeps.
     pub fn export_conversation_layout(&self) -> ConversationLayout {
         let mut layout = self
-            .conversation_layout
-            .to_conversation_layout(&self.pane_sessions);
+            .navigation
+            .layout()
+            .to_conversation_layout(self.navigation.sessions());
         layout.browse = Some(self.browse_pane().raw());
         layout.pins = self.pin_ids.clone();
         layout
@@ -365,7 +358,6 @@ impl DashboardState {
         self.workspace_views
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
-                selected_session_id: None,
                 sessions_scroll: 0,
                 targets_scroll: 0,
                 quota_scroll: 0,
@@ -388,31 +380,19 @@ impl DashboardState {
     /// one this surface knows about becomes an empty pane rather than a
     /// failure: sessions are closed and removed outside this client.
     pub(crate) fn restore_conversation_layout(&mut self, layout: &ConversationLayout) {
-        let (tree, sessions) = TileLayout::from_conversation_layout(layout);
-        self.conversation_layout = tree;
+        self.navigation
+            .restore(layout, |id| self.state.sessions.contains_key(id));
         self.browse_pane = Some(PaneId::from_raw(layout.browse.unwrap_or(layout.focus)));
         self.pin_ids = layout.pins.clone();
-        self.pending_browse = None;
         self.conversation_zoomed = false;
-        // A session belongs to one pane. A stored arrangement that names the
-        // same session twice keeps the first pane and empties the rest, so the
-        // same conversation is never drawn in two places.
-        let mut claimed = BTreeSet::new();
-        self.pane_sessions = sessions
-            .into_iter()
-            .filter(|(_, session_id)| self.state.sessions.contains_key(session_id))
-            .filter(|(_, session_id)| claimed.insert(session_id.clone()))
-            .collect();
         self.reconcile_pins();
     }
 
     /// Start over with one empty pane, for a workspace with nothing stored.
     pub(crate) fn reset_conversation_layout(&mut self) {
-        self.conversation_layout = TileLayout::new().0;
-        self.pane_sessions.clear();
+        self.navigation.reset();
         self.browse_pane = None;
         self.pin_ids.clear();
-        self.pending_browse = None;
         self.pane_menu = None;
         self.conversation_zoomed = false;
     }
@@ -442,6 +422,116 @@ mod pin_tests {
     }
 
     #[test]
+    fn selection_changes_panes_synchronously_without_entering_the_composer() {
+        let mut d = dashboard();
+        let pin = d.focused_pane();
+        let browse = d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        assert_eq!(d.selected_session_id(), None);
+        d.handle_key(key(KeyCode::Down));
+        assert_eq!(d.selected_session_id(), Some("session-1"));
+        assert_eq!(d.focused_pane(), pin);
+        assert_eq!(d.focus(), Focus::Sessions);
+        d.handle_key(key(KeyCode::Down));
+        assert_eq!(d.focused_pane(), browse);
+        assert_eq!(d.selected_session_id(), Some("session-2"));
+        assert_eq!(d.current_session_id(), Some("session-2"));
+        assert_eq!(d.command_session_id(), Some("session-2"));
+        assert_eq!(d.focus(), Focus::Sessions);
+        assert_eq!(d.pane_session(pin), Some("session-1"));
+        d.focus_pane(pin);
+        d.focus_prompt();
+        assert_eq!(d.selected_session_id(), Some("session-1"));
+        assert_eq!(d.command_session_id(), Some("session-1"));
+        d.focus_sessions();
+        assert_eq!(d.command_session_id(), Some("session-1"));
+    }
+
+    #[test]
+    fn an_empty_pane_selects_the_last_row_on_up_and_cannot_command_another_pane() {
+        let mut d = dashboard();
+        d.split_focused_pane(Direction::Horizontal, None).unwrap();
+        assert_eq!(d.selected_session_id(), None);
+        assert_eq!(d.command_session_id(), None);
+        d.handle_key(key(KeyCode::Up));
+        assert_eq!(d.selected_session_id(), Some("session-6"));
+        assert_eq!(d.current_session_id(), Some("session-6"));
+    }
+
+    #[test]
+    fn assignment_identity_survives_focus_but_not_reassignment_or_restore() {
+        let mut d = dashboard();
+        let pane = d.focused_pane();
+        let first = d.pane_assignment(pane).unwrap();
+        let other = d
+            .split_focused_pane(Direction::Horizontal, Some("session-2"))
+            .unwrap();
+        d.focus_pane(pane);
+        assert_eq!(d.pane_assignment(pane), Some(first));
+        d.set_pane_session(pane, Some("session-3"));
+        d.set_pane_session(pane, Some("session-1"));
+        assert_ne!(d.pane_assignment(pane), Some(first));
+        let before_restore = d.pane_assignment(pane);
+        let saved = d.export_conversation_layout();
+        d.restore_conversation_layout(&saved);
+        assert_ne!(d.pane_assignment(pane), before_restore);
+        assert_eq!(d.selected_session_id(), Some("session-1"));
+        d.close_pane(pane);
+        assert_eq!(d.focused_pane(), other);
+        assert_eq!(d.selected_session_id(), Some("session-2"));
+        assert_eq!(d.pane_assignment(pane), None);
+    }
+
+    #[test]
+    fn filters_keep_the_active_row_until_navigation_selects_a_match() {
+        let mut d = dashboard();
+        d.focus_sessions();
+        d.handle_key(key(KeyCode::Char('/')));
+        for ch in "session-2".chars() {
+            d.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(d.selected_session_id(), Some("session-1"));
+        assert_eq!(d.current_session_id(), Some("session-1"));
+        assert_eq!(
+            d.ordered_sessions()
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-1", "session-2"]
+        );
+        let rows = crate::test_support::drawn(&mut d, 140, 40);
+        assert!(
+            rows.iter().any(|row| row.contains("Outside filter")),
+            "{rows:?}"
+        );
+        d.handle_key(key(KeyCode::Enter));
+        d.handle_key(key(KeyCode::Down));
+        assert_eq!(d.selected_session_id(), Some("session-2"));
+        assert_eq!(d.current_session_id(), Some("session-2"));
+        assert_eq!(d.ordered_sessions().len(), 1);
+        assert!(
+            !crate::test_support::drawn(&mut d, 140, 40)
+                .iter()
+                .any(|row| row.contains("Outside filter"))
+        );
+    }
+
+    #[test]
+    fn filter_counts_exclude_an_active_row_from_another_list_scope() {
+        let mut d = dashboard();
+        let mut historical = running_session();
+        historical.id = "history".into();
+        historical.state = SessionState::Stopped;
+        d.state.sessions.insert(historical.id.clone(), historical);
+        d.select_active_session("history");
+        d.focus_sessions();
+        d.handle_key(key(KeyCode::Char('/')));
+        d.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(d.ordered_sessions().len(), 1);
+        assert_eq!(d.selected_session_id(), Some("history"));
+        assert_eq!(d.sessions_hidden_count(), 6);
+    }
+
+    #[test]
     fn splitting_builds_a_grid_with_one_browse_and_stable_pins() {
         let mut d = dashboard();
         let left = d.browse_pane();
@@ -462,10 +552,10 @@ mod pin_tests {
         assert_eq!(d.browse_pane(), lower_right);
         assert_eq!(d.pin_ids, pins);
         d.select_active_session("session-4");
-        d.request_selected_browse();
-        d.focus_pane(right);
         assert_eq!(d.selected_session_id(), Some("session-4"));
-        assert_eq!(d.take_browse_request().as_deref(), Some("session-4"));
+        d.focus_pane(right);
+        assert_eq!(d.selected_session_id(), Some("session-2"));
+        assert_eq!(d.pane_session(lower_right), Some("session-4"));
         assert_eq!(d.pane_session(left), Some("session-1"));
         assert_eq!(d.pane_session(right), Some("session-2"));
         assert_eq!(d.pane_session(lower_left), Some("session-3"));
@@ -491,12 +581,11 @@ mod pin_tests {
         let browse = d.split_focused_pane(Direction::Horizontal, None).unwrap();
         d.set_pane_session(browse, Some("session-2"));
         d.focus_pane(pin);
-        d.select_active_session("session-3");
         let saved = d.export_conversation_layout();
         d.restore_conversation_layout(&saved);
         assert_eq!(d.focused_pane(), pin);
         assert_eq!(d.browse_pane(), browse);
-        assert_eq!(d.selected_session_id(), Some("session-3"));
+        assert_eq!(d.selected_session_id(), Some("session-1"));
         assert_eq!(d.pin_id("session-1"), Some(0));
         let mut legacy = saved;
         legacy.browse = None;
@@ -507,7 +596,7 @@ mod pin_tests {
     }
 
     #[test]
-    fn refresh_clamping_does_not_request_a_preview_and_missing_pins_leave_slots() {
+    fn refresh_removal_clears_selection_and_missing_pins_leave_slots() {
         let mut d = dashboard();
         let pin = d.browse_pane();
         d.split_focused_pane(Direction::Horizontal, None).unwrap();
@@ -516,13 +605,13 @@ mod pin_tests {
         state.sessions.remove("session-1");
         state.sessions.remove("session-2");
         d.set_state(state);
-        assert!(d.take_browse_request().is_none());
+        assert_eq!(d.selected_session_id(), None);
         assert_eq!(d.pane_session(pin), None);
-        assert_eq!(d.conversation_layout.pane_count(), 2);
+        assert_eq!(d.navigation.layout().pane_count(), 2);
         assert!(d.pin_ids.is_empty());
         d.focus_sessions();
         d.handle_key(key(KeyCode::Down));
-        assert!(d.take_browse_request().is_some());
+        assert_eq!(d.selected_session_id(), d.current_session_id());
     }
 
     #[test]
@@ -532,15 +621,15 @@ mod pin_tests {
         let second = d.split_focused_pane(Direction::Horizontal, None).unwrap();
         d.set_pane_session(second, Some("session-2"));
         d.split_focused_pane(Direction::Vertical, None).unwrap();
-        let before = d.conversation_layout.pane_count();
+        let before = d.navigation.layout().pane_count();
         d.set_pane_session(first, None);
-        assert_eq!(d.conversation_layout.pane_count(), before);
+        assert_eq!(d.navigation.layout().pane_count(), before);
         assert_eq!(d.pin_id("session-2"), Some(1));
         assert_eq!(d.pin_id("session-1"), None);
         let browse = d.browse_pane();
         assert_eq!(d.close_pane(browse), None);
-        assert_eq!(d.conversation_layout.pane_count(), before);
+        assert_eq!(d.navigation.layout().pane_count(), before);
         d.close_pane(first);
-        assert_eq!(d.conversation_layout.pane_count(), before - 1);
+        assert_eq!(d.navigation.layout().pane_count(), before - 1);
     }
 }

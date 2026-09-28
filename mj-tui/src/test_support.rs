@@ -399,8 +399,8 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
     );
     // This fixture represents a conversation already opened by the host.
     dashboard
-        .pane_sessions
-        .insert(dashboard.focused_pane(), session_id);
+        .navigation
+        .assign(dashboard.focused_pane(), Some(&session_id));
     dashboard
 }
 

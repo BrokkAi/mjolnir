@@ -13,6 +13,7 @@ pub(super) const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Default)]
 pub(super) struct SessionAttachment {
     selection: Option<String>,
+    assignment: Option<mj_tui::PaneAssignment>,
     generation: u64,
     task: Option<JoinHandle<()>>,
 }
@@ -77,6 +78,33 @@ impl ChatRetirement {
 }
 
 impl SessionAttachment {
+    /// A completion supplies content only to the assignment that requested it.
+    /// Read the navigation owner directly: it may have changed before the
+    /// supervisor has observed another selection or spawned another attempt.
+    pub(super) fn accepts_pane_result(
+        &self,
+        generation: u64,
+        assignment: mj_tui::PaneAssignment,
+        dashboard: &mj_tui::DashboardState,
+        pane: PaneId,
+        session: &str,
+    ) -> bool {
+        self.accepts(generation, Some(session))
+            && dashboard.pane_assignment(pane) == Some(assignment)
+            && dashboard.pane_session(pane) == Some(session)
+    }
+
+    /// Observe the authoritative pane binding before starting or accepting work.
+    pub(super) fn bind(&mut self, assignment: Option<mj_tui::PaneAssignment>) -> bool {
+        if self.assignment == assignment {
+            return false;
+        }
+        self.cancel();
+        self.selection = None;
+        self.assignment = assignment;
+        true
+    }
+
     fn identity(&self, session_id: &str) -> Option<u64> {
         (self.selection.as_deref() == Some(session_id)).then_some(self.generation)
     }

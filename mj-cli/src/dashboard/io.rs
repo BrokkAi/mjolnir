@@ -111,6 +111,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         generation: u64,
+        assignment: mj_tui::PaneAssignment,
         /// The pane that asked for this conversation. A result whose pane has
         /// since moved on to another session is dropped.
         pane: mj_tui::tile_layout::PaneId,
@@ -752,19 +753,23 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ChatOpened {
                 generation,
+                assignment,
                 pane,
                 session_id,
                 result,
             } => {
                 // Ignore a late result after the pane that asked for it moved
                 // on (or the dashboard has shut down).
-                if !self
-                    .attachments
-                    .get(&pane)
-                    .is_some_and(|attachment| attachment.accepts(generation, Some(&session_id)))
-                    || self.dashboard.pane_session(pane) != Some(session_id.as_str())
-                    || self.opening_chat_sessions.get(&pane).map(String::as_str)
-                        != Some(session_id.as_str())
+                if !self.attachments.get(&pane).is_some_and(|attachment| {
+                    attachment.accepts_pane_result(
+                        generation,
+                        assignment,
+                        &self.dashboard,
+                        pane,
+                        &session_id,
+                    )
+                }) || self.opening_chat_sessions.get(&pane).map(String::as_str)
+                    != Some(session_id.as_str())
                 {
                     return;
                 }
@@ -813,9 +818,6 @@ impl DashboardContext {
                         // was in flight is handed over now.
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
-                        // The chat belongs to the pane that asked for it, not
-                        // to whichever pane has the focus now.
-                        self.dashboard.set_pane_session(pane, Some(&session_id));
                         self.dashboard.clear_notice();
                         self.acknowledge_visible_chats();
                     }
@@ -1459,7 +1461,10 @@ impl DashboardContext {
                 if let Some((host, size)) = registered.remembered_container_size {
                     self.controller.state.remember_container_size(&host, size);
                 }
-                self.dashboard.select_active_session(&session_id);
+                let activate = self.dashboard.launch_standby_capturing();
+                if activate {
+                    self.dashboard.select_active_session(&session_id);
+                }
                 self.resolve_project_sources();
                 let still_launching = self
                     .controller
@@ -1490,7 +1495,9 @@ impl DashboardContext {
                 // The next thing the person does with a launching session is
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.
-                self.dashboard.focus_prompt();
+                if activate {
+                    self.dashboard.focus_prompt();
+                }
                 let notice_name = self.session_notice_name(&session_id);
                 self.dashboard
                     .set_notice(format!("Launching {notice_name}…"));

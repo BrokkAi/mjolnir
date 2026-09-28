@@ -134,7 +134,8 @@ impl DashboardState {
     }
 
     fn empty_pin_panes(&self) -> impl Iterator<Item = PaneId> + '_ {
-        self.conversation_layout
+        self.navigation
+            .layout()
             .pane_ids()
             .into_iter()
             .filter(|pane| *pane != self.browse_pane() && self.pane_session(*pane).is_none())
@@ -746,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_commands_target_the_focused_pin_without_moving_the_list_cursor() {
+    fn prompt_commands_and_list_selection_follow_the_active_pin() {
         let mut d = dashboard_with_session(running_session());
         let pin = d.browse_pane();
         d.split_focused_pane(Direction::Horizontal, None).unwrap();
@@ -763,7 +764,7 @@ mod tests {
                 session_id: "session-1".into()
             }
         );
-        assert_eq!(d.selected_session_id(), Some("session-2"));
+        assert_eq!(d.selected_session_id(), Some("session-1"));
     }
 
     #[test]
@@ -772,7 +773,7 @@ mod tests {
         let pin = d.browse_pane();
         d.set_pane_session(pin, Some("session-1"));
         d.split_focused_pane(Direction::Horizontal, None).unwrap();
-        d.selected_session_id = None;
+        d.set_current_session(None);
         assert_eq!(
             d.toggle_session_pin("session-1".into()),
             DashboardAction::UnpinSession {

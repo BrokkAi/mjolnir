@@ -184,6 +184,90 @@ fn populated_dashboard() -> DashboardState {
     DashboardState::new(config, state, std::collections::BTreeMap::new())
 }
 
+#[tokio::test]
+async fn delayed_attachment_cannot_land_after_a_to_b_to_a_or_layout_restore() {
+    let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
+    let pane = dashboard.focused_pane();
+    let assignment = dashboard.pane_assignment(pane).unwrap();
+    let mut attachment = attachment::SessionAttachment::default();
+    attachment.bind(Some(assignment));
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let (report, received) = tokio::sync::oneshot::channel();
+    attachment.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async move { wait.await.map_err(|error| error.to_string()) },
+        move |generation, result| {
+            report.send((generation, result)).unwrap();
+        },
+    );
+    // No supervisor pass occurs between these input events and the reply.
+    dashboard.select_active_session("session-2");
+    dashboard.select_active_session("session-1");
+    finish.send(()).unwrap();
+    let (generation, result) = received.await.unwrap();
+    assert!(result.is_ok());
+    assert!(!attachment.accepts_pane_result(generation, assignment, &dashboard, pane, "session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+
+    // A new attempt for the current assignment can complete, even if another
+    // pane became active while it was loading.
+    let current = dashboard.pane_assignment(pane).unwrap();
+    attachment.bind(Some(current));
+    let (report, received) = tokio::sync::oneshot::channel();
+    attachment.spawn(
+        "session-1",
+        Duration::from_secs(5),
+        async { Ok(()) },
+        move |generation, _| {
+            report.send(generation).unwrap();
+        },
+    );
+    let generation = received.await.unwrap();
+    let other = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    assert!(attachment.accepts_pane_result(generation, current, &dashboard, pane, "session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.focused_pane(), other);
+
+    let saved = dashboard.export_conversation_layout();
+    dashboard.set_active_workspace(Some("another-workspace".into()));
+    dashboard.set_active_workspace(Some("default".into()));
+    assert_eq!(dashboard.export_conversation_layout(), saved);
+    assert!(!attachment.accepts_pane_result(generation, current, &dashboard, pane, "session-1"));
+    let restored = dashboard.pane_assignment(pane).unwrap();
+    dashboard.close_pane(pane);
+    assert!(!attachment.accepts_pane_result(generation, restored, &dashboard, pane, "session-1"));
+}
+
+#[tokio::test]
+async fn selecting_a_loading_session_never_renders_the_previous_chat() {
+    let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
+    let mut chats = BTreeMap::from([("session-1".to_owned(), open_test_chat("session-1"))]);
+    dashboard.select_active_session("session-2");
+    let pane = dashboard.focused_pane();
+    dashboard.set_opening_session(Some("session-2"));
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let mut drawn = Vec::new();
+    terminal
+        .draw(|frame| {
+            drawn = render_combined(
+                frame,
+                &mut dashboard,
+                &mut chats,
+                &BTreeMap::from([(pane, "session-2".to_owned())]),
+                false,
+            );
+        })
+        .unwrap();
+    assert!(!drawn.iter().any(|id| id == "session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.current_session_id(), Some("session-2"));
+}
+
 #[test]
 fn switching_sessions_preserves_drafts_through_the_rendered_attach_composer() {
     let mut dashboard = populated_dashboard();
@@ -1346,6 +1430,7 @@ fn the_read_chord_marks_all_read_from_the_targets_pane() {
 #[test]
 fn the_cancel_chord_cancels_the_selected_sessions_launch_from_the_composer() {
     let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
     dashboard.focus_sessions();
     let session_id = dashboard
         .selected_session_id()
@@ -1399,6 +1484,7 @@ fn the_cancel_chord_inside_the_target_dialog_cancels_the_running_test() {
 #[test]
 fn plain_x_no_longer_cancels_anything() {
     let mut dashboard = populated_dashboard();
+    dashboard.select_active_session("session-1");
     dashboard.focus_sessions();
     let session_id = dashboard
         .selected_session_id()
@@ -1713,10 +1799,9 @@ fn the_startup_pick_waits_for_its_summaries_then_gives_up() {
     assert!(stalled.ready(start + STARTUP_SESSION_WAIT));
 }
 
-/// Nothing may open a conversation on the surface's behalf until the pick has
-/// run. `follow_selected_session` reads this: before the pick, the highlighted
-/// row is only where the clamp left it, and following it would move the
-/// keyboard out of the pane a restored arrangement named.
+/// Automatic attachments wait for startup to restore the saved arrangement
+/// or choose a fresh conversation. User input cancels that choice and lets
+/// attachment reconciliation follow the user's assignments immediately.
 #[test]
 fn the_pick_holds_the_automatic_follow_back_until_it_has_run() {
     let start = std::time::Instant::now();

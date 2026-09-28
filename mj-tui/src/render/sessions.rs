@@ -248,7 +248,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 // The selection drives which conversation is on screen, so
                 // the caret marks it in both forms.
                 let selected = options.show_selection
-                    && dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
+                    && dashboard.selected_session_id() == Some(session.id.as_str());
                 let glyphs = theme::glyphs();
                 let symbol = dashboard
                     .transition_kind(&session.id)
@@ -345,6 +345,9 @@ pub(crate) fn drawn_session_rows_with_options(
                         spinner,
                         width,
                     );
+                }
+                if dashboard.session_outside_filter(session) {
+                    lines.push(Line::styled("  Outside filter", theme::muted()));
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {

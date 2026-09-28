@@ -44,6 +44,8 @@ use crate::workspaces::{WorkspaceControlFocus, WorkspaceManager};
 
 mod actions;
 mod combined;
+mod conversation_navigation;
+pub use conversation_navigation::PaneAssignment;
 mod component_events;
 mod dialogs;
 mod go;
@@ -797,11 +799,6 @@ pub struct DashboardState {
     /// session id to key a standby by yet. It is adopted by the new session's
     /// standby as soon as the launch registers.
     pub(crate) launch_standby: Option<ChatState>,
-    /// The session the Sessions pane had selected when the launch standby
-    /// began. Keys go to the launch standby only while the selection is still
-    /// that one, so moving to another session hands its conversation the
-    /// keyboard back without losing the typed text.
-    pub(crate) launch_standby_anchor: Option<String>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
@@ -817,14 +814,6 @@ pub struct DashboardState {
     /// The New wizard opened and the stored mount and project history should
     /// be read again, since sessions created after startup add to it.
     pub(crate) mount_history_refresh_pending: bool,
-    /// Selection anchor for the Sessions pane, by id rather than position: the
-    /// pane shows different row sets at different explicit sizes, so a
-    /// position could silently point at a different session after resizing.
-    pub(crate) selected_session_id: Option<String>,
-    /// The session a refresh took the selection away from, and the row the
-    /// clamp put in its place. Nobody chose that row, so a launch finishing
-    /// for the displaced session may still take the selection back (R4-11).
-    pub(crate) displaced_selection: Option<(String, Option<String>)>,
     pub(crate) command_session_override: Option<String>,
     /// Persisted scroll offsets for the three list panes, so each scrolls only
     /// far enough to keep its selection visible instead of jumping back to the
@@ -841,15 +830,10 @@ pub struct DashboardState {
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
-    /// The conversation area's tiled panes. The focused pane holds the
-    /// conversation the keyboard belongs to; every pane may show a session.
-    pub(crate) conversation_layout: tile_layout::TileLayout,
-    /// The session each conversation pane shows. A pane with no entry is
-    /// empty, which is what an unfilled split starts as.
-    pub(crate) pane_sessions: BTreeMap<tile_layout::PaneId, String>,
+    /// The active pane and its assignment are the sole session selection.
+    navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
-    pub(crate) pending_browse: Option<String>,
     pub(crate) navigation_session: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
@@ -1013,7 +997,6 @@ pub struct DashboardState {
 
 #[derive(Debug, Clone)]
 struct WorkspaceViewState {
-    selected_session_id: Option<String>,
     sessions_scroll: usize,
     targets_scroll: usize,
     quota_scroll: usize,
@@ -1028,7 +1011,6 @@ struct WorkspaceViewState {
 impl WorkspaceViewState {
     fn from_dashboard(dashboard: &DashboardState) -> Self {
         Self {
-            selected_session_id: dashboard.selected_session_id.clone(),
             sessions_scroll: dashboard.sessions_scroll.get(),
             targets_scroll: dashboard.targets_scroll.get(),
             quota_scroll: dashboard.quota_scroll.get(),
@@ -1094,15 +1076,13 @@ impl DashboardState {
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,
-            launch_standby_anchor: None,
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
             mount_history_refresh_pending: false,
-            selected_session_id: None,
-            displaced_selection: None,
+
             command_session_override: None,
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
@@ -1112,11 +1092,10 @@ impl DashboardState {
             quota_index: 0,
             focus: Focus::Sessions,
             pane_sizes: PaneSizes::default(),
-            conversation_layout: tile_layout::TileLayout::new().0,
-            pane_sessions: BTreeMap::new(),
+            navigation: conversation_navigation::ConversationNavigation::default(),
             browse_pane: None,
             pin_ids: BTreeMap::new(),
-            pending_browse: None,
+
             navigation_session: None,
             pane_menu: None,
             conversation_zoomed: false,

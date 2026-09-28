@@ -151,7 +151,7 @@ impl DashboardState {
                         && self.state.sessions.contains_key(&id)
                     {
                         self.focus_sessions();
-                        self.selected_session_id = Some(id);
+                        self.select_active_session(&id);
                         self.begin_session_palette();
                     }
                     DashboardAction::None
