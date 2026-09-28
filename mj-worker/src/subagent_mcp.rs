@@ -632,7 +632,8 @@ mod tests {
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("parks it"), "{spawn}");
-        assert!(SERVER_INSTRUCTIONS.contains("send_input starts a parked child again"));
+        assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
+        assert!(SERVER_INSTRUCTIONS.contains("send_input resumes one"));
     }
 
     #[test]
@@ -657,10 +658,10 @@ mod tests {
         // Each wait call resends the parent's whole context, so the parent is
         // told to wait long and once, and to read details from files.
         for needed in [
-            "rather than polling",
-            "largest timeout",
+            "avoid short polling",
+            "default maximum timeout",
             "report_dir",
-            "do not redo",
+            "instead of duplicating work",
         ] {
             assert!(
                 SERVER_INSTRUCTIONS.contains(needed),
