@@ -186,6 +186,8 @@ pub(crate) struct SetupDialog {
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
+    /// The notice describes the build cache page and goes when the page does.
+    build_cache_notice: bool,
     /// The host-resolved values behind the blank fields of the build cache
     /// page being viewed, keyed by the settings they were resolved from.
     build_cache_preview: Option<BuildCachePreviewState>,
@@ -786,6 +788,7 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             notice: None,
+            build_cache_notice: false,
             build_cache_preview: None,
             archive_space_preview: None,
             preferred_width: preferred.width,
@@ -907,6 +910,10 @@ impl SetupDialog {
             review.prepare();
             return;
         }
+        if self.build_cache_notice && self.build_cache_page().is_none() {
+            self.notice = None;
+            self.build_cache_notice = false;
+        }
         use SetupControl::*;
         if let Some(search) = &self.search {
             let len = search.matches.len();
@@ -978,6 +985,7 @@ impl SetupDialog {
             if let Some(reason) = self.build_cache_blocked() {
                 let notice = format!("The build cache cannot be turned on here: {reason}");
                 self.notice = Some(notice);
+                self.build_cache_notice = true;
                 return;
             }
             *self.draft.pointer_mut(&pointer(&path)).unwrap() =
@@ -992,6 +1000,7 @@ impl SetupDialog {
                 "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
                     .into(),
             );
+            self.build_cache_notice = true;
             return;
         }
         if value.is_object() || value.is_array() {
@@ -1249,6 +1258,7 @@ impl SetupDialog {
             result: BuildCachePreviewResult::Resolving,
         });
         self.notice = Some("Resolving the build cache defaults on the machine…".into());
+        self.build_cache_notice = true;
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
@@ -2258,6 +2268,7 @@ impl DashboardState {
             },
         });
         dialog.notice = Some(notice);
+        dialog.build_cache_notice = true;
         dialog.prepare();
     }
 

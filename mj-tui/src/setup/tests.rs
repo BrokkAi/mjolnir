@@ -1738,6 +1738,33 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         );
     }
 
+    // The status line belongs to this page: leaving it takes the line along.
+    let shown = setup_dialog_mut(&mut dashboard.mode)
+        .expect("settings")
+        .notice
+        .clone();
+    assert!(
+        shown
+            .as_deref()
+            .is_some_and(|notice| notice.contains("build cache")),
+        "{shown:?}"
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+    let left = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        left.notice, None,
+        "the build cache status outlived its page"
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "build_cache")
+        .unwrap();
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+
     // A host that cannot support the cache cannot be overruled from here: the
     // row is disabled, so Enter on it does nothing.
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
