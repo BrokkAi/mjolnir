@@ -392,3 +392,7 @@ A Claude session whose native (Task) child started background Bash work showed o
 ### Validation of the fixed master (`060be89c` code, 12:20)
 
 fmt clean; clippy clean; web unit tests 63/63; `cargo test` stopped at its first failing binary: `mj-worker` `acp::verdict_client::tests::continuous_overall_activity_does_not_postpone_or_invalidate_parent_check` (a 200 ms timing test that failed under the full parallel load and passes alone; on the launch campaign's flaky list). Rerun with `--no-fail-fast`; fix wave F13 makes the test deterministic. `bin-fixed` is built with `MJ_BUILD_REVISION=c37a3b45…` so the Linux binaries carry the same stamp as the Darwin worker built on the Mac from that commit (later commits on master are documentation only until F12/F13 land).
+
+## Re-verification run (12:35, `bin-fixed` from `c37a3b45`)
+
+`bin-fixed/SHA256SUMS-c37a3b45.txt`: `mj` `7042fe48…`, host worker `ad1cd780…`, Darwin worker `c44d1f12…` (built on the Mac from the same commit via a git bundle), musl worker `8fc78a38…`; all stamped `2.23.3+c37a3b45…` (the Linux binaries with `MJ_BUILD_REVISION` pinned, since master's later commits are documentation). Five Sonnet workers: RV-A fake labs (RV-5, RV-7, RV-8, RV-9, RV-14; seeds 4401 and 4411 at 60 s), RV-B web (RV-10; seed 4402), RV-C real Claude on `tf-i1` (RV-2, RV-3, RV-4, RV-11, RV-13), RV-D real Codex and Grok on `tf-i2` (RV-1, RV-6), RV-E the Mac on `tf-mac` (RV-5, RV-12). Evidence under `evidence/rv-<track>/`.
