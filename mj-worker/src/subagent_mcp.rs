@@ -24,7 +24,7 @@ const SERVER_INSTRUCTIONS: &str = "spawn returns a child_session_id immediately,
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{SERVER_INSTRUCTIONS} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS."
+        "{SERVER_INSTRUCTIONS} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost."
     )
 });
 
@@ -650,6 +650,10 @@ mod tests {
         assert!(spawn.contains("parks it"), "{spawn}");
         assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
         assert!(SERVER_INSTRUCTIONS.contains("send_input resumes one"));
+        // Codex code mode runs a wait inside an exec script that yields while
+        // the wait blocks; the S30 parents then polled that script every second.
+        assert!(CODEX_SERVER_INSTRUCTIONS.contains("longest yield"));
+        assert!(!SERVER_INSTRUCTIONS.contains("longest yield"));
     }
 
     #[test]
