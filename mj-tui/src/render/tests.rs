@@ -1394,6 +1394,16 @@ fn current_agent_excerpt_never_repeats_an_old_answer() {
 }
 
 #[test]
+fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
+    let asking = SessionDetail {
+        latest_agent_activity_after_last_user: Some("request_user_input".into()),
+        pending_elicitations: vec![crate::test_support::question("session-1")],
+        ..SessionDetail::default()
+    };
+    assert_eq!(current_agent_excerpt(&asking), Some("Choose a path"));
+}
+
+#[test]
 fn marking_all_read_removes_the_unread_tint_from_an_idle_session() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, vec![agent_message(4, "unread response")]);

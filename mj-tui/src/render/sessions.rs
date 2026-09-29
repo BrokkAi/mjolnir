@@ -901,6 +901,11 @@ pub(crate) fn session_display_clock(
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.
 pub(crate) fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
+    // A question waiting for an answer is what the session is doing now; the
+    // tool call that raised it only carries the harness's internal tool name.
+    if let Some(question) = detail.pending_elicitations.first() {
+        return Some(&question.message);
+    }
     if detail.last_agent_message_follows_last_user {
         detail
             .last_agent_message

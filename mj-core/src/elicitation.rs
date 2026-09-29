@@ -73,6 +73,7 @@ impl ElicitationRequest {
             .map(|(field_id, schema)| parse_field(field_id, schema, required.contains(field_id)))
             .collect::<Result<Vec<_>>>()?;
         pair_claude_custom_answers_by_name(&mut fields);
+        title_untitled_question_from_message(&message, &mut fields);
         Ok(Self {
             id: id.into(),
             message,
@@ -380,6 +381,26 @@ pub enum ElicitationValue {
     Number(f64),
     Boolean(bool),
     StringArray(Vec<String>),
+}
+
+/// Muse sends one question per form, names its field `q0`, and puts the
+/// question in the message as "Header: question". Claude puts the header in
+/// the field title, so a form titled with its own id borrows the header from
+/// the message, and the form reads the same for both.
+fn title_untitled_question_from_message(message: &str, fields: &mut [ElicitationField]) {
+    let [field] = fields else {
+        return;
+    };
+    if field.title != field.id {
+        return;
+    }
+    if let Some((header, _)) = message.split_once(": ")
+        && !header.trim().is_empty()
+        && header.chars().count() <= 40
+        && !header.contains('\n')
+    {
+        field.title = header.trim().to_owned();
+    }
 }
 
 /// Pairs each AskUserQuestion "Other" field with its question by name.
@@ -749,6 +770,36 @@ mod tests {
             request.fields[1].custom_answer_for.as_deref(),
             Some("question_0")
         );
+    }
+
+    #[test]
+    fn an_untitled_single_question_takes_the_header_from_its_message() {
+        let request = |message: &str, title: Option<&str>| {
+            let mut field = json!({
+                "type": "string",
+                "oneOf": [{"const": "Red", "title": "Red"}]
+            });
+            if let Some(title) = title {
+                field["title"] = json!(title);
+            }
+            ElicitationRequest::from_acp_params(
+                "elicit-muse",
+                json!({
+                    "sessionId": "session-1",
+                    "mode": "form",
+                    "message": message,
+                    "requestedSchema": {"type": "object", "properties": {"q0": field}}
+                }),
+            )
+            .unwrap()
+        };
+        let muse = request("Color: Which colour do you prefer?", Some("q0"));
+        assert_eq!(muse.fields[0].title, "Color");
+        assert_eq!(muse.fields[0].id, "q0", "the answer is still keyed by id");
+        assert_eq!(request("Color: Which?", None).fields[0].title, "Color");
+        // A real title, or a message with no header, is left alone.
+        assert_eq!(request("Color: Which?", Some("Hue")).fields[0].title, "Hue");
+        assert_eq!(request("Which colour?", None).fields[0].title, "q0");
     }
 
     #[test]
