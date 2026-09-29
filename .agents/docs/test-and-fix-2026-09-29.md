@@ -497,3 +497,7 @@ The coordinator's reading was wrong: nothing was left set by the harness-started
 ### Final build and validation (16:20)
 
 `4a5ba374` (everything through F19): `cargo test --no-fail-fast` 42 binaries, 0 failures; web unit tests 67/67; fmt and clippy clean (interim run at `c138f70d` plus F19's own). `bin-fixed2/` built from it in one go: Linux binaries with `MJ_BUILD_REVISION` pinned, the Darwin worker on the Mac from the bundled commit; `bin-fixed2/SHA256SUMS-4a5ba374.txt`. F18 (`e11e0ca5`, `fb1ac763`, `ec08a30c`) cherry-picked after the run; its crates re-validated on master. Final recheck on `bin-fixed2`: RC-Mac (RVE-1 destroy first try, Change Workspace live, the session menu's facts and Interrupt all) and RC-Linux (Grok resume on `tf-i2`, Filter search live on a fake lab, web preselect and status, `mj destroy` then `mj daemon restart`).
+
+### User request (16:35): Sessions filter label order
+
+`Sessions · idle · 8 hidden ×` becomes `Sessions · 8 hidden · idle ×` (count first, then state and search text, then the clear glyph), with the `×` hit region kept correct. Fix wave F20 (Sonnet).
