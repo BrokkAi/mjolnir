@@ -1181,6 +1181,10 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
 
 #[test]
 fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
+    if !in_isolated_store("force_destroy_aborts_and_keeps_the_record_when_the_target_survives") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
@@ -1202,6 +1206,7 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
             ..State::default()
         },
     };
+    crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let deleted = RefCell::new(Vec::new());
 
     let error = controller
@@ -1229,6 +1234,13 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
         "a surviving target must keep the recovery archive"
     );
     assert!(deleted.into_inner().is_empty());
+    // The record is being destroyed: it must stop being polled, so the daemon
+    // does not keep reconnecting to a worker the destroy stopped (I2-9). It
+    // keeps its target, so the next destroy finishes the removal.
+    let record = &controller.state.sessions[session_id];
+    assert_eq!(record.state, SessionState::Error);
+    assert!(record.target.is_some());
+    assert!(!crate::pollers::session_target_is_pollable(record));
 }
 
 #[test]

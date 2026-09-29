@@ -39,6 +39,26 @@ pub fn interrupted_suspend_session_ids(controller: &Controller) -> Vec<String> {
         .collect()
 }
 
+/// Sessions whose destroy failed and stopped partway: `Error`, still holding
+/// their target, with the destruction failure recorded by
+/// `record_lifecycle_failure`. The person asked for them to be destroyed, so
+/// startup finishes the removal (the next `mj destroy` does the same).
+pub fn interrupted_destroy_session_ids(controller: &Controller) -> Vec<String> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.state == SessionState::Error
+                && session.target.is_some()
+                && session.last_error.as_deref().is_some_and(|error| {
+                    error.starts_with(mj_core::state::DESTRUCTION_FAILURE_PREFIX)
+                })
+        })
+        .map(|session| session.id.clone())
+        .collect()
+}
+
 /// Why a record left in an in-flight lifecycle state has nobody to finish it,
 /// in words the user reads in `mj sessions` and the TUI.
 ///

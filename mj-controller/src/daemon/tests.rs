@@ -2182,6 +2182,70 @@ async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
         .expect("a cancelled-and-finished lifecycle lets force destruction proceed");
 }
 
+/// A second destroy of a session that is already being destroyed (a person's
+/// `mj destroy` of a sub-agent while its parent's destroy is destroying it)
+/// waits for that teardown instead of cancelling it half way (I2-9).
+#[tokio::test]
+async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cancelling_it() {
+    let state = test_runtime_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
+            let release = release.clone();
+            move |_state, _session_id, cancelled| async move {
+                release.notified().await;
+                assert!(
+                    !cancelled.load(Ordering::Acquire),
+                    "a second destroy must not cancel a teardown in progress"
+                );
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    let preempt_state = state.clone();
+    let waited =
+        tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waited.is_finished(), "the second destroy waits");
+    assert!(
+        !state
+            .owner()
+            .lifecycle
+            .get("session-1")
+            .expect("lifecycle entry")
+            .cancelled
+            .load(Ordering::Acquire)
+    );
+
+    release.notify_one();
+    waited.await.expect("wait task").expect("teardown finished");
+}
+
+/// A teardown that never finishes is still cancelled, after the wait: force
+/// destruction remains the escape hatch for a wedged operation.
+#[tokio::test(start_paused = true)]
+async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
+            |_state, _session_id, cancelled| async move {
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    state
+        .preempt_active_lifecycle("session-1")
+        .await
+        .expect("the wedged teardown is cancelled and stops");
+}
+
 #[tokio::test(start_paused = true)]
 async fn force_destruction_preemption_times_out_without_destroying() {
     let state = test_runtime_state();

@@ -555,7 +555,7 @@ impl RuntimeState {
     /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
     /// under.
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let mut result = {
+        let (mut result, tearing_down) = {
             let mut lifecycle_owner = self.owner();
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let Some(active) = lifecycle.get_mut(session_id) else {
@@ -564,22 +564,29 @@ impl RuntimeState {
             if !active.is_running() {
                 return Ok(());
             }
-            active.request_cancel();
-            active.result.clone()
+            let tearing_down = active.kind.is_teardown();
+            // A teardown already under way is the fact this destroy wants, so
+            // it is waited for, not cancelled half way: cancelling it is what
+            // left a sub-agent's destroy "cancelled before its parent" when
+            // the parent's destroy and the person's own destroy of the child
+            // overlapped. Only one that outlives the wait is cancelled below.
+            if !tearing_down {
+                active.request_cancel();
+            }
+            (active.result.clone(), tearing_down)
         };
-        let finished = tokio::time::timeout(FORCE_DESTROY_PREEMPT_TIMEOUT, async {
-            loop {
-                if result.borrow().is_some() {
-                    return Ok(());
-                }
-                if result.changed().await.is_err() {
-                    return Err(());
+        let mut finished = wait_for_lifecycle_result(&mut result).await;
+        if finished.is_err() && tearing_down {
+            {
+                let mut lifecycle_owner = self.owner();
+                if let Some(active) = lifecycle_owner.lifecycle.get_mut(session_id) {
+                    active.request_cancel();
                 }
             }
-        })
-        .await;
+            finished = wait_for_lifecycle_result(&mut result).await;
+        }
         match finished {
-            // The loop only returns once the watch holds a result or its
+            // The wait only returns once the watch holds a result or its
             // sender died; distinguish those two, and the timeout separately.
             Ok(Ok(())) => Ok(()),
             Ok(Err(())) => bail!(
@@ -676,4 +683,22 @@ impl RuntimeState {
         .await?;
         Ok(())
     }
+}
+
+/// Wait up to [`FORCE_DESTROY_PREEMPT_TIMEOUT`] for a lifecycle to publish its
+/// result. `Ok(Err(()))` means the task ended without one.
+async fn wait_for_lifecycle_result(
+    result: &mut LifecycleWatch,
+) -> std::result::Result<std::result::Result<(), ()>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(FORCE_DESTROY_PREEMPT_TIMEOUT, async {
+        loop {
+            if result.borrow().is_some() {
+                return Ok(());
+            }
+            if result.changed().await.is_err() {
+                return Err(());
+            }
+        }
+    })
+    .await
 }

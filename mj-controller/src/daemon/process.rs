@@ -312,6 +312,33 @@ pub(super) async fn run_daemon_runtime(
         });
         interrupted_close_tasks.push(interrupted_close_task);
     }
+    // A destroy that failed left its record in `Error` with the target still
+    // present; it is finished the way `mj destroy` finishes it. The branch is
+    // kept, because whether to delete it was that command's choice and is not
+    // recorded.
+    for session_id in interrupted_destroy_session_ids(&controller) {
+        let recovery_state = state.clone();
+        let recovery_shutdown = cancellation.clone();
+        let updates = interrupted_close_tx.clone();
+        let upgrade_work = startup_work.clone();
+        interrupted_close_tasks.push(tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
+            let result = tokio::select! {
+                result = recovery_state.force_destroy_session(
+                    session_id.clone(),
+                    crate::daemon::BranchDisposition::Keep,
+                ) => result,
+                () = recovery_shutdown.cancelled() => return,
+            }
+            .map(|()| crate::pollers::LifecycleSuccess::ForceDestroyed)
+            .map_err(|error| format!("{error:#}"));
+            let _ = updates.send(crate::pollers::LifecycleUpdate {
+                session_id,
+                result,
+                deferred_cleanup: false,
+            });
+        }));
+    }
     // Whatever is still in an in-flight lifecycle state now has no owner: the
     // moves, the interrupted closes, and the checkpointing rows above are
     // every operation that legitimately resumes. The list comes from the

@@ -205,6 +205,27 @@ fn a_parked_sub_agent_stays_out_of_live_target_pollers_and_startup_repair() {
     assert!(unowned_interrupted_lifecycles(&parked, &Default::default()).is_empty());
 }
 
+/// I2-9: a destroy that failed leaves the session `Error` with its target and
+/// the recorded destruction failure; startup finishes it, and nothing else in
+/// `Error` is destroyed on the person's behalf.
+#[test]
+fn startup_finishes_only_destroys_that_failed() {
+    let mut failed = podman_controller(SessionState::Error);
+    let id = "0123456789abcdef0123456789abcdef";
+    failed.state.sessions.get_mut(id).unwrap().last_error = Some(format!(
+        "{}; the daemon log records the reason",
+        mj_core::state::DESTRUCTION_FAILURE_PREFIX
+    ));
+    assert_eq!(interrupted_destroy_session_ids(&failed).len(), 1);
+    failed.state.sessions.get_mut(id).unwrap().last_error = Some(format!(
+        "{}; the daemon log records the reason",
+        mj_core::state::CLOSE_FAILURE_PREFIX
+    ));
+    assert!(interrupted_destroy_session_ids(&failed).is_empty());
+    let running = podman_controller(SessionState::Running);
+    assert!(interrupted_destroy_session_ids(&running).is_empty());
+}
+
 /// R7-3: a bare target has no container to sample, so the resource poller
 /// has nothing to ask it. It must skip the session without a warning: the
 /// dashboard rebuilds these targets on every poll, and each bare session

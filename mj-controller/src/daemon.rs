@@ -50,8 +50,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, interrupted_suspend_session_ids, reserve_recovery_or_cancel,
-    spawn_image_refresher, unowned_interrupted_lifecycles,
+    dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
+    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -235,6 +235,18 @@ enum LifecycleKind {
 }
 
 impl LifecycleKind {
+    /// Whether this operation is a destroy's teardown of the session, which a
+    /// second destroy of the same session waits for instead of cancelling.
+    fn is_teardown(self) -> bool {
+        matches!(
+            self,
+            LifecycleKind::ForceDestroy
+                | LifecycleKind::DestroyStopped
+                | LifecycleKind::ArchiveStopped
+                | LifecycleKind::StopSubagent
+        )
+    }
+
     /// What a refusal calls this operation, so a person told that a session is
     /// busy learns which operation is holding it (#1010).
     fn label(self) -> &'static str {

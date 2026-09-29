@@ -1043,6 +1043,51 @@ impl Controller {
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
     ) -> Result<()> {
+        let result = self.force_destroy_session_steps(session_id, executor, branch, delete);
+        if result.is_err() {
+            self.settle_failed_destroy(session_id);
+        }
+        result
+    }
+
+    /// A destroy that stopped partway leaves a record whose worker it may have
+    /// stopped already. The destroy is the decision, so the record stops being
+    /// a live session: `Error` is not polled, so the daemon does not keep
+    /// reconnecting a relay proxy to the worker it stopped (I2-9). The target
+    /// stays recorded, and the next destroy finishes the removal.
+    fn settle_failed_destroy(&mut self, session_id: &str) {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return;
+        };
+        if !record.state.is_active() || record.state == SessionState::Error {
+            return;
+        }
+        let previous = record.clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        if let Err(error) = persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist the failed destroy",
+            &crate::database::save_lifecycle_session,
+        ) {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not record a failed destroy"
+            );
+        }
+    }
+
+    fn force_destroy_session_steps(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+        delete: impl Fn(&str) -> Result<()>,
+    ) -> Result<()> {
         let session = self
             .state
             .sessions
