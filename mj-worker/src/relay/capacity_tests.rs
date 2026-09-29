@@ -481,3 +481,73 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     assert_eq!(evidence, state.assessment.unwrap().evidence.unwrap());
     assert_eq!(restored.snapshot.assessment_context, state.context);
 }
+
+/// A routine checkpoint is Mjolnir's housekeeping, not user work, so it keeps
+/// a pending retry assessment and, once assessed, the armed retry (F24).
+#[test]
+fn a_routine_checkpoint_keeps_the_pending_assessment_and_the_armed_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    start(&mut relay, "original-prompt");
+    finish(
+        &mut relay,
+        "original-prompt",
+        "temporary service failure",
+        "error",
+    );
+    let identity = relay.retry_assessment_identity();
+    assert!(identity.is_some());
+    ready_checkpoint(&mut relay, "routine-checkpoint-1");
+    assert!(relay.operational_state().retry_assessment_pending);
+    assert_eq!(relay.retry_assessment_identity(), identity);
+    submit_relay(
+        &mut relay,
+        "release-1",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "routine-checkpoint-1".into(),
+        },
+    );
+    assess(&mut relay, true);
+    let retry = relay.operational_state().capacity_retry.unwrap();
+    ready_checkpoint(&mut relay, "routine-checkpoint-2");
+    assert_eq!(relay.operational_state().capacity_retry, Some(retry));
+}
+
+/// Older journals hold a `RetryAssessmentStarted` record, the durable form of
+/// a turn that ended on a capacity refusal. A routine checkpoint must not
+/// drop it (F24).
+#[test]
+fn a_routine_checkpoint_keeps_a_journaled_retry_assessment() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    start(&mut relay, "original-prompt");
+    finish(&mut relay, "original-prompt", "temporary failure", "error");
+    let context = mj_transcript::turn_context::TurnContext::default();
+    context.reset("Implement");
+    let evidence = context.evidence(
+        HarnessKind::Codex,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &Default::default(),
+        0,
+    );
+    relay
+        .record_observation(RelayObservation::RetryAssessmentStarted {
+            command_id: "original-prompt".into(),
+            evidence: Box::new(evidence),
+        })
+        .unwrap();
+    let pending = relay.snapshot.retry_assessment.clone();
+    assert!(pending.is_some());
+    ready_checkpoint(&mut relay, "routine-checkpoint");
+    assert_eq!(relay.snapshot.retry_assessment, pending);
+    // A user prompt is still real work and still supersedes it.
+    submit_relay(
+        &mut relay,
+        "release-routine-checkpoint",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "routine-checkpoint".into(),
+        },
+    );
+    submit_relay(&mut relay, "new-prompt", prompt("Something else"));
+    assert!(relay.snapshot.retry_assessment.is_none());
+}

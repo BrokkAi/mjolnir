@@ -297,11 +297,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if cancels_capacity_retry(command)
                 || matches!(
                     command,
-                    RelayCommand::CancelTurnFor { .. }
-                        | RelayCommand::ClearContext
-                        | RelayCommand::BeginCheckpoint { .. }
+                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ClearContext
                 )
             {
+                // A checkpoint barrier is housekeeping, so it leaves a pending
+                // retry assessment alone, as it leaves a quota recovery (F24).
                 snapshot.retry_assessment = None;
             }
             if cancels_capacity_retry(command) {
