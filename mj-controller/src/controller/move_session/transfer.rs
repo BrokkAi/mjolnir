@@ -95,6 +95,38 @@ mv -f -- "$temporary" "$1"
     Ok(())
 }
 
+/// Options for every Move rsync. `--protect-args` sends paths inside the rsync
+/// protocol, so the namespace wrapper passes paths with spaces unchanged. The
+/// preflight probes these options, so an rsync that rejects one blocks Move.
+const RSYNC_TRANSFER_OPTIONS: [&str; 6] = [
+    "--recursive",
+    "--times",
+    "--perms",
+    "--protect-args",
+    "--partial",
+    "--partial-dir=.move-partial",
+];
+
+/// Why an rsync failed the probe. macOS ships openrsync, or rsync 2.6.9 on
+/// older releases, and neither accepts `--protect-args`.
+const RSYNC_REQUIREMENT: &str = "Move needs rsync 3.0 or newer, which accepts --protect-args; \
+the rsync that ships with macOS does not (install one with `brew install rsync`)";
+
+/// Rsync arguments that succeed only if rsync accepts every transfer option.
+/// `--version` makes rsync exit once it has parsed them.
+fn rsync_probe_arguments() -> impl Iterator<Item = String> {
+    RSYNC_TRANSFER_OPTIONS
+        .into_iter()
+        .chain(["--version"])
+        .map(String::from)
+}
+
+fn rsync_probe() -> Vec<String> {
+    std::iter::once("rsync".into())
+        .chain(rsync_probe_arguments())
+        .collect()
+}
+
 /// Rsync's remote shell is the existing locator command, including its SSH
 /// session lease and container namespace. The remote endpoint sees only Move
 /// staging. Partial files belong to this operation and survive retry.
@@ -108,14 +140,7 @@ fn copy_workspace(
     std::fs::create_dir_all(local)?;
     let source = format!("{}/", if upload { local } else { remote }.display());
     let destination = format!("{}/", if upload { remote } else { local }.display());
-    let mut args = vec![
-        "--recursive".into(),
-        "--times".into(),
-        "--perms".into(),
-        "--protect-args".into(),
-        "--partial".into(),
-        "--partial-dir=.move-partial".into(),
-    ];
+    let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
     let base = targets::locator_command(backend, vec!["rsync".into()]);
     let lease = base.open_ssh_session(executor)?;
     let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
@@ -362,18 +387,19 @@ impl Controller {
             },
         )?)?;
         for command in [
-            CommandSpec::new("rsync", ["--version"]).purpose("check controller Move transport"),
+            CommandSpec::new("rsync", rsync_probe_arguments())
+                .purpose("check controller Move transport"),
             targets::command_on_locator(
                 &layout.backend,
                 id,
-                vec!["rsync".into(), "--version".into()],
+                rsync_probe(),
                 "check source Move transport",
             )?,
         ] {
             match executor.execute(&command) {
                 Ok(output) if output.status == 0 => {}
                 Ok(output) => assessment.blockers.push(format!(
-                    "{}: {}",
+                    "{}: {RSYNC_REQUIREMENT}: {}",
                     command.purpose,
                     String::from_utf8_lossy(&output.stderr)
                 )),
@@ -463,17 +489,18 @@ impl Controller {
         };
         let mut arguments =
             if let (Some(engine), Some(image)) = (destination_engine, destination_image) {
-                vec![
+                let mut arguments = vec![
                     engine.into(),
                     "run".into(),
                     "--rm".into(),
                     "--entrypoint".into(),
                     "rsync".into(),
                     image.into(),
-                    "--version".into(),
-                ]
+                ];
+                arguments.extend(rsync_probe_arguments());
+                arguments
             } else {
-                vec!["rsync".into(), "--version".into()]
+                rsync_probe()
             };
         let command = if let Some(ssh) = destination_ssh {
             targets::ssh_command_owned(&targets::SshTarget::from(ssh), arguments)
@@ -483,7 +510,7 @@ impl Controller {
         };
         match executor.execute(&command.purpose("check destination Move transport")) {
             Ok(output) if output.status == 0 => {},
-            Ok(output) => assessment.blockers.push(format!("Destination needs rsync before Move. Update the target image or install rsync there: {}", String::from_utf8_lossy(&output.stderr))),
+            Ok(output) => assessment.blockers.push(format!("Destination: {RSYNC_REQUIREMENT}. Update the target image or install rsync there: {}", String::from_utf8_lossy(&output.stderr))),
             Err(error) => assessment.blockers.push(format!("Destination transport check failed: {error:#}")),
         }
         let destination_ssh = destination_ssh.map(targets::SshTarget::from);

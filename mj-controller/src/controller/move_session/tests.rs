@@ -1273,6 +1273,107 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     assert_eq!(first.fingerprint, second.fingerprint);
 }
 
+/// The rsync that ships with macOS answers `--version` but rejects
+/// `--protect-args`, which every Move transfer passes.
+struct RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor);
+
+impl CommandExecutor for RsyncWithoutProtectArgs {
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.0.execute_with_stdin(command, input)
+    }
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let runs_rsync = command.program == "rsync" || command.args.iter().any(|a| a == "rsync");
+        if !runs_rsync {
+            return self.0.execute(command);
+        }
+        let (status, stdout, stderr): (i32, &[u8], &[u8]) =
+            if command.args.iter().any(|a| a == "--protect-args") {
+                (1, b"", b"rsync: unrecognized option `--protect-args'\n")
+            } else {
+                (0, b"openrsync: protocol version 29\n", b"")
+            };
+        Ok(CommandOutput {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        })
+    }
+}
+
+#[test]
+fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
+    let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args";
+    if !isolated_test_child(&test_name(short), "MJ_MOVE_RSYNC_PROBE_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let (_remote_parent, remote) =
+        crate::controller::test_support::network_remote_for(repository.path());
+    let home = tempfile::tempdir().unwrap();
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, home.path());
+    config
+        .bundles
+        .insert("project".into(), local_bundle(repository.path()));
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
+    session.bundle_id = "project".into();
+    session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(session_id),
+    });
+    let state = State {
+        sessions: [(session_id.into(), session)].into_iter().collect(),
+        ..State::default()
+    };
+    crate::database::save_state(&state).unwrap();
+    let controller = Controller { config, state };
+    let selection = mj_core::state::MoveSelection {
+        workspace: Default::default(),
+        clear_resource_allocation: false,
+        session_id: session_id.into(),
+        profile_id: Some("codex".into()),
+        target_template_id: Some("podman".into()),
+        additional_mounts: None,
+        resource_allocation: None,
+    };
+    let executor = RsyncWithoutProtectArgs(GitWithPodmanPreflightExecutor { remote });
+    let preparation = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(controller.prepare_move_session_controlled(selection.clone(), &executor))
+        .unwrap();
+
+    let assessment = preparation.workspace.expect("a workspace transfer");
+    for side in ["controller", "source", "Destination"] {
+        assert!(
+            assessment
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains(side)
+                    && blocker.contains("--protect-args")
+                    && blocker.contains("brew install rsync")),
+            "{side} rsync is not reported: {:?}",
+            assessment.blockers
+        );
+    }
+    assert!(
+        selection
+            .workspace
+            .validate(&assessment)
+            .unwrap_err()
+            .to_string()
+            .contains("--protect-args"),
+        "the transfer must refuse to start"
+    );
+}
+
 #[test]
 fn a_move_preparation_shows_queued_images_as_placeholders_without_their_bytes() {
     let mut queued = vec![mj_core::state::MaterializedQueuedPrompt {

@@ -374,6 +374,11 @@ which does not migrate a running process, installed packages, container layers,
 or files outside the declared workspace. Either way the old harness process
 stops, so running process memory is lost.
 
+A Move that rebuilds the environment copies the workspace with rsync, so the
+machine running Mjolnir, the source, and the destination each need rsync 3.0 or
+newer. The rsync that ships with macOS is older; install a current one with
+`brew install rsync`. Move checks every side before it interrupts the session.
+
 If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
 not retry in place. It releases the environment and leaves the session suspended
 with its verified checkpoint, and the UI offers retry or resume with the

@@ -38,6 +38,16 @@ jobs:
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
 
+    # Move transfers need rsync 3.0 or newer, and the rsync that ships with
+    # macOS rejects --protect-args. Users install the same formula.
+    - name: Install rsync
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+      run: |
+        brew install rsync
+        echo "$(brew --prefix rsync)/bin" >> "$GITHUB_PATH"
+        "$(brew --prefix rsync)/bin/rsync" --version
+
     # The runtime suite exercises Unix target paths, directory fsync, and Git
     # worktree byte preservation. This lane executes it on macOS.
     - name: Run tests
