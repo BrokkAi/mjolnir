@@ -208,6 +208,7 @@ pub(super) fn project_observation(
         RelayObservation::CommandCompleted {
             command_id,
             outcome,
+            command,
             ..
         } => {
             let mut queue = current.queued_prompts.clone();
@@ -354,9 +355,19 @@ pub(super) fn project_observation(
                 mj_core::relay::RelayCommandOutcome::Configured => {
                     mutation.config_results.push((command_id.clone(), None));
                 }
+                mj_core::relay::RelayCommandOutcome::Cancelled => {
+                    if matches!(
+                        command,
+                        Some(
+                            mj_core::relay::RelayCommandKind::CancelTurn
+                                | mj_core::relay::RelayCommandKind::Cancel
+                        )
+                    ) {
+                        end_cancelled_harness_turn(current, event, command_id, mutation);
+                    }
+                }
                 mj_core::relay::RelayCommandOutcome::GoalControlled
                 | mj_core::relay::RelayCommandOutcome::SessionModeSet
-                | mj_core::relay::RelayCommandOutcome::Cancelled
                 | mj_core::relay::RelayCommandOutcome::CheckpointCompleted
                 | mj_core::relay::RelayCommandOutcome::CheckpointReleased
                 | mj_core::relay::RelayCommandOutcome::RecoveryFloorAdvanced
@@ -725,6 +736,69 @@ pub(super) fn project_observation(
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
     Ok(())
+}
+
+/// A stop applied while the harness runs a turn of its own (a goal
+/// continuation, or work a background command woke). No prompt of ours is
+/// running, so no prompt completion will carry the cancellation: give the turn
+/// the same "Interrupted" row and cancelled outcome an ordinary turn gets
+/// (I2-8). A stop that lands on a prompt of ours, or on nothing, adds neither.
+fn end_cancelled_harness_turn(
+    current: &MaterializedSession,
+    event: &RelayEvent,
+    cancel_command_id: &str,
+    mutation: &mut MaterializedSessionMutation,
+) {
+    if current.active_turn.is_some()
+        || !matches!(
+            current.execution,
+            MaterializedExecutionState::Running { .. }
+        )
+    {
+        return;
+    }
+    let Some(start_position) = current
+        .transcript
+        .iter()
+        .rev()
+        .find(|item| {
+            item.stable_id
+                .starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
+        })
+        .map(|item| item.position)
+    else {
+        return;
+    };
+    let turn_id = mj_core::continuation::harness_turn_id(start_position);
+    // A second stop of the same turn changes nothing.
+    if current
+        .last_turn_outcome
+        .as_ref()
+        .is_some_and(|turn| turn.command_id == turn_id)
+    {
+        return;
+    }
+    push_system_with_id(
+        mutation,
+        event,
+        format!(
+            "{}{cancel_command_id}",
+            mj_core::transcript::TURN_INTERRUPTED_ITEM_PREFIX
+        ),
+        mj_core::transcript::TURN_INTERRUPTED_TEXT,
+    );
+    mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: turn_id,
+        accepted_ordinal: None,
+        turn_start_position: Some(start_position),
+        completed_ordinal: event.ordinal,
+        completed_at_ms: event.recorded_at_ms,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "Cancelled".into(),
+        },
+    });
 }
 
 pub(super) fn user_shell_item_id(command_id: &str) -> String {
