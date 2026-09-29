@@ -2087,6 +2087,24 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
+    fn profile_config(
+        &self,
+        profile: String,
+        model: Option<String>,
+        refresh: bool,
+    ) -> BoxFuture<'_, Result<mj_core::worker_launch::ProfileConfig>> {
+        Box::pin(async move {
+            match model {
+                Some(model) if !refresh => {
+                    self.profile_catalog
+                        .model_capabilities(profile, model)
+                        .await
+                }
+                model => crate::controller::profile_config::discover(profile, model, refresh).await,
+            }
+        })
+    }
+
     fn subagent_candidates(
         &self,
         parent_profile: String,

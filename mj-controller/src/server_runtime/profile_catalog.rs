@@ -93,6 +93,10 @@ impl ProfilesKey {
 /// shared per-profile discovery; tests substitute a hand-written probe.
 pub(crate) type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 
+/// Discovers what one profile offers with a named model, whose efforts can
+/// differ from the default model's. Tests answer it with their [`Probe`].
+type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
+
 /// Why a shared discovery failed. Every waiter receives a clone of the error,
 /// so it carries the formatted cause rather than the original error value.
 #[derive(Clone, Debug)]
@@ -156,6 +160,7 @@ impl Inner {
 pub(crate) struct ProfileCatalog {
     cancellation: CancellationToken,
     probe: Arc<Probe>,
+    model_probe: Arc<ModelProbe>,
     inner: Mutex<Inner>,
 }
 
@@ -170,15 +175,36 @@ impl ProfileCatalog {
                     profile, None, false,
                 ))
             }),
+            Arc::new(|profile, model| {
+                Box::pin(crate::controller::profile_config::discover(
+                    profile,
+                    Some(model),
+                    false,
+                ))
+            }),
         )
     }
 
-    fn build(cancellation: CancellationToken, probe: Arc<Probe>) -> Arc<Self> {
+    fn build(
+        cancellation: CancellationToken,
+        probe: Arc<Probe>,
+        model_probe: Arc<ModelProbe>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cancellation,
             probe,
+            model_probe,
             inner: Mutex::new(Inner::default()),
         })
+    }
+
+    /// What `profile` offers with `model`, discovered for that model.
+    pub(crate) async fn model_capabilities(
+        &self,
+        profile: String,
+        model: String,
+    ) -> Result<ProfileConfig> {
+        (self.model_probe)(profile, model).await
     }
 
     /// Adopt the configuration and warm the catalogue when it changed. The
@@ -381,7 +407,12 @@ impl ProfileCatalog {
 
     #[cfg(test)]
     pub(crate) fn with_probe(probe: Arc<Probe>) -> Arc<Self> {
-        Self::build(CancellationToken::new(), probe)
+        let model_probe = probe.clone();
+        Self::build(
+            CancellationToken::new(),
+            probe,
+            Arc::new(move |profile, _model| model_probe(profile)),
+        )
     }
 
     /// [`ProfileCatalog::sync`] without the spawn, so a test can await the
