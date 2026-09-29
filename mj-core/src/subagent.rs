@@ -636,6 +636,25 @@ pub fn is_handback_reminder(command_id: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('-'))
 }
 
+/// The command id of the handback reminder for the turn that finished at
+/// `completed_ordinal`. The id is deterministic so a reminder is sent at most
+/// once per turn, and [`reminded_turn_ordinal`] reads it back.
+#[must_use]
+pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
+    format!("{HANDBACK_REMINDER_PREFIX}-{completed_ordinal}")
+}
+
+/// The ordinal at which the reminded turn finished, when `command_id` names a
+/// handback reminder.
+#[must_use]
+pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
+    command_id
+        .strip_prefix(HANDBACK_REMINDER_PREFIX)?
+        .strip_prefix('-')?
+        .parse()
+        .ok()
+}
+
 /// A report a child handed back during the turn `command_id` names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentHandback {
@@ -681,11 +700,29 @@ pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
 ) -> bool {
-    awaited_ordinal.is_some_and(|awaited| {
-        last_turn
-            .and_then(|turn| turn.accepted_ordinal)
-            .is_none_or(|answered| answered < awaited)
-    })
+    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
+}
+
+/// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
+/// finished turn that answers prompts up to `answered_ordinal` (see
+/// [`answered_ordinal`]). This is the one comparison every reader applies.
+#[must_use]
+pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
+    awaited_ordinal
+        .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
+}
+
+/// The newest prompt a finished turn answers, by acceptance ordinal.
+///
+/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
+/// reminder is Mjolnir's, not the parent's: the store gives its turn no
+/// acceptance ordinal, and the report the child hands back in it answers the
+/// turn it reminded about, so it answers every prompt accepted before that
+/// turn finished. A prompt accepted after that runs after the reminder and is
+/// still owed.
+#[must_use]
+pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
+    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -1780,6 +1817,37 @@ mod tests {
             suspend_warning(3).as_deref(),
             Some("3 sub-agents have not handed back; suspending stops them")
         );
+    }
+
+    /// A report handed back in a reminder turn answers the prompts accepted
+    /// before the reminded turn finished, though the reminder turn has no
+    /// acceptance ordinal of its own (I1-3, I1-4).
+    #[test]
+    fn a_report_handed_back_in_a_reminder_turn_answers_the_reminded_prompt() {
+        let reminder_id = handback_reminder_command_id(103);
+        assert_eq!(reminded_turn_ordinal(&reminder_id), Some(103));
+        assert_eq!(reminded_turn_ordinal("subagent-input-1"), None);
+        let reminder_turn = crate::state::MaterializedTurnOutcome {
+            accepted_ordinal: None,
+            turn_start_position: None,
+            completed_ordinal: 118,
+            ..finished(&reminder_id, "end_turn")
+        };
+        let report = SubagentReport {
+            handback: handback(&reminder_id),
+            awaited_ordinal: Some(84),
+            ..SubagentReport::default()
+        };
+        assert!(!awaiting_prompt(Some(84), Some(&reminder_turn)));
+        assert!(has_handed_back(
+            true,
+            &report,
+            false,
+            Some(&reminder_turn),
+            0
+        ));
+        // A prompt accepted after the reminded turn ended is still owed.
+        assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }
 
     #[test]

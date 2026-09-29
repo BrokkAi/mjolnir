@@ -1252,11 +1252,8 @@ impl ApiBackend {
         if state != (ReportState::Pending { remind: true }) {
             return Ok(state == (ReportState::Pending { remind: false }));
         }
-        let command_id = format!(
-            "{}-{}",
-            mj_core::subagent::HANDBACK_REMINDER_PREFIX,
-            last_turn.completed_ordinal
-        );
+        let command_id =
+            mj_core::subagent::handback_reminder_command_id(last_turn.completed_ordinal);
         let submitted = async {
             let handle = self
                 .sessions
@@ -1507,7 +1504,8 @@ pub(crate) struct ChildProgress {
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
     pub awaited_ordinal: Option<u64>,
-    /// Acceptance ordinal of the child's last finished turn.
+    /// The newest prompt the child's last finished turn answers; see
+    /// [`mj_core::subagent::answered_ordinal`].
     pub answered_ordinal: Option<u64>,
     /// How that turn failed, when it did: `failed` or `interrupted`, and why.
     pub failed_turn: Option<(&'static str, String)>,
@@ -1537,10 +1535,10 @@ impl ChildProgress {
     /// Whether the parent's newest prompt is still unanswered. `submitted` is
     /// the first prompt's ordinal while its start follow-up remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
-        self.awaited_ordinal.max(submitted).is_some_and(|awaited| {
-            self.answered_ordinal
-                .is_none_or(|answered| answered < awaited)
-        })
+        mj_core::subagent::prompt_unanswered(
+            self.awaited_ordinal.max(submitted),
+            self.answered_ordinal,
+        )
     }
 }
 
@@ -1580,7 +1578,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
     Ok(ChildProgress {
         report,
         awaited_ordinal: recorded.awaited_ordinal,
-        answered_ordinal: last.as_ref().and_then(|turn| turn.accepted_ordinal),
+        answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
         failed_turn,
         login_failure,
         report_dir: recorded.report_dir,
