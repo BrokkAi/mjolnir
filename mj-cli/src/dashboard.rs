@@ -265,6 +265,9 @@ pub(crate) struct DashboardContext {
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::chat::Notices,
+    /// When the "daemon is running again" notice went up, so the clock tick
+    /// can take it down again. Nothing else clears it on an idle dashboard.
+    daemon_running_again_since: Option<std::time::Instant>,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
     /// Every warm conversation, keyed by session id: one for each pane that
@@ -813,6 +816,11 @@ pub(crate) async fn run_dashboard_for_workspace(
                         }
                         crate::daemon::DaemonPresence::Attached => {
                             show_daemon_reattached(&mut context.dashboard);
+                            context.daemon_running_again_since = context
+                                .dashboard
+                                .notice()
+                                .is_some_and(|notice| notice == DAEMON_RUNNING_AGAIN_NOTICE)
+                                .then(std::time::Instant::now);
                         }
                         // The reason is already in the log. The notice bar is
                         // one line, so it carries the action instead.
@@ -830,6 +838,11 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
                 redraw = context.clock_tick_redraws();
+                redraw |= expire_daemon_running_again(
+                    &context.notices,
+                    &mut context.daemon_running_again_since,
+                    std::time::Instant::now(),
+                );
                 // The startup pick fires at most once, and opening the
                 // conversation it chooses has to reach the screen.
                 redraw |= context.maybe_open_startup_session();
@@ -1587,6 +1600,7 @@ impl DashboardContext {
             known_workspace_layouts,
             workspace_layouts: conversation_layouts,
             notices,
+            daemon_running_again_since: None,
             events: Some(event::EventStream::new()),
             chats: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
@@ -2091,6 +2105,32 @@ fn show_daemon_reattached(dashboard: &mut DashboardState) {
         return;
     }
     dashboard.set_notice(DAEMON_RUNNING_AGAIN_NOTICE);
+}
+
+/// How long "the daemon is running again" stays in the notice bar.
+const DAEMON_RUNNING_AGAIN_DISPLAY: Duration = Duration::from_secs(8);
+
+/// Take the reconnect notice down once it has been readable for
+/// [`DAEMON_RUNNING_AGAIN_DISPLAY`]. Only that notice expires here: if
+/// something else has taken the bar since, it is left alone. Answers whether
+/// the bar changed, so the caller can draw the frame that shows the key hints.
+fn expire_daemon_running_again(
+    notices: &mj_chat::chat::Notices,
+    since: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    let Some(shown_at) = *since else {
+        return false;
+    };
+    if notices.current().as_deref() != Some(DAEMON_RUNNING_AGAIN_NOTICE) {
+        *since = None;
+        return false;
+    }
+    if now.saturating_duration_since(shown_at) < DAEMON_RUNNING_AGAIN_DISPLAY {
+        return false;
+    }
+    *since = None;
+    notices.dismiss(now)
 }
 
 #[cfg(test)]

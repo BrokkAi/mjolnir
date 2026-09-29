@@ -2111,6 +2111,48 @@ fn a_quick_reconnect_replaces_the_daemon_unavailable_notice() {
     );
 }
 
+#[test]
+fn the_daemon_running_again_notice_expires_by_itself() {
+    let notices = mj_chat::chat::Notices::default();
+    notices.set(DAEMON_RUNNING_AGAIN_NOTICE);
+    let shown_at = std::time::Instant::now();
+    let mut since = Some(shown_at);
+
+    // Still readable: it stays.
+    assert!(!expire_daemon_running_again(
+        &notices,
+        &mut since,
+        shown_at + DAEMON_RUNNING_AGAIN_DISPLAY / 2
+    ));
+    assert_eq!(
+        notices.current().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+
+    // Past its display time with no key press: the bar clears.
+    assert!(expire_daemon_running_again(
+        &notices,
+        &mut since,
+        shown_at + DAEMON_RUNNING_AGAIN_DISPLAY
+    ));
+    assert_eq!(notices.current(), None);
+    assert_eq!(since, None);
+
+    // A different notice that has replaced it is not this expiry's to clear.
+    notices.set(DAEMON_RUNNING_AGAIN_NOTICE);
+    let mut since = Some(shown_at);
+    notices.set("Could not save the layout.");
+    assert!(!expire_daemon_running_again(
+        &notices,
+        &mut since,
+        shown_at + DAEMON_RUNNING_AGAIN_DISPLAY * 2
+    ));
+    assert_eq!(
+        notices.current().as_deref(),
+        Some("Could not save the layout.")
+    );
+}
+
 #[tokio::test]
 async fn shutdown_persistence_bounds_a_silent_acknowledgement() {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
