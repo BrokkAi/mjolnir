@@ -576,14 +576,23 @@ fn row_summary(
     }
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
-    machine_build_cache_summary(&child_path, value)
+    machine_build_cache_summary(&child_path, value, automatic.as_deref())
         .unwrap_or_else(|| value_summary(path, key, value, draft, automatic))
 }
 
 /// Configured policy only: opening the page resolves the host's actual defaults.
-fn machine_build_cache_summary(path: &[String], value: &Value) -> Option<String> {
+/// A host the preview found unable to share the cache reports `unavailable`,
+/// which is the same fact the build cache page shows as an unchecked switch.
+fn machine_build_cache_summary(
+    path: &[String],
+    value: &Value,
+    unavailable: Option<&str>,
+) -> Option<String> {
     if !matches!(path, [section, _, page] if section == "machines" && page == "build_cache") {
         return None;
+    }
+    if let Some(reason) = unavailable {
+        return Some(format!("{reason}  ›"));
     }
     let enabled = match value["enabled"].as_bool() {
         Some(false) => "Disabled",
@@ -1234,10 +1243,46 @@ impl SetupDialog {
         Some((machine_id.clone(), key))
     }
 
+    /// The machine page that holds the build cache row, whose summary depends
+    /// on what the machine's host can do.
+    fn build_cache_machine_page(&self) -> Option<(String, Value)> {
+        let [section, machine_id] = self.path.as_slice() else {
+            return None;
+        };
+        if section != "machines" || self.draft["machines"][machine_id]["build_cache"].is_null() {
+            return None;
+        }
+        let key = serde_json::json!({
+            "machine": self.draft["machines"][machine_id],
+        });
+        Some((machine_id.clone(), key))
+    }
+
+    /// What the machine page's build cache row says when the resolved preview
+    /// shows the host cannot share the cache.
+    fn build_cache_row_unavailable(&self) -> Option<&'static str> {
+        use mj_core::state::BuildCacheOff;
+        let (_, key) = self.build_cache_machine_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        match &preview.result {
+            BuildCachePreviewResult::Ready(Some(preview)) => match preview.off_reason {
+                Some(BuildCacheOff::Unavailable(_)) => Some("Off · not available on this host"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Start resolving the build cache page's automatic values on the target's
     /// host, unless the current settings are already resolved or in flight.
     fn preview_build_cache_action(&mut self) -> DashboardAction {
-        let Some((_, key)) = self.build_cache_page() else {
+        let Some((_, key)) = self
+            .build_cache_page()
+            .or_else(|| self.build_cache_machine_page())
+        else {
             return DashboardAction::None;
         };
         if self
@@ -2761,7 +2806,12 @@ pub(crate) fn render_setup(
                     &dialog.draft,
                     dialog
                         .build_cache_automatic_label(key)
-                        .or_else(|| dialog.archive_space_automatic_label(key)),
+                        .or_else(|| dialog.archive_space_automatic_label(key))
+                        .or_else(|| {
+                            (key == "build_cache")
+                                .then(|| dialog.build_cache_row_unavailable().map(str::to_owned))
+                                .flatten()
+                        }),
                 ),
                 None => String::new(),
             };

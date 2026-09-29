@@ -84,7 +84,7 @@ fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String>
     {
         return Some(summary);
     }
-    if let Some(summary) = machine_build_cache_summary(path, value) {
+    if let Some(summary) = machine_build_cache_summary(path, value, None) {
         return Some(summary);
     }
     let count = visible_keys(path, value).len();

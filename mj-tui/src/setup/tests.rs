@@ -210,14 +210,14 @@ fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_tog
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], true);
 }
 
-fn choose(dashboard: &mut DashboardState, name: &str) {
+fn choose(dashboard: &mut DashboardState, name: &str) -> DashboardAction {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
     dialog.selected = dialog.keys().iter().position(|key| key == name).unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter))
 }
 
 fn activate(dashboard: &mut DashboardState, control: SetupControl) {
@@ -1672,7 +1672,14 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     );
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
@@ -1683,15 +1690,12 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    // Opening the page starts the host lookup exactly once.
-    let DashboardAction::PreviewBuildCache {
-        generation,
-        key: preview_key,
-        ..
-    } = dashboard.handle_key(key(KeyCode::Enter))
-    else {
-        panic!("preview build cache");
-    };
+    // Opening the machine starts the host lookup; opening its cache page does
+    // not start a second one.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::None
@@ -1802,7 +1806,14 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     dialog.selected = dialog
         .keys()
@@ -1811,14 +1822,10 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
         .unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    let DashboardAction::PreviewBuildCache {
-        generation,
-        key: preview_key,
-        ..
-    } = dashboard.handle_key(key(KeyCode::Enter))
-    else {
-        panic!("preview build cache");
-    };
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
     dashboard.build_cache_previewed(
         generation,
         &preview_key,
@@ -3405,4 +3412,49 @@ fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
             &drawn(&mut dashboard, 80, 30),
         );
     }
+}
+
+/// Test-and-fix M-3: the machine's list row said "Enabled by default" while
+/// the build cache page, opened next, said the host cannot share the cache.
+#[test]
+fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    // Opening the machine resolves its host, so the row does not have to wait
+    // for the build cache page to be opened.
+    let (generation, key) = {
+        let (_, key) = dialog.build_cache_machine_page().unwrap();
+        (dialog.generation, key)
+    };
+    assert_eq!(
+        dialog.build_cache_preview.as_ref().map(|p| &p.key),
+        Some(&key)
+    );
+    dashboard.build_cache_previewed(
+        generation,
+        &key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            directory: None,
+            max_size: None,
+            target_max_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        })),
+    );
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Build cache (mbx)")
+            && line.contains("Off")
+            && !line.contains("Enabled by default")),
+        "{lines:#?}"
+    );
 }
