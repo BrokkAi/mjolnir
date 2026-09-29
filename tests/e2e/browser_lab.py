@@ -65,7 +65,11 @@ def wait_marker_or_exit(marker: pathlib.Path, browser: subprocess.Popen[bytes]) 
 # partially redrawn frame can show two panes bordered alike for one frame,
 # whereas the footer is one line that is always rewritten whole.
 PANE_RING = ("Sessions", "Prompt", "Targets", "Quota")
-SESSIONS_FOCUSED = "Enter open"
+# Sessions offers its filter whenever it has the keyboard, selected row or not.
+SESSIONS_FOCUSED = "/ search"
+# Opening needs a selected session. Nothing is selected until a conversation
+# is open, and the arrow keys select a row, which opens it.
+SESSION_SELECTED = "Enter open"
 
 
 def focus_sessions(client) -> None:
@@ -88,8 +92,17 @@ def focus_sessions(client) -> None:
     )
 
 
+def select_only_session(client) -> None:
+    """Select the lab's one session so session commands act on it."""
+    if SESSION_SELECTED in client.text():
+        return
+    client.send(b"\x1b[B")
+    client.wait_for(SESSION_SELECTED)
+
+
 def stop_from_dashboard(client) -> None:
     focus_sessions(client)
+    select_only_session(client)
     # The palette is a prefix chord (ctrl+b then :); it has no function key.
     client.send(b"\x02:")
     client.wait_for("Search commands")
