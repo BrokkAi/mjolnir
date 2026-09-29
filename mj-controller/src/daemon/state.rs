@@ -955,12 +955,21 @@ impl RuntimeState {
                         {
                             let id = session_id.to_owned();
                             let reason = format!("{error:#}");
-                            if let Err(persistence) = blocking(move || {
-                                crate::database::fail_startup_group(&id, &group_id, &reason)
+                            let persisted = reason.clone();
+                            match blocking(move || {
+                                crate::database::fail_startup_group(&id, &group_id, &persisted)
                             })
                             .await
                             {
-                                tracing::error!(session_id, %persistence, "could not persist startup rejection");
+                                // The group failed as a whole, and was never
+                                // accepted: say so, and settle its other rows.
+                                Ok(()) => {
+                                    self.reject_startup(session_id, &reason).await;
+                                    continue;
+                                }
+                                Err(persistence) => {
+                                    tracing::error!(session_id, %persistence, "could not persist startup rejection");
+                                }
                             }
                         }
                         let refused = error
@@ -1153,7 +1162,7 @@ impl RuntimeState {
     /// up: an API group fails so its client's wait answers, a user's prompt
     /// goes back to the draft, and anything else is marked failed. The drain
     /// then continues with the next step.
-    async fn abandon_startup_step(&self, session_id: &str) {
+    async fn abandon_startup_step(self: &Arc<Self>, session_id: &str) {
         let lookup_id = session_id.to_owned();
         let step = match blocking(move || crate::database::next_startup_delivery(&lookup_id)).await
         {
@@ -1182,7 +1191,7 @@ impl RuntimeState {
             {
                 tracing::error!(session_id, %error, "could not fail an abandoned startup group");
             }
-            self.push_notice(session_id, reason);
+            self.reject_startup(session_id, &reason).await;
             return;
         }
         let decoded: Option<StartupStep> = serde_json::from_str(&step.step_json).ok();
@@ -1201,6 +1210,18 @@ impl RuntimeState {
             tracing::error!(session_id, %error, "could not mark an abandoned startup step failed");
         }
         self.push_notice(session_id, reason);
+    }
+
+    /// An API startup group failed for good: its step was refused, or kept
+    /// failing until it was given up. Nothing of it was accepted, so the
+    /// notice says the startup failed, not that work remains saved. A
+    /// sub-agent whose first prompt can therefore never run is recorded as
+    /// failed and its worker stopped (I1-2); its parent reads the same cause
+    /// from `wait` and `list_agents`.
+    async fn reject_startup(self: &Arc<Self>, session_id: &str, reason: &str) {
+        tracing::warn!(session_id, reason, "session startup failed");
+        self.push_notice(session_id, format!("Session startup failed: {reason}"));
+        self.fail_subagent_start(session_id, reason).await;
     }
 
     /// A prompt the worker will not take is the user's text again, not a

@@ -2492,6 +2492,70 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
     }
 }
 
+/// I1-2: once a child's refused startup has also recorded it as failed, the
+/// parent still reads the startup's cause from `wait` and `list_agents`, and
+/// `send_input` is refused with it.
+#[tokio::test]
+async fn a_child_recorded_failed_after_a_refused_startup_reports_its_cause() {
+    if !isolated_parked_test("a_child_recorded_failed_after_a_refused_startup_reports_its_cause") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let cause = "this agent does not offer high as a effort";
+    let exports = ParkingExports::new(SessionState::Error, None);
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .last_error = Some(cause.into());
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let startup_id = hold_child_start(&backend);
+    crate::database::fail_startup_group("child-1", &startup_id, cause).unwrap();
+
+    let answer = send_input(&backend, "must not run").await;
+    assert!(answer.is_error, "{}", answer.message);
+    let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(
+        value["error"],
+        format!("child startup failed: {cause}"),
+        "{value}"
+    );
+    assert!(delivered.try_recv().is_err());
+    assert_eq!(exports.unparks(), 0);
+
+    let call = |action| {
+        let backend = backend.clone();
+        async move {
+            let answer = backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
+                        request_id: "request".into(),
+                        created_at_ms: mj_core::clock::epoch_millis(),
+                        action,
+                    },
+                )
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()
+        }
+    };
+    let waited = call(mj_core::subagent::SubagentToolAction::WaitAgents {
+        child_session_ids: vec!["child-1".into()],
+        timeout_seconds: Some(1),
+        return_when: Default::default(),
+    })
+    .await;
+    assert_eq!(waited["agents"][0]["state"], "error", "{waited}");
+    assert_eq!(waited["agents"][0]["output"], cause, "{waited}");
+    let listed = call(mj_core::subagent::SubagentToolAction::ListAgents).await;
+    assert_eq!(listed["agents"][0]["state"], "error", "{listed}");
+}
+
 #[tokio::test]
 async fn replayed_child_input_reuses_durable_acceptance_without_a_second_prompt() {
     if !isolated_parked_test(

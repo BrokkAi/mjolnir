@@ -652,7 +652,7 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         ensure!(
-            has_nothing_to_checkpoint(&session),
+            has_nothing_to_checkpoint(&session, self.state.subagents.contains_key(session_id)),
             "session {session_id} has a workspace to checkpoint; suspend it instead"
         );
         self.stop_target_and_settle(session_id, &session, executor, &persist)
@@ -1164,13 +1164,16 @@ impl Controller {
 /// failed, with no target locator left, has no target to read a workspace
 /// from at all. Every other state may hold work and must take the graceful
 /// close's checkpoint.
-pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
+///
+/// `subagent` says the session is a Mjolnir sub-agent. A child is never
+/// resumed on its own, so a close keeps no archive of it; its conversation
+/// and report are already in the store. A parked child's worker is stopped,
+/// and so is that of a failed one: its first prompt was refused for good and
+/// its worker was stopped when it was recorded as failed (I1-2).
+pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> bool {
     match session.state {
-        SessionState::Provisioning => true,
-        // A parked sub-agent's worker is stopped. A child is never resumed on
-        // its own, so its close keeps no archive; its conversation and report
-        // are already in the store.
-        SessionState::Parked => true,
+        SessionState::Provisioning | SessionState::Parked => true,
+        SessionState::Error if subagent => true,
         SessionState::Closing
         | SessionState::Destroying
         | SessionState::Error

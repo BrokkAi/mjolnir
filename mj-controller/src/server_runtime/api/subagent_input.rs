@@ -50,6 +50,12 @@ impl ApiBackend {
                 .exports
                 .session_record(child)
                 .context("child session no longer exists")?;
+            // A child whose startup failed is recorded as failed too; the
+            // startup's own cause is the answer either way.
+            let start = self.start_status(child.to_owned()).await?;
+            if let Some(StartStatus::Failed { message }) = &start {
+                bail!("child startup failed: {message}");
+            }
             ensure!(
                 matches!(
                     record.state,
@@ -71,13 +77,9 @@ impl ApiBackend {
                 tokio::time::Instant::now() < deadline,
                 "child was not ready for queued input within 30 minutes"
             );
-            match self.start_status(child.to_owned()).await? {
-                Some(StartStatus::Failed { message }) => bail!("child startup failed: {message}"),
-                Some(StartStatus::Pending) => {
-                    tokio::time::sleep(INPUT_POLL).await;
-                    continue;
-                }
-                _ => {}
+            if matches!(start, Some(StartStatus::Pending)) {
+                tokio::time::sleep(INPUT_POLL).await;
+                continue;
             }
             if crate::upgrade::is_draining() {
                 tokio::time::sleep(Duration::from_millis(250)).await;

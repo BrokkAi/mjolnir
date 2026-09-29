@@ -328,7 +328,9 @@ enum CloseRoute {
 /// A record mid-close with a live target cannot be closed again from the start:
 /// its worker socket is gone, so a fresh checkpoint attempt only fails on
 /// connect. Recovery finishes it from the checkpoint the first close verified.
-fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
+/// `subagent` says the session is a Mjolnir sub-agent; see
+/// [`crate::controller::has_nothing_to_checkpoint`].
+fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
     let Some(session) = session else {
         return CloseRoute::Graceful;
     };
@@ -340,7 +342,7 @@ fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
         } else {
             CloseRoute::Done
         }
-    } else if crate::controller::has_nothing_to_checkpoint(session) {
+    } else if crate::controller::has_nothing_to_checkpoint(session, subagent) {
         CloseRoute::SettleWithoutCheckpoint
     } else {
         CloseRoute::Graceful

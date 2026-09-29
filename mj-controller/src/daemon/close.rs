@@ -413,7 +413,10 @@ impl RuntimeState {
         let mut controller = tokio::task::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
-        let route = close_route(controller.state.sessions.get(&session_id));
+        let route = close_route(
+            controller.state.sessions.get(&session_id),
+            controller.state.subagents.contains_key(&session_id),
+        );
         if matches!(route, CloseRoute::Done | CloseRoute::DeferredCleanup) {
             self.stop_subagents_for_suspend(&session_id).await?;
             return Ok(if route == CloseRoute::DeferredCleanup {

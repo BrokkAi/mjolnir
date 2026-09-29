@@ -109,6 +109,40 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<ParkOutcome> {
+        self.stop_idle_subagent_worker(session_id, executor, manager, None)
+            .await
+    }
+
+    /// Stop a sub-agent whose first prompt can never run and record it as
+    /// failed with `cause`, so every surface shows the failure instead of an
+    /// idle session holding a worker (I1-2). It is stopped exactly as a park
+    /// stops a child, behind the same idle reservation, and keeps its record,
+    /// relation and target; its close settles without a checkpoint (see
+    /// [`super::has_nothing_to_checkpoint`]).
+    ///
+    /// A child that took work meanwhile is left running and
+    /// [`ParkOutcome::Busy`] is returned. [`ParkOutcome::Parked`] means the
+    /// worker was stopped and the record now says `Error`.
+    pub async fn fail_subagent_start_worker(
+        &self,
+        session_id: &str,
+        cause: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<ParkOutcome> {
+        self.stop_idle_subagent_worker(session_id, executor, manager, Some(cause))
+            .await
+    }
+
+    /// The stop behind a park and a failed start: the record becomes
+    /// `Parked`, or `Error` with `failure` as its cause.
+    async fn stop_idle_subagent_worker(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        failure: Option<&str>,
+    ) -> Result<ParkOutcome> {
         ensure!(
             self.state.subagents.contains_key(session_id),
             "session {session_id} is not a sub-agent"
@@ -132,12 +166,16 @@ impl Controller {
             return Ok(ParkOutcome::Busy);
         }
         stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
-            .context("stop the sub-agent's worker to park it")?;
+            .context("stop the sub-agent's worker")?;
         let mut record = session.clone();
-        record.state = SessionState::Parked;
-        record.last_error = None;
+        record.state = if failure.is_some() {
+            SessionState::Error
+        } else {
+            SessionState::Parked
+        };
+        record.last_error = failure.map(str::to_owned);
         record.updated_at = super::now();
-        crate::database::save_lifecycle_session(&record).context("record the parked sub-agent")?;
+        crate::database::save_lifecycle_session(&record).context("record the stopped sub-agent")?;
         let released = tokio::time::timeout(PARK_RELEASE_TIMEOUT, async {
             while manager.session(session_id.to_owned()).await.is_ok() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -147,7 +185,7 @@ impl Controller {
         if released.is_err() {
             tracing::warn!(
                 session_id,
-                "the session manager still held the parked sub-agent; releasing it anyway"
+                "the session manager still held the stopped sub-agent; releasing it anyway"
             );
         }
         drop(lease);
@@ -458,6 +496,74 @@ mod tests {
                 .as_deref(),
             Some("The parser has three entry points.")
         );
+        assert!(control.session(LATCH_RELAY_SESSION).await.is_err());
+        let _targets = refresher.await.unwrap();
+        shutdown.shutdown().await.unwrap();
+    }
+
+    /// I1-2: a child whose first prompt is refused for good has its worker
+    /// stopped and is recorded as failed with the cause, keeping its record,
+    /// relation and target, instead of staying a live idle session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_child_whose_start_failed_is_stopped_and_recorded_as_failed() {
+        if !isolated("a_child_whose_start_failed_is_stopped_and_recorded_as_failed") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        register_child(root.path());
+        let crate::session_manager::SessionManagerChannels {
+            targets,
+            control,
+            updates: _updates,
+            shutdown,
+        } = crate::session_manager::spawn_session_manager().unwrap();
+        targets
+            .send(vec![latch_relay_target(
+                root.path(),
+                None,
+                ReleaseSupport::Supported,
+                false,
+            )])
+            .unwrap();
+        control
+            .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let refresher = tokio::spawn(async move {
+            while crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
+                != Some(SessionState::Error)
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            targets.send_replace(Vec::new());
+            targets
+        });
+        let executor = RacingStop::default();
+        let cause = "this agent does not offer high as a effort";
+
+        let outcome = loaded_controller()
+            .fail_subagent_start_worker(LATCH_RELAY_SESSION, cause, &executor, &control)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ParkOutcome::Parked);
+        assert!(
+            executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|purpose| purpose == "stop Mjolnir worker daemon"),
+            "the child's worker was stopped: {:?}",
+            executor.purposes.lock().unwrap()
+        );
+        let stored = crate::database::load_state().unwrap();
+        let child = &stored.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(child.state, SessionState::Error);
+        assert_eq!(child.last_error.as_deref(), Some(cause));
+        assert!(child.target.is_some(), "the failed child keeps its target");
+        assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
         assert!(control.session(LATCH_RELAY_SESSION).await.is_err());
         let _targets = refresher.await.unwrap();
         shutdown.shutdown().await.unwrap();

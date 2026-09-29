@@ -162,51 +162,68 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     for state in [SessionState::Closing, SessionState::Destroying] {
         let mut session = runtime_test_session("session", "workspace", state);
         session.target = target.clone();
-        assert_eq!(close_route(Some(&session)), CloseRoute::RecoverInterrupted);
+        assert_eq!(
+            close_route(Some(&session), false),
+            CloseRoute::RecoverInterrupted
+        );
         // Without a target there is nothing left for recovery to finish, and
         // nothing to checkpoint either: the close settles instead of waiting
         // on a relay that does not exist.
         session.target = None;
         assert_eq!(
-            close_route(Some(&session)),
+            close_route(Some(&session), false),
             CloseRoute::SettleWithoutCheckpoint
         );
     }
 
     let mut running = runtime_test_session("session", "workspace", SessionState::Running);
     running.target = target.clone();
-    assert_eq!(close_route(Some(&running)), CloseRoute::Graceful);
-    assert_eq!(close_route(None), CloseRoute::Graceful);
+    assert_eq!(close_route(Some(&running), false), CloseRoute::Graceful);
+    assert_eq!(close_route(None, false), CloseRoute::Graceful);
 
     // A session wedged in provisioning has no harness state and no relay, with
     // or without the container it managed to create (#1059).
     let mut provisioning = runtime_test_session("session", "workspace", SessionState::Provisioning);
     assert_eq!(
-        close_route(Some(&provisioning)),
+        close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
     provisioning.target = target.clone();
     assert_eq!(
-        close_route(Some(&provisioning)),
+        close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
 
     // The same session once startup reconciliation has failed it (#1070).
     let failed = runtime_test_session("session", "workspace", SessionState::Error);
     assert_eq!(
-        close_route(Some(&failed)),
+        close_route(Some(&failed), false),
         CloseRoute::SettleWithoutCheckpoint
     );
     // A failed session that still names its target keeps a workspace worth
     // checkpointing, so it takes the graceful close.
     let mut failed_with_target = failed.clone();
     failed_with_target.target = target.clone();
-    assert_eq!(close_route(Some(&failed_with_target)), CloseRoute::Graceful);
+    assert_eq!(
+        close_route(Some(&failed_with_target), false),
+        CloseRoute::Graceful
+    );
+    // A failed sub-agent's worker is stopped and a child keeps no archive,
+    // so its close settles without a checkpoint even with its target (I1-2).
+    assert_eq!(
+        close_route(Some(&failed_with_target), true),
+        CloseRoute::SettleWithoutCheckpoint
+    );
+    // A running child still takes the graceful close.
+    assert_eq!(close_route(Some(&running), true), CloseRoute::Graceful);
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
-    assert_eq!(close_route(Some(&stopped)), CloseRoute::Done);
+    assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
     stopped.target = target;
-    assert_eq!(close_route(Some(&stopped)), CloseRoute::DeferredCleanup);
+    assert_eq!(
+        close_route(Some(&stopped), false),
+        CloseRoute::DeferredCleanup
+    );
 }
 
 /// A process that has exited but has not been reaped still answers
