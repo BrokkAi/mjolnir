@@ -82,13 +82,9 @@ fn session_resources_are_sampled(session: &mj_core::state::SessionRecord) -> boo
 
 pub fn refresh_dashboard_poll_targets(
     controller: &Controller,
-    worker_targets_tx: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
     resource_targets_tx: &tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
     excluded_sessions: &std::collections::BTreeSet<String>,
 ) {
-    let mut worker_targets = remote_dashboard_worker_targets(controller);
-    worker_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
-    worker_targets_tx.send_replace(worker_targets);
     let mut resource_targets = dashboard_resource_targets(controller);
     resource_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
     resource_targets_tx.send_replace(resource_targets);

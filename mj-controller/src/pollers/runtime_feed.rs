@@ -3,7 +3,6 @@ use mj_client::runtime_feed::RuntimeProjection;
 use mj_core::snapshot_map::SnapshotMap;
 
 pub struct RemoteDashboardWorkerPoller {
-    pub targets: tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
     pub updates: SessionManagerUpdates,
     pub control: SessionManagerControl,
     pub shutdown: SessionManagerShutdown,
@@ -109,6 +108,8 @@ pub enum RuntimeFeedUpdate {
         session_id: String,
         view: Box<ManagedSessionView>,
     },
+    /// The daemon no longer runs an actor for this session, so it has no view.
+    SessionRemoved(String),
     Error(String),
 }
 
@@ -221,6 +222,7 @@ where
         };
         let snapshot_revision = snapshot.revision;
         let sessions = std::mem::take(&mut snapshot.sessions);
+        let mut removed = Vec::new();
         for (id, runtime) in previous_sessions.changes(&sessions) {
             match runtime {
                 Some(runtime) if !published.get(id).is_some_and(|last| last.matches(runtime)) => {
@@ -230,6 +232,7 @@ where
                     published.remove(id);
                     pending_ids.remove(id);
                     convergence.attempts.remove(id);
+                    removed.push(id.clone());
                 }
                 Some(_) => {}
             }
@@ -241,6 +244,17 @@ where
             .is_err()
         {
             return Ok(());
+        }
+        // Forgetting a view here is announced, so a consumer never keeps a
+        // copy this loop will not send again.
+        for session_id in removed {
+            if tx
+                .send(RuntimeFeedUpdate::SessionRemoved(session_id))
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
         }
         let mut pending = pending_ids
             .iter()

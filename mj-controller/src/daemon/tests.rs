@@ -2413,6 +2413,9 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2471,6 +2474,9 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2513,6 +2519,9 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     state
         .publish_session("session-1".into(), ready_startup_view())
         .await
@@ -5050,6 +5059,9 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
         );
     });
     state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+    state
         .publish_session("session-1".into(), ready_startup_view())
         .await
         .unwrap();
@@ -5058,6 +5070,56 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
         sessions.remove("session-1");
     });
     assert!(!state.owner().sessions.contains_key("session-1"));
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(!state.owner().sessions.contains_key("session-1"));
+}
+
+/// A retired relay actor publishes no final view. Removing its session from
+/// the manager's targets must drop the view it left, and a view it sends late
+/// must not bring it back, so no client keeps a live-looking stopped session.
+#[tokio::test]
+async fn a_session_without_a_relay_actor_has_no_runtime_view() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(
+            "session-1".into(),
+            runtime_test_session("session-1", "workspace", SessionState::Running),
+        );
+    });
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(
+        !state.owner().sessions.contains_key("session-1"),
+        "a view arrived before its actor was installed"
+    );
+
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(replica.projection.sessions.contains_key("session-1"));
+    let cursor = replica.cursor.clone();
+
+    assert!(state.owner().install_relay_sessions(Default::default()));
+    state.publish_revision();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert!(!replica.projection.sessions.contains_key("session-1"));
+    assert!(state.owner().background_policies.is_empty());
+
     state
         .publish_session("session-1".into(), ready_startup_view())
         .await

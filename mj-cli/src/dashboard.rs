@@ -68,11 +68,10 @@ use crate::import::{
 use crate::pollers::{
     CapacityPollUpdate, DashboardLifecycleUpdate, Feed, QuotaRefreshBatch, QuotaUpdate,
     ResourcePollTarget, ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker,
-    WorkerPollTarget, apply_worker_poll_update, complete_manual_quota_refresh,
-    projected_queued_prompts, quota_refresh_profiles, refresh_dashboard_poll_targets,
-    remote_dashboard_worker_targets, session_target_is_pollable, spawn_dashboard_capacity_poller,
-    spawn_dashboard_resource_poller, spawn_quota_refresher, spawn_remote_dashboard_worker_poller,
-    spawn_worker_diagnosis,
+    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
+    quota_refresh_profiles, refresh_dashboard_poll_targets, session_target_is_pollable,
+    spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller, spawn_quota_refresher,
+    spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
 use crate::{TerminalGuard, short_id};
@@ -338,7 +337,6 @@ pub(crate) struct DashboardContext {
     /// plan, keyed by the TUI generation that requested it.
     pub(crate) session_preflight_cancel: Option<(u64, Arc<AtomicBool>)>,
 
-    worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
     runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
@@ -1536,7 +1534,6 @@ impl DashboardContext {
 
         let (quota_profiles_tx, quota_updates_rx) = spawn_quota_refresher();
         let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.to_owned())?;
-        let worker_targets_tx = remote_worker.targets;
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
@@ -1561,7 +1558,6 @@ impl DashboardContext {
             .map(|notice| notice.id)
             .max();
         let runtime_config_rx = remote_worker.config;
-        worker_targets_tx.send_replace(remote_dashboard_worker_targets(&controller));
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
@@ -1574,7 +1570,6 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<AwsResourceOptions>();
         refresh_dashboard_poll_targets(
             &controller,
-            &worker_targets_tx,
             &resource_targets_tx,
             &lifecycle_operations.keys().cloned().collect(),
         );
@@ -1641,7 +1636,6 @@ impl DashboardContext {
             completion_job: None,
             review_discovery_cancel: None,
             session_preflight_cancel: None,
-            worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
             runtime_health: Feed::new(remote_worker.health),

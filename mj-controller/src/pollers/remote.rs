@@ -75,7 +75,10 @@ pub fn spawn_remote_dashboard_worker_poller(
                             notices_tx.send_replace(metadata.notices);
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
-                            if publisher.publish(session_id, *view).await.is_err() { return; }
+                            if mirror_daemon_view(&targets, &publisher, session_id, *view).await.is_err() { return; }
+                        }
+                        Some(RuntimeFeedUpdate::SessionRemoved(session_id)) => {
+                            mirror_daemon_removal(&targets, &session_id);
                         }
                         Some(RuntimeFeedUpdate::Error(error)) => {
                             health_tx.send_if_modified(|health| {
@@ -95,7 +98,6 @@ pub fn spawn_remote_dashboard_worker_poller(
         }
     });
     Ok(RemoteDashboardWorkerPoller {
-        targets,
         updates,
         control,
         shutdown,
@@ -105,6 +107,41 @@ pub fn spawn_remote_dashboard_worker_poller(
         config: config_rx,
         health: health_rx,
     })
+}
+
+/// A handle for a session exists exactly while the daemon publishes a view for
+/// it, which is while the daemon runs its relay actor. The daemon decides; this
+/// surface only mirrors it, so no local record or lifecycle can strand a handle.
+pub(super) async fn mirror_daemon_view(
+    targets: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    publisher: &crate::session_manager::RemoteSessionPublisher,
+    session_id: String,
+    view: ManagedSessionView,
+) -> Result<()> {
+    targets.send_if_modified(|targets| {
+        if targets.iter().any(|target| target.session_id == session_id) {
+            return false;
+        }
+        targets.push(WorkerPollTarget {
+            session_id: session_id.clone(),
+            spec: crate::targets::CommandSpec::new("daemon-owned", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        });
+        true
+    });
+    publisher.publish(session_id, view).await
+}
+
+pub(super) fn mirror_daemon_removal(
+    targets: &tokio::sync::watch::Sender<Vec<WorkerPollTarget>>,
+    session_id: &str,
+) {
+    targets.send_if_modified(|targets| {
+        let before = targets.len();
+        targets.retain(|target| target.session_id != session_id);
+        targets.len() != before
+    });
 }
 
 pub(super) async fn poll_daemon_runtime(

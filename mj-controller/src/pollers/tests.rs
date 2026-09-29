@@ -1994,3 +1994,56 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
         );
     }
 }
+
+/// A TUI handle used to need both a view from the daemon and the session in a
+/// target list the dashboard derived from its records minus its own lifecycle
+/// operations. A lifecycle that failed left an idle session in the list but
+/// without a view, so it could never be opened again. The daemon's views are
+/// now the only input: a handle exists exactly while one is published.
+#[tokio::test]
+async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
+    let channels = spawn_remote_session_manager().unwrap();
+    let wait = Duration::from_secs(1);
+    let view = || ManagedSessionView {
+        snapshot: None,
+        connected: true,
+        error: None,
+    };
+
+    super::remote::mirror_daemon_view(
+        &channels.targets,
+        &channels.publisher,
+        "session-1".into(),
+        view(),
+    )
+    .await
+    .unwrap();
+    channels
+        .control
+        .wait_for_session("session-1", wait)
+        .await
+        .unwrap();
+
+    super::remote::mirror_daemon_removal(&channels.targets, "session-1");
+    tokio::time::timeout(wait, async {
+        while channels.control.session("session-1").await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a session the daemon stopped publishing kept its handle");
+
+    super::remote::mirror_daemon_view(
+        &channels.targets,
+        &channels.publisher,
+        "session-1".into(),
+        view(),
+    )
+    .await
+    .unwrap();
+    channels
+        .control
+        .wait_for_session("session-1", wait)
+        .await
+        .unwrap();
+}
