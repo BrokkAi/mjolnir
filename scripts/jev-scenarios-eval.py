@@ -122,10 +122,36 @@ def api_key():
     return key
 
 
+WIRE_BUDGET = 60 * 1024
+
+
+def fit_to_wire(evidence):
+    """Port of the worker's shrink step: drop the oldest assistant entries, never the
+    final reply, until the serialized evidence fits; drop the history only if that fails."""
+    evidence = json.loads(json.dumps(evidence))
+    size = lambda: len(json.dumps(evidence).encode())
+    context = evidence.get("authorization")
+    while context and size() > WIRE_BUDGET:
+        messages = context["messages"]
+        protected = messages[-1]["id"] if messages and messages[-1]["role"] == "assistant" else None
+        index = next((i for i, m in enumerate(messages) if m["role"] == "assistant" and m["id"] != protected), None)
+        if index is None:
+            break
+        messages.pop(index)
+        context["assistant_history_omitted"] = True
+    if size() > WIRE_BUDGET:
+        evidence["authorization"] = None
+        evidence["transcript_summary"] = ""
+    return evidence
+
+
 def ask(key, questions, evidence):
+    evidence = fit_to_wire(evidence)
+    # The proxy bounds the evidence alone at 64 KiB and adds the questions itself.
+    state_bytes = len(json.dumps(evidence).encode())
+    if state_bytes > MAX_BODY_BYTES:
+        return {"error": f"evidence {state_bytes} bytes exceeds {MAX_BODY_BYTES}"}
     body = json.dumps({"model": "jev-latest", "state": evidence, "questions": questions}).encode()
-    if len(body) > MAX_BODY_BYTES:
-        return {"error": f"request body {len(body)} bytes exceeds {MAX_BODY_BYTES}"}
     request = urllib.request.Request(
         ENDPOINT, data=body, headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}
     )
@@ -170,7 +196,7 @@ def run(args):
             answer = future.result()
             record = {"id": fixture["id"], "repeat": repeat, **answer}
             if "verdict" in answer:
-                record["action"] = action(answer["verdict"], authorization_complete(fixture["evidence"]))
+                record["action"] = action(answer["verdict"], authorization_complete(fit_to_wire(fixture["evidence"])))
             out.write(json.dumps(record) + "\n")
             out.flush()
             summary = record.get("action") or record.get("error")

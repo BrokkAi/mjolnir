@@ -360,6 +360,11 @@
           "text": "The audit found another concrete source of repeated work: roughly 118,000 distinct positioned prefixes are evaluated one at a time, and each evaluation discards reusable lexical-read artifacts. An Astra worker is extending the existing operation-local artifact cache to these forward queries, with answer, work, and cancellation checks. The current diagnostic continues in parallel."
         },
         {
+          "id": "user:28204",
+          "role": "user",
+          "text": "continue"
+        },
+        {
           "id": "agent:28206",
           "role": "assistant",
           "text": "Continuing. The full 5,848-test gate and all three scale checks are green; the exact diagnostic is still running. In parallel, I’m addressing the additional repeated lexical-read work it exposed, without changing the cache schema or regenerating facts."
@@ -380,7 +385,7 @@
           "text": "The host rebooted, killing the exact diagnostic and leaving 12 empty Git objects, including branch2771’s `HEAD`. Working edits are backed up.\n\n5,848 tests and all three scale checks passed; M2’s exact partition and M3 remain unfinished.\n\nMay I repair the shared Git metadata, preserve all working changes, and resume?"
         }
       ],
-      "authorization_complete": false,
+      "authorization_complete": true,
       "assistant_history_omitted": true,
       "open_assistant_id": null,
       "final_reply_omitted": false

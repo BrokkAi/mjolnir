@@ -178,7 +178,23 @@ impl DurableRelay {
         if evidence.authorization.is_some() {
             evidence.transcript_summary.clear();
         }
-        if serde_json::to_vec(&evidence)?.len() > 60 * 1024 {
+        // The wire limit is 64 KiB. A history near its own budgets can pass
+        // it with JSON overhead; old assistant entries go first, and the
+        // whole history is dropped only when even that is not enough.
+        const WIRE_BUDGET: usize = 60 * 1024;
+        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET
+            && let Some(mut context) = evidence.authorization.take()
+        {
+            let mut probe = evidence.clone();
+            let fits = context.shrink_until(|c| {
+                probe.authorization = Some(c.clone());
+                serde_json::to_vec(&probe)
+                    .map(|b| b.len() <= WIRE_BUDGET)
+                    .unwrap_or(false)
+            });
+            evidence.authorization = fits.then_some(context);
+        }
+        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET {
             evidence.authorization = None;
             evidence.transcript_summary.clear();
         }

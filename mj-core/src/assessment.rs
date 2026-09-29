@@ -243,7 +243,72 @@ impl Default for ContextHistory {
         }
     }
 }
+/// Most messages fit whole; a pasted document is kept by its head and tail
+/// with an explicit marker, so one paste cannot use up the whole budget.
+pub const MESSAGE_HEAD_BYTES: usize = 4 * 1024;
+pub const MESSAGE_TAIL_BYTES: usize = 2 * 1024;
+/// Total entries the wire contract allows (`ContinuationEvidence::validate`
+/// and the proxy validator). Assistant entries give way first; only a
+/// history with this many user messages on its own is refused.
+pub const MAX_MESSAGES: usize = 256;
+
+/// Keep the first [`MESSAGE_HEAD_BYTES`] and last [`MESSAGE_TAIL_BYTES`] of
+/// a long message, with the omitted byte count in between.
+#[must_use]
+pub fn trim_middle(text: &str) -> String {
+    if text.len() <= MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
+        return text.to_owned();
+    }
+    let head_end = text.floor_char_boundary(MESSAGE_HEAD_BYTES);
+    let tail_start = text.ceil_char_boundary(text.len() - MESSAGE_TAIL_BYTES);
+    format!(
+        "{}\n[... {} bytes omitted from the middle of this message ...]\n{}",
+        &text[..head_end],
+        tail_start - head_end,
+        &text[tail_start..]
+    )
+}
+
 impl ContextHistory {
+    fn user_bytes(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.text.len())
+            .sum()
+    }
+
+    fn user_count(&self) -> usize {
+        self.messages.iter().filter(|m| m.role == "user").count()
+    }
+
+    fn assistant_bytes(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.text.len())
+            .sum()
+    }
+
+    /// Evict the oldest assistant entry that is not the one being written.
+    /// Returns false when none remains.
+    fn evict_oldest_assistant(&mut self) -> bool {
+        let protected = self.open_assistant_id.clone();
+        let Some(i) = self
+            .messages
+            .iter()
+            .position(|m| m.role == "assistant" && Some(&m.id) != protected.as_ref())
+        else {
+            return false;
+        };
+        if i + 1 == self.messages.len() {
+            self.final_reply_omitted = true;
+        }
+        self.messages.remove(i);
+        self.assistant_history_omitted = true;
+        true
+    }
+
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::schema::v1::ContentBlock]) {
         use agent_client_protocol::schema::v1::ContentBlock;
         self.open_assistant_id = None;
@@ -267,16 +332,16 @@ impl ContextHistory {
         if text.trim().is_empty() {
             return;
         }
-        if self
-            .messages
-            .iter()
-            .filter(|m| m.role == "user")
-            .map(|m| m.text.len())
-            .sum::<usize>()
-            + text.len()
-            > USER_BYTES
-            || self.messages.len() >= 256
-        {
+        let text = trim_middle(&text);
+        // The byte budget is for user text alone; a message that would push
+        // it over is the one case that makes the history incomplete.
+        if self.user_bytes() + text.len() > USER_BYTES || self.user_count() >= MAX_MESSAGES {
+            self.authorization_complete = false;
+            return;
+        }
+        // Assistant entries make room; the wire cap counts both roles.
+        while self.messages.len() >= MAX_MESSAGES && self.evict_oldest_assistant() {}
+        if self.messages.len() >= MAX_MESSAGES {
             self.authorization_complete = false;
             return;
         }
@@ -286,6 +351,7 @@ impl ContextHistory {
             text,
         });
     }
+
     pub fn assistant(&mut self, id: Option<&str>, ordinal: u64, text: &str) {
         let id = id
             .map(str::to_owned)
@@ -297,12 +363,9 @@ impl ContextHistory {
                 .last_mut()
                 .filter(|m| m.role == "assistant" && m.id == id)
             {
-                if last.text.len() + text.len() <= ASSISTANT_BYTES {
-                    last.text.push_str(text);
-                } else {
-                    self.messages.pop();
-                    self.assistant_history_omitted = true;
-                    self.final_reply_omitted = true;
+                last.text.push_str(text);
+                if last.text.len() > MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
+                    last.text = trim_middle(&last.text);
                 }
             }
         } else {
@@ -310,31 +373,39 @@ impl ContextHistory {
             self.messages.push(EvidenceMessage {
                 id: id.clone(),
                 role: "assistant".into(),
-                text: text.into(),
+                text: trim_middle(text),
             });
         }
         self.open_assistant_id = Some(id);
-        while self
-            .messages
-            .iter()
-            .filter(|m| m.role == "assistant")
-            .map(|m| m.text.len())
-            .sum::<usize>()
-            > ASSISTANT_BYTES
-            || self.messages.len() > 256
-        {
-            if let Some(i) = self.messages.iter().position(|m| m.role == "assistant") {
-                if i + 1 == self.messages.len() {
-                    self.final_reply_omitted = true;
-                }
-                self.messages.remove(i);
-                self.assistant_history_omitted = true;
-            } else {
-                self.authorization_complete = false;
-                break;
-            }
-        }
+        // Oldest assistant entries give way to the byte budget and the wire
+        // cap; the entry being written is never evicted, and user entries are
+        // never evicted here.
+        while (self.assistant_bytes() > ASSISTANT_BYTES || self.messages.len() > MAX_MESSAGES)
+            && self.evict_oldest_assistant()
+        {}
     }
+    /// Evict the oldest assistant entries, never the final reply, until
+    /// `fits` accepts the history. Returns false when nothing more can go.
+    pub fn shrink_until(&mut self, mut fits: impl FnMut(&Self) -> bool) -> bool {
+        while !fits(self) {
+            let protected = self
+                .messages
+                .last()
+                .filter(|m| m.role == "assistant")
+                .map(|m| m.id.clone());
+            let Some(i) = self
+                .messages
+                .iter()
+                .position(|m| m.role == "assistant" && Some(&m.id) != protected.as_ref())
+            else {
+                return false;
+            };
+            self.messages.remove(i);
+            self.assistant_history_omitted = true;
+        }
+        true
+    }
+
     pub fn evidence(&self) -> crate::continuation::ContinuationEvidence {
         crate::continuation::ContinuationEvidence {
             messages: self.messages.clone(),
@@ -599,13 +670,113 @@ mod tests {
             context.messages.iter().filter(|m| m.role == "user").count(),
             1
         );
+        // One pasted document is kept by its head and tail, not refused.
         context.user(
-            "too-large",
+            "pasted",
             &[ContentBlock::Text(TextContent::new(
                 "x".repeat(USER_BYTES + 1),
             ))],
         );
+        assert!(context.authorization_complete);
+        let pasted = context
+            .messages
+            .iter()
+            .find(|m| m.id == "user:pasted")
+            .expect("kept");
+        assert!(pasted.text.len() < MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES + 100);
+        assert!(pasted.text.contains("bytes omitted from the middle"));
+        // Only the user byte budget itself makes the history incomplete.
+        for i in 0..6 {
+            context.user(
+                &format!("paste-{i}"),
+                &[ContentBlock::Text(TextContent::new("y".repeat(USER_BYTES)))],
+            );
+        }
         assert!(!context.authorization_complete);
-        assert!(context.messages.iter().all(|m| m.id != "user:too-large"));
+    }
+
+    #[test]
+    fn long_sessions_evict_assistant_entries_before_refusing_a_user_message() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        // Two hundred exchanges with ten assistant messages each: far past
+        // the old 256-entry refusal, still complete.
+        for i in 0..200 {
+            context.user(
+                &format!("u{i}"),
+                &[ContentBlock::Text(TextContent::new(format!("step {i}")))],
+            );
+            for j in 0..10 {
+                context.assistant(Some(&format!("a{i}-{j}")), i * 10 + j, "ok");
+            }
+        }
+        assert!(
+            context.authorization_complete,
+            "hundreds of exchanges stay complete"
+        );
+        assert!(context.messages.len() <= MAX_MESSAGES);
+        assert!(context.assistant_history_omitted);
+        assert!(!context.final_reply_omitted);
+        assert_eq!(context.user_count(), 200);
+        assert!(
+            context.messages.iter().any(|m| m.id == "user:u0"),
+            "user history is never evicted"
+        );
+        assert_eq!(
+            context.messages.last().map(|m| m.role.as_str()),
+            Some("assistant")
+        );
+        // Only the 257th distinct user message cannot fit.
+        for i in 200..MAX_MESSAGES {
+            context.user(
+                &format!("u{i}"),
+                &[ContentBlock::Text(TextContent::new(format!("step {i}")))],
+            );
+        }
+        assert!(context.authorization_complete);
+        context.user(
+            "u-one-too-many",
+            &[ContentBlock::Text(TextContent::new("step 256"))],
+        );
+        assert!(!context.authorization_complete);
+    }
+
+    #[test]
+    fn shrinking_to_a_wire_limit_drops_old_assistant_entries_but_keeps_the_reply() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        context.user("u", &[ContentBlock::Text(TextContent::new("do the thing"))]);
+        for i in 0..12 {
+            context.assistant(Some(&format!("a{i}")), i, &"z".repeat(1000));
+        }
+        let limit = 5_000;
+        assert!(context.shrink_until(|c| serde_json::to_vec(c).unwrap().len() <= limit));
+        assert!(serde_json::to_vec(&context).unwrap().len() <= limit);
+        assert!(context.assistant_history_omitted);
+        assert!(context.messages.iter().any(|m| m.id == "user:u"));
+        assert_eq!(context.messages.last().map(|m| m.id.as_str()), Some("a11"));
+        assert!(!context.final_reply_omitted);
+        assert!(context.evidence().validate().is_ok());
+        // Once only the user message and the final reply remain, it gives up.
+        assert!(!context.shrink_until(|c| serde_json::to_vec(c).unwrap().len() <= 100));
+    }
+
+    #[test]
+    fn a_long_final_reply_is_trimmed_rather_than_omitted() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        context.user(
+            "u",
+            &[ContentBlock::Text(TextContent::new("write the report"))],
+        );
+        for chunk in 0..40 {
+            context.assistant(Some("reply"), chunk, &"r".repeat(1024));
+        }
+        assert!(!context.final_reply_omitted);
+        assert!(context.authorization_complete);
+        let reply = context.messages.last().unwrap();
+        assert_eq!(reply.role, "assistant");
+        assert!(reply.text.contains("bytes omitted from the middle"));
+        assert!(context.evidence().validate().is_ok());
     }
 }

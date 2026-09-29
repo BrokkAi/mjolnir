@@ -50,6 +50,11 @@
           "text": "I pushed two more #3543 chunks to origin/master, now at `811abf505`: Java source trees can select a configured JDK home, and the call-result-use index now recognizes discarded calls in `for` initializers and updates. Focused tests, formatting, Clippy, and open-core classification passed; the working tree is clean.\n\n[#3649] remains open. Source selection alone does not prove artifact applicability: JDK discovery still collapses equal-version homes, and activation retains only one matching evidence row per shard. I recorded those constraints in the [ExecPlan](/workspace/0b4b14fb06f2c331d802b44d8e35c660/bifrost/.agents/plans/issue-3649-call-artifact-applicability.md). No JDK result obligation is enabled yet."
         },
         {
+          "id": "user:232120",
+          "role": "user",
+          "text": "how far did you get on the \"this is the first tranche that makes sense\" of the epic?"
+        },
+        {
           "id": "agent:232126",
           "role": "assistant",
           "text": "I’ll compare the first-tranche scope in the #3543 plan with what has actually shipped, then give you a rule-by-rule status and the remaining gate."
@@ -58,6 +63,11 @@
           "id": "agent:232181",
           "role": "assistant",
           "text": "The “first tranche” was **A1–A6 for Java, JavaScript, TypeScript, and Python**. All six native policies have shipped to origin/master for bounded, supported cases in those four languages. The combined pilot passed CLI JSON, SARIF, and MCP fixture checks, with incomplete cases reported as incomplete. Java has since gained narrower A1, A2, A5, and A6 coverage. The [qualification record](/workspace/0b4b14fb06f2c331d802b44d8e35c660/bifrost/.agents/docs/lint-catalog-pilot-qualification.md) has the exact revisions and results.\n\n**The tranche is not finished as a language-level deliverable.** All four A-batch tickets remain open: required semantic shapes and near misses still need coverage, particularly around A1/A5/A6. I also shipped independent B1/B2/B3/B6 slices, but those do not complete a B batch; B4/B5 still need reviewed result obligations and the exact call-to-JDK-artifact proof tracked by #3649. The [delivery plan](/workspace/0b4b14fb06f2c331d802b44d8e35c660/bifrost/.agents/plans/issue-3543-lint-catalog-delivery.md) tracks those gaps.\n\nSo: the first tranche’s shared engine and pilot policies are real and published, but **zero of its four language tickets are ready to close**."
+        },
+        {
+          "id": "user:232506",
+          "role": "user",
+          "text": "let's close those out now then"
         },
         {
           "id": "agent:232512",
@@ -265,6 +275,11 @@
           "text": "I pushed the A6 extension and Java A1 call-identity improvement to `origin/master` at `384892709`. The updated binary passed **115/115** CLI JSON, SARIF, and MCP fixture variants; all 18 branch-policy tests passed. I also filled in the six-row evidence ledgers for [Java #3548](https://github.com/BrokkAi/bifrost-dev/issues/3548), [JavaScript #3549](https://github.com/BrokkAi/bifrost-dev/issues/3549), [TypeScript #3550](https://github.com/BrokkAi/bifrost-dev/issues/3550), and [Python #3553](https://github.com/BrokkAi/bifrost-dev/issues/3553).\n\n**I did not close the tickets.** Their acceptance contracts still require semantics the current analyzer cannot prove, including Java overload ambiguity and broader A5 arithmetic, boxed, and floating-point predicates, plus dynamic property cases in the other languages. Those cases report *inconclusive*, so closing the tickets now would claim completion the evidence does not support."
         },
         {
+          "id": "user:236601",
+          "role": "user",
+          "text": "did you make appropriate comments on the tickets then? should adding those semantics be your next sprint?"
+        },
+        {
           "id": "agent:236611",
           "role": "assistant",
           "text": "No—I updated the ticket bodies with six-row evidence ledgers, but I didn’t add comments. I’ll add a short status comment to each ticket now. Yes, the missing semantics should be the next sprint, with the work ordered by shared capabilities and each language ticket kept open until its own acceptance passes."
@@ -280,7 +295,7 @@
           "text": "No. I had updated the six-row ledgers in the ticket bodies but missed the comments. I’ve now posted current evidence and remaining gaps on [Java #3548](https://github.com/BrokkAi/bifrost-dev/issues/3548#issuecomment-5800010413), [JavaScript #3549](https://github.com/BrokkAi/bifrost-dev/issues/3549#issuecomment-5800010764), [TypeScript #3550](https://github.com/BrokkAi/bifrost-dev/issues/3550#issuecomment-5800011092), and [Python #3553](https://github.com/BrokkAi/bifrost-dev/issues/3553#issuecomment-5800011409).\n\nYes—those missing A1/A5 semantics should be my next sprint. I’ve recorded the sequence in the [ExecPlan](/workspace/0b4b14fb06f2c331d802b44d8e35c660/bifrost/.agents/plans/issue-3543-lint-catalog-delivery.md): shared scalar facts first, Java overload applicability next, then separate JS/TS and Python qualification. The plan is pushed to `origin/master` at `aa31c2c78`. Each ticket stays open until its own acceptance passes."
         }
       ],
-      "authorization_complete": false,
+      "authorization_complete": true,
       "assistant_history_omitted": true,
       "open_assistant_id": null,
       "final_reply_omitted": false

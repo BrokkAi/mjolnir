@@ -37,6 +37,9 @@ LOCAL_TZ = ZoneInfo("America/Chicago")
 
 USER_BYTES = 32 * 1024
 ASSISTANT_BYTES = 16 * 1024
+MESSAGE_HEAD_BYTES = 4 * 1024
+MESSAGE_TAIL_BYTES = 2 * 1024
+MAX_MESSAGES = 256
 USER_TAIL = 1024
 ASSISTANT_TAIL = 2048
 CONTINUATION_PROMPT = (
@@ -235,14 +238,27 @@ def parse_local(text):
     return int(naive.replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
 
 
-def build_authorization(items, end_index):
-    """Whole user and assistant messages up to the reply, under production budgets.
+def trim_middle(text):
+    """Port of `mj_core::assessment::trim_middle`: head and tail with an omission marker."""
+    data = text.encode()
+    if len(data) <= MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES:
+        return text
+    head = data[:MESSAGE_HEAD_BYTES].decode(errors="ignore")
+    tail = data[-MESSAGE_TAIL_BYTES:].decode(errors="ignore")
+    omitted = len(data) - len(head.encode()) - len(tail.encode())
+    return f"{head}\n[... {omitted} bytes omitted from the middle of this message ...]\n{tail}"
 
-    Mirrors `mj_core::assessment::ContextHistory`: a user message that would push
-    the user total past 32 KiB marks the history incomplete; assistant messages
-    are evicted oldest first past 16 KiB, and evicting the final reply is flagged.
-    History starts after the last `/compact` or `/clear`, the closest available
-    stand-in for a context reset.
+
+def build_authorization(items, end_index):
+    """Whole user and assistant messages up to the reply, under production rules.
+
+    Mirrors `mj_core::assessment::ContextHistory` step by step: every message is
+    kept by head and tail past 6 KiB; a user message that would push the user
+    total past 32 KiB, or a 257th user message, marks the history incomplete;
+    assistant entries are evicted oldest first past 16 KiB of assistant text or
+    past 256 entries in all, never the final reply. History starts after the
+    last `/compact` or `/clear`, the closest available stand-in for a context
+    reset.
     """
     start = 0
     for index in range(end_index + 1):
@@ -250,8 +266,30 @@ def build_authorization(items, end_index):
         if item["kind"] == "user" and item["text"].strip().split(" ")[0] in ("/compact", "/clear"):
             start = index + 1
     messages = []
-    complete = True
-    user_total = 0
+    state = {"complete": True, "omitted": False, "final_omitted": False}
+
+    def user_bytes():
+        return sum(len(m["text"].encode()) for m in messages if m["role"] == "user")
+
+    def user_count():
+        return sum(1 for m in messages if m["role"] == "user")
+
+    def assistant_bytes():
+        return sum(len(m["text"].encode()) for m in messages if m["role"] == "assistant")
+
+    def evict_oldest_assistant(protect_last):
+        candidates = [i for i, m in enumerate(messages) if m["role"] == "assistant"]
+        if protect_last and candidates and candidates[-1] == len(messages) - 1:
+            candidates = candidates[:-1]
+        if not candidates:
+            return False
+        index = candidates[0]
+        if index + 1 == len(messages):
+            state["final_omitted"] = True
+        messages.pop(index)
+        state["omitted"] = True
+        return True
+
     for index in range(start, end_index + 1):
         item = items[index]
         text = item["text"]
@@ -260,48 +298,46 @@ def build_authorization(items, end_index):
         if item["kind"] == "user":
             if text.startswith(CONTINUATION_PROMPT) or text.startswith("[handback reminder]"):
                 continue
-            if user_total + len(text.encode()) > USER_BYTES or len(messages) >= 256:
-                complete = False
+            text = trim_middle(text)
+            if user_bytes() + len(text.encode()) > USER_BYTES or user_count() >= MAX_MESSAGES:
+                state["complete"] = False
                 continue
-            user_total += len(text.encode())
+            while len(messages) >= MAX_MESSAGES and evict_oldest_assistant(False):
+                pass
+            if len(messages) >= MAX_MESSAGES:
+                state["complete"] = False
+                continue
             messages.append({"id": f"user:{item['position']}", "role": "user", "text": text})
         elif item["kind"] == "agent":
-            messages.append({"id": f"agent:{item['position']}", "role": "assistant", "text": text})
-    omitted = False
-    final_omitted = False
-
-    def assistant_total():
-        return sum(len(m["text"].encode()) for m in messages if m["role"] == "assistant")
-
-    while assistant_total() > ASSISTANT_BYTES or len(messages) > 256:
-        index = next((i for i, m in enumerate(messages) if m["role"] == "assistant"), None)
-        if index is None:
-            complete = False
-            break
-        if index + 1 == len(messages):
-            final_omitted = True
-        messages.pop(index)
-        omitted = True
+            state["final_omitted"] = False
+            messages.append({"id": f"agent:{item['position']}", "role": "assistant", "text": trim_middle(text)})
+            while (assistant_bytes() > ASSISTANT_BYTES or len(messages) > MAX_MESSAGES) and evict_oldest_assistant(True):
+                pass
     return {
         "messages": messages,
-        "authorization_complete": complete,
-        "assistant_history_omitted": omitted,
+        "authorization_complete": state["complete"],
+        "assistant_history_omitted": state["omitted"],
         "open_assistant_id": None,
-        "final_reply_omitted": final_omitted,
+        "final_reply_omitted": state["final_omitted"],
     }
 
 
 def fixture_from_transcript(args, connection):
     session, title, harness = resolve_session(connection, args.session)
-    at_ms = parse_local(args.at)
     items = transcript(connection, session)
-    candidates = [
-        (index, item)
-        for index, item in enumerate(items)
-        if item["kind"] == "agent" and item["text"].strip() and at_ms - 180_000 <= item["at_ms"] <= at_ms + 999
-    ]
-    if not candidates:
-        fail("no agent reply within three minutes before that time")
+    if args.position is not None:
+        candidates = [(i, item) for i, item in enumerate(items) if item["position"] == args.position and item["kind"] == "agent"]
+        if not candidates:
+            fail(f"no agent reply at position {args.position}")
+    else:
+        at_ms = parse_local(args.at)
+        candidates = [
+            (index, item)
+            for index, item in enumerate(items)
+            if item["kind"] == "agent" and item["text"].strip() and at_ms - 180_000 <= item["at_ms"] <= at_ms + 999
+        ]
+        if not candidates:
+            fail("no agent reply within three minutes before that time")
     index, reply = candidates[-1]
     prompt = next(
         (items[i]["text"] for i in range(index, -1, -1) if items[i]["kind"] == "user" and items[i]["text"].strip()),
@@ -345,13 +381,14 @@ def main():
     parser.add_argument("--decision", help="worker decision id (assessment-<session>-<ordinal> or an activity id)")
     parser.add_argument("--session", help="session id or unique prefix")
     parser.add_argument("--at", help="local time of the agent reply, YYYY-MM-DD HH:MM:SS (America/Chicago)")
+    parser.add_argument("--position", type=int, help="transcript position of the agent reply (instead of --at)")
     parser.add_argument("--out", type=Path, default=FIXTURES)
     parser.add_argument("--force", action="store_true", help="overwrite an existing fixture for this id")
     args = parser.parse_args()
-    if bool(args.decision) == bool(args.at):
-        fail("give exactly one of --decision or --at")
-    if args.at and not args.session:
-        fail("--at needs --session")
+    if sum(1 for flag in (args.decision, args.at, args.position) if flag) != 1:
+        fail("give exactly one of --decision, --at, or --position")
+    if (args.at or args.position) and not args.session:
+        fail("--at and --position need --session")
     connection = connect()
     body = fixture_from_decision(args, connection) if args.decision else fixture_from_transcript(args, connection)
     fixture = {

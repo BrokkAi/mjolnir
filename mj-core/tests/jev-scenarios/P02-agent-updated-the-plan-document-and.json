@@ -255,6 +255,221 @@
           "text": "│ 1. The typed frontier is 100% greenfield, and the oracle doubles its cost. Confirmed: no type-transfer machinery exists under\n│ any name. What exists is declaration-level signature types in unit_signature_metadata (return type identity, extension receiver,\n│ type params) and query-time receiver analysis (receiver_query/ over the ReceiverContext contracts) — call-site receiver types\n│ are never persisted today. So the \"type transfer\" column of your matrix is a new persisted fact family for all nine domains, and\n│ the oracle must implement the same typed dispatch semantics independently — it's a small type evaluator per language, not a\n│ scope enumerator. Two things the ExecPlan should add: an honest sizing of the oracle's per-domain cost, and a named ground truth\n│ for typed dispatch (language-spec fixtures, e.g. JLS overload-resolution examples for the Java spike). This matters because the\n│ oracle and production engine share the persisted-fact substrate — a lowering bug fools both, and your lowering tests need an\n│ external referent. NB: once upon a time I ported all the go-to-definition and scan_usages equivalent tests from the top LSP\n| per language (at the time this did not include rb or kt), comments or git history may reference this.\n│\n│ 2. Make the real-repo benchmark a promotion requirement, and pin the baseline corpus. BIFROST_BENCH_REPO exists but only in the\n│ root test harness (tests/common/memory_benchmark.rs:108), which is fine to build on. But \"when a real Java checkout is\n│ available\" is soft — generated corpora flatter engines (regular structure, no pathological re-export patterns). Either require\n│ the real-repo run for promotion or state explicitly that synthetic numbers alone can promote. Relatedly, the ratio gates (1.25×\n│ cold, 2× warm) need the current engine measured on the same milestone-2 corpus; milestone 1's baseline capture should name that\n│ harness, not just real-repo measurements.\n│\n│ 3. State the Java spike's fate. Milestone 2 builds Java facts on a temporary provider, but Java's production cutover is sixth in\n│ line. PLANS.md requires prototype milestones to state promote-or-discard criteria: does the spike extraction get rewritten on\n│ the production schema at JVM cutover, bit-rot in the interim, or get maintained? One paragraph in the ExecPlan settles it.\n│\n│ 4. Decide where the oracle lives, explicitly. The release guidance says independent/metamorphic oracles default private, but\n│ crate src/ under crates/bifrost-analysis projects public. If ResolutionOracle sits in analyzer/resolution/ it gets published.\n│ Either accept that (defensible — it's general capability, and publishing the readable model has value) or place it in a private\n│ subtree. Record the classification decision either way; your \"engine open-core, assurance private\" sentence currently straddles\n│ exactly this case.\n│\n│ 5. Reconcile the umbrella issue's acceptance criteria. Three specific conflicts with #2771 as written: it names design 5 the\n│ leading design (retire that explicitly, keep the survey); its \"do not add … a whole-result Moka cache\" reads literally against\n│ your warm-gate contingency, since the existing 32 MiB cache is a whole-result graph cache (CompleteValueCache<…,\n│ WorkspaceUsageRankingGraph>) — the issue text should permit the gated retention; and it commits to re-running the #2767 and\n│ #2768 reproductions by name, which your milestone-2 gates mirror (ten-function missing_tests, broad streaming) but don't cite.\n│ Cite them.\n│\n│ Nits: the current cache only publishes complete graphs (Incomplete is deliberately uncached) — preserve that property if you\n│ adapt it to edge streams. CandidateOutcome has a distinct RQL twin CandidateOutcomeLabel (bifrost-rql/src/query/ir.rs:578); the\n│ ExecPlan should say which vocabulary the witness records. And the core vocabulary enums are labelled_enum!-generated, worth a\n│ note in the ExecPlan so an implementer's grep \"enum PrecedenceTier\" miss doesn't send them down a rabbit hole.\n│\n│ One residual judgment call I'll flag once more and then drop: Rust-first cutover now carries even more front-loaded risk than\n│ in v1, because the typed frontier (point 1) is greenfield and Rust is its hardest client. The plan acknowledges the trade\n│ deliberately, and the milestone-2 gates protect you, so I won't push further — but if the Java spike reveals the typed-frontier\n│ design churning, Go (small, no overloads, structural method sets) is the cheap second opinion before Rust."
         },
         {
+          "id": "user:65888",
+          "role": "user",
+          "text": "remind me which ticket we decided owns this?"
+        },
+        {
+          "id": "user:66016",
+          "role": "user",
+          "text": "ty, continue"
+        },
+        {
+          "id": "user:118275",
+          "role": "user",
+          "text": "what are the gaps to production"
+        },
+        {
+          "id": "user:119159",
+          "role": "user",
+          "text": "do you have what you need to execute or should we do a /plan phase"
+        },
+        {
+          "id": "user:119268",
+          "role": "user",
+          "text": "/goal complete production implementation of the execplan"
+        },
+        {
+          "id": "user:148093",
+          "role": "user",
+          "text": "my other agents say that tests/common/native_resolution_benchmark.rs isn't theirs, so ig if it's not yours you can remove it"
+        },
+        {
+          "id": "user:148358",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:151615",
+          "role": "user",
+          "text": "is each of the \"cut over $language\" tasks a big lift? should we start spreading these out across parallel subagents?"
+        },
+        {
+          "id": "user:152395",
+          "role": "user",
+          "text": "is that the next goal to work towards to close out 2771?"
+        },
+        {
+          "id": "user:152696",
+          "role": "user",
+          "text": "ok so it sounds like parallelization is premature until we do #1-#4"
+        },
+        {
+          "id": "user:152828",
+          "role": "user",
+          "text": "great, do it that way"
+        },
+        {
+          "id": "user:183760",
+          "role": "user",
+          "text": "uh hang on does that mean that our sql db is so bad we couldn't even test it meaningfully, and we're still running legacy mode?"
+        },
+        {
+          "id": "user:183985",
+          "role": "user",
+          "text": "\"if we revisit this design\" lol i don't think you understand, we MUST ship this working, legacy is far too slow since it builds everything [above facts] from scratch every times\n\nwhat should we do next, is it profiling?"
+        },
+        {
+          "id": "user:184991",
+          "role": "user",
+          "text": "let's re-ground this in the useful priort art: ../stack-graphs and .agents/docs/related-work/scope-graphs-story-so-far.pdf\n\nmy assistant's assesment is:\n\n│ Now I've read the whole thing (Zwaan & van Antwerpen, \"Scope Graphs: The Story so Far,\" EVCS 2023). Direct answer: neither is\n│ the \"do it this way\" artifact — they answer different halves of your design, and this paper is the better semantic spec while\n│ the stack-graphs repo is the better operational spec. Notably, the two lineages share an author (van Antwerpen wrote Statix at\n│ Delft, then stack graphs at GitHub), and your plan is — whether you intended it or not — a recombination of the two:\n│ scope-graphs semantics in a stack-graphs-shaped storage architecture.\n│\n│ ## What this paper gives the implementor that stack-graphs can't\n│\n│ The semantic model your plan actually needs. The Statix-era formulation (the paper's Figures 4–5) is queries with a per-query\n│ reachability regular expression, visibility as an order on labels, and a data-match predicate. That's the right specification\n│ vocabulary for your PrecedenceTier ordering and, critically, for the ResolutionOracle — the resolution calculus is a brute-force\n│ oracle spec, readable and directly implementable. And \"Scopes as Types\" is the direct ancestor of your typed frontier:\n│ type-dependent member resolution done by interleaving typing with resolution (their record-projection example …​.x13 is your\n│ a.b().c problem). Stack graphs deliberately erased that interleaving by compiling type flow into stack discipline; your plan\n│ re-introduces it explicitly, which puts your semantics closer to Statix than to stack graphs.\n│\n│ The completeness theory. Rouvoet 2020's critical edges — \"these edges are sufficient to determine if a query result in the\n│ partial graph is sound (i.e., equal to its result in the final graph)\" — is the formal foundation your closure certificates\n│ need: an answer counts only when it's stable under completion of the graph. Stack graphs have no counterpart; this is the\n│ intellectual gap behind their silent pruning.\n│\n│ Hard-won negative results, which are worth more than the positive ones. Three map directly onto your plan: local label-order\n│ shadowing provably can't express Scala's preference of outer named imports over closer wildcard imports — so your \"ordered\n│ precedence traces\" must be full path orders, not per-edge label comparisons (your schema bullet already says this; now you know\n│ why). Rust's module system \"was expressible in Statix, but could not be made executable\" — a warning shot aimed precisely at\n│ your Rust-first cutover. And resolution queries \"cannot express a query that resolves all names that would result in capture\" —\n│ meaning your symbol_rename consumer needs more than the resolver exposes; plan for that in the consumer matrix.\n│\n│ ## What it can't give them\n│\n│ The paper contains zero operational architecture for your problem: no per-file summaries, no partial paths, no persistence, no\n│ query-time composition — Statix is a whole-program constraint solver, and even its incrementality work (Zwaan 2022's unit diffs,\n│ impressive 20–150x speedups) is re-analysis avoidance in a solver, not summary composition from storage. It also, tellingly,\n│ never mentions stack graphs. And the paper is frank that Statix-derived checkers remain \"an order of magnitude slower than\n│ hand-written ones.\" The stack-graphs repo is where the operational half lives: minimal partial paths as the summarization unit,\n│ the phased stitching loop, and the Database hydration contract that maps one-to-one onto your SqlFragmentSource.\n│\n│ ★ Insight ─────────────────────────────────────\n│\n│ • These are one research program split in two: Delft kept the declarative semantics and decidable query theory but stayed\n│   whole-program; GitHub kept per-file incrementality and zero-config operation but gave up the typing interleave and\n│   completeness. Your plan's typed frontier + persisted fragments is the first design I know of that takes each half from the\n│   branch that got it right.\n│\n│ • The most reusable thing in the scope-graphs line for Bifrost is not an algorithm but a contract: a query answer is valid only\n│   if provably stable under graph completion (critical edges). That contract, transplanted into a stitching engine, is exactly\n│   your \"incomplete, never absence\" rule.\n│ ─────────────────────────────────────────────────\n│the ExecPlan's context section should this paper for the semantic layer (resolution calculus\n│ for the oracle, per-query reachability/visibility/data-match as the query vocabulary, critical-edge stability as the\n│ completeness definition, plus the three negative results as design constraints) and distills the stack-graphs docs for the\n│ storage/composition layer (minimal partial paths, pre/postconditions with variables, phased hydration), with one explicit\n│ prohibition: do not import their cycle/similar-path heuristics as a correctness model. The paper and repo then go into\n│ .agents/docs/ as background reading for the curious, not as the spec.\n│\n│ One caution against over-indexing on the paper in the other direction: its formalism assumes a solver that owns the whole graph\n│ in memory. An implementor who reads only it will produce a beautiful whole-program engine with no incrementality story — which\n│ is roughly the failure mode your current resolver already has. The pairing is the point."
+        },
+        {
+          "id": "user:185410",
+          "role": "user",
+          "text": "(i've converted the pdf to .md for you if that's still useful)"
+        },
+        {
+          "id": "user:185904",
+          "role": "user",
+          "text": "> Stack Graphs’ phased loader has no “exhausted vs incomplete” proof\n\nthis is core to bf no? we shouldn't have to invent anything here, just extend what's there\n\n> the 2023 paper is a survey\n\nlmk if you want any of the referenced details"
+        },
+        {
+          "id": "user:186137",
+          "role": "user",
+          "text": "i don't give a shit about citations, question is if they are useful to understanding how to build what we need"
+        },
+        {
+          "id": "user:186818",
+          "role": "user",
+          "text": "i've also added the theory of name resolution paper"
+        },
+        {
+          "id": "user:187122",
+          "role": "user",
+          "text": "are there remaining gaps that we should check the literature for? my experience is i usually start hitting diminishing returns after ~3 papers but if there's a high value target left we can keep going"
+        },
+        {
+          "id": "user:187517",
+          "role": "user",
+          "text": "added scopes as types"
+        },
+        {
+          "id": "user:191465",
+          "role": "user",
+          "text": "wtf is this running that is taking 77+ minutes"
+        },
+        {
+          "id": "user:191661",
+          "role": "user",
+          "text": "i think my harness may have missed some updates. where are we now / what's next?"
+        },
+        {
+          "id": "user:192217",
+          "role": "user",
+          "text": "where do we go to \"do the other 12 languages in parallel,\" is it after java? (i thought java was after rust, did we cut over rust?)"
+        },
+        {
+          "id": "user:192609",
+          "role": "user",
+          "text": "is this in the execplan?"
+        },
+        {
+          "id": "user:192709",
+          "role": "user",
+          "text": "update the plan pls"
+        },
+        {
+          "id": "user:193218",
+          "role": "user",
+          "text": "/goal implement the updated plan at .agents/plans/bifrost-native-resolution-engine.md"
+        },
+        {
+          "id": "user:198277",
+          "role": "user",
+          "text": "did we scope creep from \"construct the graph more efficiently\" to \"build a more-sound graph\"? bc we only need to match legacy's soundness (if that's what you're doing, carry on)"
+        },
+        {
+          "id": "user:198922",
+          "role": "user",
+          "text": "> the uncommitted import-proof theorem\n\nthis is useful code right? should we preserve it in a branch?"
+        },
+        {
+          "id": "user:199067",
+          "role": "user",
+          "text": "as long as it doesn't cause issues that's fine, either way pls create a ticket so we remember to follow up on it. then continue w/ the plan"
+        },
+        {
+          "id": "user:203521",
+          "role": "user",
+          "text": "Quick bug I noticed:\nThe false-negative sweep flagged engine.rs:2017 (reverse_candidate_references) as labeling a cancellation-induced None as UnsupportedSemantic instead of Cancelled, citing the trait contract \"recheck the token before interpreting None.\"\n\nIt doesn't hold. The call is ResolutionFragmentSource::definition_node (engine.rs:980-983), whose signature takes no cancellation token (engine.rs:102) and whose body is require_legacy_closed_world()?; Ok(self.definitions.get(&definition).copied()). It returns None only for a genuinely absent definition — cancellation cannot produce it, for any implementer, because the method has no token to observe. The agent conflated it with lookup_definition_node (engine.rs:1166-1174, the batch trait method that does take a token). So UnsupportedSemantic is the correct label at that site; the batch.rs:1795 contract note governs a different method. No defect. (And that path is in the preload compatibility oracle, impl ResolutionEngine at engine.rs:1772, not the production reverse path anyway.)"
+        },
+        {
+          "id": "user:204205",
+          "role": "user",
+          "text": "I'd recommend the v35 checkpoint's gate include native_resolution_sql:: before it's treated as done, if it doesn't already"
+        },
+        {
+          "id": "user:205643",
+          "role": "user",
+          "text": "go ahead and include the research papers w your next checkpoint"
+        },
+        {
+          "id": "user:205774",
+          "role": "user",
+          "text": "pls take a minute to move historical noise from the execplan into an -archived sidecar, it's getting unwieldy"
+        },
+        {
+          "id": "user:209768",
+          "role": "user",
+          "text": "1. is migration heavy enough that we should start from scratch?\n2. did this work explode cold build to \"build entire graph eagerly\" instead of just facts db?"
+        },
+        {
+          "id": "user:209846",
+          "role": "user",
+          "text": "eh if this is just test harness noise then i'm not fussed"
+        },
+        {
+          "id": "user:227530",
+          "role": "user",
+          "text": "this is ofc a shared host and if you're measuring wall clocks you're in for a bad time"
+        },
+        {
+          "id": "user:233635",
+          "role": "user",
+          "text": "are we doing a useful ratio of work : waiting for builds / tests? if not how can we improve?"
+        },
+        {
+          "id": "user:233852",
+          "role": "user",
+          "text": "pls add your workflow notes to the execplan\n\nand: add a detour before M6 to clean up the schema as follows:\n\nCommit 1, point 6: repeated enumerations become domain tables. Any CHECK IN list that appears in two or more tables becomes a seeded reference table with a foreign key and the same immutability triggers as resolution_boundary_nodes. Known repeats: gap origin (3 copies), boundary status and reason kind (about 10 each), namespace (about 9). Keep generic as a seeded origin. Seed all 5 namespaces and keep a one-line exclusion check where type_or_value is not allowed.\n\nCommit 2, point 5: one name per meaning. Keep the resolution_ prefix. Rename the recipe table's lang to semantic_language, since the seal trigger compares it to the semantic language. Rename bare kind columns to node_kind and witness_kind. Dense child indexes are all position, which renames the enumeration-impact and Java segment ordinal columns. The precedence ordinal is the TypeOrValue route order, so it becomes route_ordinal in both tables that carry it. Two table names become plural: path_precedence_cells and path_witnesses.\n\nCommit 3, point 8: the probe order is a row. Add a seeded table mapping type_or_value at route ordinal 0 to value and at 1 to type. The Java lookup view joins it instead of the CASE. The agent must find where Rust hard-codes the same rule and leave it in one place only.\n\nCommit 4, point 3: the root is a node. Each fragment gets exactly one node of kind root with a constant digest, enforced at seal. Drop the boundary table. The nine node-or-boundary column pairs collapse to one non-null node key. MountRebaser maps root nodes to the universal root identity, and the Commit A bijection and near-miss laws must pass unchanged. I rejected an endpoint supertype table because it adds a join to every hot read.\n\nCommit 5, point 2: subtype tables. Three splits. Nodes become a supertype plus symbol, jump-to-scope, reference, and optional reference-site tables, which deletes the 40-line node CHECK. The ten copies of the reason shape become one per-blob reason catalog with three subtype tables and thin owner links, sealed like any other family. Path witnesses split into one table per kind, and the agent decides whether the boundary kind folds into node after Commit 4.\n\nFinal check. After Commit 5 the schema must contain no exclusive-arc IS NULL <> checks and no CHECK that ties nullability to more than one discriminator value."
+        },
+        {
+          "id": "user:234267",
+          "role": "user",
+          "text": "sorry, my schema directive earlier was premature. override it with this narrower one, and be clear that if my updated directive is still based on incomplete understanding (that is: implementing the directive would break shit) to skip that part.\n\nthe updated directive is at .agents/plans/v35-schema-relational-cleanup.md"
+        },
+        {
+          "id": "user:235784",
+          "role": "user",
+          "text": "btw are we running tests with --no-fail-fast or a reasonable --max-fail so a flake costs one re-run of one test, not of the full suite?"
+        },
+        {
+          "id": "user:236126",
+          "role": "user",
+          "text": "what are we blocking on now? close to no CPU used on host"
+        },
+        {
+          "id": "user:236335",
+          "role": "user",
+          "text": "how often does your plan call for running clippy? should we reduce that in the spirit of improving our productive time : waiting time ratio?"
+        },
+        {
+          "id": "user:257501",
+          "role": "user",
+          "text": "continue"
+        },
+        {
           "id": "agent:282925",
           "role": "assistant",
           "text": "The selected range boundary is now validated: operation parity is 12/12, the persisted range lookup and its maximum-width indexed SQL plan pass, and both v35 schema upgrade/rebuild laws pass. I’m checkpointing this separately before tackling target-semantic-to-`CodeUnit` projection, which is the next independent consumer boundary."
@@ -310,6 +525,11 @@
           "text": "The first cooperative path is in place: bounded point evaluation now charges typed relation requests/rows, lexical seed/classification/match/hydration work, and both outer fixed-point and inner stitching rounds before performing each unit. A tiny budget terminates through the existing `BoundedResolution::Exceeded` contract and discards the partial semantic answer. I’m running the real dependency-module law now; the default-budget result must remain byte-for-byte equal to the unbounded oracle."
         },
         {
+          "id": "user:284998",
+          "role": "user",
+          "text": "(fyi, i had another agent clean the noise out of the execplan; summary is appended to the -archived execplan file and the exact details ofc are in dcbbc76a4 if we missed anything important)"
+        },
+        {
           "id": "agent:285001",
           "role": "assistant",
           "text": "A concurrent workspace change appeared while the test was running: the active ExecPlan was deleted and 42 lines were appended to its archive. I did not make those changes, so I’m preserving them and will not stage or reverse them. I’m checking whether this was an intentional plan rollover and will continue limiting my edits to the four Rust implementation/test files unless the active plan reappears."
@@ -318,6 +538,11 @@
           "id": "agent:285084",
           "role": "assistant",
           "text": "Got it—that explains the concurrent diff. I’ll treat the archive edits and active-plan replacement as intentional user-owned work, won’t stage them, and will use `dcbbc76a4` whenever an omitted detail matters. I’m continuing the cooperative limiter against the implementation files while the cleaned plan settles."
+        },
+        {
+          "id": "user:285171",
+          "role": "user",
+          "text": "edits complete, sorry you saw the blank intermediate state, i've committed the edits as a separate commit"
         },
         {
           "id": "agent:285175",
@@ -395,9 +620,19 @@
           "text": "Warning: Falling back from WebSockets to HTTPS transport. unexpected status 404 Not Found: Unknown error, url: wss://chatgpt.com/backend-api/codex/responses, cf-ray: a355b2a60abac8e5-IAH\n\nunexpected status 404 Not Found: Unknown error, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: a355b2d8ef67c2fd-IAH\n\n"
         },
         {
+          "id": "user:287154",
+          "role": "user",
+          "text": "continue"
+        },
+        {
           "id": "agent:287157",
           "role": "assistant",
           "text": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n\n"
+        },
+        {
+          "id": "user:287170",
+          "role": "user",
+          "text": "continue"
         },
         {
           "id": "agent:287172",
@@ -423,6 +658,11 @@
           "id": "agent:287459",
           "role": "assistant",
           "text": "The strict workspace pass reached our crates but was blocked by three pre-existing warnings in the untouched Rust context crate (`large_enum_variant`, `redundant_iter_cloned`, and `filter_map_bool_then`). I’m leaving those unrelated files alone. I’ll use one targeted lint confirmation for the two changed crates so this checkpoint still has meaningful lint evidence without absorbing baseline cleanup."
+        },
+        {
+          "id": "user:287544",
+          "role": "user",
+          "text": "what is the slice you're finishing, is it the \"rust in production\" one?"
         },
         {
           "id": "agent:287548",
@@ -475,6 +715,11 @@
           "text": "The new provider law uses a persisted intrinsic seed with two child value rows. A budget of 2 must stop before the parent callback and publish no identity/cache state; a fresh budget of 3 must return the unchanged row. That directly tests the child-relation boundary rather than inferring it from final operation totals."
         },
         {
+          "id": "user:289152",
+          "role": "user",
+          "text": "(update the plan to say that we should merge with origin/master before parallelizing the production language lanes)"
+        },
+        {
           "id": "agent:289157",
           "role": "assistant",
           "text": "Got it. I’ll add an explicit synchronization gate: after the Rust production cutover checkpoint, merge `origin/master` into the current branch before any production language lanes are parallelized. I’ll keep the existing rule that the lanes may prepare independently but cannot route before Rust."
@@ -490,7 +735,7 @@
           "text": "Updated the [ExecPlan](/home/jonathan/Projects/bifrost2/.agents/plans/bifrost-native-resolution-engine.md) with an explicit gate:\n\n1. Complete and commit the Rust production cutover.\n2. Merge `origin/master` into the current branch.\n3. Revalidate the integrated Rust cutover.\n4. Only then parallelize production language lanes.\n\nPreparatory research and isolated fixtures may still proceed earlier. I did not perform the merge now."
         }
       ],
-      "authorization_complete": false,
+      "authorization_complete": true,
       "assistant_history_omitted": true,
       "open_assistant_id": null,
       "final_reply_omitted": false
