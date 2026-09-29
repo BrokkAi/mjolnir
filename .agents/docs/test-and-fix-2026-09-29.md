@@ -357,3 +357,9 @@ Session `7a52ae6d` (Claude, `morannon-podman`, bridge 0.84.0): the target is `Ss
 ### Upstream issue filed (11:50)
 
 agentclientprotocol/claude-agent-acp#1196: 0.84.0 sends `session/request_permission` for a Bash tool call while the session mode is `bypassPermissions` (the `7a52ae6d` case).
+
+### Fix wave F8 (Sonnet) — landed
+
+`a51541d9` (M-3): opening a machine's Settings page starts the host preview the Build cache page uses, and an unavailable host's row reads "Off · not available on this host" (test `machine_row_reports_an_unsupported_cache_host_like_its_page`; verified with the injected preview, not against the Mac). `23d15783` (M-4): `WorkerBinarySourceSnapshot::capture` logs one info line "worker source selected" per pinned source with triple, source label, original and pinned paths and `BUILD_ID` (a remote source logs URL and sha256). `01c440ef` (C-8a): a missing secret is reported in one line, "<entry> = { from_secret = … } needs <secrets file>: … (in Mjolnir config <path>)", no TOML caret. `f6a7d247` (C-8b): `restart_daemon` and `replace_daemon` call `ensure_config_loads` before stopping anything and refuse with the loader's message plus "The Mjolnir daemon was not restarted; fix the configuration and try again" (helper tested; the ordering is by construction). `d51413a3` (C-8c): `Controller::load()` marks a config load failure as a precondition refusal, so actions answer 409 with the message; the daemon's periodic refresh already kept the last good config. Noted: `mj new` refuses while the file is broken rather than using the in-memory config (chosen for clarity); the refusal text includes the secrets and config paths (an authenticated caller sees them). controller 1996, core 565, tui 860, CLI 248 green; clippy and fmt clean.
+
+All fix waves have landed. Master validation and the `bin-fixed` rebuild follow.
