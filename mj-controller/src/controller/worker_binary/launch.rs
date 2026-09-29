@@ -630,7 +630,7 @@ pub(super) fn worker_launch_config(
         target_environment.insert("MBX_SAVINGS".into(), "off".into());
     }
     let mut environment = target_environment.clone();
-    environment.extend(profile.environment.clone());
+    environment.extend(profile.environment.resolved().clone());
     profile
         .kind
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);

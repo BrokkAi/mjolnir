@@ -134,8 +134,11 @@ fn remote_submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFai
     let unconfirmed = error
         .downcast_ref::<mj_client::daemon::DaemonRefusal>()
         .is_none_or(mj_client::daemon::DaemonRefusal::delivery_unconfirmed);
+    // The daemon's refusal text does not say whether the worker itself
+    // rejected the command, so never claim it did.
     mj_client::session::SubmitFailure {
         unconfirmed,
+        refused: false,
         message: format!("{error:#}"),
     }
 }

@@ -147,12 +147,17 @@ pub enum ReviewerOutcome {
 pub struct SubmitFailure {
     pub message: String,
     pub unconfirmed: bool,
+    /// The worker itself read the command and rejected it. Other definite
+    /// failures (a full queue, a worker that could not be reached) were
+    /// never looked at and may succeed on a later attempt.
+    pub refused: bool,
 }
 impl From<String> for SubmitFailure {
     fn from(message: String) -> Self {
         Self {
             message,
             unconfirmed: false,
+            refused: false,
         }
     }
 }
@@ -161,6 +166,17 @@ impl From<&str> for SubmitFailure {
         message.to_owned().into()
     }
 }
+
+/// The worker read the command and rejected it; resending it unchanged will
+/// be rejected again.
+#[derive(Debug)]
+pub struct Refused;
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the worker refused the command")
+    }
+}
+impl std::error::Error for Refused {}
 
 /// Submission lost its acknowledgement; callers must reconcile before retrying.
 #[derive(Debug)]

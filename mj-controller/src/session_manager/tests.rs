@@ -2857,3 +2857,16 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
             .is_none()
     );
 }
+
+/// #1186: a park can hand back its lease after stopping the worker, before
+/// the actor learns the target is gone. A deferred submit that then cannot
+/// even connect was never sent, so it must reach `send_input` as a definite
+/// refusal it can retry, not as a delivery that may have happened.
+#[test]
+fn a_submit_that_never_reached_the_worker_is_a_definite_failure() {
+    let never_sent = anyhow::anyhow!("connect worker socket: No such file or directory")
+        .context(super::actor::NotSent);
+    assert!(!super::actor::submit_failure(&never_sent).unconfirmed);
+    let lost_reply = anyhow::anyhow!("relay connection closed while awaiting a reply");
+    assert!(super::actor::submit_failure(&lost_reply).unconfirmed);
+}

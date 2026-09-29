@@ -1516,7 +1516,7 @@ async fn login(args: LoginArgs) -> Result<()> {
         arguments.join(" "),
         profile.home.display()
     );
-    let mut environment = profile.environment.clone();
+    let mut environment = profile.environment.resolved().clone();
     profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),
@@ -1594,7 +1594,7 @@ async fn store_claude_setup_token(
         "Running `claude setup-token` against {}.",
         profile.home.display()
     );
-    let mut environment = profile.environment.clone();
+    let mut environment = profile.environment.resolved().clone();
     profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),

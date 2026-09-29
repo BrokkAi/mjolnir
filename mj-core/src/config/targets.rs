@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ExecutionPolicy, PermissionMode, is_github_source, validate_id, validate_relative_destination,
+    Environment, ExecutionPolicy, PermissionMode, is_github_source, validate_id,
+    validate_relative_destination,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,8 +283,10 @@ pub struct ContainerTemplate {
     pub cpus: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment: BTreeMap<String, String>,
+    /// Environment inside the container. An entry may name a secret instead
+    /// of holding it; see [`super::Environment`].
+    #[serde(default, skip_serializing_if = "Environment::is_empty")]
+    pub environment: Environment,
     #[serde(default, skip_serializing_if = "PodmanWorkspaceStorage::is_default")]
     pub workspace_storage: PodmanWorkspaceStorage,
     /// Per-target mbx build cache overrides.
@@ -480,6 +483,18 @@ pub enum TargetTemplate {
 }
 
 impl TargetTemplate {
+    /// The container this runtime starts, for the container runtimes.
+    pub fn container(&self) -> Option<&ContainerTemplate> {
+        match self {
+            Self::LocalPodman { container }
+            | Self::LocalDocker { container }
+            | Self::AppleContainer { container }
+            | Self::SshPodman { container, .. }
+            | Self::SshDocker { container, .. } => Some(container),
+            _ => None,
+        }
+    }
+
     /// The `kind` spelling used in configuration and on the wire.
     pub const fn kind_name(&self) -> &'static str {
         match self {

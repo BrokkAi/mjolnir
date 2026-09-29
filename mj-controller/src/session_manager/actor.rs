@@ -1057,17 +1057,38 @@ pub(super) async fn deliver_submit(
 /// What the submitter is told. A final rejection is the relay's own reason,
 /// such as "/clear requires an idle session…"; the relay version, operation,
 /// and error code stay in the log written above (I1-12).
+/// The submission failed before it was handed to the worker.
+#[derive(Debug)]
+pub(super) struct NotSent;
+
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the command was not sent to the worker")
+    }
+}
+
+impl std::error::Error for NotSent {}
+
 pub(super) fn submit_failure(error: &anyhow::Error) -> mj_client::session::SubmitFailure {
+    if error.downcast_ref::<NotSent>().is_some() {
+        return mj_client::session::SubmitFailure {
+            unconfirmed: false,
+            refused: false,
+            message: format!("{error:#}"),
+        };
+    }
     match error
         .downcast_ref::<RelayRejected>()
         .filter(|rejected| !rejected.is_retryable())
     {
         Some(rejected) => mj_client::session::SubmitFailure {
             unconfirmed: false,
+            refused: true,
             message: rejected.0.message.clone(),
         },
         None => mj_client::session::SubmitFailure {
             unconfirmed: true,
+            refused: false,
             message: format!("{error:#}"),
         },
     }
@@ -1087,8 +1108,18 @@ pub(super) async fn submit_actor_command(
 ) -> Result<u64> {
     let mut first_error = None;
     for attempt in 1..=2 {
-        if connection.is_none() {
-            sync_actor_connection(target, connection).await?;
+        if connection.is_none()
+            && let Err(error) = sync_actor_connection(target, connection).await
+        {
+            // Before any send was attempted, a failure to reach the worker
+            // proves the command was not delivered. Callers may then retry
+            // under the same id instead of reporting a possible delivery,
+            // which is what a park that stopped the worker leaves behind.
+            return Err(if attempt == 1 {
+                error.context(NotSent)
+            } else {
+                error
+            });
         }
         let result = connection
             .as_mut()

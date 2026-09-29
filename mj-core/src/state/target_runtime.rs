@@ -98,7 +98,9 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::AppleContainer { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container.environment.clone(),
+            | TargetTemplate::SshDocker { container, .. } => {
+                container.environment.resolved().clone()
+            }
             _ => BTreeMap::new(),
         };
         Self {

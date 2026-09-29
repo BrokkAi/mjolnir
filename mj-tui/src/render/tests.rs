@@ -2220,7 +2220,7 @@ fn add_api_priced_profile(dashboard: &mut DashboardState) {
             guardian_review_model: None,
             kind: HarnessKind::Codex,
             home: std::path::PathBuf::from("/profiles/api-priced"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
 }

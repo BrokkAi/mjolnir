@@ -170,11 +170,16 @@ for line in sys.stdin:
     }
 
     let config = temp.path().join("launch.json");
+    // Every launch config the controller writes names the harness home; a
+    // Codex worker registers its delegation tools there before starting.
+    let harness_home = temp.path().join("harness-home");
+    std::fs::create_dir_all(&harness_home).unwrap();
     let mut launch = serde_json::json!({
         "session_id": SESSION_ID, "harness": harness,
         "bridge_command": "python3", "bridge_args": [script],
         "environment": {}, "target_environment": {"MJ_INSTANCE": "qa-empty-recovery-1063"},
-        "cwd": temp.path(), "execution_policy": "configured_approvals"
+        "cwd": temp.path(), "execution_policy": "configured_approvals",
+        "harness_home": harness_home
     });
     if origin == RelayOrigin::RestoredSeed {
         launch["native_session_id"] = serde_json::json!("missing-thread");

@@ -45,6 +45,7 @@ tempfile.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["compat"] }
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

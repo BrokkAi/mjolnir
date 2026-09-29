@@ -117,6 +117,7 @@ pub(super) async fn forward_in_process_session_request(
             .await
             .map_err(|error| mj_client::session::SubmitFailure {
                 unconfirmed: error.is::<mj_client::session::DeliveryUnconfirmed>(),
+                refused: error.is::<mj_client::session::Refused>(),
                 message: format!("{error:#}"),
             });
             let _ = reply.send(result);

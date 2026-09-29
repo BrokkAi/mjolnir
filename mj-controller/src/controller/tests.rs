@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::targets::ProcessExecutor;
@@ -22,7 +21,7 @@ fn registration_config() -> Config {
             enabled: true,
             kind: HarnessKind::Codex,
             home: PathBuf::from("/home/dev/.codex"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -50,7 +49,7 @@ fn registration_config() -> Config {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },
@@ -1224,7 +1223,7 @@ fn local_mount_source_must_be_an_existing_directory() {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },

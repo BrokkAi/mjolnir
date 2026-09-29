@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1589,7 +1588,7 @@ fn a_converted_record_is_a_valid_bundle_session() {
             enabled: true,
             kind: record.harness_kind,
             home: PathBuf::from("/profiles/codex"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -1782,7 +1781,7 @@ fn a_session_that_left_its_target_is_a_valid_raw_session() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: PathBuf::from("/profiles/codex"),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },

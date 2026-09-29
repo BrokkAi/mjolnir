@@ -357,6 +357,8 @@ impl PendingRelaySubmit {
                 let error = anyhow::Error::msg(failure.message);
                 if failure.unconfirmed {
                     error.context(mj_client::session::DeliveryUnconfirmed)
+                } else if failure.refused {
+                    error.context(mj_client::session::Refused)
                 } else {
                     error
                 }

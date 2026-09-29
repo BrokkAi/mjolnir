@@ -337,7 +337,8 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
-        )]),
+        )])
+        .into(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -380,7 +381,8 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         environment: std::collections::BTreeMap::from([(
             "PATH".into(),
             directory.path().to_string_lossy().into_owned(),
-        )]),
+        )])
+        .into(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -742,7 +744,7 @@ fn container_template(platform: Option<&str>) -> mj_core::config::ContainerTempl
         platform: platform.map(str::to_owned),
         cpus: None,
         memory: None,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     }
 }
@@ -2054,7 +2056,7 @@ fn readiness_stage_names_only_install_capable_default_harnesses() {
         enabled: true,
         kind,
         home: PathBuf::from("/profiles/test"),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2374,7 +2376,8 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
-        environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())]),
+        environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())])
+            .into(),
         context_window_bytes: None,
         guardian_review_model: None,
     }
@@ -2551,7 +2554,8 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.to_path_buf(),
-        environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())]),
+        environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())])
+            .into(),
         context_window_bytes: None,
         guardian_review_model: None,
     }
@@ -2666,7 +2670,7 @@ fn a_native_codex_profile_gets_no_generated_catalog() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2706,7 +2710,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Grok,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2737,7 +2741,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Claude,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2780,7 +2784,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Claude,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2819,7 +2823,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Claude,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2880,7 +2884,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             enabled: true,
             kind,
             home: home.path().to_path_buf(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -2951,7 +2955,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Claude,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -3006,7 +3010,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Claude,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -3463,7 +3467,8 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         environment: BTreeMap::from([
             ("OPENAI_API_KEY".to_owned(), "sk-svcacct-profile".to_owned()),
             ("PROFILE_SETTING".to_owned(), "kept".to_owned()),
-        ]),
+        ])
+        .into(),
         context_window_bytes: None,
         guardian_review_model: None,
     }
@@ -3771,7 +3776,7 @@ fn raw_local_muse_launches_unconstrained() {
         enabled: true,
         kind: HarnessKind::Muse,
         home: PathBuf::from("/profiles/muse"),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -3813,7 +3818,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Kimi,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -3845,7 +3850,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Kimi,
         home: home.path().to_path_buf(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -3947,7 +3952,7 @@ fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
             enabled: true,
             kind,
             home: home.path().to_path_buf(),
-            environment: std::collections::BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -3980,7 +3985,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Kimi,
         home: home.path().to_path_buf(),
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -4121,7 +4126,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         bridge_command: "ignored".into(),
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
@@ -4314,7 +4319,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         bridge_command: "ignored".into(),
         bridge_args: Vec::new(),
         harness_runtime: HarnessRuntimePolicy::Managed,
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         excluded_environment: Vec::new(),
         cwd: "/srv/mj/session-remote/project".into(),
         additional_directories: Vec::new(),
@@ -4734,7 +4739,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             enabled: true,
             kind,
             home: home.path().to_path_buf(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -4812,7 +4817,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             enabled: true,
             kind,
             home: home.clone(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -4931,7 +4936,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             enabled: true,
             kind,
             home: home.clone(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -5003,9 +5008,10 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
 /// entry serves delegation; a child's serves only `handback`, and the role
 /// travels in the arguments so one worker binary can serve either.
 #[test]
-fn the_staged_claude_profile_names_the_sub_agent_role() {
+fn the_staged_claude_profile_exposes_sub_agent_tools_upfront_for_each_role() {
     for role in [
         mj_core::subagent::SubagentMcpRole::Parent,
+        mj_core::subagent::SubagentMcpRole::FixedParent,
         mj_core::subagent::SubagentMcpRole::Child,
     ] {
         let stage = tempfile::tempdir().unwrap();
@@ -5013,6 +5019,7 @@ fn the_staged_claude_profile_names_the_sub_agent_role() {
         let staged: serde_json::Value =
             serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap())
                 .unwrap();
+        assert_eq!(staged["mcpServers"]["mj-agents"]["alwaysLoad"], true);
         let args = staged["mcpServers"]["mj-agents"]["args"]
             .as_array()
             .expect("the staged server has arguments")

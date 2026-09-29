@@ -103,7 +103,7 @@ fn container(image: &str) -> ContainerTemplate {
         platform: None,
         cpus: None,
         memory: None,
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         workspace_storage: Default::default(),
     }
 }
@@ -154,7 +154,7 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
         enabled: true,
         kind: HarnessKind::Codex,
         home: directory.path().join("codex-home"),
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -1567,7 +1567,7 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
         enabled: true,
         kind: HarnessKind::Codex,
         home,
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -1606,7 +1606,7 @@ fn claude_config_with_home<const N: usize>(
                 enabled: true,
                 kind: HarnessKind::Claude,
                 home: home.to_path_buf(),
-                environment: std::collections::BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             },
@@ -1645,7 +1645,7 @@ fn doctor_reports_disabled_profiles_without_probing_them() {
         enabled: false,
         kind: HarnessKind::Claude,
         home: PathBuf::from("/missing/disabled-profile"),
-        environment: std::collections::BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -2415,4 +2415,100 @@ fn each_profile_line_says_where_its_quota_comes_from_and_who_may_delegate_to_it(
         "{}",
         detail("claude")
     );
+}
+
+#[test]
+fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode() {
+    use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
+
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    let secrets = directory.path().join(mj_core::config::SECRETS_FILE);
+    let mut config = Config::default();
+    let mut literal = Environment::new();
+    literal.insert("ZAI_API_KEY".into(), "plain".into());
+    literal.insert("PATH".into(), "/usr/bin".into());
+    config.profiles.insert(
+        "plain".into(),
+        HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: "/profiles/plain".into(),
+            environment: literal,
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    let referenced = with_secret_resolver(
+        SecretResolver::fixed(
+            Default::default(),
+            [("ZAI_API_KEY".to_owned(), "stored".to_owned())].into(),
+        ),
+        || {
+            Environment::from_sources(
+                [(
+                    "ZAI_API_KEY".to_owned(),
+                    EnvironmentValue::FromSecret("ZAI_API_KEY".into()),
+                )]
+                .into(),
+            )
+        },
+    )
+    .unwrap();
+    config.profiles.insert(
+        "referenced".into(),
+        HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: "/profiles/referenced".into(),
+            environment: referenced,
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    let mut target = container("ghcr.io/example/agent:latest");
+    target.environment.insert("GH_TOKEN".into(), "plain".into());
+    config.targets.insert(
+        "podman".into(),
+        TargetTemplate::LocalPodman { container: target },
+    );
+
+    let checks = secret_checks(Ok(&config), &config_path);
+    let ids: Vec<&str> = checks.iter().map(|check| check.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["profiles.plain.secrets", "targets.podman.secrets"],
+        "{checks:#?}"
+    );
+    assert!(
+        checks
+            .iter()
+            .all(|check| check.status == CheckStatus::Warning)
+    );
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("from_secret") && remediation.contains(&secrets.display().to_string()),
+        "{remediation}"
+    );
+    assert!(checks[0].detail.contains("ZAI_API_KEY") && !checks[0].detail.contains("PATH"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&secrets, "ZAI_API_KEY = \"stored\"\n").unwrap();
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file_check = secret_checks(Ok(&config), &config_path).remove(0);
+        assert_eq!(file_check.id, "secrets.file");
+        assert_eq!(file_check.status, CheckStatus::Warning);
+        assert!(
+            file_check
+                .remediation
+                .as_deref()
+                .unwrap()
+                .contains("chmod 600")
+        );
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file_check = secret_checks(Ok(&config), &config_path).remove(0);
+        assert_eq!(file_check.status, CheckStatus::Ready, "{file_check:?}");
+    }
 }

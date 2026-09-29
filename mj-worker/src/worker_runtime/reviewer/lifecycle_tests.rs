@@ -4,7 +4,7 @@ use super::*;
 async fn stopping_timeout_retains_the_runtime_and_lane_until_actual_completion() {
     let root = tempfile::tempdir().unwrap();
     let placement = ReviewerPlacement {
-        target_environment: BTreeMap::new(),
+        target_environment: Default::default(),
         worker_root: root.path().join("worker"),
         session_id: "reviewer-lifecycle-test".into(),
         cwd: root.path().to_path_buf(),
@@ -46,7 +46,7 @@ async fn stopping_timeout_retains_the_runtime_and_lane_until_actual_completion()
             harness: mj_core::config::HarnessKind::Kimi,
             bridge_command: PathBuf::from("/unused"),
             bridge_args: Vec::new(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             excluded_environment: Vec::new(),
             execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             model: None,

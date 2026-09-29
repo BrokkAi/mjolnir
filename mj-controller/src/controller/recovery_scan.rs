@@ -1229,7 +1229,6 @@ fn recovery_backend_locator(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use crate::controller::test_support::{IsolatedTest, test_name};
     use mj_core::config::{
@@ -1469,7 +1468,7 @@ mod tests {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         };
@@ -1530,7 +1529,7 @@ mod tests {
                     platform: None,
                     cpus: None,
                     memory: None,
-                    environment: BTreeMap::new(),
+                    environment: Default::default(),
                     workspace_storage: Default::default(),
                 },
             },
@@ -1692,7 +1691,7 @@ mod tests {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
                 build_cache: None,
             },
@@ -1747,7 +1746,7 @@ mod tests {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         };

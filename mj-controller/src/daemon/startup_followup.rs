@@ -11,6 +11,14 @@ impl std::fmt::Display for StartupRejected {
 
 impl std::error::Error for StartupRejected {}
 
+/// One startup step's durable command id. The worker relay accepts only ASCII
+/// alphanumerics, `-` and `_` in a command id, so the step key is joined with
+/// `-`, never `:`: a rejected id leaves `mj new --model` and every spawned
+/// child waiting forever for a step the worker will never admit.
+pub(crate) fn startup_step_id(group_id: &str, key: &str) -> String {
+    format!("{group_id}-{key}")
+}
+
 impl RuntimeState {
     pub(crate) async fn queue_api_followup(
         self: &Arc<Self>,
@@ -22,7 +30,7 @@ impl RuntimeState {
         for (key, value) in [("model", followup.model), ("effort", followup.effort)] {
             if let Some(value) = value {
                 steps.push((
-                    format!("{group_id}:{key}"),
+                    startup_step_id(&group_id, key),
                     StartupStep::Configure {
                         key: key.to_owned(),
                         value,
@@ -33,7 +41,7 @@ impl RuntimeState {
         }
         if followup.fast_mode {
             steps.push((
-                format!("{group_id}:fast-mode"),
+                startup_step_id(&group_id, "fast-mode"),
                 StartupStep::Configure {
                     key: "fast-mode".to_owned(),
                     value: "on".to_owned(),
@@ -43,7 +51,7 @@ impl RuntimeState {
         }
         if let Some(text) = followup.prompt {
             steps.push((
-                format!("{group_id}:prompt"),
+                startup_step_id(&group_id, "prompt"),
                 StartupStep::ApiPrompt { text },
             ));
         }
@@ -150,5 +158,32 @@ pub(crate) async fn configure_startup(
             Ok(None)
         }
         Err(error) => Err(StartupRejected(format!("{error:#}")).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors `validate_identifier` in `mj-worker/src/relay/commands.rs`.
+    fn relay_accepts(command_id: &str) -> bool {
+        (8..=128).contains(&command_id.len())
+            && command_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+    }
+
+    #[test]
+    fn startup_step_ids_satisfy_the_worker_relay_identifier_rule() {
+        for group in [
+            new_command_id("api-startup").unwrap(),
+            "subagent-spawn-3d79eb2c70f5f5d16e524b460525d1a7".to_owned(),
+        ] {
+            for key in ["model", "effort", "fast-mode", "prompt"] {
+                let id = startup_step_id(&group, key);
+                assert!(relay_accepts(&id), "{id}");
+                assert!(id.starts_with(&group) && id.ends_with(key), "{id}");
+            }
+        }
     }
 }

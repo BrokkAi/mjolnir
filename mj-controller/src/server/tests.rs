@@ -117,7 +117,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 guardian_review_model: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
-                environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]),
+                environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
             },
         )]),
         bundles: BTreeMap::from([(
@@ -144,7 +144,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                         platform: None,
                         cpus: None,
                         memory: None,
-                        environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())]),
+                        environment: BTreeMap::from([("TOKEN".into(), "secret-target".into())])
+                            .into(),
                         workspace_storage: Default::default(),
                     },
                 },
@@ -2859,8 +2860,31 @@ async fn post_action(app: Router, cookie: String, body: String) -> Response<Body
     .unwrap()
 }
 
+const ISOLATED_STORE_CHILD: &str = "MJ_SERVER_ISOLATED_STORE_CHILD";
+
+/// Run the named test alone, with a data directory of its own: image routes
+/// store attachments under the data directory. Returns whether this process
+/// is that run.
+fn in_isolated_store(test: &str) -> bool {
+    if std::env::var_os(ISOLATED_STORE_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    crate::controller::test_support::IsolatedTest::new(crate::controller::test_support::test_name(
+        module_path!(),
+        test,
+    ))
+    .env(ISOLATED_STORE_CHILD, "1")
+    .isolated_store(directory.path())
+    .run();
+    false
+}
+
 #[tokio::test]
 async fn image_prompt_reaches_the_controller_with_its_images() {
+    if !in_isolated_store("image_prompt_reaches_the_controller_with_its_images") {
+        return;
+    }
     let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let image = sample_valid_image();
@@ -2897,6 +2921,11 @@ async fn image_prompt_reaches_the_controller_with_its_images() {
 
 #[tokio::test]
 async fn browser_attachment_upload_returns_a_stored_reference_without_inline_bytes() {
+    if !in_isolated_store(
+        "browser_attachment_upload_returns_a_stored_reference_without_inline_bytes",
+    ) {
+        return;
+    }
     let (app, _, _, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -2928,6 +2957,9 @@ async fn browser_attachment_upload_returns_a_stored_reference_without_inline_byt
 /// carries prompts, so it is the route that gets the larger bound.
 #[tokio::test]
 async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
+    if !in_isolated_store("multi_image_prompts_are_accepted_over_the_general_body_limit") {
+        return;
+    }
     let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
     let cookie = login_cookie(&app).await;
     let image = sample_valid_image();
@@ -3438,7 +3470,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
             guardian_review_model: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
         },
     );
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);

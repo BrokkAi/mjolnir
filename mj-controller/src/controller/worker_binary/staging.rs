@@ -137,6 +137,9 @@ pub(super) fn configure_claude_subagent_mcp(
             SUBAGENT_MCP_SERVER.into(),
             serde_json::json!({
                 "type":"stdio",
+                // Delegation is part of the session's core toolset, like
+                // Claude's native Agent tool, rather than optional discovery.
+                "alwaysLoad":true,
                 "command":Path::new(worker_root).join("hel"),
                 "args":[
                     "worker",

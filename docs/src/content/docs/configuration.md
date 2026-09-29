@@ -1,6 +1,6 @@
 ---
 title: Configuration reference
-description: Complete reference for Mjolnir 2 config.toml, including profiles, bundles, machines, runtimes, review, viewer, paths, and environment overrides.
+description: Complete reference for Mjolnir 2 config.toml, including profiles, secrets, bundles, machines, runtimes, review, viewer, paths, and environment overrides.
 ---
 
 Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
@@ -516,6 +516,7 @@ home = "/home/me/.codex-work"
 [profiles.codex-work.environment]
 # PATH = "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
 # PROVIDER_SETTING = "value"
+# PROVIDER_API_KEY = { from_secret = "PROVIDER_API_KEY" }
 ```
 
 | Field | TOML type | Required | Default | Validation and behavior |
@@ -523,7 +524,7 @@ home = "/home/me/.codex-work"
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `environment` | table of strings | no | empty | Environment passed to harness/profile commands. Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
+| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
 
@@ -542,6 +543,45 @@ Profiles do not accept `model` or `reasoning_effort`. Use `/model` and `/effort`
 inside a session, or configure the harness's own defaults in its home. For
 credential files, staging allowlists, skills, quotas, and harness limitations,
 see [Profiles and harnesses](/profiles/).
+
+## Secrets `secrets.toml`
+
+`config.toml` is copied into isolated instances, pasted into bug reports, and
+read by agents diagnosing a setup. A credential written into it as a plain
+string travels with it. Keep credentials out of it by writing a reference
+instead of a value in any `environment` table:
+
+```toml
+[profiles.deepseek.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+GITHUB_TOKEN = { from_env = "GITHUB_TOKEN" }
+```
+
+| Form | Value passed to the harness |
+| --- | --- |
+| `"text"` | The text as written. |
+| `{ from_secret = "NAME" }` | The `NAME` entry of `secrets.toml` beside this `config.toml`. |
+| `{ from_env = "NAME" }` | The variable `NAME` in the environment of the process that reads the configuration: the daemon for sessions, the CLI or TUI for their own commands. Start the daemon with the variable set, or use `from_secret`. |
+
+`secrets.toml` is a flat table of string values, in the same directory as
+`config.toml`, so each `--instance` has its own and copying a configuration
+never copies a secret:
+
+```toml
+DEEPSEEK_API_KEY = "sk-..."
+```
+
+Make it readable only by you (`chmod 600 secrets.toml`). References are
+resolved when the configuration is read, and an entry that names a missing
+variable or secret fails the load with the entry and file named. Saving a
+setting writes the reference back as written, never the value it stood for.
+`mj doctor` warns about a `secrets.toml` other users can read, and about any
+environment value written as plain text under a name that suggests a
+credential, such as `*_API_KEY` or `*_TOKEN`.
+
+A configuration that uses a reference needs a Mjolnir that understands it;
+an older build reports the entry as an invalid type. Plain strings keep
+working everywhere.
 
 ## Bundles `[bundles.<id>]`
 
@@ -758,7 +798,7 @@ EC2 machine launches one instance per session. See
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
 | `memory` | string | no | unset (no template override) | Runtime memory value, for example `"32g"`. Per-session selection can override it. |
-| `environment` | table of strings | no | empty | Environment placed inside the target container. Keys cannot be blank or contain `=`. |
+| `environment` | table of strings or references | no | empty | Environment placed inside the target container. Values take the same forms as a profile's; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. |
 | `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 
 The schema checks that `image` is non-blank but leaves CPU, memory, and platform

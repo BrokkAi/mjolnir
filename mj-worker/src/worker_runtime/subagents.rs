@@ -17,6 +17,71 @@ use tokio::time::{Instant, sleep_until};
 use mj_core::subagent::{MAX_WAIT_SECONDS, SubagentToolRequest, SubagentToolResult};
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
+/// Register the owned server in Codex's session-private profile. The ACP bridge
+/// cannot carry omit_tools_from. Do this on the worker before launching the
+/// harness so an upgraded worker also repairs an older staged profile.
+pub(super) fn configure_codex_mcp(
+    root: &Path,
+    home: &Path,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    policy: mj_core::config::ExecutionPolicy,
+) -> Result<bool> {
+    // Earlier local workers used the person's original profile, directly or
+    // through <root>/profile as a symlink. Keep those on ACP until restaging;
+    // never write configuration through that compatibility link.
+    let staged = root.join("profile");
+    match std::fs::symlink_metadata(&staged) {
+        Ok(metadata) if !metadata.is_dir() => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("inspect private Codex profile"),
+        Ok(_) => {}
+    }
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path)
+            .with_context(|| format!("resolve Codex profile {}", path.display()))
+    };
+    if canonical(home)? != canonical(&staged)? {
+        return Ok(false);
+    }
+    // The staged copy is session-private, so re-serializing it through a
+    // structured table (which drops comments and formatting) is acceptable.
+    let path = home.join("config.toml");
+    let mut config = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str::<toml::Table>(&text)
+            .with_context(|| format!("parse staged Codex configuration {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let name = mj_core::subagent::SUBAGENT_MCP_SERVER;
+    if role.is_none() && !config.contains_key("mcp_servers") {
+        return Ok(true);
+    }
+    let servers = config
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("mcp_servers in {} must be a table", path.display()))?;
+    if let Some(role) = role {
+        let worker = std::env::current_exe().context("locate worker for Codex delegation")?;
+        let mut server = serde_json::json!({
+            "command": worker,
+            "args": ["worker", "subagent-mcp", "--socket", root.join(SUBAGENT_SOCKET),
+                     "--harness", "codex", "--role", role.id()],
+            // Keep direct and code-mode access; other servers retain their policy.
+            "omit_tools_from": ["deferred"]
+        });
+        if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
+            server["default_tools_approval_mode"] = serde_json::json!("approve");
+        }
+        servers.insert(name.into(), toml::Value::try_from(server)?);
+    } else if servers.remove(name).is_none() {
+        return Ok(true);
+    }
+    mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
+        .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
+    Ok(true)
+}
+
 const SUBAGENT_QUEUE: &str = "subagents.json";
 
 const MAX_SOCKET_TASKS: usize = 96;
@@ -190,6 +255,155 @@ impl SubagentEndpoint {
 mod tests {
     use super::*;
     use mj_core::subagent::SubagentToolAction;
+
+    #[test]
+    fn codex_delegation_profile_preserves_other_servers_and_handles_upgrades_and_disable() {
+        use mj_core::config::ExecutionPolicy;
+        use mj_core::subagent::SubagentMcpRole;
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::FixedParent,
+            SubagentMcpRole::Child,
+        ] {
+            for policy in [
+                ExecutionPolicy::ConfiguredApprovals,
+                ExecutionPolicy::Unconstrained,
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().join("profile");
+                std::fs::create_dir(&home).unwrap();
+                let path = home.join("config.toml");
+                let original = r#"
+model = "parent-model"
+[mcp_servers.user-server]
+command = "user-tool"
+omit_tools_from = ["direct"]
+[mcp_servers.mj-agents]
+url = "https://obsolete.invalid"
+enabled = false
+"#;
+                std::fs::write(&path, original).unwrap();
+                let worker = std::env::current_exe().unwrap();
+                let socket = root.path().join(SUBAGENT_SOCKET);
+                assert!(configure_codex_mcp(root.path(), &home, Some(role), policy).unwrap());
+                let first = std::fs::read_to_string(&path).unwrap();
+                assert!(configure_codex_mcp(root.path(), &home, Some(role), policy).unwrap());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+                let config: toml::Value = toml::from_str(&first).unwrap();
+                let original: toml::Value = toml::from_str(original).unwrap();
+                assert_eq!(config["model"], original["model"]);
+                assert_eq!(
+                    config["mcp_servers"]["user-server"],
+                    original["mcp_servers"]["user-server"]
+                );
+                let server = &config["mcp_servers"]["mj-agents"];
+                assert_eq!(server["command"].as_str(), worker.to_str());
+                assert_eq!(
+                    server["omit_tools_from"].as_array().unwrap(),
+                    &vec![toml::Value::String("deferred".into())]
+                );
+                assert!(server.get("url").is_none());
+                assert!(server.get("enabled").is_none());
+                let args: Vec<_> = server["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|arg| arg.as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    args,
+                    [
+                        "worker",
+                        "subagent-mcp",
+                        "--socket",
+                        socket.to_str().unwrap(),
+                        "--harness",
+                        "codex",
+                        "--role",
+                        role.id()
+                    ]
+                );
+                assert_eq!(
+                    server
+                        .get("default_tools_approval_mode")
+                        .and_then(toml::Value::as_str),
+                    (policy == ExecutionPolicy::ConfiguredApprovals).then_some("approve")
+                );
+                assert!(configure_codex_mcp(root.path(), &home, None, policy).unwrap());
+                let disabled: toml::Value =
+                    toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                assert!(disabled["mcp_servers"].get("mj-agents").is_none());
+                assert_eq!(
+                    disabled["mcp_servers"]["user-server"],
+                    original["mcp_servers"]["user-server"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_delegation_profile_handles_missing_and_invalid_configuration() {
+        use mj_core::config::ExecutionPolicy;
+        use mj_core::subagent::SubagentMcpRole;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join("config.toml");
+        let configure =
+            |role| configure_codex_mcp(root.path(), &home, role, ExecutionPolicy::Unconstrained);
+        configure(None).unwrap();
+        assert!(!path.exists());
+        configure(Some(SubagentMcpRole::Child)).unwrap();
+        let config: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            config["mcp_servers"]["mj-agents"]["omit_tools_from"][0].as_str(),
+            Some("deferred")
+        );
+        for broken in ["[", "mcp_servers = 3"] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(configure(Some(SubagentMcpRole::Parent)).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        }
+    }
+
+    #[test]
+    fn legacy_codex_homes_stay_on_acp_without_writing_the_users_profile() {
+        use mj_core::config::ExecutionPolicy;
+        use mj_core::subagent::SubagentMcpRole;
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("config.toml");
+        let original = "model = \"original\"\n";
+        std::fs::write(&path, original).unwrap();
+        let configure = |home: &Path, role| {
+            configure_codex_mcp(
+                root.path(),
+                home,
+                role,
+                ExecutionPolicy::ConfiguredApprovals,
+            )
+        };
+        assert!(!configure(source.path(), Some(SubagentMcpRole::Parent)).unwrap());
+        let staged = root.path().join("profile");
+        std::os::unix::fs::symlink(source.path(), &staged).unwrap();
+        for home in [source.path(), staged.as_path()] {
+            for role in [
+                Some(SubagentMcpRole::Parent),
+                Some(SubagentMcpRole::Child),
+                None,
+            ] {
+                assert!(!configure(home, role).unwrap());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            }
+        }
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        assert!(!configure(source.path(), Some(SubagentMcpRole::Parent)).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(configure(&staged, Some(SubagentMcpRole::Parent)).unwrap());
+        assert!(staged.join("config.toml").is_file());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
 
     fn request(id: &str) -> SubagentToolRequest {
         SubagentToolRequest {

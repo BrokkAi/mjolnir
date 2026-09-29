@@ -1119,7 +1119,7 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                         enabled: true,
                         kind: *kind,
                         home: std::path::PathBuf::from("/profiles").join(id),
-                        environment: BTreeMap::new(),
+                        environment: Default::default(),
                         context_window_bytes: None,
                         guardian_review_model: None,
                     },

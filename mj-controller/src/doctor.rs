@@ -192,6 +192,7 @@ pub fn run_with_config_path(
     checks.push(harness_discovery_check(config, executor));
     checks.extend(harness_checks(config, executor));
     checks.extend(subagent_eligibility_checks(config));
+    checks.extend(secret_checks(config, config_path));
     let podman = podman_checks(config, executor, options.smoke, &apple_platform);
     let docker = docker_checks(config, executor, options.smoke);
     let apple_container = apple_container_check(
@@ -740,6 +741,92 @@ fn profile_quota_source(profile: &HarnessProfile) -> String {
         },
         kind => format!("quota as {} reports it", kind.display_name()),
     }
+}
+
+/// The secrets file's permissions, and credentials written into `config.toml`
+/// as plain text that belong in it instead.
+///
+/// `config.toml` is copied into isolated instances, pasted into bug reports,
+/// and read by agents diagnosing a setup, so a credential in it travels with
+/// it. `secrets.toml` beside it is read only when a reference names one of
+/// its entries and is never copied with the configuration.
+fn secret_checks(config: ConfigStatus<'_>, config_path: &Path) -> Vec<DoctorCheck> {
+    use mj_core::config::{secrets_path_beside, secrets_permission_problem};
+
+    let mut checks = Vec::new();
+    let secrets = secrets_path_beside(config_path);
+    if secrets.exists() {
+        checks.push(match secrets_permission_problem(&secrets) {
+            Ok(None) => DoctorCheck::ready(
+                "secrets.file",
+                "Secrets file",
+                format!("{} is readable only by its owner", secrets.display()),
+            ),
+            Ok(Some(problem)) => DoctorCheck::warning(
+                "secrets.file",
+                "Secrets file",
+                problem,
+                format!("Run `chmod 600 {}`.", secrets.display()),
+            ),
+            Err(error) => DoctorCheck::warning(
+                "secrets.file",
+                "Secrets file",
+                format!("{error:#}"),
+                "Make the file readable by the user running Mjolnir.",
+            ),
+        });
+    }
+    let Ok(config) = config else {
+        return checks;
+    };
+    let profiles = config
+        .profiles
+        .iter()
+        .map(|(id, profile)| (format!("profiles.{id}"), &profile.environment));
+    let targets = config.targets.iter().filter_map(|(id, target)| {
+        target
+            .container()
+            .map(|container| (format!("targets.{id}"), &container.environment))
+    });
+    for (owner, environment) in profiles.chain(targets) {
+        if let Some(check) = plain_text_credential_check(&owner, environment, &secrets) {
+            checks.push(check);
+        }
+    }
+    checks
+}
+
+/// A warning naming each literal environment value under `owner` whose
+/// variable name suggests a credential.
+fn plain_text_credential_check(
+    owner: &str,
+    environment: &mj_core::config::Environment,
+    secrets: &Path,
+) -> Option<DoctorCheck> {
+    let names = environment
+        .sources()
+        .iter()
+        .filter(|(name, value)| {
+            !value.is_reference() && mj_core::config::looks_like_credential(name)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    let example = names[0];
+    Some(DoctorCheck::warning(
+        format!("{owner}.secrets"),
+        "Credentials in config.toml",
+        format!(
+            "[{owner}.environment] holds {} as plain text; config.toml is copied into isolated instances and read as ordinary configuration",
+            names.join(", ")
+        ),
+        format!(
+            "Move each value into {} as `{example} = \"...\"` (mode 600) and refer to it as `{example} = {{ from_secret = \"{example}\" }}`, or use `{{ from_env = \"{example}\" }}` to read the daemon's environment.",
+            secrets.display()
+        ),
+    ))
 }
 
 /// The sub-agent policy in one line, then a warning for each profile that is

@@ -14,9 +14,19 @@ use mj_core::subagent::{
     FileSourceRanges, SubagentMcpRole, SubagentToolAction, SubagentToolRequest,
 };
 
-/// Server instructions stating the spawn/wait contract: results reach the
-/// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Use Mjolnir children for broad exploration and research before gathering that context yourself. Tracing unfamiliar behavior, comparing sources, mapping constraints, and questions requiring several searches belong with a child; a known-file lookup or one narrow check can stay local. Judge the whole investigation, not just the next command. Discover these tools if deferred. You own design decisions and final acceptance; children supply evidence and implement agreed decisions. Dispatch independent questions together and do not repeat their searches. Give each child a bounded outcome, starting pointers, constraints, explicit exclusions and ownership boundaries; leave routine details and necessary supporting work to it. spawn returns a child_session_id immediately, not a finished result. Collect results or startup errors with wait. wait blocks until the requested children finish or its timeout; status complete supplies results, while still_running means wait again when needed. Use the default maximum timeout and return_when any if one result lets you advance; avoid short polling because each call carries the parent's context. Read the short handback and cited report_dir files instead of duplicating work or importing every log. Finished children are parked and hold no process slots. send_input resumes one for related follow-up; close cancels or retires it. Only children holding processes count toward the live-child limit. The user can see children in the Sub-agents workspace.";
+/// Routing advice lives beside `spawn`; server instructions carry only mechanics.
+const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, and independent work whose intermediate results would otherwise fill a significant fraction of your context; spawn a child before collecting that context yourself, and use direct tools for a known-file lookup or a small, bounded check. Children can locate and map behavior, diagnose competing explanations, implement an agreed design, or independently verify a consequential claim. You own design decisions and final acceptance. Dispatch independent assignments together and do not duplicate their work. Give a focused question or outcome, relevant context and constraints, starting pointers, and the evidence or validation needed; the child does not receive your full conversation automatically. Keep investigation read-only unless changes are authorized. Starting files are pointers, not an implicit whitelist; state actual exclusions and ownership boundaries.";
+
+/// Results reach the model through wait, never as a push notification.
+const SERVER_INSTRUCTIONS: &str = "spawn returns a child_session_id immediately, not a finished result. Collect results or startup errors with wait. wait blocks until the requested children finish or its timeout; status complete supplies results, while still_running means wait again when needed. Use the default maximum timeout and return_when any if one result lets you advance; avoid short polling because each call carries the parent's context. Read the short handback and decisive references in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no process slots. send_input resumes one when its existing context helps; a fresh child can implement your design using the investigation's decisive references. close cancels or retires a child. Only children holding processes count toward the live-child limit. The user can see children in the Sub-agents workspace.";
+
+/// Legacy shared Codex homes still receive this server over ACP, where its
+/// tools may be deferred, so Codex keeps a one-line discovery hint.
+static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{SERVER_INSTRUCTIONS} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS."
+    )
+});
 
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
@@ -209,9 +219,13 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     role: SubagentMcpRole,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
+    let parent_instructions = match harness {
+        Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
+        _ => SERVER_INSTRUCTIONS,
+    };
     let (instructions, tools) = match role {
-        SubagentMcpRole::Parent => (SERVER_INSTRUCTIONS, tool_definitions(harness)),
-        SubagentMcpRole::FixedParent => (SERVER_INSTRUCTIONS, fixed_tool_definitions(harness)),
+        SubagentMcpRole::Parent => (parent_instructions, tool_definitions(harness)),
+        SubagentMcpRole::FixedParent => (parent_instructions, fixed_tool_definitions(harness)),
         SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
     };
     crate::mcp_stdio::serve(
@@ -473,7 +487,9 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Give the child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. The child handles routine decisions and necessary supporting work within that scope; you retain consequential design decisions and final acceptance. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again.",
+            &format!(
+                "{DELEGATION_ROUTING} Start an independent Mjolnir child session in this session's target and filesystem. The child handles routine decisions and necessary supporting work within its assignment. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again."
+            ),
             json!({
                 "type":"object",
                 "properties":{
@@ -530,9 +546,9 @@ fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
             .remove(key);
     }
     spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
-    spawn["description"] = json!(
-        "Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. Give the child a bounded outcome, the agreed design and constraints, starting pointers, and explicit exclusions and ownership boundaries. The child handles routine decisions and necessary supporting work within that scope; you retain consequential design decisions and final acceptance. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
-    );
+    spawn["description"] = json!(format!(
+        "{DELEGATION_ROUTING} Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. The child handles routine decisions and necessary supporting work within its assignment. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
+    ));
     tools
 }
 

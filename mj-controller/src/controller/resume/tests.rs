@@ -157,7 +157,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Claude,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -604,7 +604,19 @@ fn self_contained_bundle_validation_cannot_lazy_fetch_or_prompt() {
 
 #[test]
 fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
+    // Resume reads the session's saved record, so the test needs its own store.
+    const CHILD: &str = "MJ_TEST_LOST_BUNDLE_RESUME_CHILD";
     let directory = tempfile::tempdir().unwrap();
+    if std::env::var_os(CHILD).is_none() {
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 3);
     let mut session = checkpoint_test_session(session_id);
@@ -620,7 +632,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -1205,7 +1217,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -1233,7 +1245,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },
@@ -1356,7 +1368,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -1541,7 +1553,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: profile_home,
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         },
@@ -1807,7 +1819,7 @@ exit 0
                 enabled: true,
                 kind: harness,
                 home: home.clone(),
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             },

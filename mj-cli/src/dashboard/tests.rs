@@ -105,7 +105,7 @@ fn populated_dashboard() -> DashboardState {
                 guardian_review_model: None,
                 kind,
                 home: std::path::PathBuf::from("/profiles").join(id),
-                environment: std::collections::BTreeMap::new(),
+                environment: Default::default(),
             },
         );
     }
@@ -119,7 +119,7 @@ fn populated_dashboard() -> DashboardState {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: std::collections::BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },
@@ -1093,7 +1093,7 @@ fn a_reload_asks_for_quotas_again_only_when_the_profiles_changed() {
         enabled: true,
         kind: mj_core::config::HarnessKind::Codex,
         home: home.into(),
-        environment: BTreeMap::new(),
+        environment: Default::default(),
         context_window_bytes: None,
         guardian_review_model: None,
     };
@@ -1872,7 +1872,7 @@ fn only_a_fully_empty_config_triggers_automatic_setup() {
                 platform: None,
                 cpus: None,
                 memory: None,
-                environment: std::collections::BTreeMap::new(),
+                environment: Default::default(),
                 workspace_storage: Default::default(),
             },
         },

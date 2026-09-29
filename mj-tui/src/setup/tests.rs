@@ -281,7 +281,7 @@ fn account_path_apply_expands_home_before_config_and_quota_use() {
     let expected = mj_core::path_input::expand_local(std::path::Path::new("~/.codex4")).unwrap();
     let profile = &config.profiles["codex-1"];
     assert_eq!(profile.home, expected);
-    let mut environment = profile.environment.clone();
+    let mut environment = profile.environment.resolved().clone();
     profile.kind.configure_profile_home_environment(
         &profile.home,
         mj_core::config::HarnessHost::current(),

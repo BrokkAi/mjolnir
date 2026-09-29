@@ -409,7 +409,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                         enabled: true,
                         kind: *kind,
                         home: std::path::PathBuf::from("/home/agent").join(id),
-                        environment: BTreeMap::new(),
+                        environment: Default::default(),
                         context_window_bytes: None,
                         guardian_review_model: None,
                     },

@@ -959,10 +959,10 @@ impl RuntimeState {
                                 tracing::error!(session_id, %persistence, "could not persist startup rejection");
                             }
                         }
-                        let definite = error
-                            .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
-                            .is_none();
-                        if definite
+                        let refused = error
+                            .downcast_ref::<mj_client::session::Refused>()
+                            .is_some();
+                        if refused
                             && step.group_id.is_none()
                             && let StartupStep::Prompt { text, .. } = &decoded
                         {

@@ -267,7 +267,7 @@ fn discover_blocking(
     let profile = config
         .enabled_profile(profile_id)
         .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
-    let mut environment = profile.environment.clone();
+    let mut environment = profile.environment.resolved().clone();
     super::worker_binary::apply_claude_setup_token(
         &mut environment,
         profile.kind,
@@ -441,7 +441,7 @@ mod tests {
                     enabled: id != "disabled",
                     kind: mj_core::config::HarnessKind::Codex,
                     home: std::path::PathBuf::from("/unused"),
-                    environment: BTreeMap::new(),
+                    environment: Default::default(),
                     context_window_bytes: None,
                     guardian_review_model: None,
                 },
@@ -530,7 +530,7 @@ mod tests {
             enabled: true,
             kind: mj_core::config::HarnessKind::Muse,
             home: home.path().into(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -555,7 +555,7 @@ mod tests {
             enabled: true,
             kind: mj_core::config::HarnessKind::Codex,
             home: home.path().into(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };
@@ -599,7 +599,7 @@ mod tests {
             enabled: true,
             kind: mj_core::config::HarnessKind::Claude,
             home: root.path().into(),
-            environment: BTreeMap::new(),
+            environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
         };

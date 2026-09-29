@@ -121,7 +121,7 @@ mod tests {
                 enabled: true,
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/profiles/profile-1"),
-                environment: BTreeMap::new(),
+                environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
             },
